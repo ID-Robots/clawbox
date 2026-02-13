@@ -1,0 +1,13 @@
+{
+  "name": "clawbox-setup",
+  "version": "1.0.0",
+  "description": "ClawBox setup wizard and dashboard",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

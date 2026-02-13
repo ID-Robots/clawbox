@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClawBox Setup</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+        <rect width="32" height="32" rx="8" fill="#2563eb"/>
+        <path d="M8 20l4-8 4 4 4-6 4 10" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>ClawBox</span>
+    </div>
+    <div class="progress">
+      <div class="progress-step active" data-step="1"><span class="num">1</span> Welcome</div>
+      <div class="progress-step" data-step="2"><span class="num">2</span> WiFi</div>
+      <div class="progress-step" data-step="3"><span class="num">3</span> Telegram</div>
+      <div class="progress-step" data-step="4"><span class="num">4</span> Done</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Step 1: Welcome -->
+    <section id="step-1" class="step active">
+      <div class="card">
+        <h1>Welcome to ClawBox</h1>
+        <p class="subtitle">Your personal AI assistant is almost ready. This wizard will help you get set up in just a few minutes.</p>
+        <div class="checklist">
+          <div class="check-item">
+            <span class="icon">&#10003;</span>
+            <div>
+              <strong>Connect to WiFi</strong>
+              <p>Link your ClawBox to your home network</p>
+            </div>
+          </div>
+          <div class="check-item">
+            <span class="icon">&#10003;</span>
+            <div>
+              <strong>Connect Telegram</strong>
+              <p>Set up your chat bot for messaging</p>
+            </div>
+          </div>
+          <div class="check-item">
+            <span class="icon">&#10003;</span>
+            <div>
+              <strong>Start chatting</strong>
+              <p>Talk to your AI from anywhere</p>
+            </div>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="wizard.goTo(2)">Get Started</button>
+      </div>
+    </section>
+
+    <!-- Step 2: WiFi -->
+    <section id="step-2" class="step">
+      <div class="card">
+        <h1>Connect to WiFi</h1>
+        <p class="subtitle">Select your home WiFi network so ClawBox can access the internet.</p>
+        <div id="wifi-list" class="wifi-list">
+          <div class="loading"><div class="spinner"></div> Scanning for networks...</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn-secondary" onclick="wizard.scanWifi()">Rescan</button>
+          <button class="btn-link" onclick="wizard.goTo(3)">Skip (Ethernet only)</button>
+        </div>
+      </div>
+
+      <!-- WiFi password modal -->
+      <div id="wifi-modal" class="modal hidden">
+        <div class="modal-backdrop" onclick="wizard.closeModal()"></div>
+        <div class="modal-content card">
+          <h2>Connect to <span id="selected-ssid"></span></h2>
+          <div id="password-field">
+            <label for="wifi-password">Password</label>
+            <input type="password" id="wifi-password" placeholder="Enter WiFi password" autocomplete="off">
+          </div>
+          <div id="wifi-status" class="status-msg hidden"></div>
+          <div class="btn-row">
+            <button class="btn-primary" id="wifi-connect-btn" onclick="wizard.connectWifi()">Connect</button>
+            <button class="btn-secondary" onclick="wizard.closeModal()">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: Telegram -->
+    <section id="step-3" class="step">
+      <div class="card">
+        <h1>Connect Telegram</h1>
+        <p class="subtitle">Link a Telegram bot so you can chat with your ClawBox from your phone.</p>
+        <ol class="instructions">
+          <li>Open Telegram and search for <strong>@BotFather</strong></li>
+          <li>Send <code>/newbot</code> and follow the prompts to create a bot</li>
+          <li>Copy the <strong>Bot Token</strong> and paste it below</li>
+        </ol>
+        <label for="bot-token">Bot Token</label>
+        <input type="text" id="bot-token" placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz" spellcheck="false">
+        <div id="telegram-status" class="status-msg hidden"></div>
+        <div class="btn-row">
+          <button class="btn-primary" onclick="wizard.saveTelegram()">Save & Continue</button>
+          <button class="btn-link" onclick="wizard.goTo(4)">Skip for now</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 4: Dashboard -->
+    <section id="step-4" class="step">
+      <div class="card">
+        <h1>You're all set!</h1>
+        <p class="subtitle">Your ClawBox is ready. Open Telegram and start chatting with your bot.</p>
+        <div id="system-info" class="info-grid">
+          <div class="loading"><div class="spinner"></div> Loading system info...</div>
+        </div>
+        <button class="btn-primary" onclick="wizard.completeSetup()">Finish Setup</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <a href="https://openclawhardware.dev" target="_blank">openclawhardware.dev</a>
+  </footer>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

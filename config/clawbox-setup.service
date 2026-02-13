@@ -1,0 +1,16 @@
+[Unit]
+Description=ClawBox Setup Wizard Web Server
+After=network-online.target clawbox-ap.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/clawbox/clawbox
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
