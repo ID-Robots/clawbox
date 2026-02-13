@@ -119,8 +119,8 @@ const wizard = {
       const data = await res.json();
 
       if (data.success) {
-        showStatus('telegram-status', 'success', 'Telegram bot configured!');
-        setTimeout(() => this.goTo(4), 1000);
+        showStatus('telegram-status', 'success', 'Telegram bot configured! Continuing...');
+        setTimeout(() => wizard.goTo(4), 1500);
       } else {
         showStatus('telegram-status', 'error', data.error || 'Failed to save');
       }
@@ -172,12 +172,23 @@ const wizard = {
   },
 
   async completeSetup() {
+    const btn = document.querySelector('#step-4 .btn-primary');
+    btn.disabled = true;
+    btn.textContent = 'Finishing...';
+
     try {
       await fetch('/api/setup/complete', { method: 'POST' });
-      document.querySelector('#step-4 .card h1').textContent = 'Setup Complete!';
-      document.querySelector('#step-4 .btn-primary').textContent = 'Done';
-      document.querySelector('#step-4 .btn-primary').onclick = null;
     } catch { /* ignore */ }
+
+    // Show completion state
+    document.querySelector('#step-4 .card h1').textContent = 'Setup Complete!';
+    document.querySelector('#step-4 .subtitle').textContent =
+      'Your ClawBox is ready to use. Open Telegram and start chatting with your bot!';
+    btn.textContent = 'Done';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-secondary');
+    btn.disabled = false;
+    btn.onclick = () => window.location.reload();
   }
 };
 
