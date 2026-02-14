@@ -43,8 +43,8 @@ export default function SetupWizard() {
 
   return (
     <>
-      <header className="bg-gray-900/80 backdrop-blur-md px-6 py-4 flex items-center justify-between flex-wrap gap-3 sticky top-0 z-50">
-        <Link href="/" className="flex items-center gap-2.5">
+      <header className="bg-gray-900/80 backdrop-blur-md px-6 py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
+        <Link href="/" className="flex items-center gap-2.5 shrink-0">
           <Image
             src="/clawbox-icon.png"
             alt="ClawBox"
@@ -53,7 +53,7 @@ export default function SetupWizard() {
             className="w-9 h-9 object-contain"
             priority
           />
-          <span className="text-xl font-bold font-display bg-gradient-to-r from-orange-400 to-orange-700 bg-clip-text text-transparent">
+          <span className="hidden sm:inline text-xl font-bold font-display bg-gradient-to-r from-orange-400 to-orange-700 bg-clip-text text-transparent">
             ClawBox
           </span>
         </Link>
