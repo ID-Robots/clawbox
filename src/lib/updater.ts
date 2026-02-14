@@ -85,16 +85,10 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 600_000,
   },
   {
-    id: "nvpmodel",
-    label: "Setting max performance mode",
-    command: "nvpmodel -m 0",
-    timeoutMs: 30_000,
-  },
-  {
-    id: "jetson_clocks",
-    label: "Enabling Jetson clocks",
-    command: "jetson_clocks",
-    timeoutMs: 30_000,
+    id: "performance_mode",
+    label: "Enabling max performance mode",
+    command: "nvpmodel -m 0 && jetson_clocks",
+    timeoutMs: 60_000,
   },
   {
     id: "openclaw_install",
