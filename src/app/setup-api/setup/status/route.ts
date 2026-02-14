@@ -8,8 +8,10 @@ export async function GET() {
     const config = await getAll();
     return NextResponse.json({
       setup_complete: !!config.setup_complete,
+      password_configured: !!config.password_configured,
       update_completed: !!config.update_completed,
       wifi_configured: !!config.wifi_configured,
+      ai_model_configured: !!config.ai_model_configured,
       telegram_configured: !!config.telegram_bot_token,
     });
   } catch (err) {

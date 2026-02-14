@@ -4,10 +4,12 @@ interface ProgressBarProps {
 
 const steps = [
   { num: 1, label: "Welcome" },
-  { num: 2, label: "WiFi" },
-  { num: 3, label: "Update" },
-  { num: 4, label: "Telegram" },
-  { num: 5, label: "Done" },
+  { num: 2, label: "Security" },
+  { num: 3, label: "WiFi" },
+  { num: 4, label: "Update" },
+  { num: 5, label: "AI Model" },
+  { num: 6, label: "Telegram" },
+  { num: 7, label: "Done" },
 ];
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {

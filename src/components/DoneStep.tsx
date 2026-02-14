@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { StepStatus, UpdateState } from "@/lib/updater";
 
 interface SystemInfo {
   cpus: number;
@@ -17,6 +18,34 @@ interface DoneStepProps {
   setupComplete?: boolean;
 }
 
+function UpdateStepIcon({ status }: { status: StepStatus }) {
+  if (status === "running") {
+    return <div className="spinner !w-4 !h-4 !border-2" />;
+  }
+  if (status === "completed") {
+    return (
+      <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px] font-bold">
+        &#10003;
+      </div>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <div className="w-4 h-4 rounded-full bg-red-500 flex items-center justify-center text-white text-[10px] font-bold">
+        &#10005;
+      </div>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <div className="w-4 h-4 rounded-full bg-gray-600 flex items-center justify-center text-gray-400 text-[10px]">
+        &mdash;
+      </div>
+    );
+  }
+  return <div className="w-4 h-4 rounded-full bg-gray-600" />;
+}
+
 export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -26,7 +55,69 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const [completeError, setCompleteError] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [updateStarted, setUpdateStarted] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const updatePollControllerRef = useRef<AbortController | null>(null);
+
+  const stopUpdatePolling = useCallback(() => {
+    if (updatePollRef.current) {
+      clearInterval(updatePollRef.current);
+      updatePollRef.current = null;
+    }
+    updatePollControllerRef.current?.abort();
+    updatePollControllerRef.current = null;
+  }, []);
+
+  const startUpdatePolling = useCallback(() => {
+    if (updatePollRef.current) return;
+    const controller = new AbortController();
+    updatePollControllerRef.current = controller;
+    updatePollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/setup-api/update/status", {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (!res.ok) return;
+        const data: UpdateState = await res.json();
+        if (controller.signal.aborted) return;
+        setUpdateState(data);
+        if (data.phase !== "running") {
+          stopUpdatePolling();
+        }
+      } catch {
+        /* ignore polling errors */
+      }
+    }, 2000);
+  }, [stopUpdatePolling]);
+
+  const triggerUpdate = async () => {
+    setUpdateStarted(true);
+    setUpdateError(null);
+    setUpdateState(null);
+    try {
+      const res = await fetch("/setup-api/update/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setUpdateError(typeof data.error === "string" ? data.error : "Failed to start update");
+        return;
+      }
+      startUpdatePolling();
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : "Failed to start update");
+    }
+  };
+
+  useEffect(() => {
+    return () => stopUpdatePolling();
+  }, [stopUpdatePolling]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -128,7 +219,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </div>
         )}
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
             onClick={completed ? () => (window.location.href = "/") : completeSetup}
@@ -143,12 +234,74 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </button>
           <button
             type="button"
+            onClick={triggerUpdate}
+            disabled={updateStarted && updateState?.phase === "running"}
+            className="px-5 py-3 bg-transparent border border-orange-500/30 text-orange-400 rounded-lg text-sm font-medium hover:bg-orange-500/10 hover:border-orange-500/50 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {updateStarted && updateState?.phase === "running" ? "Updating..." : "System Update"}
+          </button>
+          <button
+            type="button"
             onClick={() => setShowResetConfirm(true)}
             className="px-5 py-3 bg-transparent border border-red-500/30 text-red-400 rounded-lg text-sm font-medium hover:bg-red-500/10 hover:border-red-500/50 transition-colors cursor-pointer"
           >
             Factory Reset
           </button>
         </div>
+
+        {/* System Update Progress */}
+        {updateStarted && (
+          <div className="mt-5 border border-gray-700/50 rounded-lg bg-gray-900/50 p-4">
+            <h3 className="text-sm font-semibold text-gray-300 mb-3">
+              {updateState?.phase === "completed" ? (
+                <span className="text-green-400">Update Complete</span>
+              ) : updateState?.phase === "failed" ? (
+                <span className="text-red-400">Update Failed</span>
+              ) : (
+                "System Update"
+              )}
+            </h3>
+
+            {updateError && (
+              <div className="mb-3 p-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">
+                {updateError}
+              </div>
+            )}
+
+            {updateState && (
+              <div className="space-y-0.5">
+                {updateState.steps.map((step) => (
+                  <div key={step.id} className="flex items-center gap-2.5 py-1.5 px-2">
+                    <UpdateStepIcon status={step.status} />
+                    <span
+                      className={`flex-1 text-xs ${
+                        step.status === "running"
+                          ? "text-orange-400 font-medium"
+                          : step.status === "completed"
+                            ? "text-gray-400"
+                            : step.status === "failed"
+                              ? "text-red-400"
+                              : "text-gray-600"
+                      }`}
+                    >
+                      {step.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {updateState?.phase === "failed" && (
+              <button
+                type="button"
+                onClick={triggerUpdate}
+                className="mt-3 px-5 py-2 btn-gradient text-white rounded-lg text-xs font-semibold cursor-pointer"
+              >
+                Retry Update
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Factory reset confirmation modal */}

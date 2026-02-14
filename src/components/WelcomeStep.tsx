@@ -4,21 +4,6 @@ interface WelcomeStepProps {
   onNext: () => void;
 }
 
-const items = [
-  {
-    title: "Connect to WiFi",
-    desc: "Link your ClawBox to your home network",
-  },
-  {
-    title: "Connect Telegram",
-    desc: "Set up your chat bot for messaging",
-  },
-  {
-    title: "Start chatting",
-    desc: "Talk to your AI from anywhere",
-  },
-];
-
 export default function WelcomeStep({ onNext }: WelcomeStepProps) {
   return (
     <div className="w-full max-w-[520px]">
@@ -42,21 +27,6 @@ export default function WelcomeStep({ onNext }: WelcomeStepProps) {
           Your personal AI assistant is almost ready. This wizard will help you
           get set up in just a few minutes.
         </p>
-        <div className="flex flex-col gap-4 mb-7">
-          {items.map(({ title, desc }) => (
-            <div key={title} className="flex gap-3.5 items-start">
-              <span className="flex items-center justify-center w-7 h-7 rounded-full bg-orange-500/10 text-orange-400 text-sm font-bold shrink-0">
-                &#10003;
-              </span>
-              <div>
-                <strong className="block text-sm mb-0.5 text-gray-200">
-                  {title}
-                </strong>
-                <p className="text-xs text-gray-500">{desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
         <div className="flex justify-center">
           <button
             type="button"
