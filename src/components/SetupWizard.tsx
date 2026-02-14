@@ -24,6 +24,8 @@ export default function SetupWizard() {
         if (data.setup_complete) {
           setCurrentStep(5);
         } else if (data.update_completed) {
+          setCurrentStep(4);
+        } else if (data.wifi_configured) {
           setCurrentStep(3);
         }
       })
@@ -65,9 +67,11 @@ export default function SetupWizard() {
           <WelcomeStep onNext={() => setCurrentStep(2)} />
         )}
         {currentStep === 2 && (
-          <UpdateStep onNext={() => setCurrentStep(3)} />
+          <WifiStep onNext={() => setCurrentStep(3)} />
         )}
-        {currentStep === 3 && <WifiStep onNext={() => setCurrentStep(4)} />}
+        {currentStep === 3 && (
+          <UpdateStep onNext={() => setCurrentStep(4)} />
+        )}
         {currentStep === 4 && (
           <TelegramStep onNext={() => setCurrentStep(5)} />
         )}

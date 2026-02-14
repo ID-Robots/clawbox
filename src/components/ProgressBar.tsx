@@ -4,8 +4,8 @@ interface ProgressBarProps {
 
 const steps = [
   { num: 1, label: "Welcome" },
-  { num: 2, label: "Update" },
-  { num: 3, label: "WiFi" },
+  { num: 2, label: "WiFi" },
+  { num: 3, label: "Update" },
   { num: 4, label: "Telegram" },
   { num: 5, label: "Done" },
 ];

@@ -69,7 +69,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "git_pull",
     label: "Fetching latest ClawBox code",
-    command: "git -C /home/clawbox/clawbox pull --ff-only",
+    command: "git config --global --add safe.directory /home/clawbox/clawbox && git -C /home/clawbox/clawbox pull --ff-only",
     timeoutMs: 60_000,
   },
   {
@@ -104,8 +104,8 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
   {
     id: "models_update",
-    label: "Downloading AI models",
-    command: "/home/clawbox/.npm-global/bin/openclaw models pull",
+    label: "Configuring AI models",
+    command: "/home/clawbox/.npm-global/bin/openclaw models",
     timeoutMs: 600_000,
   },
 ];
