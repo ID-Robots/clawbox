@@ -1,25 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { StepStatus, UpdateState } from "@/lib/updater";
 
 interface UpdateStepProps {
   onNext: () => void;
-}
-
-type StepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
-type UpdatePhase = "idle" | "running" | "completed" | "failed" | "skipped";
-
-interface StepState {
-  id: string;
-  label: string;
-  status: StepStatus;
-  error?: string;
-}
-
-interface UpdateState {
-  phase: UpdatePhase;
-  steps: StepState[];
-  currentStepIndex: number;
 }
 
 function StepIcon({ status }: { status: StepStatus }) {
@@ -56,6 +41,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [fetchError, setFetchError] = useState(false);
   const startedRef = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollControllerRef = useRef<AbortController | null>(null);
+  const retryControllerRef = useRef<AbortController | null>(null);
   const onNextRef = useRef(onNext);
   onNextRef.current = onNext;
 
@@ -64,14 +51,23 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    if (pollControllerRef.current) {
+      pollControllerRef.current.abort();
+      pollControllerRef.current = null;
+    }
   }, []);
 
   const startPolling = useCallback(() => {
     if (pollRef.current) return;
+    const controller = new AbortController();
+    pollControllerRef.current = controller;
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch("/setup-api/update/status");
+        const res = await fetch("/setup-api/update/status", {
+          signal: controller.signal,
+        });
         const data: UpdateState = await res.json();
+        if (controller.signal.aborted) return;
         setState(data);
         if (data.phase !== "running") {
           stopPolling();
@@ -125,16 +121,30 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }, [startPolling, stopPolling]);
 
   const retry = async () => {
+    retryControllerRef.current?.abort();
+    const controller = new AbortController();
+    retryControllerRef.current = controller;
+
     startedRef.current = true;
     setFetchError(false);
     try {
-      const res = await fetch("/setup-api/update/run", { method: "POST" });
+      const res = await fetch("/setup-api/update/run", {
+        method: "POST",
+        signal: controller.signal,
+      });
       if (!res.ok) throw new Error(`Retry failed (${res.status})`);
       startPolling();
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setFetchError(true);
     }
   };
+
+  useEffect(() => {
+    return () => {
+      retryControllerRef.current?.abort();
+    };
+  }, []);
 
   if (fetchError) {
     return (

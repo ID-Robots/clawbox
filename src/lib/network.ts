@@ -23,7 +23,7 @@ export interface WifiNetwork {
 
 async function isAPMode(): Promise<boolean> {
   try {
-    const { stdout } = await exec("iw", ["dev", IFACE, "info"]);
+    const { stdout } = await exec("iw", ["dev", IFACE, "info"], { timeout: NETWORK_TIMEOUT });
     return stdout.includes("type AP");
   } catch {
     return false;
@@ -33,7 +33,7 @@ async function isAPMode(): Promise<boolean> {
 async function bringAPUp(): Promise<void> {
   for (let attempt = 1; attempt <= AP_RETRY_COUNT; attempt++) {
     try {
-      await exec("nmcli", ["connection", "up", "ClawBox-Setup"]);
+      await exec("nmcli", ["connection", "up", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT });
       console.log(`[WiFi] AP restored (attempt ${attempt})`);
       return;
     } catch (err) {
@@ -68,7 +68,7 @@ async function doScan(): Promise<WifiNetwork[]> {
 
   if (wasAP) {
     // Disconnect AP so the interface can scan in station mode
-    await exec("nmcli", ["connection", "down", "ClawBox-Setup"]).catch(
+    await exec("nmcli", ["connection", "down", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT }).catch(
       () => {}
     );
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -76,7 +76,7 @@ async function doScan(): Promise<WifiNetwork[]> {
 
   try {
     // Trigger a fresh scan
-    await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE]).catch(
+    await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(
       () => {}
     );
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -90,7 +90,7 @@ async function doScan(): Promise<WifiNetwork[]> {
       "list",
       "ifname",
       IFACE,
-    ]);
+    ], { timeout: NETWORK_TIMEOUT });
 
     const networks = stdout
       .trim()
@@ -138,21 +138,31 @@ export async function switchToClient(
   console.log(`[WiFi] Switching to client mode, connecting to: ${ssid}`);
 
   // Stop the AP
-  await exec("bash", [AP_STOP_SCRIPT]);
+  await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
 
   // Build args conditionally instead of splicing
   const args = password
     ? ["device", "wifi", "connect", ssid, "password", password, "ifname", IFACE]
     : ["device", "wifi", "connect", ssid, "ifname", IFACE];
 
-  const { stdout } = await exec("nmcli", args, { timeout: NETWORK_TIMEOUT });
-  console.log(`[WiFi] Connected: ${stdout.trim()}`);
-  return { message: stdout.trim() };
+  try {
+    const { stdout } = await exec("nmcli", args, { timeout: NETWORK_TIMEOUT });
+    console.log(`[WiFi] Connected: ${stdout.trim()}`);
+    return { message: stdout.trim() };
+  } catch (err) {
+    console.error("[WiFi] Connection failed, restoring AP:", err instanceof Error ? err.message : err);
+    try {
+      await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+    } catch (apErr) {
+      console.error("[WiFi] Failed to restore AP:", apErr instanceof Error ? apErr.message : apErr);
+    }
+    throw err;
+  }
 }
 
 export async function restartAP(): Promise<void> {
   console.log("[WiFi] Restarting access point...");
-  await exec("bash", [AP_START_SCRIPT]);
+  await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
 }
 
 export async function getWifiStatus(): Promise<Record<string, string>> {
@@ -164,7 +174,7 @@ export async function getWifiStatus(): Promise<Record<string, string>> {
       "device",
       "show",
       IFACE,
-    ]);
+    ], { timeout: NETWORK_TIMEOUT });
 
     const info: Record<string, string> = {};
     for (const line of stdout.split("\n")) {

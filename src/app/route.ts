@@ -14,7 +14,10 @@ const ALLOWED_PROTOS = new Set(["http", "https"]);
 
 function redirectToSetup(request: NextRequest) {
   const rawProto = request.headers.get("x-forwarded-proto");
-  const proto = rawProto && ALLOWED_PROTOS.has(rawProto) ? rawProto : "http";
+  const proto = rawProto
+    ?.split(",")
+    .map((t) => t.trim().toLowerCase())
+    .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
   const host = request.headers.get("host") || "localhost";
   return NextResponse.redirect(new URL(`${proto}://${host}/setup`), 302);
 }
@@ -27,14 +30,13 @@ export async function GET(request: NextRequest) {
   }
 
   // Proxy the OpenClaw Control UI from the gateway
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch("http://127.0.0.1:18789/", {
       cache: "no-store",
       signal: controller.signal,
     });
-    clearTimeout(timeout);
     if (!res.ok) {
       return redirectToSetup(request);
     }
@@ -53,5 +55,7 @@ export async function GET(request: NextRequest) {
   } catch {
     // Gateway not running — fall back to setup
     return redirectToSetup(request);
+  } finally {
+    clearTimeout(timeout);
   }
 }

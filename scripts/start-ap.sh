@@ -60,8 +60,8 @@ wait_for_interface || echo "[AP] Continuing despite interface timeout"
 
 echo "[AP] Setting up iptables captive portal rules..."
 # Check if rule already exists before adding to avoid duplicates
-if ! iptables -t nat -C PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null; then
-  iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80"
+if ! iptables -w 5 -t nat -C PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null; then
+  iptables -w 5 -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80"
 fi
 
 echo "[AP] WiFi access point '$SSID' is running on $IFACE ($AP_IP)"

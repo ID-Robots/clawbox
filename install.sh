@@ -9,6 +9,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Verify clawbox user exists
+if ! id -u clawbox &>/dev/null; then
+  echo "Error: System user 'clawbox' does not exist. Create it first."
+  exit 1
+fi
+
 # Verify project directory exists
 if [ ! -d "$PROJECT_DIR" ]; then
   echo "Error: Project directory '$PROJECT_DIR' does not exist"
@@ -45,7 +51,7 @@ fi
 echo "[3/7] Ensuring bun is installed..."
 if ! command -v "$BUN" &>/dev/null; then
   # Note: fetches and runs remote installer script. Accepted risk for initial setup.
-  sudo -u clawbox bash -c 'curl -fsSL https://bun.sh/install | bash' || {
+  sudo -u clawbox bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash' || {
     echo "Warning: Bun installation failed. Please install manually."
     exit 1
   }

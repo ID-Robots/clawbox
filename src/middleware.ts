@@ -32,7 +32,7 @@ const APPLE_PATHS = new Set([
 ]);
 
 export function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
+  const pathname = request.nextUrl.pathname.toLowerCase();
 
   if (REDIRECT_PATHS.has(pathname)) {
     return NextResponse.redirect(PORTAL_URL, 302);

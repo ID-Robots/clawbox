@@ -22,25 +22,31 @@ export async function POST(request: Request) {
     await set("wifi_ssid", ssid);
 
     // Schedule network switch after response is sent
-    setTimeout(async () => {
-      try {
-        await switchToClient(ssid, password as string | undefined);
-        await set("wifi_configured", true);
-      } catch (err) {
-        console.error(
-          "[WiFi] Failed to connect, restarting AP:",
-          err instanceof Error ? err.message : err
-        );
-        await set("wifi_configured", false);
+    setTimeout(() => {
+      (async () => {
         try {
-          await restartAP();
-        } catch (apErr) {
+          await switchToClient(ssid, password as string | undefined);
+          await set("wifi_configured", true);
+        } catch (err) {
           console.error(
-            "[WiFi] Failed to restart AP:",
-            apErr instanceof Error ? apErr.message : apErr
+            "[WiFi] Failed to connect, restarting AP:",
+            err instanceof Error ? err.message : err
           );
+          try {
+            await set("wifi_configured", false);
+          } catch (setErr) {
+            console.error("[WiFi] Failed to clear wifi_configured:", setErr);
+          }
+          try {
+            await restartAP();
+          } catch (apErr) {
+            console.error(
+              "[WiFi] Failed to restart AP:",
+              apErr instanceof Error ? apErr.message : apErr
+            );
+          }
         }
-      }
+      })();
     }, 5000);
 
     return NextResponse.json({

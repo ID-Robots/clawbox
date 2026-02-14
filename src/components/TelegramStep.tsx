@@ -95,11 +95,12 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         </label>
         <input
           id="telegram-bot-token"
-          type="text"
+          type="password"
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
           spellCheck={false}
+          autoComplete="off"
           className="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500"
         />
         {status && (

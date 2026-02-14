@@ -28,6 +28,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     message: string;
   } | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const connectControllerRef = useRef<AbortController | null>(null);
 
   const scanWifi = useCallback(async () => {
     setScanning(true);
@@ -59,18 +60,25 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   const closeModal = useCallback(() => setSelectedSSID(null), []);
 
   const connectWifi = async () => {
+    connectControllerRef.current?.abort();
+    const controller = new AbortController();
+    connectControllerRef.current = controller;
+
     setConnecting(true);
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ssid: selectedSSID, password }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `Connection failed (${res.status})`);
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       if (data.success) {
         setStatus({
           type: "success",
@@ -88,6 +96,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         });
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setStatus({
         type: "error",
         message: `Connection failed: ${err instanceof Error ? err.message : err}`,
@@ -96,6 +105,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       setConnecting(false);
     }
   };
+
+  // Cleanup connect controller on unmount
+  useEffect(() => {
+    return () => {
+      connectControllerRef.current?.abort();
+    };
+  }, []);
 
   // Escape key to close modal + focus management
   useEffect(() => {

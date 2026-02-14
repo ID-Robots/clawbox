@@ -42,8 +42,7 @@ export async function get(key: string): Promise<unknown> {
 
 export async function set(key: string, value: unknown): Promise<void> {
   const prev = writeLock;
-  let done: Promise<void>;
-  done = (async () => {
+  const done = (async () => {
     await prev;
     const config = await readConfig();
     if (value === undefined) {
@@ -63,8 +62,7 @@ export async function getAll(): Promise<Config> {
 
 export async function resetConfig(): Promise<void> {
   const prev = writeLock;
-  let done: Promise<void>;
-  done = (async () => {
+  const done = (async () => {
     await prev;
     await writeConfig({});
   })();

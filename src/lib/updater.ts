@@ -1,13 +1,15 @@
-import { exec as execCb } from "child_process";
+import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { get, set } from "./config-store";
 
 const execShell = promisify(execCb);
+const execFile = promisify(execFileCb);
 
+const VALID_HOST = /^[A-Za-z0-9.\-:]+$/;
 const PING_TARGETS = (process.env.PING_TARGETS || "8.8.8.8,1.1.1.1")
   .split(",")
   .map((t) => t.trim())
-  .filter(Boolean);
+  .filter((t) => t && VALID_HOST.test(t));
 
 interface UpdateStepDef {
   id: string;
@@ -15,6 +17,7 @@ interface UpdateStepDef {
   command: string;
   timeoutMs: number;
   required?: boolean;
+  customRun?: () => Promise<void>;
 }
 
 export type StepStatus =
@@ -48,9 +51,20 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "internet_check",
     label: "Checking internet connectivity",
-    command: PING_TARGETS.map((t) => `ping -c 1 -W 5 ${t}`).join(" || "),
+    command: "",
     timeoutMs: 10_000,
     required: true,
+    customRun: async () => {
+      for (const target of PING_TARGETS) {
+        try {
+          await execFile("ping", ["-c", "1", "-W", "5", target], { timeout: 10_000 });
+          return;
+        } catch {
+          // try next target
+        }
+      }
+      throw new Error("All ping targets unreachable");
+    },
   },
   {
     id: "git_pull",
@@ -155,10 +169,14 @@ async function runUpdate(): Promise<void> {
     console.log(`[Updater] Running step: ${stepDef.label}`);
 
     try {
-      await execShell(stepDef.command, {
-        timeout: stepDef.timeoutMs,
-        maxBuffer: 2 * 1024 * 1024,
-      });
+      if (stepDef.customRun) {
+        await stepDef.customRun();
+      } else {
+        await execShell(stepDef.command, {
+          timeout: stepDef.timeoutMs,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+      }
       state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${stepDef.label}`);
     } catch (err) {
@@ -185,8 +203,10 @@ async function runUpdate(): Promise<void> {
   state.currentStepIndex = -1;
   state.phase = hasFailures ? "failed" : "completed";
 
-  // Persist completion
-  await set("update_completed", true);
-  await set("update_completed_at", new Date().toISOString());
+  // Only persist completion when all steps succeeded
+  if (!hasFailures) {
+    await set("update_completed", true);
+    await set("update_completed_at", new Date().toISOString());
+  }
   console.log("[Updater] Update process finished");
 }
