@@ -26,6 +26,12 @@ export default function DoneStep() {
 
   useEffect(() => {
     const controller = new AbortController();
+    fetch("/setup-api/setup/status", { signal: controller.signal })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.setup_complete) setCompleted(true);
+      })
+      .catch(() => {});
     fetch("/setup-api/system/info", { signal: controller.signal })
       .then((r) => {
         if (!r.ok) throw new Error("Failed to load");
