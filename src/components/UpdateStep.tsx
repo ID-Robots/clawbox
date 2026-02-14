@@ -66,6 +66,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         const res = await fetch("/setup-api/update/status", {
           signal: controller.signal,
         });
+        if (controller.signal.aborted) return;
+        if (!res.ok) return;
         const data: UpdateState = await res.json();
         if (controller.signal.aborted) return;
         setState(data);

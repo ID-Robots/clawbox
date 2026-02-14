@@ -15,10 +15,12 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
     message: string;
   } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      saveControllerRef.current?.abort();
     };
   }, []);
 
@@ -27,13 +29,19 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
       setStatus({ type: "error", message: "Please enter a bot token" });
       return;
     }
+    saveControllerRef.current?.abort();
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
+
     setSaving(true);
     try {
       const res = await fetch("/setup-api/telegram/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botToken: token.trim() }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setStatus({
@@ -43,6 +51,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         return;
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       if (data.success) {
         setStatus({
           type: "success",
@@ -57,12 +66,13 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         });
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setStatus({
         type: "error",
         message: `Failed: ${err instanceof Error ? err.message : err}`,
       });
     } finally {
-      setSaving(false);
+      if (!controller.signal.aborted) setSaving(false);
     }
   };
 

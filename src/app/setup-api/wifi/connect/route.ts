@@ -26,7 +26,6 @@ export async function POST(request: Request) {
       (async () => {
         try {
           await switchToClient(ssid, password as string | undefined);
-          await set("wifi_configured", true);
         } catch (err) {
           console.error(
             "[WiFi] Failed to connect, restarting AP:",
@@ -45,6 +44,15 @@ export async function POST(request: Request) {
               apErr instanceof Error ? apErr.message : apErr
             );
           }
+          return;
+        }
+        try {
+          await set("wifi_configured", true);
+        } catch (setErr) {
+          console.error(
+            "[WiFi] Connected but failed to persist wifi_configured:",
+            setErr instanceof Error ? setErr.message : setErr
+          );
         }
       })();
     }, 5000);

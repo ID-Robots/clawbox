@@ -40,7 +40,7 @@ export function middleware(request: NextRequest) {
 
   if (APPLE_PATHS.has(pathname)) {
     return new NextResponse(
-      "<HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
+      "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
       {
         status: 200,
         headers: { "Content-Type": "text/html" },

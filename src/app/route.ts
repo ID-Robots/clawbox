@@ -11,6 +11,13 @@ const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;
 </div>`;
 
 const ALLOWED_PROTOS = new Set(["http", "https"]);
+const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
+const ALLOWED_HOSTS = new Set(
+  (process.env.ALLOWED_HOSTS || "clawbox.local,10.42.0.1,localhost")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean)
+);
 
 function redirectToSetup(request: NextRequest) {
   const rawProto = request.headers.get("x-forwarded-proto");
@@ -18,8 +25,11 @@ function redirectToSetup(request: NextRequest) {
     ?.split(",")
     .map((t) => t.trim().toLowerCase())
     .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
-  const host = request.headers.get("host") || "localhost";
-  return NextResponse.redirect(new URL(`${proto}://${host}/setup`), 302);
+  const rawHost = request.headers.get("host")?.toLowerCase().replace(/:\d+$/, "");
+  if (rawHost && ALLOWED_HOSTS.has(rawHost)) {
+    return NextResponse.redirect(new URL(`${proto}://${request.headers.get("host")}/setup`), 302);
+  }
+  return NextResponse.redirect(new URL(`${CANONICAL_ORIGIN}/setup`), 302);
 }
 
 export async function GET(request: NextRequest) {
