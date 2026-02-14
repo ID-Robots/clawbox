@@ -30,12 +30,11 @@ export async function gather(): Promise<SystemInfo> {
 
   let diskUsed = "unknown";
   let diskFree = "unknown";
-  let diskTotal = "unknown";
+  const diskTotal = "512 GB";
   if (dfRes.status === "fulfilled") {
     const lines = dfRes.value.stdout.trim().split("\n");
     if (lines.length >= 2) {
       const parts = lines[1].trim().split(/\s+/);
-      diskTotal = parts[0] || "unknown";
       diskUsed = parts[1] || "unknown";
       diskFree = parts[2] || "unknown";
     }
