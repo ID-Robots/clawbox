@@ -60,7 +60,7 @@ export default function SetupWizard() {
         {currentStep < 5 && <ProgressBar currentStep={currentStep} />}
       </header>
 
-      <main className="flex-1 flex items-center justify-center p-6">
+      <main className="flex-1 flex items-start sm:items-center justify-center p-6 pt-4 sm:pt-6">
         {currentStep === 1 && (
           <WelcomeStep onNext={() => setCurrentStep(2)} />
         )}
