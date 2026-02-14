@@ -57,7 +57,7 @@ export default function SetupWizard() {
             ClawBox
           </span>
         </Link>
-        <ProgressBar currentStep={currentStep} />
+        {currentStep < 5 && <ProgressBar currentStep={currentStep} />}
       </header>
 
       <main className="flex-1 flex items-center justify-center p-6">

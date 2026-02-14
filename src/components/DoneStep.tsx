@@ -85,7 +85,6 @@ export default function DoneStep() {
           label: "NVMe Storage",
           value: `${info.diskFree} free / ${info.diskTotal}`,
         },
-        { label: "NVMe Used", value: info.diskUsed },
         { label: "Temperature", value: info.temperature },
         { label: "Uptime", value: info.uptime },
       ]
@@ -94,21 +93,6 @@ export default function DoneStep() {
   return (
     <div className="w-full max-w-[520px]">
       <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
-        <h1 className="text-2xl font-bold font-display mb-2">
-          {completed ? (
-            <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-              Setup Complete!
-            </span>
-          ) : (
-            "You're all set!"
-          )}
-        </h1>
-        <p className="text-gray-400 mb-6 leading-relaxed">
-          {completed
-            ? "Your ClawBox is ready to use. Open Telegram and start chatting with your bot!"
-            : "Your ClawBox is ready. Open Telegram and start chatting with your bot."}
-        </p>
-
         <div className="my-5">
           {!info && !loadError && (
             <div className="flex items-center justify-center gap-2.5 p-6 text-gray-400 text-sm">
