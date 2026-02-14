@@ -73,17 +73,6 @@ export default function SetupWizard() {
         )}
         {currentStep === 5 && <DoneStep />}
       </main>
-
-      <footer className="text-center p-4 text-xs">
-        <a
-          href="https://openclawhardware.dev"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-gray-500 hover:text-orange-400 no-underline transition-colors"
-        >
-          openclawhardware.dev
-        </a>
-      </footer>
     </>
   );
 }
