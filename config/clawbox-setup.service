@@ -5,12 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=clawbox
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 WorkingDirectory=/home/clawbox/clawbox
-ExecStart=/usr/bin/node server/index.js
+ExecStart=/home/clawbox/.bun/bin/bun run .next/standalone/server.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
+Environment=PORT=80
+Environment=HOSTNAME=0.0.0.0
 
 [Install]
 WantedBy=multi-user.target

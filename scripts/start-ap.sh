@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IFACE="wlP1p1s0"
+IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
 CON_NAME="ClawBox-Setup"
 SSID="ClawBox-Setup"
 AP_IP="10.42.0.1"
+IFACE_TIMEOUT="${IFACE_TIMEOUT:-10}"
+
+wait_for_interface() {
+  local elapsed=0
+  while [ "$elapsed" -lt "$IFACE_TIMEOUT" ]; do
+    if [ -e "/sys/class/net/$IFACE/operstate" ]; then
+      local state
+      state=$(cat "/sys/class/net/$IFACE/operstate")
+      if [ "$state" = "up" ] || [ "$state" = "unknown" ]; then
+        echo "[AP] Interface $IFACE is ready (state=$state)"
+        return 0
+      fi
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "[AP] Warning: Interface $IFACE not ready after ${IFACE_TIMEOUT}s timeout"
+  return 1
+}
 
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
@@ -29,15 +48,17 @@ nmcli connection modify "$CON_NAME" remove 802-11-wireless-security 2>/dev/null 
 echo "[AP] Activating access point..."
 nmcli connection up "$CON_NAME"
 
-# Wait for interface to come up
-sleep 2
+# Wait for interface readiness instead of fixed sleep
+wait_for_interface || echo "[AP] Continuing despite interface timeout"
 
 # DNS hijack is handled by NM's built-in dnsmasq via
 # /etc/NetworkManager/dnsmasq-shared.d/captive-portal.conf
 # which resolves all queries to 10.42.0.1
 
 echo "[AP] Setting up iptables captive portal rules..."
-# Redirect HTTP traffic not destined for us to our server (captive portal trigger)
-iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80"
+# Check if rule already exists before adding to avoid duplicates
+if ! iptables -t nat -C PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null; then
+  iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80"
+fi
 
 echo "[AP] WiFi access point '$SSID' is running on $IFACE ($AP_IP)"
