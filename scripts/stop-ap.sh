@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IFACE="wlP1p1s0"
+IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
 CON_NAME="ClawBox-Setup"
 AP_IP="10.42.0.1"
 

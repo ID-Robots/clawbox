@@ -21,6 +21,7 @@ export default function DoneStep() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [completeError, setCompleteError] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,13 +58,17 @@ export default function DoneStep() {
 
   const completeSetup = async () => {
     setFinishing(true);
+    setCompleteError(null);
     try {
       const res = await fetch("/setup-api/setup/complete", { method: "POST" });
       if (res.ok) {
         setCompleted(true);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setCompleteError(data.error || "Failed to complete setup");
       }
-    } catch {
-      /* ignore */
+    } catch (err) {
+      setCompleteError(err instanceof Error ? err.message : "Failed to complete setup");
     } finally {
       setFinishing(false);
     }
@@ -129,8 +134,15 @@ export default function DoneStep() {
             ))}
         </div>
 
+        {completeError && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">
+            {completeError}
+          </div>
+        )}
+
         <div className="flex items-center gap-3">
           <button
+            type="button"
             onClick={completed ? () => (window.location.href = "/") : completeSetup}
             disabled={finishing}
             className={`px-8 py-3 rounded-lg text-sm font-semibold transition transform cursor-pointer ${
@@ -142,6 +154,7 @@ export default function DoneStep() {
             {finishing ? "Finishing..." : completed ? "Open Control Panel" : "Finish Setup"}
           </button>
           <button
+            type="button"
             onClick={() => setShowResetConfirm(true)}
             className="px-5 py-3 bg-transparent border border-red-500/30 text-red-400 rounded-lg text-sm font-medium hover:bg-red-500/10 hover:border-red-500/50 transition-colors cursor-pointer"
           >
@@ -154,14 +167,16 @@ export default function DoneStep() {
       {showResetConfirm && (
         <div
           className="fixed inset-0 flex items-center justify-center z-[100] p-6"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="reset-dialog-title"
-          ref={modalRef}
-          tabIndex={-1}
         >
-          <div className="fixed inset-0 bg-black/60" onClick={closeResetModal} />
-          <div className="relative z-[101] w-full max-w-[400px] bg-gray-800 border border-gray-700 rounded-2xl p-8 shadow-2xl">
+          <div className="fixed inset-0 bg-black/60" aria-hidden="true" role="presentation" />
+          <div
+            className="relative z-[101] w-full max-w-[400px] bg-gray-800 border border-gray-700 rounded-2xl p-8 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-dialog-title"
+            ref={modalRef}
+            tabIndex={-1}
+          >
             <h2 id="reset-dialog-title" className="text-lg font-semibold font-display mb-2 text-red-400">
               Factory Reset
             </h2>
@@ -175,11 +190,16 @@ export default function DoneStep() {
             )}
             <div className="flex items-center gap-3">
               <button
+                type="button"
                 onClick={async () => {
                   setResetting(true);
                   setResetError(null);
                   try {
-                    const res = await fetch("/setup-api/setup/reset", { method: "POST" });
+                    const res = await fetch("/setup-api/setup/reset", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ confirm: true }),
+                    });
                     if (!res.ok) {
                       const data = await res.json().catch(() => ({}));
                       throw new Error(data.error || "Reset failed");
@@ -196,6 +216,7 @@ export default function DoneStep() {
                 {resetting ? "Resetting..." : "Yes, Reset Everything"}
               </button>
               <button
+                type="button"
                 onClick={closeResetModal}
                 className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer"
               >

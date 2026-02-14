@@ -56,6 +56,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [fetchError, setFetchError] = useState(false);
   const startedRef = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onNextRef = useRef(onNext);
+  onNextRef.current = onNext;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -81,38 +83,57 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }, [stopPolling]);
 
   useEffect(() => {
+    const controller = new AbortController();
+
     async function init() {
       try {
-        const res = await fetch("/setup-api/update/status");
+        const res = await fetch("/setup-api/update/status", {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`Status check failed (${res.status})`);
         const data: UpdateState = await res.json();
+        if (controller.signal.aborted) return;
         setState(data);
 
         if (data.phase === "completed") {
-          onNext();
+          onNextRef.current();
           return;
         }
 
         if (data.phase === "idle" && !startedRef.current) {
           startedRef.current = true;
-          await fetch("/setup-api/update/run", { method: "POST" });
+          const runRes = await fetch("/setup-api/update/run", {
+            method: "POST",
+            signal: controller.signal,
+          });
+          if (!runRes.ok) throw new Error(`Start update failed (${runRes.status})`);
           startPolling();
         } else if (data.phase === "running") {
           startPolling();
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setFetchError(true);
       }
     }
 
     init();
-    return stopPolling;
-  }, [onNext, startPolling, stopPolling]);
+    return () => {
+      controller.abort();
+      stopPolling();
+    };
+  }, [startPolling, stopPolling]);
 
   const retry = async () => {
     startedRef.current = true;
     setFetchError(false);
-    await fetch("/setup-api/update/run", { method: "POST" });
-    startPolling();
+    try {
+      const res = await fetch("/setup-api/update/run", { method: "POST" });
+      if (!res.ok) throw new Error(`Retry failed (${res.status})`);
+      startPolling();
+    } catch {
+      setFetchError(true);
+    }
   };
 
   if (fetchError) {
@@ -127,12 +148,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           </p>
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={retry}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
             >
               Retry
             </button>
             <button
+              type="button"
               onClick={onNext}
               className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
             >
@@ -242,6 +265,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <div className="flex items-center gap-3 mt-5">
             {(isDone || isSkipped) && (
               <button
+                type="button"
                 onClick={onNext}
                 className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
               >
@@ -251,12 +275,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             {isFailed && (
               <>
                 <button
+                  type="button"
                   onClick={retry}
                   className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
                 >
                   Retry
                 </button>
                 <button
+                  type="button"
                   onClick={onNext}
                   className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
                 >

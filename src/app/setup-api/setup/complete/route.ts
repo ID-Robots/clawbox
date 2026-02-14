@@ -10,6 +10,7 @@ export async function POST() {
   } catch (err) {
     // Rollback on partial failure
     await set("setup_complete", undefined).catch(() => {});
+    await set("setup_completed_at", undefined).catch(() => {});
     return NextResponse.json(
       {
         error:

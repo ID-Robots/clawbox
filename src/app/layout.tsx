@@ -23,7 +23,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="scroll-smooth">
-<body className="font-body min-h-screen flex flex-col">
+      <body className="font-body min-h-screen flex flex-col">
         {children}
       </body>
     </html>

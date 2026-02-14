@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "path";
+import { resetConfig } from "@/lib/config-store";
 
-const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
-const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
-
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    const tmpPath = CONFIG_PATH + ".tmp";
-    await fs.writeFile(tmpPath, JSON.stringify({}, null, 2));
-    await fs.rename(tmpPath, CONFIG_PATH);
+    const body = await request.json().catch(() => ({}));
+    if (!body.confirm) {
+      return NextResponse.json(
+        { error: "Missing confirmation. Send { \"confirm\": true } to reset." },
+        { status: 400 }
+      );
+    }
+
+    await resetConfig();
     return NextResponse.json({ success: true });
   } catch (err) {
     return NextResponse.json(

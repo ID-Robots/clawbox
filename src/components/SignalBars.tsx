@@ -4,7 +4,7 @@ interface SignalBarsProps {
 
 export default function SignalBars({ level }: SignalBarsProps) {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" className="shrink-0">
+    <svg width="16" height="16" viewBox="0 0 16 16" className="shrink-0" role="img" aria-label={`Signal strength: ${level} of 4`}>
       {[0, 1, 2, 3].map((i) => {
         const h = 4 + i * 3;
         const y = 16 - h;

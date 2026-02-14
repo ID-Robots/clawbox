@@ -58,6 +58,7 @@ export default function WelcomeStep({ onNext }: WelcomeStepProps) {
           ))}
         </div>
         <button
+          type="button"
           onClick={onNext}
           className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
         >

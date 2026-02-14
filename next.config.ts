@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
-const GATEWAY_URL = "http://127.0.0.1:18789";
+const isDev = process.env.NODE_ENV === "development";
+const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -57,8 +58,17 @@ const nextConfig: NextConfig = {
           },
           {
             key: "Content-Security-Policy",
-            value:
-              "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'",
+            value: [
+              "default-src 'self'",
+              // TODO: Migrate inline scripts to nonce/hash to remove 'unsafe-inline'
+              // 'unsafe-inline' is required for Next.js hydration and proxied gateway UI
+              `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' data: blob:",
+              "font-src 'self'",
+              "connect-src 'self'",
+              "frame-ancestors 'self'",
+            ].join("; "),
           },
         ],
       },

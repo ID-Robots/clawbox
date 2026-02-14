@@ -4,6 +4,11 @@ import { get, set } from "./config-store";
 
 const execShell = promisify(execCb);
 
+const PING_TARGETS = (process.env.PING_TARGETS || "8.8.8.8,1.1.1.1")
+  .split(",")
+  .map((t) => t.trim())
+  .filter(Boolean);
+
 interface UpdateStepDef {
   id: string;
   label: string;
@@ -43,7 +48,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "internet_check",
     label: "Checking internet connectivity",
-    command: "ping -c 1 -W 5 8.8.8.8",
+    command: PING_TARGETS.map((t) => `ping -c 1 -W 5 ${t}`).join(" || "),
     timeoutMs: 10_000,
     required: true,
   },
@@ -104,6 +109,7 @@ function createInitialState(): UpdateState {
 }
 
 let state: UpdateState = createInitialState();
+let running = false;
 
 export function getUpdateState(): UpdateState {
   return { ...state, steps: state.steps.map((s) => ({ ...s })) };
@@ -114,20 +120,25 @@ export async function isUpdateCompleted(): Promise<boolean> {
 }
 
 export function startUpdate(): { started: boolean; error?: string } {
-  if (state.phase === "running") {
+  if (running) {
     return { started: false, error: "Update already in progress" };
   }
 
   // Reset state for fresh or retry run
+  running = true;
   state = createInitialState();
   state.phase = "running";
   state.currentStepIndex = 0;
 
   // Run async without awaiting
-  runUpdate().catch((err) => {
-    console.error("[Updater] Unexpected error:", err);
-    state.phase = "failed";
-  });
+  runUpdate()
+    .catch((err) => {
+      console.error("[Updater] Unexpected error:", err);
+      state.phase = "failed";
+    })
+    .finally(() => {
+      running = false;
+    });
 
   return { started: true };
 }
@@ -146,7 +157,7 @@ async function runUpdate(): Promise<void> {
     try {
       await execShell(stepDef.command, {
         timeout: stepDef.timeoutMs,
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: 2 * 1024 * 1024,
       });
       state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${stepDef.label}`);
@@ -172,7 +183,7 @@ async function runUpdate(): Promise<void> {
   }
 
   state.currentStepIndex = -1;
-  state.phase = hasFailures ? "completed" : "completed";
+  state.phase = hasFailures ? "failed" : "completed";
 
   // Persist completion
   await set("update_completed", true);

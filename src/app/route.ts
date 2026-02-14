@@ -10,9 +10,11 @@ const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;
 <a href="/setup" style="color:#9ca3af;text-decoration:none;font-size:11px;">Settings</a>
 </div>`;
 
+const ALLOWED_PROTOS = new Set(["http", "https"]);
+
 function redirectToSetup(request: NextRequest) {
-  const proto =
-    request.headers.get("x-forwarded-proto") || "http";
+  const rawProto = request.headers.get("x-forwarded-proto");
+  const proto = rawProto && ALLOWED_PROTOS.has(rawProto) ? rawProto : "http";
   const host = request.headers.get("host") || "localhost";
   return NextResponse.redirect(new URL(`${proto}://${host}/setup`), 302);
 }
@@ -26,14 +28,20 @@ export async function GET(request: NextRequest) {
 
   // Proxy the OpenClaw Control UI from the gateway
   try {
-    const res = await fetch("http://127.0.0.1:18789/", { cache: "no-store" });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch("http://127.0.0.1:18789/", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
     if (!res.ok) {
       return redirectToSetup(request);
     }
     let html = await res.text();
 
     // Inject ClawBox navigation bar
-    html = html.replace("</body>", `${CLAWBOX_BAR}</body>`);
+    html = html.replace(/<\/body>/i, `${CLAWBOX_BAR}</body>`);
 
     return new NextResponse(html, {
       status: 200,

@@ -17,6 +17,9 @@ wait_for_interface() {
         echo "[AP] Interface $IFACE is ready (state=$state)"
         return 0
       fi
+      echo "[AP] Interface $IFACE state=$state (elapsed=${elapsed}s)"
+    else
+      echo "[AP] Interface $IFACE operstate file not found (elapsed=${elapsed}s)"
     fi
     sleep 1
     elapsed=$((elapsed + 1))

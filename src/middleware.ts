@@ -1,7 +1,20 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PORTAL_URL = process.env.PORTAL_URL || "http://10.42.0.1/";
+function getPortalUrl(): string {
+  const raw = process.env.PORTAL_URL;
+  if (raw) {
+    try {
+      new URL(raw);
+      return raw;
+    } catch {
+      console.error(`[middleware] Invalid PORTAL_URL: ${raw}, using default`);
+    }
+  }
+  return "http://10.42.0.1/";
+}
+
+const PORTAL_URL = getPortalUrl();
 
 const REDIRECT_PATHS = new Set([
   "/generate_204", // Android

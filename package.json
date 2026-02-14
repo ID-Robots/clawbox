@@ -5,7 +5,7 @@
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
-    "dev:privileged": "PORT=80 next dev --port 80 --hostname 0.0.0.0",
+    "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "build": "next build",
     "postbuild": "cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public 2>/dev/null || true",
     "start": "PORT=80 HOSTNAME=0.0.0.0 bun run .next/standalone/server.js",

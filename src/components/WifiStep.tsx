@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import SignalBars from "./SignalBars";
 import StatusMessage from "./StatusMessage";
 
@@ -27,6 +27,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     type: "success" | "error";
     message: string;
   } | null>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
 
   const scanWifi = useCallback(async () => {
     setScanning(true);
@@ -96,13 +97,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
   };
 
-  // Escape key to close modal
+  // Escape key to close modal + focus management
   useEffect(() => {
     if (!selectedSSID) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") closeModal();
     };
     document.addEventListener("keydown", handleKey);
+    modalRef.current?.focus();
     return () => document.removeEventListener("keydown", handleKey);
   }, [selectedSSID, closeModal]);
 
@@ -129,6 +131,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             <div className="p-6 text-center text-sm text-red-400">
               Scan failed.{" "}
               <button
+                type="button"
                 onClick={scanWifi}
                 className="text-orange-400 underline bg-transparent border-none cursor-pointer"
               >
@@ -140,6 +143,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             <div className="p-6 text-center text-gray-400 text-sm">
               No networks found.{" "}
               <button
+                type="button"
                 onClick={scanWifi}
                 className="text-orange-400 underline bg-transparent border-none cursor-pointer"
               >
@@ -154,10 +158,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               const hasLock =
                 n.security && n.security !== "" && n.security !== "--";
               return (
-                <div
+                <button
+                  type="button"
                   key={n.ssid}
                   onClick={() => selectNetwork(n.ssid, n.security || "")}
-                  className="flex items-center gap-3 px-4 py-3 cursor-pointer border-b border-gray-800 last:border-b-0 hover:bg-gray-700/50 transition-colors"
+                  aria-label={`${n.ssid}${hasLock ? " (secured)" : " (open)"}`}
+                  className="flex items-center gap-3 px-4 py-3 cursor-pointer border-b border-gray-800 last:border-b-0 hover:bg-gray-700/50 transition-colors w-full text-left bg-transparent border-x-0 border-t-0"
                 >
                   <SignalBars level={bars} />
                   <span className="flex-1 text-sm font-medium text-gray-200">
@@ -168,19 +174,21 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                       &#128274;
                     </span>
                   )}
-                </div>
+                </button>
               );
             })}
         </div>
 
         <div className="flex items-center gap-3 mt-5">
           <button
+            type="button"
             onClick={scanWifi}
             className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer"
           >
             Rescan
           </button>
           <button
+            type="button"
             onClick={onNext}
             className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
           >
@@ -192,8 +200,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       {/* WiFi password modal */}
       {selectedSSID && (
         <div className="fixed inset-0 flex items-center justify-center z-[100] p-6">
-          <div className="fixed inset-0 bg-black/60" onClick={closeModal} />
-          <div className="relative z-[101] w-full max-w-[400px] bg-gray-800 border border-gray-700 rounded-2xl p-8 shadow-2xl">
+          <div className="fixed inset-0 bg-black/60" aria-hidden="true" role="presentation" />
+          <div
+            className="relative z-[101] w-full max-w-[400px] bg-gray-800 border border-gray-700 rounded-2xl p-8 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Connect to ${selectedSSID}`}
+            ref={modalRef}
+            tabIndex={-1}
+          >
             <h2 className="text-lg font-semibold font-display mb-2">
               Connect to {selectedSSID}
             </h2>
@@ -221,6 +236,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             )}
             <div className="flex items-center gap-3 mt-5">
               <button
+                type="button"
                 onClick={connectWifi}
                 disabled={connecting}
                 className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
@@ -228,6 +244,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 {connecting ? "Connecting..." : "Connect"}
               </button>
               <button
+                type="button"
                 onClick={closeModal}
                 className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer"
               >

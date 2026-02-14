@@ -9,6 +9,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Verify project directory exists
+if [ ! -d "$PROJECT_DIR" ]; then
+  echo "Error: Project directory '$PROJECT_DIR' does not exist"
+  exit 1
+fi
+
 echo "=== ClawBox Setup Installer ==="
 echo ""
 
@@ -19,14 +25,21 @@ hostnamectl set-hostname clawbox
 # 2. Configure avahi for clawbox.local mDNS
 echo "[2/7] Configuring avahi (clawbox.local)..."
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
-if grep -q '^#host-name=' "$AVAHI_CONF"; then
-  sed -i 's/^#host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
-elif grep -q '^host-name=' "$AVAHI_CONF"; then
-  sed -i 's/^host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
+if [ -f "$AVAHI_CONF" ]; then
+  cp "$AVAHI_CONF" "${AVAHI_CONF}.bak"
+  if grep -q '^#host-name=' "$AVAHI_CONF"; then
+    sed -i 's/^#host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
+  elif grep -q '^host-name=' "$AVAHI_CONF"; then
+    sed -i 's/^host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
+  elif grep -q '^\[server\]' "$AVAHI_CONF"; then
+    sed -i '/^\[server\]/a host-name=clawbox' "$AVAHI_CONF"
+  else
+    printf '\n[server]\nhost-name=clawbox\n' >> "$AVAHI_CONF"
+  fi
+  systemctl restart avahi-daemon
 else
-  sed -i '/^\[server\]/a host-name=clawbox' "$AVAHI_CONF"
+  echo "Warning: $AVAHI_CONF not found, skipping avahi configuration"
 fi
-systemctl restart avahi-daemon
 
 # 3. Install bun if not present
 echo "[3/7] Ensuring bun is installed..."
@@ -52,11 +65,17 @@ find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
 
 # 6. Install systemd services
 echo "[6/7] Installing systemd services..."
-cp "$PROJECT_DIR/config/clawbox-ap.service" /etc/systemd/system/
-cp "$PROJECT_DIR/config/clawbox-setup.service" /etc/systemd/system/
+for svc in clawbox-ap.service clawbox-setup.service; do
+  src="$PROJECT_DIR/config/$svc"
+  if [ ! -f "$src" ]; then
+    echo "Error: Service file not found: $src"
+    exit 1
+  fi
+  cp "$src" /etc/systemd/system/ || { echo "Error: Failed to copy $svc"; exit 1; }
+done
 systemctl daemon-reload
-systemctl enable clawbox-ap.service
-systemctl enable clawbox-setup.service
+systemctl enable clawbox-ap.service || { echo "Error: Failed to enable clawbox-ap.service"; exit 1; }
+systemctl enable clawbox-setup.service || { echo "Error: Failed to enable clawbox-setup.service"; exit 1; }
 
 # 7. Start services
 echo "[7/7] Starting services..."

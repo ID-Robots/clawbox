@@ -9,6 +9,7 @@ interface TelegramStepProps {
 
 export default function TelegramStep({ onNext }: TelegramStepProps) {
   const [token, setToken] = useState("");
+  const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
     type: "success" | "error";
     message: string;
@@ -26,6 +27,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
       setStatus({ type: "error", message: "Please enter a bot token" });
       return;
     }
+    setSaving(true);
     try {
       const res = await fetch("/setup-api/telegram/configure", {
         method: "POST",
@@ -46,6 +48,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
           type: "success",
           message: "Telegram bot configured! Continuing...",
         });
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
         timeoutRef.current = setTimeout(() => onNext(), 1500);
       } else {
         setStatus({
@@ -58,6 +61,8 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         type: "error",
         message: `Failed: ${err instanceof Error ? err.message : err}`,
       });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -102,12 +107,15 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         )}
         <div className="flex items-center gap-3 mt-5">
           <button
+            type="button"
             onClick={saveTelegram}
-            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
+            disabled={saving}
+            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
-            Save & Continue
+            {saving ? "Saving..." : "Save & Continue"}
           </button>
           <button
+            type="button"
             onClick={onNext}
             className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
           >
