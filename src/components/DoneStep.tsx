@@ -13,10 +13,14 @@ interface SystemInfo {
   diskTotal: string;
 }
 
-export default function DoneStep() {
+interface DoneStepProps {
+  setupComplete?: boolean;
+}
+
+export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState(setupComplete);
   const [finishing, setFinishing] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -26,12 +30,6 @@ export default function DoneStep() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/setup-api/setup/status", { signal: controller.signal })
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (data?.setup_complete) setCompleted(true);
-      })
-      .catch(() => {});
     fetch("/setup-api/system/info", { signal: controller.signal })
       .then((r) => {
         if (!r.ok) throw new Error("Failed to load");

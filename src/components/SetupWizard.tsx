@@ -12,6 +12,7 @@ import DoneStep from "./DoneStep";
 
 export default function SetupWizard() {
   const [currentStep, setCurrentStep] = useState(1);
+  const [setupComplete, setSetupComplete] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -22,6 +23,7 @@ export default function SetupWizard() {
       })
       .then((data) => {
         if (data.setup_complete) {
+          setSetupComplete(true);
           setCurrentStep(5);
         } else if (data.update_completed) {
           setCurrentStep(4);
@@ -75,7 +77,7 @@ export default function SetupWizard() {
         {currentStep === 4 && (
           <TelegramStep onNext={() => setCurrentStep(5)} />
         )}
-        {currentStep === 5 && <DoneStep />}
+        {currentStep === 5 && <DoneStep setupComplete={setupComplete} />}
       </main>
     </>
   );
