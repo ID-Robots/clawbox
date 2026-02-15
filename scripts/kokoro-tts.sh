@@ -13,7 +13,7 @@ if [ -z "$TEXT" ] || [ -z "$OUTPUT" ]; then
 fi
 
 TMPWAV=$(mktemp /tmp/kokoro_XXXXXX.wav)
-trap "rm -f $TMPWAV" EXIT
+trap 'rm -f "$TMPWAV"' EXIT
 
 kokoro -t "$TEXT" -o "$TMPWAV" -m af_heart -l a 2>/dev/null
 

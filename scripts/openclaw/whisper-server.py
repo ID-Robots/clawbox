@@ -21,7 +21,7 @@ def load_model():
     return model
 
 def transcribe(model, audio_path):
-    segments, info = model.transcribe(audio_path)
+    segments, _info = model.transcribe(audio_path)
     text = " ".join(seg.text.strip() for seg in segments)
     return text.strip()
 
@@ -51,8 +51,8 @@ def serve(model):
             print(f"Error: {e}", flush=True)
             try:
                 conn.sendall(json.dumps({"ok": False, "error": str(e)}).encode())
-            except:
-                pass
+            except Exception as exc:
+                print(f"Failed to send error response: {exc}", flush=True)
         finally:
             conn.close()
 

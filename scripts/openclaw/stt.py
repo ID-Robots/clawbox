@@ -6,7 +6,6 @@ from faster_whisper import WhisperModel
 import os
 os.environ.setdefault("LD_LIBRARY_PATH", "/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64")
 
-import torch
 
 def transcribe(audio_path, model_size="base", device=None):
     if device is None:
@@ -18,7 +17,7 @@ def transcribe(audio_path, model_size="base", device=None):
             device = "cpu"
     compute = "float16" if device == "cuda" else "int8"
     model = WhisperModel(model_size, device=device, compute_type=compute)
-    segments, info = model.transcribe(audio_path)
+    segments, _info = model.transcribe(audio_path)
     text = " ".join(seg.text.strip() for seg in segments)
     return text.strip()
 

@@ -45,7 +45,7 @@ def generate_audio(text, voice=DEFAULT_VOICE):
     kokoro_voice = VOICE_MAP.get(voice, voice if voice else DEFAULT_VOICE)
     buf = io.BytesIO()
     with pipeline_lock:
-        for i, (gs, ps, audio) in enumerate(pipeline(text, voice=kokoro_voice)):
+        for _i, (_gs, _ps, audio) in enumerate(pipeline(text, voice=kokoro_voice)):
             sf.write(buf, audio, 24000, format='WAV')
             break  # first segment
     buf.seek(0)
@@ -55,7 +55,7 @@ def generate_to_file(text, output_path, voice=DEFAULT_VOICE):
     """Generate audio to a file."""
     kokoro_voice = VOICE_MAP.get(voice, voice if voice else DEFAULT_VOICE)
     with pipeline_lock:
-        for i, (gs, ps, audio) in enumerate(pipeline(text, voice=kokoro_voice)):
+        for _i, (_gs, _ps, audio) in enumerate(pipeline(text, voice=kokoro_voice)):
             sf.write(output_path, audio, 24000)
             break
 
@@ -162,7 +162,7 @@ def serve_unix(pipe):
                 data += chunk
             req = json.loads(data.decode())
             text = req["text"]
-            output = req.get("output", "/tmp/kokoro_out.wav")
+            output = req.get("output") or tempfile.mktemp(suffix=".wav", prefix="kokoro_")
             voice = req.get("voice", DEFAULT_VOICE)
             generate_to_file(text, output, voice)
             conn.sendall(b"OK")
@@ -170,8 +170,8 @@ def serve_unix(pipe):
             print(f"[Unix] Error: {e}", flush=True)
             try:
                 conn.sendall(f"ERR:{e}".encode())
-            except:
-                pass
+            except Exception as exc:
+                print(f"[Unix] Failed to send error response: {exc}", flush=True)
         finally:
             conn.close()
 

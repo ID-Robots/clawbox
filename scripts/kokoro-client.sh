@@ -7,19 +7,22 @@ TEXT="$1"
 OUTPUT="$2"
 SOCKET="/tmp/kokoro-server.sock"
 TMPWAV=$(mktemp /tmp/kokoro_XXXXXX.wav)
-trap "rm -f $TMPWAV" EXIT
+trap 'rm -f "$TMPWAV"' EXIT
 
 if [ ! -S "$SOCKET" ]; then
   echo "Kokoro server not running. Falling back to cold start." >&2
   exec bash /home/clawbox/.openclaw/workspace/scripts/kokoro-tts.sh "$TEXT" "$OUTPUT"
 fi
 
-# Send request via python
-python3 -c "
-import socket, json
+# Send request via python (text passed through env to avoid shell injection)
+KOKORO_TEXT="$TEXT" KOKORO_OUTPUT="$TMPWAV" KOKORO_SOCKET="$SOCKET" python3 -c "
+import socket, json, os
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect('$SOCKET')
-sock.sendall(json.dumps({'text': '''$TEXT''', 'output': '$TMPWAV'}).encode())
+sock.connect(os.environ['KOKORO_SOCKET'])
+sock.sendall(json.dumps({
+    'text': os.environ['KOKORO_TEXT'],
+    'output': os.environ['KOKORO_OUTPUT']
+}).encode())
 sock.shutdown(socket.SHUT_WR)
 resp = sock.recv(1024).decode()
 sock.close()

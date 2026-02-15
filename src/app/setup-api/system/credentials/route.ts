@@ -86,6 +86,7 @@ export async function POST(request: Request) {
     // Write password to a secure temp file, then delegate to the root
     // systemd service (clawbox-root-update@chpasswd) since the main
     // service runs as clawbox with NoNewPrivileges=true.
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(CHPASSWD_INPUT_PATH, `clawbox:${password}\n`, {
       mode: 0o600,
     });

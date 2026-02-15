@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate speech from text using Kokoro TTS. Outputs WAV then converts to OGG/Opus."""
+import os
 import sys
 import subprocess
 import tempfile
@@ -12,6 +13,8 @@ def synthesize(text, output_path, voice="af_heart", lang="a"):
     chunks = []
     for _, _, audio in pipeline(text, voice=voice):
         chunks.append(audio)
+    if not chunks:
+        raise RuntimeError("Kokoro produced no audio output")
     audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
 
     # Write WAV first
@@ -27,7 +30,6 @@ def synthesize(text, output_path, voice="af_heart", lang="a"):
         output_path
     ], capture_output=True, check=True)
 
-    import os
     os.unlink(wav_path)
     return output_path
 

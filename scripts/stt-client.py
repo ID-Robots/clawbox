@@ -31,7 +31,7 @@ def transcribe_direct(audio_path, model_size="base"):
     except Exception:
         device, compute = "cpu", "int8"
     model = WhisperModel(model_size, device=device, compute_type=compute)
-    segments, info = model.transcribe(audio_path)
+    segments, _info = model.transcribe(audio_path)
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 if __name__ == "__main__":
@@ -45,6 +45,6 @@ if __name__ == "__main__":
         try:
             print(transcribe_via_server(audio))
             sys.exit(0)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Server unavailable ({e}), falling back to direct", file=sys.stderr)
     print(transcribe_direct(audio, model))

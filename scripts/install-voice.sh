@@ -5,7 +5,7 @@
 set -euo pipefail
 
 CLAWBOX_USER="clawbox"
-CLAWBOX_HOME="/home/clawbox"
+CLAWBOX_HOME="/home/${CLAWBOX_USER}"
 WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
 PIP="pip3"
 
