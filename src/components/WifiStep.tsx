@@ -30,25 +30,38 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   } | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const connectControllerRef = useRef<AbortController | null>(null);
+  const scanControllerRef = useRef<AbortController | null>(null);
 
   const scanWifi = useCallback(async () => {
+    scanControllerRef.current?.abort();
+    const controller = new AbortController();
+    scanControllerRef.current = controller;
+
     setScanning(true);
     setScanError(false);
     setNetworks(null);
     try {
-      const res = await fetch("/setup-api/wifi/scan");
+      const res = await fetch("/setup-api/wifi/scan", {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
       if (!res.ok) throw new Error(`Scan failed (${res.status})`);
       const data = await res.json();
+      if (controller.signal.aborted) return;
       setNetworks(data.networks || []);
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setScanError(true);
     } finally {
-      setScanning(false);
+      if (!controller.signal.aborted) setScanning(false);
     }
   }, []);
 
   useEffect(() => {
     scanWifi();
+    return () => {
+      scanControllerRef.current?.abort();
+    };
   }, [scanWifi]);
 
   const selectNetwork = (ssid: string, security: string) => {

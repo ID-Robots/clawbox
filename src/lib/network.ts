@@ -100,15 +100,27 @@ async function doScan(): Promise<WifiNetwork[]> {
         // nmcli terse mode uses ':' as delimiter; SSID could contain ':'
         // but SIGNAL, SECURITY, FREQ are at the end - parse from right
         const parts = line.split(":");
-        if (parts.length < 4) return null;
+        if (parts.length < 4) {
+          console.warn("[WiFi] Dropping malformed nmcli line:", line);
+          return null;
+        }
         const freq = parts.pop()!;
         const security = parts.pop()!;
         const signal = parts.pop()!;
         const ssid = parts.join(":"); // rejoin in case SSID had ':'
-        return { ssid, signal: parseInt(signal, 10), security, freq };
+        if (!ssid) {
+          console.warn("[WiFi] Dropping line with empty SSID:", line);
+          return null;
+        }
+        const signalNum = parseInt(signal, 10);
+        if (Number.isNaN(signalNum)) {
+          console.warn("[WiFi] Dropping line with non-numeric signal:", line);
+          return null;
+        }
+        return { ssid, signal: signalNum, security, freq };
       })
       .filter(
-        (n): n is WifiNetwork => n !== null && !!n.ssid && n.ssid !== "ClawBox-Setup"
+        (n): n is WifiNetwork => n !== null && n.ssid !== "ClawBox-Setup"
       );
 
     // Deduplicate by SSID, keep strongest signal

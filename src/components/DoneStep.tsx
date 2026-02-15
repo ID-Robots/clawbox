@@ -184,6 +184,26 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  const handleFactoryReset = async () => {
+    setResetting(true);
+    setResetError(null);
+    try {
+      const res = await fetch("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Reset failed");
+      }
+      window.location.href = "/setup";
+    } catch (err) {
+      setResetting(false);
+      setResetError(err instanceof Error ? err.message : "Reset failed");
+    }
+  };
+
   const infoItems = info
     ? [
         { label: "CPUs", value: String(info.cpus) },
@@ -347,25 +367,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={async () => {
-                  setResetting(true);
-                  setResetError(null);
-                  try {
-                    const res = await fetch("/setup-api/setup/reset", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ confirm: true }),
-                    });
-                    if (!res.ok) {
-                      const data = await res.json().catch(() => ({}));
-                      throw new Error(data.error || "Reset failed");
-                    }
-                    window.location.href = "/setup";
-                  } catch (err) {
-                    setResetting(false);
-                    setResetError(err instanceof Error ? err.message : "Reset failed");
-                  }
-                }}
+                onClick={handleFactoryReset}
                 disabled={resetting}
                 className="px-7 py-3 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-500 transition-colors disabled:opacity-50 cursor-pointer"
               >

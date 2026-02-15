@@ -142,7 +142,7 @@ export async function POST(request: Request) {
       };
     }
     await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
-    const tmpPath = AUTH_PROFILES_PATH + ".tmp";
+    const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
     await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
       mode: 0o600,
     });

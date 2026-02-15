@@ -18,7 +18,7 @@ OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
-TOTAL_STEPS=13
+TOTAL_STEPS=14
 
 step=0
 log() {
@@ -195,7 +195,7 @@ echo "  Done"
 # ── Step 12: Systemd services ───────────────────────────────────────────────
 
 log "Installing systemd services..."
-for svc in clawbox-ap.service clawbox-setup.service; do
+for svc in clawbox-ap.service clawbox-setup.service "clawbox-root-update@.service"; do
   src="$PROJECT_DIR/config/$svc"
   if [ ! -f "$src" ]; then
     echo "Error: Service file not found: $src"
@@ -208,7 +208,15 @@ systemctl enable clawbox-ap.service
 systemctl enable clawbox-setup.service
 echo "  Services installed and enabled"
 
-# ── Step 13: Start services ─────────────────────────────────────────────────
+# ── Step 13: Polkit rules for root updates ──────────────────────────────────
+
+log "Installing polkit rules..."
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+mkdir -p "$POLKIT_RULES_DIR"
+cp "$PROJECT_DIR/config/49-clawbox-updates.rules" "$POLKIT_RULES_DIR/"
+echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
+
+# ── Step 14: Start services ─────────────────────────────────────────────────
 
 log "Starting services..."
 systemctl restart clawbox-ap.service 2>/dev/null || systemctl start clawbox-ap.service

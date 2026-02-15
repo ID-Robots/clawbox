@@ -119,6 +119,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") savePassword();
+              }}
               placeholder="Minimum 8 characters"
               autoComplete="new-password"
               className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500"

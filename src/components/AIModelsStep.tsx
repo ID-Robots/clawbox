@@ -113,12 +113,14 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
   const exchangeControllerRef = useRef<AbortController | null>(null);
+  const oauthStartControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       saveControllerRef.current?.abort();
       exchangeControllerRef.current?.abort();
+      oauthStartControllerRef.current?.abort();
     };
   }, []);
 
@@ -181,18 +183,28 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const startOAuth = async () => {
+    oauthStartControllerRef.current?.abort();
+    const controller = new AbortController();
+    oauthStartControllerRef.current = controller;
+
     setStatus(null);
     setOauthStarted(false);
     setAuthCode("");
     try {
-      const res = await fetch("/setup-api/ai-models/oauth/start", { method: "POST" });
+      const res = await fetch("/setup-api/ai-models/oauth/start", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
       if (!res.ok) return showError(await extractError(res, "Failed to start OAuth"));
       const data = await res.json();
+      if (controller.signal.aborted) return;
       if (data.url) {
         window.open(data.url, "_blank");
         setOauthStarted(true);
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
   };
@@ -271,20 +283,22 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           {PROVIDERS.map((provider) => {
             const isSelected = selectedProvider === provider.id;
             return (
-              <button
-                type="button"
-                role="radio"
-                aria-checked={isSelected}
-                aria-label={provider.name}
-                tabIndex={isSelected ? 0 : -1}
+              <label
                 key={provider.id}
-                onClick={() => selectProvider(provider.id)}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer bg-transparent border-x-0 border-t-0 ${
+                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer ${
                   isSelected
                     ? "bg-orange-500/5"
                     : "hover:bg-gray-700/50"
                 }`}
               >
+                <input
+                  type="radio"
+                  name="ai-provider"
+                  value={provider.id}
+                  checked={isSelected}
+                  onChange={() => selectProvider(provider.id)}
+                  className="sr-only"
+                />
                 <span
                   aria-hidden="true"
                   className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
@@ -305,7 +319,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     {provider.description}
                   </span>
                 </div>
-              </button>
+              </label>
             );
           })}
         </div>

@@ -70,13 +70,18 @@ export async function serveGatewayHTML(
     }
     let html = await res.text();
 
-    const tokenScript = gatewayToken
-      ? `<script>
+    const safeToken = gatewayToken
+      ? JSON.stringify(gatewayToken).replace(/</g, "\\u003c")
+      : "";
+    const tokenScript = safeToken
+      ? `<script id="clawbox-token" type="application/json">${safeToken}</script>
+<script>
 (function(){
   var KEY="openclaw.control.settings.v1";
   try{
+    var t=JSON.parse(document.getElementById("clawbox-token").textContent);
     var s=JSON.parse(localStorage.getItem(KEY)||"{}");
-    if(!s.token){s.token=${JSON.stringify(gatewayToken)};localStorage.setItem(KEY,JSON.stringify(s))}
+    if(!s.token){s.token=t;localStorage.setItem(KEY,JSON.stringify(s))}
   }catch(e){}
 })();
 </script>`

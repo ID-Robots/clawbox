@@ -17,6 +17,7 @@ interface UpdateStepDef {
   command: string;
   timeoutMs: number;
   required?: boolean;
+  requiresRoot?: boolean;
   customRun?: () => Promise<void>;
 }
 
@@ -75,20 +76,23 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
     label: "Updating system packages",
-    command: "apt-get update",
+    command: "",
     timeoutMs: 120_000,
+    requiresRoot: true,
   },
   {
     id: "nvidia_jetpack",
     label: "Installing NVIDIA JetPack",
-    command: "apt-get install -y nvidia-jetpack",
+    command: "",
     timeoutMs: 600_000,
+    requiresRoot: true,
   },
   {
     id: "performance_mode",
     label: "Enabling max performance mode",
-    command: "nvpmodel -m 0 && jetson_clocks",
+    command: "",
     timeoutMs: 60_000,
+    requiresRoot: true,
   },
   {
     id: "openclaw_install",
@@ -141,6 +145,25 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 600_000,
   },
 ];
+
+/**
+ * Runs a root-privileged step via the clawbox-root-update@ systemd template
+ * service. The main service runs as clawbox with NoNewPrivileges=true, so
+ * privilege escalation is handled by systemd: the template service runs as
+ * root, and polkit (49-clawbox-updates.rules) authorizes the clawbox user
+ * to start it.
+ */
+async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
+  const serviceName = `clawbox-root-update@${stepId}.service`;
+  // Clear any previous failed state so systemd allows a fresh start
+  await execFile("systemctl", ["reset-failed", serviceName], {
+    timeout: 10_000,
+  }).catch(() => {});
+  // systemctl start blocks for oneshot services until completion
+  await execFile("systemctl", ["start", serviceName], {
+    timeout: timeoutMs + 30_000,
+  });
+}
 
 function createInitialState(): UpdateState {
   return {
@@ -203,6 +226,8 @@ async function runUpdate(): Promise<void> {
     try {
       if (stepDef.customRun) {
         await stepDef.customRun();
+      } else if (stepDef.requiresRoot) {
+        await execAsRoot(stepDef.id, stepDef.timeoutMs);
       } else {
         await execShell(stepDef.command, {
           timeout: stepDef.timeoutMs,
