@@ -7,6 +7,15 @@ interface UpdateStepProps {
   onNext: () => void;
 }
 
+function stepTextClass(status: StepStatus): string {
+  switch (status) {
+    case "running": return "text-orange-400 font-medium";
+    case "completed": return "text-gray-300";
+    case "failed": return "text-red-400";
+    default: return "text-gray-500";
+  }
+}
+
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "running") {
     return <div className="spinner !w-5 !h-5 !border-2" />;
@@ -25,14 +34,6 @@ function StepIcon({ status }: { status: StepStatus }) {
       </div>
     );
   }
-  if (status === "skipped") {
-    return (
-      <div className="w-5 h-5 rounded-full bg-gray-600 flex items-center justify-center text-gray-400 text-xs">
-        &mdash;
-      </div>
-    );
-  }
-  // pending
   return <div className="w-5 h-5 rounded-full bg-gray-600" />;
 }
 
@@ -61,13 +62,25 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     if (pollRef.current) return;
     const controller = new AbortController();
     pollControllerRef.current = controller;
+    let consecutiveFailures = 0;
+    let serverWentDown = false;
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch("/setup-api/update/status", {
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
-        if (!res.ok) return;
+        if (!res.ok) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= 3) serverWentDown = true;
+          return;
+        }
+        // Server came back after being down — reload to pick up new code
+        if (serverWentDown) {
+          window.location.reload();
+          return;
+        }
+        consecutiveFailures = 0;
         const data: UpdateState = await res.json();
         if (controller.signal.aborted) return;
         setState(data);
@@ -75,7 +88,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           stopPolling();
         }
       } catch {
-        /* ignore polling errors */
+        if (controller.signal.aborted) return;
+        consecutiveFailures++;
+        if (consecutiveFailures >= 3) serverWentDown = true;
       }
     }, 2000);
   }, [stopPolling]);
@@ -191,7 +206,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  const isSkipped = state.phase === "skipped";
   const isDone = state.phase === "completed";
   const isFailed = state.phase === "failed";
   const isRunning = state.phase === "running";
@@ -207,8 +221,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
               Update Complete
             </span>
-          ) : isSkipped ? (
-            "No Internet Connection"
           ) : (
             "System Update"
           )}
@@ -216,39 +228,34 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         <p className="text-gray-400 mb-6 leading-relaxed">
           {isDone
             ? "All updates have been applied successfully."
-            : isSkipped
-              ? "Updates will be applied after you connect to WiFi."
-              : isFailed
-                ? "The update process encountered an error."
-                : "Preparing your ClawBox with the latest software..."}
+            : isFailed
+              ? "The update process encountered an error."
+              : "Preparing your ClawBox with the latest software..."}
         </p>
 
-        {/* Step list */}
-        <div className="my-5 space-y-1">
-          {state.steps.map((step) => (
-            <div
-              key={step.id}
-              className="flex items-center gap-3 py-2 px-3 rounded-lg"
-            >
-              <StepIcon status={step.status} />
-              <span
-                className={`flex-1 text-sm ${
-                  step.status === "running"
-                    ? "text-orange-400 font-medium"
-                    : step.status === "completed"
-                      ? "text-gray-300"
-                      : step.status === "failed"
-                        ? "text-red-400"
-                        : step.status === "skipped"
-                          ? "text-gray-600"
-                          : "text-gray-500"
-                }`}
+        {/* Internet error (no steps shown) */}
+        {isFailed && state.error && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">
+            {state.error}
+          </div>
+        )}
+
+        {/* Step list (hide when internet error with no steps run) */}
+        {!(isFailed && state.error) && (
+          <div className="my-5 space-y-1">
+            {state.steps.map((step) => (
+              <div
+                key={step.id}
+                className="flex items-center gap-3 py-2 px-3 rounded-lg"
               >
-                {step.label}
-              </span>
-            </div>
-          ))}
-        </div>
+                <StepIcon status={step.status} />
+                <span className={`flex-1 text-sm ${stepTextClass(step.status)}`}>
+                  {step.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Current step indicator */}
         {runningStep && (
@@ -259,7 +266,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         )}
 
         {/* Failed step errors */}
-        {(isDone || isFailed) &&
+        {(isDone || isFailed) && !state.error &&
           state.steps
             .filter((s) => s.status === "failed")
             .map((s) => (
@@ -275,13 +282,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         {/* Action buttons */}
         {!isRunning && (
           <div className="flex items-center gap-3 mt-5">
-            {(isDone || isSkipped) && (
+            {isDone && (
               <button
                 type="button"
                 onClick={onNext}
                 className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
               >
-                {isSkipped ? "Continue to WiFi Setup" : "Continue"}
+                Continue
               </button>
             )}
             {isFailed && (

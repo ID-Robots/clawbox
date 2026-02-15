@@ -95,10 +95,9 @@ if [ ! -d "$PROJECT_DIR/.git" ]; then
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
 else
   echo "  Repository exists, pulling latest..."
-  git config --global --add safe.directory "$PROJECT_DIR"
-  git -C "$PROJECT_DIR" fetch origin
-  git -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
-  git -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
 fi
 
 # ── Step 6: Install bun ─────────────────────────────────────────────────────

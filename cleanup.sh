@@ -18,8 +18,10 @@ for svc in clawbox-setup.service clawbox-ap.service; do
   systemctl disable "$svc" 2>/dev/null || true
 done
 rm -f /etc/systemd/system/clawbox-setup.service \
-      /etc/systemd/system/clawbox-ap.service \
-      "/etc/systemd/system/clawbox-root-update@.service"
+      /etc/systemd/system/clawbox-ap.service
+# Keep clawbox-root-update@.service — factory reset runs via this service
+# and removing it mid-run causes systemd to kill the process with a short timeout.
+# install.sh will reinstall it anyway.
 systemctl daemon-reload
 echo "  Done"
 
@@ -27,7 +29,8 @@ echo "  Done"
 echo ""
 echo "[2/7] Removing polkit rules..."
 rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
-rm -f /etc/polkit-1/localauthority/50-local.d/49-clawbox-updates.pkla
+# Keep polkit pkla — needed by the running root-update service and install.sh
+# install.sh will reinstall it anyway.
 echo "  Done"
 
 # 3. Remove dnsmasq captive portal config

@@ -12,6 +12,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
+  const [hotspotPassword, setHotspotPassword] = useState("");
+  const [showHotspotPassword, setShowHotspotPassword] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
     type: "success" | "error";
@@ -21,26 +24,51 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const saveControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
+    fetch("/setup-api/system/hotspot", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && !controller.signal.aborted) {
+          if (data.ssid) setHotspotName(data.ssid);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       saveControllerRef.current?.abort();
     };
   }, []);
 
-  const savePassword = async () => {
-    if (!password) {
-      setStatus({ type: "error", message: "Please enter a password" });
+  const save = async () => {
+    // Validate system password (if filled)
+    if (password || confirmPassword) {
+      if (password.length < 8) {
+        setStatus({
+          type: "error",
+          message: "System password must be at least 8 characters",
+        });
+        return;
+      }
+      if (password !== confirmPassword) {
+        setStatus({ type: "error", message: "Passwords do not match" });
+        return;
+      }
+    }
+
+    // Validate hotspot fields
+    if (!hotspotName.trim()) {
+      setStatus({ type: "error", message: "Hotspot name is required" });
       return;
     }
-    if (password.length < 8) {
+    if (hotspotPassword && hotspotPassword.length < 8) {
       setStatus({
         type: "error",
-        message: "Password must be at least 8 characters",
+        message: "Hotspot password must be at least 8 characters",
       });
-      return;
-    }
-    if (password !== confirmPassword) {
-      setStatus({ type: "error", message: "Passwords do not match" });
       return;
     }
 
@@ -51,36 +79,51 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     setSaving(true);
     setStatus(null);
     try {
-      const res = await fetch("/setup-api/system/credentials", {
+      // Save system password if provided
+      if (password) {
+        const res = await fetch("/setup-api/system/credentials", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setStatus({
+            type: "error",
+            message: data.error || "Failed to set system password",
+          });
+          return;
+        }
+      }
+
+      // Save hotspot settings
+      const hotspotRes = await fetch("/setup-api/system/hotspot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({
+          ssid: hotspotName.trim(),
+          password: hotspotPassword || undefined,
+        }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      if (!hotspotRes.ok) {
+        const data = await hotspotRes.json().catch(() => ({}));
         setStatus({
           type: "error",
-          message: data.error || "Failed to set password",
+          message: data.error || "Failed to save hotspot settings",
         });
         return;
       }
-      const data = await res.json();
-      if (controller.signal.aborted) return;
-      if (data.success) {
-        setStatus({
-          type: "success",
-          message: "Password updated! Continuing...",
-        });
-        if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        timeoutRef.current = setTimeout(() => onNext(), 1500);
-      } else {
-        setStatus({
-          type: "error",
-          message: data.error || "Failed to set password",
-        });
-      }
+
+      setStatus({
+        type: "success",
+        message: "Settings saved! Continuing...",
+      });
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => onNext(), 1500);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setStatus({
@@ -103,11 +146,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     <div className="w-full max-w-[520px]">
       <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
-          Set Password
+          Security
         </h1>
         <p className="text-gray-400 mb-5 leading-relaxed">
-          Change the default system password for the <strong className="text-gray-200">clawbox</strong> user.
+          Set a system password and configure your hotspot.
         </p>
+
+        {/* System Password */}
+        <h2 className="text-sm font-semibold text-gray-300 mb-3">System Password</h2>
 
         <div className="mb-4">
           <label htmlFor="cred-password" className="block text-xs font-semibold text-gray-400 mb-1.5">
@@ -120,7 +166,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") savePassword();
+                if (e.key === "Enter") save();
               }}
               placeholder="Minimum 8 characters"
               autoComplete="new-password"
@@ -137,7 +183,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           </div>
         </div>
 
-        <div className="mb-1">
+        <div className="mb-5">
           <label htmlFor="cred-confirm" className="block text-xs font-semibold text-gray-400 mb-1.5">
             Confirm Password
           </label>
@@ -148,7 +194,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") savePassword();
+                if (e.key === "Enter") save();
               }}
               placeholder="Re-enter password"
               autoComplete="new-password"
@@ -165,6 +211,58 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           </div>
         </div>
 
+        {/* Hotspot Settings */}
+        <div className="border-t border-gray-700/50 pt-5 mb-1">
+          <h2 className="text-sm font-semibold text-gray-300 mb-3">Hotspot Settings</h2>
+          <p className="text-gray-500 text-xs mb-3">
+            Changes apply next time the hotspot starts.
+          </p>
+
+          <div className="mb-4">
+            <label htmlFor="hotspot-name" className="block text-xs font-semibold text-gray-400 mb-1.5">
+              Hotspot Name
+            </label>
+            <input
+              id="hotspot-name"
+              type="text"
+              value={hotspotName}
+              onChange={(e) => setHotspotName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save();
+              }}
+              maxLength={32}
+              className="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="hotspot-password" className="block text-xs font-semibold text-gray-400 mb-1.5">
+              Hotspot Password <span className="text-gray-500 font-normal">(optional)</span>
+            </label>
+            <div className="relative">
+              <input
+                id="hotspot-password"
+                type={showHotspotPassword ? "text" : "password"}
+                value={hotspotPassword}
+                onChange={(e) => setHotspotPassword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") save();
+                }}
+                placeholder="Leave empty for open network"
+                className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowHotspotPassword((v) => !v)}
+                aria-label={showHotspotPassword ? "Hide password" : "Show password"}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5"
+              >
+                {showHotspotPassword ? EyeClosed : EyeOpen}
+              </button>
+            </div>
+          </div>
+        </div>
+
         {status && (
           <StatusMessage type={status.type} message={status.message} />
         )}
@@ -172,7 +270,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         <div className="flex items-center gap-3 mt-5">
           <button
             type="button"
-            onClick={savePassword}
+            onClick={save}
             disabled={saving}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >

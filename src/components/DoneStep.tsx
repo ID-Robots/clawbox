@@ -18,6 +18,15 @@ interface DoneStepProps {
   setupComplete?: boolean;
 }
 
+function updateStepTextClass(status: StepStatus): string {
+  switch (status) {
+    case "running": return "text-orange-400 font-medium";
+    case "completed": return "text-gray-400";
+    case "failed": return "text-red-400";
+    default: return "text-gray-600";
+  }
+}
+
 function UpdateStepIcon({ status }: { status: StepStatus }) {
   if (status === "running") {
     return <div className="spinner !w-4 !h-4 !border-2" />;
@@ -36,23 +45,16 @@ function UpdateStepIcon({ status }: { status: StepStatus }) {
       </div>
     );
   }
-  if (status === "skipped") {
-    return (
-      <div className="w-4 h-4 rounded-full bg-gray-600 flex items-center justify-center text-gray-400 text-[10px]">
-        &mdash;
-      </div>
-    );
-  }
   return <div className="w-4 h-4 rounded-full bg-gray-600" />;
 }
 
 export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const [completed, setCompleted] = useState(setupComplete);
   const [finishing, setFinishing] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [resetInProgress, setResetInProgress] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const [completeError, setCompleteError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -172,11 +174,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     try {
       const res = await fetch("/setup-api/setup/complete", { method: "POST" });
       if (res.ok) {
-        setCompleted(true);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setCompleteError(data.error || "Failed to complete setup");
+        window.location.href = "/";
+        return;
       }
+      const data = await res.json().catch(() => ({}));
+      setCompleteError(data.error || "Failed to complete setup");
     } catch (err) {
       setCompleteError(err instanceof Error ? err.message : "Failed to complete setup");
     } finally {
@@ -197,7 +199,25 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Reset failed");
       }
-      window.location.href = "/setup";
+      // Show full-screen waiting state while cleanup + reinstall runs
+      setResetInProgress(true);
+      setShowResetConfirm(false);
+      // Poll until the server comes back up after factory reset
+      const poll = async () => {
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const r = await fetch("/setup-api/setup/status", { signal: AbortSignal.timeout(5000) });
+            if (r.ok) {
+              window.location.href = "/setup";
+              return;
+            }
+          } catch {
+            // Server still down, keep polling
+          }
+        }
+      };
+      poll();
     } catch (err) {
       setResetting(false);
       setResetError(err instanceof Error ? err.message : "Reset failed");
@@ -257,15 +277,15 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
-            onClick={completed ? () => (window.location.href = "/") : completeSetup}
+            onClick={setupComplete ? () => (window.location.href = "/") : completeSetup}
             disabled={finishing}
             className={`px-8 py-3 rounded-lg text-sm font-semibold transition transform cursor-pointer ${
-              completed
+              setupComplete
                 ? "bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600"
                 : "btn-gradient text-white hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100"
             }`}
           >
-            {finishing ? "Finishing..." : completed ? "OpenClaw" : "Finish Setup"}
+            {finishing ? "Finishing..." : setupComplete ? "OpenClaw" : "Finish Setup"}
           </button>
           <button
             type="button"
@@ -308,17 +328,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 {updateState.steps.map((step) => (
                   <div key={step.id} className="flex items-center gap-2.5 py-1.5 px-2">
                     <UpdateStepIcon status={step.status} />
-                    <span
-                      className={`flex-1 text-xs ${
-                        step.status === "running"
-                          ? "text-orange-400 font-medium"
-                          : step.status === "completed"
-                            ? "text-gray-400"
-                            : step.status === "failed"
-                              ? "text-red-400"
-                              : "text-gray-600"
-                      }`}
-                    >
+                    <span className={`flex-1 text-xs ${updateStepTextClass(step.status)}`}>
                       {step.label}
                     </span>
                   </div>
@@ -338,6 +348,19 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </div>
         )}
       </div>
+
+      {/* Factory reset in progress overlay */}
+      {resetInProgress && (
+        <div className="fixed inset-0 flex flex-col items-center justify-center z-[100] bg-gray-900">
+          <div className="spinner !w-10 !h-10 !border-3 mb-6" />
+          <h2 className="text-xl font-semibold font-display text-gray-200 mb-2">
+            Factory Reset in Progress
+          </h2>
+          <p className="text-gray-400 text-sm text-center max-w-xs">
+            Cleaning up and reinstalling the system. This may take a few minutes. The page will reload automatically.
+          </p>
+        </div>
+      )}
 
       {/* Factory reset confirmation modal */}
       {showResetConfirm && (

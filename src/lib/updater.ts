@@ -16,7 +16,6 @@ interface UpdateStepDef {
   label: string;
   command: string;
   timeoutMs: number;
-  required?: boolean;
   requiresRoot?: boolean;
   customRun?: () => Promise<void>;
 }
@@ -25,8 +24,7 @@ export type StepStatus =
   | "pending"
   | "running"
   | "completed"
-  | "failed"
-  | "skipped";
+  | "failed";
 
 export interface StepState {
   id: string;
@@ -39,40 +37,18 @@ export type UpdatePhase =
   | "idle"
   | "running"
   | "completed"
-  | "failed"
-  | "skipped";
+  | "failed";
 
 export interface UpdateState {
   phase: UpdatePhase;
   steps: StepState[];
   currentStepIndex: number;
+  error?: string;
 }
 
+const RESTART_STEP_ID = "restart";
+
 const UPDATE_STEPS: UpdateStepDef[] = [
-  {
-    id: "internet_check",
-    label: "Checking internet connectivity",
-    command: "",
-    timeoutMs: 10_000,
-    required: true,
-    customRun: async () => {
-      for (const target of PING_TARGETS) {
-        try {
-          await execFile("ping", ["-c", "1", "-W", "5", target], { timeout: 10_000 });
-          return;
-        } catch {
-          // try next target
-        }
-      }
-      throw new Error("All ping targets unreachable");
-    },
-  },
-  {
-    id: "git_pull",
-    label: "Fetching latest ClawBox code",
-    command: "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
-    timeoutMs: 60_000,
-  },
   {
     id: "apt_update",
     label: "Updating system packages",
@@ -95,6 +71,19 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
   {
+    id: "chrome_install",
+    label: "Installing Google Chrome",
+    command: "",
+    timeoutMs: 300_000,
+    requiresRoot: true,
+  },
+  {
+    id: "git_pull",
+    label: "Updating ClawBox",
+    command: "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
+    timeoutMs: 60_000,
+  },
+  {
     id: "rebuild",
     label: "Rebuilding ClawBox",
     command: "",
@@ -102,19 +91,43 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       const BUN = "/home/clawbox/.bun/bin/bun";
       const cwd = "/home/clawbox/clawbox";
+      // Clear stale .next cache to avoid build errors
+      const { rmSync } = await import("fs");
+      rmSync(`${cwd}/.next`, { recursive: true, force: true });
       await execFile(BUN, ["install"], { cwd, timeout: 120_000 });
       await execFile(BUN, ["run", "build"], { cwd, timeout: 180_000 });
     },
   },
   {
+    id: RESTART_STEP_ID,
+    label: "Restarting ClawBox",
+    command: "",
+    timeoutMs: 30_000,
+    customRun: async () => {
+      // Mark that post-restart steps still need to run
+      await set("update_needs_continuation", true);
+      // Fire-and-forget via root service: a separate systemd unit restarts us
+      const service = "clawbox-root-update@restart.service";
+      execFile("systemctl", ["reset-failed", service], {
+        timeout: 10_000,
+      }).catch(() => {});
+      execFile("systemctl", ["start", "--no-block", service], {
+        timeout: 10_000,
+      }).catch(() => {});
+      // Wait for systemd to SIGTERM us during the restart
+      await new Promise((r) => setTimeout(r, 10_000));
+    },
+  },
+  {
     id: "openclaw_install",
     label: "Updating OpenClaw",
-    command: "npm install -g openclaw --prefix /home/clawbox/.npm-global",
+    command: "",
     timeoutMs: 120_000,
+    requiresRoot: true,
   },
   {
     id: "openclaw_patch",
-    label: "Patching OpenClaw gateway for ClawBox",
+    label: "Patching OpenClaw gateway",
     command: "",
     timeoutMs: 30_000,
     customRun: async () => {
@@ -128,9 +141,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
       ], { timeout: 10_000 });
 
       // 2. Patch gateway JS to preserve operator scopes for token-only auth.
-      //    The gateway clears all scopes when no device identity is present
-      //    (insecure context). This sed patch keeps scopes when
-      //    allowControlUiBypass is already true.
       const { stdout: files } = await execFile("grep", [
         "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
       ], { timeout: 10_000 });
@@ -156,39 +166,19 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     command: "/home/clawbox/.npm-global/bin/openclaw models",
     timeoutMs: 600_000,
   },
-  {
-    id: "restart",
-    label: "Restarting ClawBox",
-    command: "",
-    timeoutMs: 30_000,
-    customRun: async () => {
-      // Persist completion BEFORE restart kills our process
-      await set("update_completed", true);
-      await set("update_completed_at", new Date().toISOString());
-      // Fire-and-forget: systemd will SIGTERM us during restart
-      execFile("systemctl", ["restart", "clawbox-setup.service"], {
-        timeout: 30_000,
-      }).catch(() => {});
-      // Wait for systemd to receive the command and kill us
-      await new Promise((r) => setTimeout(r, 5000));
-    },
-  },
 ];
 
 /**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
  * service. The main service runs as clawbox with NoNewPrivileges=true, so
  * privilege escalation is handled by systemd: the template service runs as
- * root, and polkit (49-clawbox-updates.rules) authorizes the clawbox user
- * to start it.
+ * root, and polkit authorizes the clawbox user to start it.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   const serviceName = `clawbox-root-update@${stepId}.service`;
-  // Clear any previous failed state so systemd allows a fresh start
   await execFile("systemctl", ["reset-failed", serviceName], {
     timeout: 10_000,
   }).catch(() => {});
-  // systemctl start blocks for oneshot services until completion
   await execFile("systemctl", ["start", serviceName], {
     timeout: timeoutMs + 30_000,
   });
@@ -200,7 +190,7 @@ function createInitialState(): UpdateState {
     steps: UPDATE_STEPS.map((s) => ({
       id: s.id,
       label: s.label,
-      status: "pending" as StepStatus,
+      status: "pending",
     })),
     currentStepIndex: -1,
   };
@@ -217,19 +207,52 @@ export async function isUpdateCompleted(): Promise<boolean> {
   return !!(await get("update_completed"));
 }
 
+/**
+ * Check if a post-restart continuation is needed and trigger it.
+ * Called from the status route on first poll after restart.
+ */
+export async function checkContinuation(): Promise<boolean> {
+  if (running) return false;
+  const needsContinuation = await get("update_needs_continuation");
+  if (!needsContinuation) return false;
+
+  await set("update_needs_continuation", undefined);
+
+  const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
+  const startFrom = restartIndex + 1;
+
+  running = true;
+  state = createInitialState();
+  state.phase = "running";
+  // Mark all pre-restart steps (including restart) as completed
+  for (let i = 0; i <= restartIndex; i++) {
+    state.steps[i].status = "completed";
+  }
+  state.currentStepIndex = startFrom;
+
+  runUpdate(startFrom)
+    .catch((err) => {
+      console.error("[Updater] Unexpected error:", err);
+      state.phase = "failed";
+    })
+    .finally(() => {
+      running = false;
+    });
+
+  return true;
+}
+
 export function startUpdate(): { started: boolean; error?: string } {
   if (running) {
     return { started: false, error: "Update already in progress" };
   }
 
-  // Reset state for fresh or retry run
   running = true;
   state = createInitialState();
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  // Run async without awaiting
-  runUpdate()
+  runUpdate(0)
     .catch((err) => {
       console.error("[Updater] Unexpected error:", err);
       state.phase = "failed";
@@ -241,10 +264,33 @@ export function startUpdate(): { started: boolean; error?: string } {
   return { started: true };
 }
 
-async function runUpdate(): Promise<void> {
+async function checkInternet(): Promise<boolean> {
+  for (const target of PING_TARGETS) {
+    try {
+      await execFile("ping", ["-c", "1", "-W", "5", target], { timeout: 10_000 });
+      return true;
+    } catch {
+      // try next target
+    }
+  }
+  return false;
+}
+
+async function runUpdate(startFrom = 0): Promise<void> {
+  // Pre-check internet (only on fresh runs, not continuations)
+  if (startFrom === 0) {
+    const hasInternet = await checkInternet();
+    if (!hasInternet) {
+      state.phase = "failed";
+      state.error = "No internet connection. Check your WiFi and try again.";
+      state.currentStepIndex = -1;
+      return;
+    }
+  }
+
   let hasFailures = false;
 
-  for (let i = 0; i < UPDATE_STEPS.length; i++) {
+  for (let i = startFrom; i < UPDATE_STEPS.length; i++) {
     const stepDef = UPDATE_STEPS[i];
     state.currentStepIndex = i;
     state.steps[i].status = "running";
@@ -271,17 +317,6 @@ async function runUpdate(): Promise<void> {
       state.steps[i].status = "failed";
       state.steps[i].error = message;
       console.error(`[Updater] Failed: ${stepDef.label} — ${message}`);
-
-      if (stepDef.required) {
-        // Required step failed — skip remaining
-        state.phase = "skipped";
-        for (let j = i + 1; j < UPDATE_STEPS.length; j++) {
-          state.steps[j].status = "skipped";
-        }
-        state.currentStepIndex = -1;
-        return;
-      }
-
       hasFailures = true;
     }
   }
@@ -289,7 +324,6 @@ async function runUpdate(): Promise<void> {
   state.currentStepIndex = -1;
   state.phase = hasFailures ? "failed" : "completed";
 
-  // Only persist completion when all steps succeeded
   if (!hasFailures) {
     await set("update_completed", true);
     await set("update_completed_at", new Date().toISOString());

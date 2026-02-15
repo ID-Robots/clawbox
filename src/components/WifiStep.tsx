@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Image from "next/image";
 import SignalBars from "./SignalBars";
 import StatusMessage from "./StatusMessage";
 
@@ -139,17 +140,28 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     return () => document.removeEventListener("keydown", handleKey);
   }, [selectedSSID, closeModal]);
 
-  const isOpen =
-    !selectedSecurity || selectedSecurity === "" || selectedSecurity === "--";
+  const isOpen = !selectedSecurity || selectedSecurity === "--";
 
   return (
     <div className="w-full max-w-[520px]">
       <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
-        <h1 className="text-2xl font-bold font-display mb-2">
-          Connect to WiFi
-        </h1>
-        <p className="text-gray-400 mb-6 leading-relaxed">
-          Select your home WiFi network so ClawBox can access the internet.
+        <div className="flex flex-col items-center gap-3 mb-6">
+          <Image
+            src="/clawbox-icon.png"
+            alt="ClawBox"
+            width={48}
+            height={48}
+            className="w-12 h-12 object-contain"
+          />
+          <h1 className="text-2xl font-bold font-display text-center">
+            Welcome to{" "}
+            <span className="bg-gradient-to-r from-orange-400 to-orange-600 bg-clip-text text-transparent">
+              ClawBox
+            </span>
+          </h1>
+        </div>
+        <p className="text-gray-400 mb-6 leading-relaxed text-center">
+          Connect to your home WiFi to get started.
         </p>
 
         <div className="border border-gray-700 rounded-lg max-h-[300px] overflow-y-auto bg-gray-900/50">
@@ -279,23 +291,25 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             {status && (
               <StatusMessage type={status.type} message={status.message} />
             )}
-            <div className="flex items-center gap-3 mt-5">
-              <button
-                type="button"
-                onClick={connectWifi}
-                disabled={connecting}
-                className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
-              >
-                {connecting ? "Connecting..." : "Connect"}
-              </button>
-              <button
-                type="button"
-                onClick={closeModal}
-                className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
+            {status?.type !== "success" && (
+              <div className="flex items-center gap-3 mt-5">
+                <button
+                  type="button"
+                  onClick={connectWifi}
+                  disabled={connecting}
+                  className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
+                >
+                  {connecting ? "Connecting..." : "Connect"}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

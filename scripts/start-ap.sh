@@ -2,10 +2,17 @@
 set -euo pipefail
 
 IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
-CON_NAME="ClawBox-Setup"
-SSID="ClawBox-Setup"
 AP_IP="10.42.0.1"
 IFACE_TIMEOUT="${IFACE_TIMEOUT:-10}"
+
+# Read hotspot config if available
+HOTSPOT_ENV="/home/clawbox/clawbox/data/hotspot.env"
+if [ -f "$HOTSPOT_ENV" ]; then
+  # shellcheck source=/dev/null
+  source "$HOTSPOT_ENV"
+fi
+SSID="${HOTSPOT_SSID:-ClawBox-Setup}"
+CON_NAME="ClawBox-Setup"
 
 wait_for_interface() {
   local elapsed=0
@@ -45,8 +52,16 @@ nmcli connection add \
   ipv4.method shared \
   ipv4.addresses "${AP_IP}/24"
 
-# Remove any security settings to make it an open network
-nmcli connection modify "$CON_NAME" remove 802-11-wireless-security 2>/dev/null || true
+# Configure security: WPA-PSK if password set, open network otherwise
+if [ -n "${HOTSPOT_PASSWORD:-}" ]; then
+  nmcli connection modify "$CON_NAME" \
+    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.psk "$HOTSPOT_PASSWORD"
+  echo "[AP] WPA-PSK security enabled"
+else
+  nmcli connection modify "$CON_NAME" remove 802-11-wireless-security 2>/dev/null || true
+  echo "[AP] Open network (no password)"
+fi
 
 echo "[AP] Activating access point..."
 nmcli connection up "$CON_NAME"

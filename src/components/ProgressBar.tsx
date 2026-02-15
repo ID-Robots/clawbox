@@ -2,15 +2,7 @@ interface ProgressBarProps {
   currentStep: number;
 }
 
-const steps = [
-  { num: 1, label: "Welcome" },
-  { num: 2, label: "Security" },
-  { num: 3, label: "WiFi" },
-  { num: 4, label: "Update" },
-  { num: 5, label: "AI Model" },
-  { num: 6, label: "Telegram" },
-  { num: 7, label: "Done" },
-];
+const STEP_LABELS = ["WiFi", "Update", "Security", "AI Model", "Telegram", "Done"];
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
   return (
@@ -18,11 +10,12 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
       className="flex gap-1 flex-wrap"
       role="progressbar"
       aria-valuemin={1}
-      aria-valuemax={steps.length}
+      aria-valuemax={STEP_LABELS.length}
       aria-valuenow={currentStep}
-      aria-label={`Setup progress: step ${currentStep} of ${steps.length}`}
+      aria-label={`Setup progress: step ${currentStep} of ${STEP_LABELS.length}`}
     >
-      {steps.map(({ num, label }) => {
+      {STEP_LABELS.map((label, i) => {
+        const num = i + 1;
         const isActive = num <= currentStep;
         const isDone = num < currentStep;
         return (
