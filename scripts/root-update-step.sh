@@ -53,6 +53,10 @@ case "${1:-}" in
         INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
         LATEST=$(npm view openclaw version 2>/dev/null || echo "unknown")
         echo "Installed: $INSTALLED, Latest: $LATEST"
+        if [ "$LATEST" = "unknown" ]; then
+            echo "Cannot determine latest version (offline?). Skipping update check."
+            exit 0
+        fi
         if [ "$INSTALLED" = "$LATEST" ]; then
             echo "OpenClaw is already up to date"
         else

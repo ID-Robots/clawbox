@@ -12,6 +12,9 @@ Restart=always
 RestartSec=5
 Environment=HOME=/home/clawbox
 Environment=NODE_ENV=production
+EnvironmentFile=-/home/clawbox/clawbox/data/network.env
+MemoryMax=512M
+CPUQuota=50%
 
 [Install]
 WantedBy=multi-user.target

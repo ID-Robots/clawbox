@@ -96,9 +96,9 @@ const UPDATE_STEPS: UpdateStepDef[] = [
       execFile("systemctl", ["reset-failed", service], {
         timeout: 10_000,
       }).catch(() => {});
-      execFile("systemctl", ["start", "--no-block", service], {
+      await execFile("systemctl", ["start", "--no-block", service], {
         timeout: 10_000,
-      }).catch(() => {});
+      });
       // Wait for systemd to SIGTERM us during the rebuild
       await new Promise((r) => setTimeout(r, 10_000));
     },

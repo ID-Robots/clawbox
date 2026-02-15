@@ -5,6 +5,8 @@ import fs from "fs/promises";
 import path from "path";
 import { set } from "@/lib/config-store";
 
+export const dynamic = "force-dynamic";
+
 const execFile = promisify(execFileCb);
 const CHPASSWD_INPUT_PATH = path.join(
   process.env.CONFIG_ROOT || "/home/clawbox/clawbox",

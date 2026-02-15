@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { switchToClient } from "@/lib/network";
 import { set } from "@/lib/config-store";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: Request) {
   let body: { ssid?: unknown; password?: unknown };
   try {

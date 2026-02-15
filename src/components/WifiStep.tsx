@@ -98,9 +98,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       showSuccess();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      // Network error (lost connection to AP) likely means the switch worked
+      // Network error (lost connection to AP) likely means the switch worked,
+      // but we can't be certain
       if (err instanceof TypeError && err.message.includes("fetch")) {
-        showSuccess();
+        setConnecting(false);
+        setStatus({
+          type: "error",
+          message: "Lost connection to ClawBox. If WiFi switched successfully, reconnect to your home WiFi and visit http://clawbox.local to continue.",
+        });
         return;
       }
       setStatus({

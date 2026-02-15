@@ -274,7 +274,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       setResetInProgress(true);
       setShowResetConfirm(false);
       const pollUntilReady = async () => {
-        for (;;) {
+        const maxAttempts = 60;
+        let attempts = 0;
+        for (; attempts < maxAttempts; attempts++) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
           try {
             const check = await fetch("/setup-api/setup/status", {
@@ -288,6 +290,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             // Server still restarting, keep polling
           }
         }
+        setResetInProgress(false);
+        setResetError("Factory reset timed out. The server did not come back within 3 minutes.");
       };
       pollUntilReady();
     } catch (err) {

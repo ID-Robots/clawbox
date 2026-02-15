@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { set } from "@/lib/config-store";
 import { setTelegramToken, restartGateway } from "@/lib/openclaw-config";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: Request) {
   try {
     let body: { botToken?: string };
@@ -34,7 +36,7 @@ export async function POST(request: Request) {
     // Register Telegram channel with OpenClaw gateway
     await setTelegramToken(botToken);
     // Restart gateway so it picks up the new channel
-    restartGateway();
+    await restartGateway();
 
     return NextResponse.json({ success: true });
   } catch (err) {

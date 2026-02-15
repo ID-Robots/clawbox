@@ -29,6 +29,7 @@ async function readConfig(): Promise<OpenClawConfig> {
 }
 
 async function writeConfig(config: OpenClawConfig): Promise<void> {
+  await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
@@ -59,5 +60,6 @@ export async function restartGateway(): Promise<void> {
       "[openclaw-config] Failed to restart gateway:",
       err instanceof Error ? err.message : err
     );
+    throw err;
   }
 }

@@ -87,6 +87,10 @@ if [ -z "$WIFI_IFACE" ]; then
   echo "You can override with: NETWORK_INTERFACE=wlan0 sudo bash install.sh"
   exit 1
 fi
+if ! iw dev "$WIFI_IFACE" >/dev/null 2>&1; then
+  echo "Error: WiFi interface '$WIFI_IFACE' not found or not wireless."
+  exit 1
+fi
 echo "  WiFi interface: $WIFI_IFACE"
 
 # ── Step 4: Hostname + mDNS ─────────────────────────────────────────────────
@@ -163,7 +167,7 @@ echo "  Build complete"
 log "Installing OpenClaw ($OPENCLAW_VERSION)..."
 mkdir -p "$NPM_PREFIX"
 chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
-npm install -g "openclaw@$OPENCLAW_VERSION" --prefix "$NPM_PREFIX"
+sudo -u "$CLAWBOX_USER" -H npm install -g "openclaw@$OPENCLAW_VERSION" --prefix "$NPM_PREFIX"
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
   echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
@@ -208,17 +212,22 @@ fi
 # 9c. Register Telegram channel if token exists in ClawBox config
 CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
 if [ -f "$CLAWBOX_CONFIG" ]; then
-  TGTOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
+  TGTOKEN=$(CLAWBOX_CONFIG="$CLAWBOX_CONFIG" node <<'NODE'
+try{const c=JSON.parse(require('fs').readFileSync(process.env.CLAWBOX_CONFIG,'utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}
+NODE
+  )
   if [ -n "$TGTOKEN" ]; then
     OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
     if [ -f "$OPENCLAW_CONFIG" ]; then
-      node -e "
-        const fs=require('fs');
-        const c=JSON.parse(fs.readFileSync('$OPENCLAW_CONFIG','utf8'));
-        if(!c.channels)c.channels={};
-        c.channels.telegram={...c.channels.telegram,enabled:true,botToken:'$TGTOKEN',dmPolicy:'open',allowFrom:['*']};
-        fs.writeFileSync('$OPENCLAW_CONFIG',JSON.stringify(c,null,2));
-      "
+      TGTOKEN="$TGTOKEN" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" node <<'NODE'
+const fs=require('fs');
+const cfgPath=process.env.OPENCLAW_CONFIG;
+const token=process.env.TGTOKEN||'';
+const c=JSON.parse(fs.readFileSync(cfgPath,'utf8'));
+if(!c.channels)c.channels={};
+c.channels.telegram={...c.channels.telegram,enabled:true,botToken:token,dmPolicy:'open',allowFrom:['*']};
+fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
+NODE
       echo "  Telegram channel registered in OpenClaw config"
     fi
   fi
