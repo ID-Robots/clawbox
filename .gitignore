@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.next-old/
+out/
+build/
+data/config.json
+*.log
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+.env*
+!.env.example
+!.env.template

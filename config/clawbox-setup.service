@@ -1,0 +1,24 @@
+[Unit]
+Description=ClawBox Setup Wizard Web Server
+After=network-online.target clawbox-ap.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawbox
+WorkingDirectory=/home/clawbox/clawbox
+ExecStart=/usr/bin/node production-server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=PORT=80
+Environment=HOSTNAME=0.0.0.0
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/clawbox/clawbox/data /tmp
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - develop
+      - main
+      - master
+  path_instructions:
+    - path: "src/app/**/*.ts*"
+      instructions: |
+        Next.js 16 App Router (TypeScript) running on an embedded NVIDIA Jetson device with bun runtime.
+        Review for:
+        - Proper async/await error handling
+        - Shell command injection risks (execFile usage with nmcli, iptables)
+        - Resource constraints (limited memory/CPU on embedded hardware)
+        - Security of network management operations
+    - path: "src/app/**/route.ts"
+      instructions: "Next.js Route Handlers. Ensure proper input validation, HTTP status codes, and error responses"
+    - path: "src/lib/network.ts"
+      instructions: "Critical system file — manages WiFi AP and client mode via nmcli. Review for race conditions and proper cleanup on failure"
+    - path: "src/lib/**"
+      instructions: "TypeScript server-side libraries. Review for proper error handling and type safety"
+    - path: "src/components/**"
+      instructions: "React 19 components with Tailwind CSS v4. Review for accessibility, proper state management, and XSS prevention"
+    - path: "scripts/**/*.sh"
+      instructions: "Bash scripts managing NetworkManager and iptables. Review for proper error handling, quoting, and idempotency"
+    - path: "config/**"
+      instructions: "Systemd service units and dnsmasq config for embedded deployment. Review for correct dependencies and security settings"
+  tools:
+    gitleaks:
+      enabled: true
+chat:
+  auto_reply: true
