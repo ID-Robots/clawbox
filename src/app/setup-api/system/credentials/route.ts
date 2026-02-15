@@ -2,7 +2,42 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import { set } from "@/lib/config-store";
 
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const RATE_LIMIT_MAX_ATTEMPTS = 5;
+
+const attempts = new Map<string, { count: number; firstAttempt: number }>();
+
+function getClientIP(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return "unknown";
+}
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const record = attempts.get(ip);
+  if (!record || now - record.firstAttempt > RATE_LIMIT_WINDOW_MS) {
+    attempts.set(ip, { count: 1, firstAttempt: now });
+    return true;
+  }
+  record.count++;
+  return record.count <= RATE_LIMIT_MAX_ATTEMPTS;
+}
+
+function resetRateLimit(ip: string): void {
+  attempts.delete(ip);
+}
+
 export async function POST(request: Request) {
+  const clientIP = getClientIP(request);
+
+  if (!checkRateLimit(clientIP)) {
+    return NextResponse.json(
+      { error: "Too many attempts. Please try again later." },
+      { status: 429 }
+    );
+  }
+
   try {
     let body: { password?: string };
     try {
@@ -28,6 +63,14 @@ export async function POST(request: Request) {
       );
     }
 
+    // Reject passwords with newlines or control characters to prevent injection
+    if (/[\r\n\x00-\x1f\x7f]/.test(password)) {
+      return NextResponse.json(
+        { error: "Password must not contain control characters or newlines" },
+        { status: 400 }
+      );
+    }
+
     // Use chpasswd via stdin to safely set password without shell injection
     await new Promise<void>((resolve, reject) => {
       const child = spawn("chpasswd", [], { stdio: ["pipe", "pipe", "pipe"] });
@@ -41,6 +84,8 @@ export async function POST(request: Request) {
       child.stdin.write(`clawbox:${password}\n`);
       child.stdin.end();
     });
+
+    resetRateLimit(clientIP);
 
     await set("password_configured", true);
     await set("password_configured_at", new Date().toISOString());

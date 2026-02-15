@@ -33,8 +33,12 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   },
 };
 
-function runCommand(cmd: string, args: string[]): Promise<void> {
+const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
+const COMMAND_TIMEOUT_MS = 30_000;
+
+function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<void> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawn(cmd, args, {
       stdio: ["pipe", "pipe", "pipe"],
       uid: CLAWBOX_UID,
@@ -45,13 +49,32 @@ function runCommand(cmd: string, args: string[]): Promise<void> {
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.on("error", reject);
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
     child.on("close", (code) => {
-      if (code === 0) resolve();
-      else
-        reject(
-          new Error(stderr.trim() || `${cmd} exited with code ${code}`)
-        );
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else
+          reject(
+            new Error(stderr.trim() || `${cmd} exited with code ${code}`)
+          );
+      }
     });
     child.stdin.end();
   });
@@ -127,7 +150,15 @@ export async function POST(request: Request) {
     // Fix ownership so the gateway (running as clawbox) can read it
     await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_UID);
 
-    // 2. Set auth profile in main config
+    // 2. Validate profileKey before interpolating into config path
+    if (!PROFILE_KEY_RE.test(config.profileKey)) {
+      return NextResponse.json(
+        { error: "Invalid profile key format" },
+        { status: 400 }
+      );
+    }
+
+    // 3. Set auth profile in main config
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
@@ -136,7 +167,7 @@ export async function POST(request: Request) {
       "--json",
     ]);
 
-    // 3. Set primary model
+    // 4. Set primary model
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
@@ -144,12 +175,12 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4. Ensure openclaw config files are owned by clawbox
+    // 5. Ensure openclaw config files are owned by clawbox
     for (const name of ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]) {
       await fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_UID).catch(() => {});
     }
 
-    // 5. Persist to ClawBox config store
+    // 6. Persist to ClawBox config store
     await set("ai_model_configured", true);
     await set("ai_model_provider", provider);
     await set("ai_model_configured_at", new Date().toISOString());

@@ -28,7 +28,7 @@ After setup completes, the root URL serves the OpenClaw gateway Control UI with 
 
 ## Architecture
 
-```
+```text
 Browser (http://clawbox.local)
   │
   ├── Port 80: Next.js (production-server.js)
@@ -57,7 +57,7 @@ Node.js is used instead of Bun for the production server because Bun doesn't fir
 
 ## Project Structure
 
-```
+```text
 ├── config/                 Systemd services, dnsmasq config
 ├── scripts/                WiFi AP start/stop scripts
 ├── src/

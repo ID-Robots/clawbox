@@ -82,7 +82,7 @@ export async function serveGatewayHTML(
 </script>`
       : "";
 
-    html = html.replace(/<body>/, `<body>${CLAWBOX_BAR}${tokenScript}`);
+    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${tokenScript}`);
     return new NextResponse(html, {
       status: 200,
       headers: {

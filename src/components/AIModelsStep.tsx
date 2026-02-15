@@ -112,11 +112,13 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
+  const exchangeControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       saveControllerRef.current?.abort();
+      exchangeControllerRef.current?.abort();
     };
   }, []);
 
@@ -197,6 +199,11 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
   const exchangeCode = async () => {
     if (!authCode.trim()) return showError("Please paste the authorization code");
+
+    exchangeControllerRef.current?.abort();
+    const controller = new AbortController();
+    exchangeControllerRef.current = controller;
+
     setExchanging(true);
     setStatus(null);
     try {
@@ -205,9 +212,12 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: authCode.trim() }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!exchangeRes.ok) return showError(await extractError(exchangeRes, "Token exchange failed"));
       const tokenData = await exchangeRes.json();
+      if (controller.signal.aborted) return;
       if (!tokenData.access_token) return showError("No access token received");
 
       // Save token via configure endpoint
@@ -221,18 +231,22 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
         }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!saveRes.ok) return showError(await extractError(saveRes, "Failed to save token"));
       const saveData = await saveRes.json();
+      if (controller.signal.aborted) return;
       if (saveData.success) {
         showSuccessAndContinue("Claude subscription connected! Continuing...");
       } else {
         showError(saveData.error || "Failed to save token");
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     } finally {
-      setExchanging(false);
+      if (!controller.signal.aborted) setExchanging(false);
     }
   };
 
@@ -253,12 +267,16 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           Select your AI provider and enter your API key or subscription token.
         </p>
 
-        <div className="border border-gray-700 rounded-lg bg-gray-900/50 overflow-hidden">
+        <div role="radiogroup" aria-label="AI Provider" className="border border-gray-700 rounded-lg bg-gray-900/50 overflow-hidden">
           {PROVIDERS.map((provider) => {
             const isSelected = selectedProvider === provider.id;
             return (
               <button
                 type="button"
+                role="radio"
+                aria-checked={isSelected}
+                aria-label={provider.name}
+                tabIndex={isSelected ? 0 : -1}
                 key={provider.id}
                 onClick={() => selectProvider(provider.id)}
                 className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer bg-transparent border-x-0 border-t-0 ${
@@ -268,6 +286,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                 }`}
               >
                 <span
+                  aria-hidden="true"
                   className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
                     isSelected
                       ? "border-orange-500"
@@ -388,7 +407,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-orange-400 hover:text-orange-300 transition-colors"
                   >
                     {activeAuth.tokenUrlLabel || "Get Token"}
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    <svg aria-hidden="true" focusable="false" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                   </a>
                 )}
 
@@ -419,9 +438,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5"
                   >
                     {showKey ? (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                     ) : (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                     )}
                   </button>
                 </div>

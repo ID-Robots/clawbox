@@ -149,14 +149,29 @@ sudo -u "$CLAWBOX_USER" "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecu
 echo "  allowInsecureAuth enabled"
 
 # 9b. Patch gateway JS to preserve operator scopes for token-only auth
-SCOPE_FILES=$(grep -rl 'if (scopes.length > 0) {' "$GATEWAY_DIST" 2>/dev/null || true)
+# Use whitespace-tolerant regex to handle formatting variations
+SCOPE_FILES=$(grep -Prl 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
 if [ -n "$SCOPE_FILES" ]; then
   for file in $SCOPE_FILES; do
-    sed -i 's/if (scopes.length > 0) {/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/' "$file"
+    sed -i -E 's/if[[:space:]]*\([[:space:]]*scopes\.length[[:space:]]*>[[:space:]]*0[[:space:]]*\)[[:space:]]*\{/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/g' "$file"
   done
   echo "  Gateway scope patch applied"
+  # Verify the patch was applied correctly
+  VERIFY=$(grep -rl 'if (scopes.length > 0 && !(isControlUi && allowControlUiBypass)) {' "$GATEWAY_DIST" 2>/dev/null || true)
+  if [ -z "$VERIFY" ]; then
+    echo "Error: Gateway scope patch verification failed — patched pattern not found in any file"
+    exit 1
+  fi
+  echo "  Gateway scope patch verified"
 else
-  echo "  Gateway scope patch: pattern not found (may already be patched)"
+  # Check if already patched
+  ALREADY_PATCHED=$(grep -rl 'isControlUi && allowControlUiBypass' "$GATEWAY_DIST" 2>/dev/null || true)
+  if [ -n "$ALREADY_PATCHED" ]; then
+    echo "  Gateway scope patch: already applied"
+  else
+    echo "Error: Gateway scope patch: pattern not found and patch not already applied"
+    exit 1
+  fi
 fi
 
 # Fix ownership of openclaw config files

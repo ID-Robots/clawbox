@@ -23,7 +23,16 @@ async function readConfig(): Promise<Config> {
   try {
     return JSON.parse(raw);
   } catch (parseErr) {
-    console.error("[config-store] Corrupt config file, resetting:", parseErr);
+    const backupPath = `${CONFIG_PATH}.corrupt.${Date.now()}`;
+    try {
+      await fs.copyFile(CONFIG_PATH, backupPath);
+    } catch {
+      // If backup fails, continue anyway
+    }
+    console.error(
+      `[config-store] Corrupt config file at ${CONFIG_PATH}, backed up to ${backupPath}:`,
+      parseErr
+    );
     return {};
   }
 }

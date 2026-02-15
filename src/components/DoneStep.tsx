@@ -75,21 +75,36 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     if (updatePollRef.current) return;
     const controller = new AbortController();
     updatePollControllerRef.current = controller;
+    let failureCounter = 0;
+    const MAX_CONSECUTIVE_FAILURES = 3;
     updatePollRef.current = setInterval(async () => {
       try {
         const res = await fetch("/setup-api/update/status", {
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
-        if (!res.ok) return;
+        if (!res.ok) {
+          failureCounter++;
+          if (failureCounter >= MAX_CONSECUTIVE_FAILURES) {
+            stopUpdatePolling();
+            setUpdateError("Lost connection to update service");
+          }
+          return;
+        }
         const data: UpdateState = await res.json();
         if (controller.signal.aborted) return;
+        failureCounter = 0;
         setUpdateState(data);
         if (data.phase !== "running") {
           stopUpdatePolling();
         }
       } catch {
-        /* ignore polling errors */
+        if (controller.signal.aborted) return;
+        failureCounter++;
+        if (failureCounter >= MAX_CONSECUTIVE_FAILURES) {
+          stopUpdatePolling();
+          setUpdateError("Lost connection to update service");
+        }
       }
     }, 2000);
   }, [stopUpdatePolling]);

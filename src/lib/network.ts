@@ -151,11 +151,44 @@ export async function switchToClient(
     return { message: stdout.trim() };
   } catch (err) {
     console.error("[WiFi] Connection failed, restoring AP:", err instanceof Error ? err.message : err);
-    try {
-      await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
-    } catch (apErr) {
-      console.error("[WiFi] Failed to restore AP:", apErr instanceof Error ? apErr.message : apErr);
+
+    const AP_RESTORE_RETRIES = 3;
+    const AP_RESTORE_BACKOFF = 3000;
+    let apRestored = false;
+
+    for (let attempt = 1; attempt <= AP_RESTORE_RETRIES; attempt++) {
+      try {
+        await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+        // Verify AP is actually up
+        const apUp = await isAPMode();
+        if (apUp) {
+          console.log(`[WiFi] AP restored after connect failure (attempt ${attempt})`);
+          apRestored = true;
+          break;
+        }
+        console.warn(`[WiFi] AP start returned success but AP not detected (attempt ${attempt})`);
+      } catch (apErr) {
+        console.error(
+          `[WiFi] Failed to restore AP (attempt ${attempt}/${AP_RESTORE_RETRIES}):`,
+          apErr instanceof Error ? apErr.message : apErr
+        );
+      }
+      if (attempt < AP_RESTORE_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, AP_RESTORE_BACKOFF * attempt));
+      }
     }
+
+    if (!apRestored) {
+      console.error("[WiFi] All AP restore attempts failed after connect failure. Device may be unreachable.");
+      // Last resort: try nmcli directly
+      try {
+        await exec("nmcli", ["connection", "up", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT });
+        console.log("[WiFi] AP restored via direct nmcli fallback");
+      } catch (fallbackErr) {
+        console.error("[WiFi] Direct nmcli fallback also failed:", fallbackErr instanceof Error ? fallbackErr.message : fallbackErr);
+      }
+    }
+
     throw err;
   }
 }

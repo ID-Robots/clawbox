@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
+import path from "path";
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
 const TOKEN_ENDPOINT = "https://console.anthropic.com/v1/oauth/token";
-const STATE_PATH = "/tmp/clawbox-oauth-state.json";
+
+const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+const STATE_PATH = path.join(CONFIG_ROOT, "data", "oauth-state.json");
 
 function parseErrorMessage(text: string, status: number): string {
   try {
@@ -71,17 +74,35 @@ export async function POST(request: Request) {
       state: codeState || stored.state,
     };
 
-    const tokenRes = await fetch(TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(exchangeBody),
-    });
+    const tokenController = new AbortController();
+    const tokenTimeout = setTimeout(() => tokenController.abort(), 30_000);
+
+    let tokenRes: Response;
+    try {
+      tokenRes = await fetch(TOKEN_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(exchangeBody),
+        signal: tokenController.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(tokenTimeout);
+      if (fetchErr instanceof DOMException && fetchErr.name === "AbortError") {
+        return NextResponse.json(
+          { error: "Token exchange timed out" },
+          { status: 504 }
+        );
+      }
+      throw fetchErr;
+    } finally {
+      clearTimeout(tokenTimeout);
+    }
 
     if (!tokenRes.ok) {
       const errText = await tokenRes.text().catch(() => "");
       return NextResponse.json(
         { error: parseErrorMessage(errText, tokenRes.status) },
-        { status: 400 }
+        { status: 502 }
       );
     }
 
