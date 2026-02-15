@@ -35,7 +35,7 @@ export function redirectToSetup(request: NextRequest) {
 
 const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:99999;display:flex;align-items:center;gap:6px;padding:4px 14px;background:rgba(17,24,39,0.92);border:1px solid rgba(249,115,22,0.3);border-top:none;border-radius:0 0 10px 10px;font-family:system-ui,sans-serif;font-size:12px;color:#d1d5db;backdrop-filter:blur(8px);box-shadow:0 2px 8px rgba(0,0,0,0.3)">
 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-<a href="/setup" style="color:#f97316;text-decoration:none;font-weight:600">ClawBox</a>
+<a href="/setup" onclick="event.preventDefault();window.location.href='/setup'" style="color:#f97316;text-decoration:none;font-weight:600">ClawBox</a>
 </div>`;
 
 async function getGatewayToken(): Promise<string> {
@@ -81,7 +81,7 @@ export async function serveGatewayHTML(
   try{
     var t=JSON.parse(document.getElementById("clawbox-token").textContent);
     var s=JSON.parse(localStorage.getItem(KEY)||"{}");
-    if(!s.token){s.token=t;localStorage.setItem(KEY,JSON.stringify(s))}
+    if(s.token!==t){s.token=t;localStorage.setItem(KEY,JSON.stringify(s))}
   }catch(e){}
 })();
 </script>`

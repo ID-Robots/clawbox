@@ -15,14 +15,10 @@ case "${1:-}" in
         jetson_clocks
         ;;
     chrome_install)
-        if command -v google-chrome-stable &>/dev/null; then
-            echo "Google Chrome already installed"
+        if command -v chromium-browser &>/dev/null; then
+            echo "Chromium already installed"
         else
-            echo "Adding Google Chrome repository..."
-            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-            echo "deb [arch=arm64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-            apt-get update -qq
-            apt-get install -y google-chrome-stable
+            apt-get install -y chromium-browser
         fi
         ;;
     chpasswd)
@@ -34,14 +30,42 @@ case "${1:-}" in
         chpasswd < "$INPUT_FILE"
         rm -f "$INPUT_FILE"
         ;;
+    rebuild)
+        PROJECT_DIR="/home/clawbox/clawbox"
+        BUN="/home/clawbox/.bun/bin/bun"
+        echo "Stopping clawbox-setup.service for rebuild..."
+        systemctl stop clawbox-setup.service 2>/dev/null || true
+        echo "Clearing .next cache..."
+        rm -rf "$PROJECT_DIR/.next"
+        echo "Running bun install..."
+        su - clawbox -c "cd $PROJECT_DIR && $BUN install"
+        echo "Running bun build..."
+        su - clawbox -c "cd $PROJECT_DIR && $BUN run build"
+        echo "Starting clawbox-setup.service..."
+        systemctl start clawbox-setup.service
+        ;;
     restart)
         echo "Restarting clawbox-setup.service..."
         systemctl restart clawbox-setup.service
         ;;
     openclaw_install)
-        # Fix npm cache/global ownership (may have root-owned files from install.sh)
-        chown -R clawbox:clawbox /home/clawbox/.npm /home/clawbox/.npm-global 2>/dev/null || true
-        su - clawbox -c "npm install -g openclaw --prefix /home/clawbox/.npm-global"
+        OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
+        INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
+        LATEST=$(npm view openclaw version 2>/dev/null || echo "unknown")
+        echo "Installed: $INSTALLED, Latest: $LATEST"
+        if [ "$INSTALLED" = "$LATEST" ]; then
+            echo "OpenClaw is already up to date"
+        else
+            # Fix npm cache/global ownership (may have root-owned files from install.sh)
+            chown -R clawbox:clawbox /home/clawbox/.npm /home/clawbox/.npm-global 2>/dev/null || true
+            su - clawbox -c "npm install -g openclaw --prefix /home/clawbox/.npm-global"
+        fi
+        ;;
+    gateway_setup)
+        cp /home/clawbox/clawbox/config/clawbox-gateway.service /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable clawbox-gateway.service
+        systemctl restart clawbox-gateway.service
         ;;
     factory_reset)
         export HOME="/root"

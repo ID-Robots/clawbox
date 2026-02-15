@@ -72,7 +72,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
   {
     id: "chrome_install",
-    label: "Installing Google Chrome",
+    label: "Installing Chromium",
     command: "",
     timeoutMs: 300_000,
     requiresRoot: true,
@@ -84,37 +84,22 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 60_000,
   },
   {
-    id: "rebuild",
-    label: "Rebuilding ClawBox",
-    command: "",
-    timeoutMs: 300_000,
-    customRun: async () => {
-      const BUN = "/home/clawbox/.bun/bin/bun";
-      const cwd = "/home/clawbox/clawbox";
-      // Clear stale .next cache to avoid build errors
-      const { rmSync } = await import("fs");
-      rmSync(`${cwd}/.next`, { recursive: true, force: true });
-      await execFile(BUN, ["install"], { cwd, timeout: 120_000 });
-      await execFile(BUN, ["run", "build"], { cwd, timeout: 180_000 });
-    },
-  },
-  {
     id: RESTART_STEP_ID,
-    label: "Restarting ClawBox",
+    label: "Rebuilding & Restarting ClawBox",
     command: "",
     timeoutMs: 30_000,
     customRun: async () => {
       // Mark that post-restart steps still need to run
       await set("update_needs_continuation", true);
-      // Fire-and-forget via root service: a separate systemd unit restarts us
-      const service = "clawbox-root-update@restart.service";
+      // Fire-and-forget: root service stops server, rebuilds, starts server
+      const service = "clawbox-root-update@rebuild.service";
       execFile("systemctl", ["reset-failed", service], {
         timeout: 10_000,
       }).catch(() => {});
       execFile("systemctl", ["start", "--no-block", service], {
         timeout: 10_000,
       }).catch(() => {});
-      // Wait for systemd to SIGTERM us during the restart
+      // Wait for systemd to SIGTERM us during the rebuild
       await new Promise((r) => setTimeout(r, 10_000));
     },
   },
@@ -141,9 +126,15 @@ const UPDATE_STEPS: UpdateStepDef[] = [
       ], { timeout: 10_000 });
 
       // 2. Patch gateway JS to preserve operator scopes for token-only auth.
-      const { stdout: files } = await execFile("grep", [
-        "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
-      ], { timeout: 10_000 });
+      let files = "";
+      try {
+        const result = await execFile("grep", [
+          "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
+        ], { timeout: 10_000 });
+        files = result.stdout;
+      } catch {
+        // grep exits 1 when no matches found — already patched or pattern changed
+      }
       const targets = files.trim().split("\n").filter(Boolean);
       if (targets.length === 0) {
         console.log("[Updater] Gateway scope patch: pattern not found (may already be patched)");
@@ -276,16 +267,12 @@ async function checkInternet(): Promise<boolean> {
   return false;
 }
 
-async function runUpdate(startFrom = 0): Promise<void> {
-  // Pre-check internet (only on fresh runs, not continuations)
-  if (startFrom === 0) {
-    const hasInternet = await checkInternet();
-    if (!hasInternet) {
-      state.phase = "failed";
-      state.error = "No internet connection. Check your WiFi and try again.";
-      state.currentStepIndex = -1;
-      return;
-    }
+async function runUpdate(startFrom: number): Promise<void> {
+  if (startFrom === 0 && !(await checkInternet())) {
+    state.phase = "failed";
+    state.error = "No internet connection. Check your WiFi and try again.";
+    state.currentStepIndex = -1;
+    return;
   }
 
   let hasFailures = false;

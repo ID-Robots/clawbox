@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawBox OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawbox
+WorkingDirectory=/home/clawbox
+ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind loopback
+Restart=always
+RestartSec=5
+Environment=HOME=/home/clawbox
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

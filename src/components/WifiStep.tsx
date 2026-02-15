@@ -81,6 +81,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     connectControllerRef.current = controller;
 
     setConnecting(true);
+    setStatus(null);
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
@@ -93,33 +94,35 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `Connection failed (${res.status})`);
       }
-      const data = await res.json();
-      if (controller.signal.aborted) return;
-      if (data.success) {
-        setStatus({
-          type: "success",
-          message:
-            "WiFi credentials saved! ClawBox will switch to your home network in a few seconds. Reconnect to your home WiFi and visit http://clawbox.local to continue.",
-        });
-        setTimeout(() => {
-          closeModal();
-          onNext();
-        }, 3000);
-      } else {
-        setStatus({
-          type: "error",
-          message: data.error || "Connection failed",
-        });
-      }
+      // Server confirmed connection succeeded
+      showSuccess();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
+      // Network error (lost connection to AP) likely means the switch worked
+      if (err instanceof TypeError && err.message.includes("fetch")) {
+        showSuccess();
+        return;
+      }
       setStatus({
         type: "error",
         message: `Connection failed: ${err instanceof Error ? err.message : err}`,
       });
     } finally {
-      setConnecting(false);
+      if (!controller.signal.aborted) setConnecting(false);
     }
+  };
+
+  const showSuccess = () => {
+    setConnecting(false);
+    setStatus({
+      type: "success",
+      message:
+        "Connected! Reconnect to your home WiFi and visit http://clawbox.local to continue.",
+    });
+    setTimeout(() => {
+      closeModal();
+      onNext();
+    }, 3000);
   };
 
   // Cleanup connect controller on unmount
@@ -198,8 +201,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             !scanError &&
             networks?.map((n) => {
               const bars = Math.min(4, Math.max(1, Math.ceil(n.signal / 25)));
-              const hasLock =
-                n.security && n.security !== "" && n.security !== "--";
+              const hasLock = n.security && n.security !== "--";
               return (
                 <button
                   type="button"

@@ -2,7 +2,19 @@ interface ProgressBarProps {
   currentStep: number;
 }
 
-const STEP_LABELS = ["WiFi", "Update", "Security", "AI Model", "Telegram", "Done"];
+const STEP_LABELS = ["WiFi", "AI Model", "Done"];
+
+function stepColors(isDone: boolean, isActive: boolean): string {
+  if (isDone) return "text-green-400 bg-green-500/10";
+  if (isActive) return "text-orange-400 bg-orange-500/10";
+  return "text-gray-500 bg-gray-800";
+}
+
+function badgeColor(isDone: boolean, isActive: boolean): string {
+  if (isDone) return "bg-green-500";
+  if (isActive) return "bg-orange-500";
+  return "bg-gray-600";
+}
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
   return (
@@ -23,22 +35,10 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
             key={num}
             aria-current={num === currentStep ? "step" : undefined}
             aria-disabled={num > currentStep ? true : undefined}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-              isDone
-                ? "text-green-400 bg-green-500/10"
-                : isActive
-                  ? "text-orange-400 bg-orange-500/10"
-                  : "text-gray-500 bg-gray-800"
-            }`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${stepColors(isDone, isActive)}`}
           >
             <span
-              className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold text-white ${
-                isDone
-                  ? "bg-green-500"
-                  : isActive
-                    ? "bg-orange-500"
-                    : "bg-gray-600"
-              }`}
+              className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold text-white ${badgeColor(isDone, isActive)}`}
             >
               {num}
             </span>

@@ -13,12 +13,13 @@ echo "=== ClawBox Cleanup ==="
 # 1. Stop and disable systemd services
 echo ""
 echo "[1/7] Stopping and disabling systemd services..."
-for svc in clawbox-setup.service clawbox-ap.service; do
+for svc in clawbox-setup.service clawbox-gateway.service clawbox-ap.service; do
   systemctl stop "$svc" 2>/dev/null || true
   systemctl disable "$svc" 2>/dev/null || true
 done
 rm -f /etc/systemd/system/clawbox-setup.service \
-      /etc/systemd/system/clawbox-ap.service
+      /etc/systemd/system/clawbox-ap.service \
+      /etc/systemd/system/clawbox-gateway.service
 # Keep clawbox-root-update@.service — factory reset runs via this service
 # and removing it mid-run causes systemd to kill the process with a short timeout.
 # install.sh will reinstall it anyway.

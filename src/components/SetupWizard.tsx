@@ -4,11 +4,8 @@ import { useState, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import ProgressBar from "./ProgressBar";
-import CredentialsStep from "./CredentialsStep";
 import WifiStep from "./WifiStep";
-import UpdateStep from "./UpdateStep";
 import AIModelsStep from "./AIModelsStep";
-import TelegramStep from "./TelegramStep";
 import DoneStep from "./DoneStep";
 
 function applyStatusData(
@@ -18,12 +15,8 @@ function applyStatusData(
 ) {
   if (data.setup_complete) {
     setSetupComplete(true);
-    setCurrentStep(6);
+    setCurrentStep(3);
   } else if (data.ai_model_configured) {
-    setCurrentStep(5);
-  } else if (data.password_configured) {
-    setCurrentStep(4);
-  } else if (data.update_completed) {
     setCurrentStep(3);
   } else if (data.wifi_configured) {
     setCurrentStep(2);
@@ -100,26 +93,23 @@ export default function SetupWizard() {
             ClawBox
           </span>
         </Link>
-        {currentStep < 6 && <ProgressBar currentStep={currentStep} />}
+        {currentStep < 3 && <ProgressBar currentStep={currentStep} />}
       </header>
 
-      <main className="flex-1 flex items-start sm:items-center justify-center px-4 pt-2 pb-4 sm:p-6">
+      <main
+        className={`flex-1 ${
+          currentStep === 3
+            ? "px-4 py-4 sm:px-6 sm:py-6"
+            : "flex items-start sm:items-center justify-center px-4 pt-2 pb-4 sm:p-6"
+        }`}
+      >
         {currentStep === 1 && (
           <WifiStep onNext={() => setCurrentStep(2)} />
         )}
         {currentStep === 2 && (
-          <UpdateStep onNext={() => setCurrentStep(3)} />
+          <AIModelsStep onNext={() => setCurrentStep(3)} />
         )}
-        {currentStep === 3 && (
-          <CredentialsStep onNext={() => setCurrentStep(4)} />
-        )}
-        {currentStep === 4 && (
-          <AIModelsStep onNext={() => setCurrentStep(5)} />
-        )}
-        {currentStep === 5 && (
-          <TelegramStep onNext={() => setCurrentStep(6)} />
-        )}
-        {currentStep === 6 && <DoneStep setupComplete={setupComplete} />}
+        {currentStep === 3 && <DoneStep setupComplete={setupComplete} />}
       </main>
     </>
   );

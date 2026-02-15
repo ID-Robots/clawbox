@@ -194,7 +194,7 @@ echo "  Done"
 # ── Step 12: Systemd services ───────────────────────────────────────────────
 
 log "Installing systemd services..."
-for svc in clawbox-ap.service clawbox-setup.service "clawbox-root-update@.service"; do
+for svc in clawbox-ap.service clawbox-setup.service clawbox-gateway.service "clawbox-root-update@.service"; do
   src="$PROJECT_DIR/config/$svc"
   if [ ! -f "$src" ]; then
     echo "Error: Service file not found: $src"
@@ -205,6 +205,7 @@ done
 systemctl daemon-reload
 systemctl enable clawbox-ap.service
 systemctl enable clawbox-setup.service
+systemctl enable clawbox-gateway.service
 echo "  Services installed and enabled"
 
 # ── Step 13: Polkit rules for root updates ──────────────────────────────────
@@ -223,6 +224,7 @@ echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
 log "Starting services..."
 systemctl restart clawbox-ap.service 2>/dev/null || systemctl start clawbox-ap.service
 systemctl restart clawbox-setup.service 2>/dev/null || systemctl start clawbox-setup.service
+systemctl restart clawbox-gateway.service 2>/dev/null || systemctl start clawbox-gateway.service
 echo "  Services started"
 
 # ── Done ─────────────────────────────────────────────────────────────────────

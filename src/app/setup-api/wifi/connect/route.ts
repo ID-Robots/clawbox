@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { switchToClient, restartAP } from "@/lib/network";
+import { switchToClient } from "@/lib/network";
 import { set } from "@/lib/config-store";
 
 export async function POST(request: Request) {
@@ -21,47 +21,19 @@ export async function POST(request: Request) {
   try {
     await set("wifi_ssid", ssid);
 
-    // Schedule network switch after response is sent
-    setTimeout(() => {
-      (async () => {
-        try {
-          await switchToClient(ssid, password as string | undefined);
-        } catch (err) {
-          console.error(
-            "[WiFi] Failed to connect, restarting AP:",
-            err instanceof Error ? err.message : err
-          );
-          try {
-            await set("wifi_configured", false);
-          } catch (setErr) {
-            console.error("[WiFi] Failed to clear wifi_configured:", setErr);
-          }
-          try {
-            await restartAP();
-          } catch (apErr) {
-            console.error(
-              "[WiFi] Failed to restart AP:",
-              apErr instanceof Error ? apErr.message : apErr
-            );
-          }
-          return;
-        }
-        try {
-          await set("wifi_configured", true);
-        } catch (setErr) {
-          console.error(
-            "[WiFi] Connected but failed to persist wifi_configured:",
-            setErr instanceof Error ? setErr.message : setErr
-          );
-        }
-      })();
-    }, 5000);
+    // Actually attempt connection before responding
+    await switchToClient(ssid, password as string | undefined);
+
+    await set("wifi_configured", true);
 
     return NextResponse.json({
       success: true,
-      message: "WiFi credentials saved. Switching networks in 5 seconds...",
+      message: "Connected! Reconnect to your home WiFi and visit http://clawbox.local to continue.",
     });
   } catch (err) {
+    // switchToClient already restores the AP on failure
+    await set("wifi_configured", false).catch(() => {});
+
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Connection failed" },
       { status: 500 }
