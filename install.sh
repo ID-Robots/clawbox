@@ -23,7 +23,7 @@ OPENCLAW_VERSION="2026.2.14"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
-TOTAL_STEPS=14
+TOTAL_STEPS=15
 
 step=0
 log() {
@@ -270,7 +270,17 @@ cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
 rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
 echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
 
-# ── Step 14: Start services ─────────────────────────────────────────────────
+# ── Step 14: Voice pipeline (Whisper STT + Kokoro TTS) ──────────────────────
+
+log "Installing voice pipeline..."
+# System dependency
+apt-get install -y -qq espeak-ng libsndfile1
+
+# Install Python packages and pre-download models
+bash "$PROJECT_DIR/scripts/install-voice.sh"
+echo "  Voice pipeline installed"
+
+# ── Step 15: Start services ─────────────────────────────────────────────────
 
 log "Starting services..."
 systemctl restart clawbox-ap.service 2>/dev/null || systemctl start clawbox-ap.service

@@ -67,6 +67,9 @@ case "${1:-}" in
         systemctl enable clawbox-gateway.service
         systemctl restart clawbox-gateway.service
         ;;
+    voice_install)
+        bash /home/clawbox/clawbox/scripts/install-voice.sh
+        ;;
     factory_reset)
         export HOME="/root"
         PROJECT_DIR="/home/clawbox/clawbox"
