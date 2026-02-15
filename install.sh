@@ -1,38 +1,76 @@
 #!/usr/bin/env bash
+# ClawBox Installer — sets up everything from a fresh NVIDIA Jetson to a
+# working setup wizard accessible at http://clawbox.local/ via WiFi hotspot.
+#
+# Usage: sudo bash install.sh
 set -euo pipefail
 
+# ── Constants ────────────────────────────────────────────────────────────────
+
+REPO_URL="https://github.com/ID-Robots/clawbox.git"
+REPO_BRANCH="main"
 PROJECT_DIR="/home/clawbox/clawbox"
-BUN="/home/clawbox/.bun/bin/bun"
+CLAWBOX_USER="clawbox"
+CLAWBOX_HOME="/home/clawbox"
+BUN="$CLAWBOX_HOME/.bun/bin/bun"
+NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
+OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
+GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
+DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
+AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+TOTAL_STEPS=13
+
+step=0
+log() {
+  step=$((step + 1))
+  echo ""
+  echo "[$step/$TOTAL_STEPS] $1"
+}
+
+# ── Step 1: Root check ──────────────────────────────────────────────────────
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Error: Run this script with sudo"
   exit 1
 fi
 
-# Verify clawbox user exists
-if ! id -u clawbox &>/dev/null; then
-  echo "Error: System user 'clawbox' does not exist. Create it first."
+echo "=== ClawBox Installer ==="
+
+# ── Step 2: Verify clawbox user ─────────────────────────────────────────────
+
+log "Verifying clawbox user..."
+if ! id -u "$CLAWBOX_USER" &>/dev/null; then
+  echo "Error: System user '$CLAWBOX_USER' does not exist."
+  echo "The default Jetson user should be 'clawbox'. Create it first or rename the default user."
   exit 1
 fi
+echo "  User '$CLAWBOX_USER' exists (uid=$(id -u "$CLAWBOX_USER"))"
 
-# Verify project directory exists
-if [ ! -d "$PROJECT_DIR" ]; then
-  echo "Error: Project directory '$PROJECT_DIR' does not exist"
-  exit 1
+# ── Step 3: System packages ─────────────────────────────────────────────────
+
+log "Installing system packages..."
+apt-get update -qq
+
+# Core packages
+apt-get install -y -qq git curl network-manager avahi-daemon iptables
+
+# Node.js 22 (required for production server — bun doesn't fire upgrade events)
+if node --version 2>/dev/null | grep -q '^v2[2-9]\|^v[3-9]'; then
+  echo "  Node.js $(node --version) already installed"
+else
+  echo "  Installing Node.js 22..."
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  apt-get install -y -qq nodejs
+  echo "  Node.js $(node --version) installed"
 fi
 
-echo "=== ClawBox Setup Installer ==="
-echo ""
+# ── Step 4: Hostname + mDNS ─────────────────────────────────────────────────
 
-# 1. Set hostname
-echo "[1/7] Setting hostname to 'clawbox'..."
+log "Configuring hostname and mDNS..."
 hostnamectl set-hostname clawbox
 
-# 2. Configure avahi for clawbox.local mDNS
-echo "[2/7] Configuring avahi (clawbox.local)..."
-AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 if [ -f "$AVAHI_CONF" ]; then
-  cp "$AVAHI_CONF" "${AVAHI_CONF}.bak"
+  cp -n "$AVAHI_CONF" "${AVAHI_CONF}.bak" 2>/dev/null || true
   if grep -q '^#host-name=' "$AVAHI_CONF"; then
     sed -i 's/^#host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
   elif grep -q '^host-name=' "$AVAHI_CONF"; then
@@ -43,50 +81,126 @@ if [ -f "$AVAHI_CONF" ]; then
     printf '\n[server]\nhost-name=clawbox\n' >> "$AVAHI_CONF"
   fi
   systemctl restart avahi-daemon
+  echo "  Hostname set to 'clawbox', avahi restarted"
 else
-  echo "Warning: $AVAHI_CONF not found, skipping avahi configuration"
+  echo "  Warning: $AVAHI_CONF not found, skipping avahi configuration"
 fi
 
-# 3. Install bun if not present
-echo "[3/7] Ensuring bun is installed..."
-if ! command -v "$BUN" &>/dev/null; then
-  # Note: fetches and runs remote installer script. Accepted risk for initial setup.
-  sudo -u clawbox bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash' || {
-    echo "Warning: Bun installation failed. Please install manually."
+# ── Step 5: Clone or update repository ───────────────────────────────────────
+
+log "Setting up ClawBox repository..."
+if [ ! -d "$PROJECT_DIR/.git" ]; then
+  echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
+  git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+else
+  echo "  Repository exists, pulling latest..."
+  git config --global --add safe.directory "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" fetch origin
+  git -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
+  git -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
+fi
+
+# ── Step 6: Install bun ─────────────────────────────────────────────────────
+
+log "Ensuring bun is installed..."
+if [ -x "$BUN" ]; then
+  echo "  Bun already installed at $BUN"
+else
+  echo "  Installing bun..."
+  sudo -u "$CLAWBOX_USER" bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash' || {
+    echo "Error: Bun installation failed. Install manually: curl -fsSL https://bun.sh/install | bash"
     exit 1
   }
 fi
 
-# 4. Install dependencies and build
-echo "[4/7] Installing dependencies and building..."
+# ── Step 7: Build ClawBox ───────────────────────────────────────────────────
+
+log "Building ClawBox..."
 cd "$PROJECT_DIR"
-sudo -u clawbox "$BUN" install
-sudo -u clawbox "$BUN" run build
+sudo -u "$CLAWBOX_USER" "$BUN" install
+sudo -u "$CLAWBOX_USER" "$BUN" run build
 
-# 5. Create data directory and set permissions
-echo "[5/7] Setting up directories and permissions..."
+if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
+  echo "Error: Build failed — .next/standalone/server.js not found"
+  exit 1
+fi
+echo "  Build complete"
+
+# ── Step 8: Install OpenClaw ────────────────────────────────────────────────
+
+log "Installing OpenClaw..."
+mkdir -p "$NPM_PREFIX"
+chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
+npm install -g openclaw --prefix "$NPM_PREFIX"
+
+if [ ! -x "$OPENCLAW_BIN" ]; then
+  echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
+  exit 1
+fi
+echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
+
+# ── Step 9: Patch OpenClaw gateway ──────────────────────────────────────────
+
+log "Patching OpenClaw gateway for ClawBox..."
+
+# 9a. Enable insecure auth so Control UI works over plain HTTP
+sudo -u "$CLAWBOX_USER" "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
+echo "  allowInsecureAuth enabled"
+
+# 9b. Patch gateway JS to preserve operator scopes for token-only auth
+SCOPE_FILES=$(grep -rl 'if (scopes.length > 0) {' "$GATEWAY_DIST" 2>/dev/null || true)
+if [ -n "$SCOPE_FILES" ]; then
+  for file in $SCOPE_FILES; do
+    sed -i 's/if (scopes.length > 0) {/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/' "$file"
+  done
+  echo "  Gateway scope patch applied"
+else
+  echo "  Gateway scope patch: pattern not found (may already be patched)"
+fi
+
+# Fix ownership of openclaw config files
+chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
+
+# ── Step 10: Captive portal DNS ─────────────────────────────────────────────
+
+log "Configuring captive portal DNS..."
+mkdir -p "$DNSMASQ_DIR"
+cp "$PROJECT_DIR/config/dnsmasq-captive.conf" "$DNSMASQ_DIR/captive-portal.conf"
+echo "  Installed $DNSMASQ_DIR/captive-portal.conf"
+
+# ── Step 11: Directories + permissions ──────────────────────────────────────
+
+log "Setting up directories and permissions..."
 mkdir -p "$PROJECT_DIR/data"
-chown clawbox:clawbox "$PROJECT_DIR/data"
+chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
 find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
+echo "  Done"
 
-# 6. Install systemd services
-echo "[6/7] Installing systemd services..."
+# ── Step 12: Systemd services ───────────────────────────────────────────────
+
+log "Installing systemd services..."
 for svc in clawbox-ap.service clawbox-setup.service; do
   src="$PROJECT_DIR/config/$svc"
   if [ ! -f "$src" ]; then
     echo "Error: Service file not found: $src"
     exit 1
   fi
-  cp "$src" /etc/systemd/system/ || { echo "Error: Failed to copy $svc"; exit 1; }
+  cp "$src" /etc/systemd/system/
 done
 systemctl daemon-reload
-systemctl enable clawbox-ap.service || { echo "Error: Failed to enable clawbox-ap.service"; exit 1; }
-systemctl enable clawbox-setup.service || { echo "Error: Failed to enable clawbox-setup.service"; exit 1; }
+systemctl enable clawbox-ap.service
+systemctl enable clawbox-setup.service
+echo "  Services installed and enabled"
 
-# 7. Start services
-echo "[7/7] Starting services..."
-systemctl start clawbox-ap.service
-systemctl start clawbox-setup.service
+# ── Step 13: Start services ─────────────────────────────────────────────────
+
+log "Starting services..."
+systemctl restart clawbox-ap.service 2>/dev/null || systemctl start clawbox-ap.service
+systemctl restart clawbox-setup.service 2>/dev/null || systemctl start clawbox-setup.service
+echo "  Services started"
+
+# ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=== ClawBox Setup Complete ==="

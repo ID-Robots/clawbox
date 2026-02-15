@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
+    "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
     "build": "next build",
     "postbuild": "cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public 2>/dev/null || true",
-    "start": "PORT=80 HOSTNAME=0.0.0.0 bun run .next/standalone/server.js",
+    "start": "PORT=80 HOSTNAME=0.0.0.0 bun run production-server.js",
     "lint": "eslint"
   },
   "dependencies": {
     "next": "16.1.6",
+    "qrcode.react": "^4.2.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

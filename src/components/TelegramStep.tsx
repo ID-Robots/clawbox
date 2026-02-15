@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import StatusMessage from "./StatusMessage";
 
 interface TelegramStepProps {
@@ -83,24 +84,45 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         <h1 className="text-2xl font-bold font-display mb-2">
           Connect Telegram
         </h1>
-        <p className="text-gray-400 mb-6 leading-relaxed">
+        <p className="text-gray-400 mb-5 leading-relaxed">
           Link a Telegram bot so you can chat with your ClawBox from your phone.
         </p>
-        <ol className="my-4 mb-5 ml-5 leading-[1.8] text-sm text-gray-300 list-decimal">
-          <li>
-            Open Telegram and search for <strong>@BotFather</strong>
-          </li>
-          <li>
-            Send{" "}
-            <code className="bg-gray-700 px-1.5 py-0.5 rounded text-xs text-orange-400">
-              /newbot
-            </code>{" "}
-            and follow the prompts to create a bot
-          </li>
-          <li>
-            Copy the <strong>Bot Token</strong> and paste it below
-          </li>
-        </ol>
+
+        <div className="flex gap-5 items-start mb-5">
+          <div className="shrink-0 p-2 bg-white rounded-lg">
+            <QRCodeSVG
+              value="https://t.me/BotFather"
+              size={96}
+              level="M"
+              bgColor="#ffffff"
+              fgColor="#000000"
+            />
+          </div>
+          <ol className="ml-0 pl-5 leading-[1.8] text-sm text-gray-300 list-decimal">
+            <li>
+              Scan the QR code or search{" "}
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-orange-400 hover:text-orange-300 font-semibold"
+              >
+                @BotFather
+              </a>{" "}
+              in Telegram
+            </li>
+            <li>
+              Send{" "}
+              <code className="bg-gray-700 px-1.5 py-0.5 rounded text-xs text-orange-400">
+                /newbot
+              </code>{" "}
+              and follow the prompts
+            </li>
+            <li>
+              Copy the <strong>Bot Token</strong> and paste it below
+            </li>
+          </ol>
+        </div>
         <label htmlFor="telegram-bot-token" className="block text-xs font-semibold text-gray-400 mb-1.5 mt-4">
           Bot Token
         </label>

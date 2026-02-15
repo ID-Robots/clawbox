@@ -2,9 +2,19 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
 const TOKEN_ENDPOINT = "https://console.anthropic.com/v1/oauth/token";
 const STATE_PATH = "/tmp/clawbox-oauth-state.json";
+
+function parseErrorMessage(text: string, status: number): string {
+  try {
+    const j = JSON.parse(text);
+    return j.error_description ?? j.error?.message ?? j.error ?? j.message
+      ?? `Token exchange failed (${status})`;
+  } catch {
+    return text?.slice(0, 200) || `Token exchange failed (${status})`;
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -15,12 +25,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { code } = body;
-    if (!code) {
+    const rawCode = body.code?.trim();
+    if (!rawCode) {
       return NextResponse.json(
         { error: "Authorization code is required" },
         { status: 400 }
       );
+    }
+
+    // The callback returns code#state — split them
+    let code = rawCode;
+    let codeState: string | undefined;
+    if (rawCode.includes("#")) {
+      const parts = rawCode.split("#");
+      code = parts[0];
+      codeState = parts[1];
     }
 
     let stored: { codeVerifier: string; state: string; createdAt: number };
@@ -43,40 +62,27 @@ export async function POST(request: Request) {
       );
     }
 
-    const params = new URLSearchParams({
+    const exchangeBody = {
       grant_type: "authorization_code",
       client_id: CLIENT_ID,
       code,
       redirect_uri: REDIRECT_URI,
       code_verifier: stored.codeVerifier,
-      state: stored.state,
-    });
+      state: codeState || stored.state,
+    };
 
     const tokenRes = await fetch(TOKEN_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(exchangeBody),
     });
 
     if (!tokenRes.ok) {
-      // Don't delete state file on failure so user can retry
       const errText = await tokenRes.text().catch(() => "");
-      let errMsg = `Token exchange failed (${tokenRes.status})`;
-      try {
-        const errJson = JSON.parse(errText);
-        if (typeof errJson.error_description === "string") {
-          errMsg = errJson.error_description;
-        } else if (typeof errJson.error === "string") {
-          errMsg = errJson.error;
-        } else if (errJson.error?.message) {
-          errMsg = String(errJson.error.message);
-        } else if (typeof errJson.message === "string") {
-          errMsg = errJson.message;
-        }
-      } catch {
-        if (errText) errMsg = errText.slice(0, 200);
-      }
-      return NextResponse.json({ error: errMsg }, { status: 400 });
+      return NextResponse.json(
+        { error: parseErrorMessage(errText, tokenRes.status) },
+        { status: 400 }
+      );
     }
 
     // Only delete state file on success

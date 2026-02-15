@@ -5,15 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=clawbox
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
+User=root
 WorkingDirectory=/home/clawbox/clawbox
-ExecStartPre=/usr/bin/test -x /home/clawbox/.bun/bin/bun
-ExecStartPre=/usr/bin/test -f /home/clawbox/clawbox/.next/standalone/server.js
-ExecStart=/home/clawbox/.bun/bin/bun run .next/standalone/server.js
+ExecStart=/usr/bin/node production-server.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production

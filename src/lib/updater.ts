@@ -97,6 +97,44 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 120_000,
   },
   {
+    id: "openclaw_patch",
+    label: "Patching OpenClaw gateway for ClawBox",
+    command: "",
+    timeoutMs: 30_000,
+    customRun: async () => {
+      const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+      const GATEWAY_DIST =
+        "/home/clawbox/.npm-global/lib/node_modules/openclaw/dist";
+
+      // 1. Enable insecure auth so Control UI works over plain HTTP
+      await execShell(
+        `${OPENCLAW_BIN} config set gateway.controlUi.allowInsecureAuth true --json`,
+        { timeout: 10_000 }
+      );
+
+      // 2. Patch gateway JS to preserve operator scopes for token-only auth.
+      //    The gateway clears all scopes when no device identity is present
+      //    (insecure context). This sed patch keeps scopes when
+      //    allowControlUiBypass is already true.
+      const { stdout: files } = await execShell(
+        `grep -rl 'if (scopes.length > 0) {' ${GATEWAY_DIST}`,
+        { timeout: 10_000 }
+      );
+      const targets = files.trim().split("\n").filter(Boolean);
+      if (targets.length === 0) {
+        console.log("[Updater] Gateway scope patch: pattern not found (may already be patched)");
+        return;
+      }
+      for (const file of targets) {
+        await execShell(
+          `sed -i 's/if (scopes.length > 0) {/if (scopes.length > 0 \\&\\& !(isControlUi \\&\\& allowControlUiBypass)) {/' ${file}`,
+          { timeout: 10_000 }
+        );
+      }
+      console.log(`[Updater] Gateway scope patch applied to ${targets.length} file(s)`);
+    },
+  },
+  {
     id: "models_update",
     label: "Configuring AI models",
     command: "/home/clawbox/.npm-global/bin/openclaw models",

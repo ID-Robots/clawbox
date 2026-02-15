@@ -7,6 +7,7 @@ import { set } from "@/lib/config-store";
 const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
 const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
+const CLAWBOX_UID = 1000; // clawbox user
 
 interface ProviderConfig {
   defaultModel: string;
@@ -34,7 +35,12 @@ const PROVIDERS: Record<string, ProviderConfig> = {
 
 function runCommand(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(cmd, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      uid: CLAWBOX_UID,
+      gid: CLAWBOX_UID,
+      env: { ...process.env, HOME: "/home/clawbox" },
+    });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -53,14 +59,20 @@ function runCommand(cmd: string, args: string[]): Promise<void> {
 
 export async function POST(request: Request) {
   try {
-    let body: { provider?: string; apiKey?: string; authMode?: string };
+    let body: {
+      provider?: string;
+      apiKey?: string;
+      authMode?: string;
+      refreshToken?: string;
+      expiresIn?: number;
+    };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token" } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn } = body;
     if (!provider || !apiKey) {
       return NextResponse.json(
         { error: "Provider and API key are required" },
@@ -87,25 +99,40 @@ export async function POST(request: Request) {
     } catch {
       authProfiles = { version: 1, profiles: {} };
     }
-    const tokenType = authMode === "subscription" ? "setup-token" : "token";
-    authProfiles.profiles[config.profileKey] = {
-      type: tokenType,
-      provider,
-      token: apiKey,
-    };
+    if (authMode === "subscription") {
+      // OAuth credential format expected by OpenClaw:
+      // { type: "oauth", provider, access, refresh, expires }
+      authProfiles.profiles[config.profileKey] = {
+        type: "oauth",
+        provider,
+        access: apiKey,
+        refresh: refreshToken || "",
+        expires: expiresIn
+          ? Date.now() + expiresIn * 1000
+          : Date.now() + 8 * 60 * 60 * 1000, // default 8h
+      };
+    } else {
+      authProfiles.profiles[config.profileKey] = {
+        type: "token",
+        provider,
+        token: apiKey,
+      };
+    }
     await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
     const tmpPath = AUTH_PROFILES_PATH + ".tmp";
     await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
       mode: 0o600,
     });
     await fs.rename(tmpPath, AUTH_PROFILES_PATH);
+    // Fix ownership so the gateway (running as clawbox) can read it
+    await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_UID);
 
     // 2. Set auth profile in main config
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify({ provider, mode: tokenType }),
+      JSON.stringify({ provider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
 
@@ -117,7 +144,12 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4. Persist to ClawBox config store
+    // 4. Ensure openclaw config files are owned by clawbox
+    for (const name of ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]) {
+      await fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_UID).catch(() => {});
+    }
+
+    // 5. Persist to ClawBox config store
     await set("ai_model_configured", true);
     await set("ai_model_provider", provider);
     await set("ai_model_configured_at", new Date().toISOString());

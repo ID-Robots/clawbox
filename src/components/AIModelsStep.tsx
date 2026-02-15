@@ -120,6 +120,19 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     };
   }, []);
 
+  const showError = (message: string) => setStatus({ type: "error", message });
+
+  const showSuccessAndContinue = (message: string) => {
+    setStatus({ type: "success", message });
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => onNext(), 1500);
+  };
+
+  const extractError = async (res: Response, fallback: string) => {
+    const data = await res.json().catch(() => ({}));
+    return typeof data.error === "string" ? data.error : fallback;
+  };
+
   const selectProvider = (id: string) => {
     const provider = PROVIDERS.find((p) => p.id === id);
     setSelectedProvider(id);
@@ -132,14 +145,8 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const saveModel = async () => {
-    if (!selectedProvider) {
-      setStatus({ type: "error", message: "Please select a provider" });
-      return;
-    }
-    if (!apiKey.trim()) {
-      setStatus({ type: "error", message: "Please enter your key or token" });
-      return;
-    }
+    if (!selectedProvider) return showError("Please select a provider");
+    if (!apiKey.trim()) return showError("Please enter your key or token");
 
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -151,43 +158,21 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: selectedProvider,
-          apiKey: apiKey.trim(),
-          authMode,
-        }),
+        body: JSON.stringify({ provider: selectedProvider, apiKey: apiKey.trim(), authMode }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setStatus({
-          type: "error",
-          message: typeof data.error === "string" ? data.error : "Failed to configure",
-        });
-        return;
-      }
+      if (!res.ok) return showError(await extractError(res, "Failed to configure"));
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        setStatus({
-          type: "success",
-          message: "AI model configured! Continuing...",
-        });
-        if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        timeoutRef.current = setTimeout(() => onNext(), 1500);
+        showSuccessAndContinue("AI model configured! Continuing...");
       } else {
-        setStatus({
-          type: "error",
-          message: data.error || "Failed to configure",
-        });
+        showError(data.error || "Failed to configure");
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setStatus({
-        type: "error",
-        message: `Failed: ${err instanceof Error ? err.message : err}`,
-      });
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
     } finally {
       if (!controller.signal.aborted) setSaving(false);
     }
@@ -198,61 +183,34 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     setOauthStarted(false);
     setAuthCode("");
     try {
-      const res = await fetch("/setup-api/ai-models/oauth/start", {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setStatus({
-          type: "error",
-          message: typeof data.error === "string" ? data.error : "Failed to start OAuth",
-        });
-        return;
-      }
+      const res = await fetch("/setup-api/ai-models/oauth/start", { method: "POST" });
+      if (!res.ok) return showError(await extractError(res, "Failed to start OAuth"));
       const data = await res.json();
       if (data.url) {
         window.open(data.url, "_blank");
         setOauthStarted(true);
       }
     } catch (err) {
-      setStatus({
-        type: "error",
-        message: `Failed: ${err instanceof Error ? err.message : err}`,
-      });
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
   };
 
   const exchangeCode = async () => {
-    if (!authCode.trim()) {
-      setStatus({ type: "error", message: "Please paste the authorization code" });
-      return;
-    }
+    if (!authCode.trim()) return showError("Please paste the authorization code");
     setExchanging(true);
     setStatus(null);
     try {
-      // Step 1: Exchange code for token
+      // Exchange code for token
       const exchangeRes = await fetch("/setup-api/ai-models/oauth/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: authCode.trim() }),
       });
-      if (!exchangeRes.ok) {
-        const data = await exchangeRes.json().catch(() => ({}));
-        setStatus({
-          type: "error",
-          message: typeof data.error === "string"
-            ? data.error
-            : data.error?.message || "Token exchange failed",
-        });
-        return;
-      }
+      if (!exchangeRes.ok) return showError(await extractError(exchangeRes, "Token exchange failed"));
       const tokenData = await exchangeRes.json();
-      if (!tokenData.access_token) {
-        setStatus({ type: "error", message: "No access token received" });
-        return;
-      }
+      if (!tokenData.access_token) return showError("No access token received");
 
-      // Step 2: Save the token via configure endpoint
+      // Save token via configure endpoint
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -260,35 +218,19 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           provider: "anthropic",
           apiKey: tokenData.access_token,
           authMode: "subscription",
+          refreshToken: tokenData.refresh_token,
+          expiresIn: tokenData.expires_in,
         }),
       });
-      if (!saveRes.ok) {
-        const data = await saveRes.json().catch(() => ({}));
-        setStatus({
-          type: "error",
-          message: typeof data.error === "string" ? data.error : "Failed to save token",
-        });
-        return;
-      }
+      if (!saveRes.ok) return showError(await extractError(saveRes, "Failed to save token"));
       const saveData = await saveRes.json();
       if (saveData.success) {
-        setStatus({
-          type: "success",
-          message: "Claude subscription connected! Continuing...",
-        });
-        if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        timeoutRef.current = setTimeout(() => onNext(), 1500);
+        showSuccessAndContinue("Claude subscription connected! Continuing...");
       } else {
-        setStatus({
-          type: "error",
-          message: saveData.error || "Failed to save token",
-        });
+        showError(saveData.error || "Failed to save token");
       }
     } catch (err) {
-      setStatus({
-        type: "error",
-        message: `Failed: ${err instanceof Error ? err.message : err}`,
-      });
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
     } finally {
       setExchanging(false);
     }
