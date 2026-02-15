@@ -256,6 +256,11 @@ if [ -f "$OPENCLAW_CONFIG" ]; then
       provider:'openai',
       openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}
     };
+    // Set default model to Sonnet for faster responses
+    if(!c.agents)c.agents={};
+    if(!c.agents.defaults)c.agents.defaults={};
+    if(!c.agents.defaults.model)c.agents.defaults.model={};
+    c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
     if(!c.env)c.env={};
     if(!c.env.vars)c.env.vars={};
     c.env.vars.OPENAI_TTS_BASE_URL='http://localhost:8880/v1';
@@ -329,6 +334,10 @@ apt-get install -y -qq espeak-ng libsndfile1
 # Install Python packages and pre-download models
 bash "$PROJECT_DIR/scripts/install-voice.sh"
 echo "  Voice pipeline installed"
+
+# Apply post-install optimizations
+bash "$PROJECT_DIR/scripts/setup-optimizations.sh"
+echo "  Optimizations applied"
 
 # ── Step 15: Start services ─────────────────────────────────────────────────
 
