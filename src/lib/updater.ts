@@ -70,7 +70,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "git_pull",
     label: "Fetching latest ClawBox code",
-    command: "git config --global --add safe.directory /home/clawbox/clawbox && git -C /home/clawbox/clawbox pull --ff-only",
+    command: "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
     timeoutMs: 60_000,
   },
   {
@@ -93,6 +93,18 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     command: "",
     timeoutMs: 60_000,
     requiresRoot: true,
+  },
+  {
+    id: "rebuild",
+    label: "Rebuilding ClawBox",
+    command: "",
+    timeoutMs: 300_000,
+    customRun: async () => {
+      const BUN = "/home/clawbox/.bun/bin/bun";
+      const cwd = "/home/clawbox/clawbox";
+      await execFile(BUN, ["install"], { cwd, timeout: 120_000 });
+      await execFile(BUN, ["run", "build"], { cwd, timeout: 180_000 });
+    },
   },
   {
     id: "openclaw_install",
@@ -143,6 +155,23 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Configuring AI models",
     command: "/home/clawbox/.npm-global/bin/openclaw models",
     timeoutMs: 600_000,
+  },
+  {
+    id: "restart",
+    label: "Restarting ClawBox",
+    command: "",
+    timeoutMs: 30_000,
+    customRun: async () => {
+      // Persist completion BEFORE restart kills our process
+      await set("update_completed", true);
+      await set("update_completed_at", new Date().toISOString());
+      // Fire-and-forget: systemd will SIGTERM us during restart
+      execFile("systemctl", ["restart", "clawbox-setup.service"], {
+        timeout: 30_000,
+      }).catch(() => {});
+      // Wait for systemd to receive the command and kill us
+      await new Promise((r) => setTimeout(r, 5000));
+    },
   },
 ];
 

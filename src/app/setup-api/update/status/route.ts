@@ -7,11 +7,16 @@ export async function GET() {
   try {
     const state = getUpdateState();
 
-    // If process was restarted but update was previously completed
+    // If process was restarted but update was previously completed,
+    // synthesize a fully-completed state (in-memory state is lost on restart)
     if (state.phase === "idle") {
       const completed = await isUpdateCompleted();
       if (completed) {
-        return NextResponse.json({ ...state, phase: "completed" });
+        return NextResponse.json({
+          ...state,
+          phase: "completed",
+          steps: state.steps.map((s) => ({ ...s, status: "completed" })),
+        });
       }
     }
 

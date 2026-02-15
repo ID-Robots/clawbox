@@ -32,18 +32,18 @@ const PROVIDERS: Provider[] = [
     description: "Claude models by Anthropic",
     authOptions: [
       {
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your Claude Pro/Max subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-ant-api03-...",
         hint: "Get your API key from console.anthropic.com",
         tokenUrl: "https://console.anthropic.com/settings/keys",
         tokenUrlLabel: "Get API Key",
-      },
-      {
-        mode: "subscription",
-        label: "Subscription",
-        placeholder: "",
-        hint: "Connect your Claude Pro/Max subscription via OAuth.",
       },
     ],
   },
@@ -95,8 +95,8 @@ const PROVIDERS: Provider[] = [
 ];
 
 export default function AIModelsStep({ onNext }: AIModelsStepProps) {
-  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
-  const [authMode, setAuthMode] = useState<AuthMode>("token");
+  const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
+  const [authMode, setAuthMode] = useState<AuthMode>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
