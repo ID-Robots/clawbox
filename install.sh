@@ -3,18 +3,23 @@
 # working setup wizard accessible at http://clawbox.local/ via WiFi hotspot.
 #
 # Usage: sudo bash install.sh
+#
+# Environment variables:
+#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
+#   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
 set -euo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
-REPO_BRANCH="main"
+REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
 PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
+OPENCLAW_VERSION="2026.2.14"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -27,7 +32,7 @@ log() {
   echo "[$step/$TOTAL_STEPS] $1"
 }
 
-# ── Step 1: Root check ──────────────────────────────────────────────────────
+# ── Pre-check: Root ──────────────────────────────────────────────────────────
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Error: Run this script with sudo"
@@ -36,23 +41,28 @@ fi
 
 echo "=== ClawBox Installer ==="
 
-# ── Step 2: Verify clawbox user ─────────────────────────────────────────────
+# ── Step 1: Ensure clawbox user ──────────────────────────────────────────────
 
-log "Verifying clawbox user..."
+log "Ensuring clawbox user exists..."
 if ! id -u "$CLAWBOX_USER" &>/dev/null; then
-  echo "Error: System user '$CLAWBOX_USER' does not exist."
-  echo "The default Jetson user should be 'clawbox'. Create it first or rename the default user."
-  exit 1
+  echo "  Creating user '$CLAWBOX_USER'..."
+  useradd -m -s /bin/bash "$CLAWBOX_USER"
+  # Add to common groups for hardware access
+  for grp in sudo video audio i2c gpio; do
+    getent group "$grp" &>/dev/null && usermod -aG "$grp" "$CLAWBOX_USER" 2>/dev/null || true
+  done
+  echo "  User '$CLAWBOX_USER' created (uid=$(id -u "$CLAWBOX_USER"))"
+else
+  echo "  User '$CLAWBOX_USER' exists (uid=$(id -u "$CLAWBOX_USER"))"
 fi
-echo "  User '$CLAWBOX_USER' exists (uid=$(id -u "$CLAWBOX_USER"))"
 
-# ── Step 3: System packages ─────────────────────────────────────────────────
+# ── Step 2: System packages ──────────────────────────────────────────────────
 
 log "Installing system packages..."
 apt-get update -qq
 
-# Core packages
-apt-get install -y -qq git curl network-manager avahi-daemon iptables
+# Core packages (iw needed for WiFi interface detection)
+apt-get install -y -qq git curl network-manager avahi-daemon iptables iw
 
 # Node.js 22 (required for production server — bun doesn't fire upgrade events)
 if node --version 2>/dev/null | grep -q '^v2[2-9]\|^v[3-9]'; then
@@ -63,6 +73,21 @@ else
   apt-get install -y -qq nodejs
   echo "  Node.js $(node --version) installed"
 fi
+
+# ── Step 3: Detect WiFi interface ────────────────────────────────────────────
+
+log "Detecting WiFi interface..."
+WIFI_IFACE="${NETWORK_INTERFACE:-}"
+if [ -z "$WIFI_IFACE" ]; then
+  # Auto-detect: pick the first wireless interface reported by iw
+  WIFI_IFACE=$(iw dev 2>/dev/null | awk '/Interface/{print $2}' | head -1)
+fi
+if [ -z "$WIFI_IFACE" ]; then
+  echo "Error: No WiFi interface found. Ensure a wireless adapter is available."
+  echo "You can override with: NETWORK_INTERFACE=wlan0 sudo bash install.sh"
+  exit 1
+fi
+echo "  WiFi interface: $WIFI_IFACE"
 
 # ── Step 4: Hostname + mDNS ─────────────────────────────────────────────────
 
@@ -100,6 +125,13 @@ else
   git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
 fi
 
+# Persist WiFi interface for scripts and services (after repo exists)
+IFACE_ENV="$PROJECT_DIR/data/network.env"
+mkdir -p "$PROJECT_DIR/data"
+printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > "$IFACE_ENV"
+chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data" "$IFACE_ENV"
+echo "  WiFi interface saved to $IFACE_ENV"
+
 # ── Step 6: Install bun ─────────────────────────────────────────────────────
 
 log "Ensuring bun is installed..."
@@ -128,10 +160,10 @@ echo "  Build complete"
 
 # ── Step 8: Install OpenClaw ────────────────────────────────────────────────
 
-log "Installing OpenClaw..."
+log "Installing OpenClaw ($OPENCLAW_VERSION)..."
 mkdir -p "$NPM_PREFIX"
 chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
-npm install -g openclaw --prefix "$NPM_PREFIX"
+npm install -g "openclaw@$OPENCLAW_VERSION" --prefix "$NPM_PREFIX"
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
   echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
@@ -170,6 +202,25 @@ else
   else
     echo "Error: Gateway scope patch: pattern not found and patch not already applied"
     exit 1
+  fi
+fi
+
+# 9c. Register Telegram channel if token exists in ClawBox config
+CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
+if [ -f "$CLAWBOX_CONFIG" ]; then
+  TGTOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
+  if [ -n "$TGTOKEN" ]; then
+    OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
+    if [ -f "$OPENCLAW_CONFIG" ]; then
+      node -e "
+        const fs=require('fs');
+        const c=JSON.parse(fs.readFileSync('$OPENCLAW_CONFIG','utf8'));
+        if(!c.channels)c.channels={};
+        c.channels.telegram={...c.channels.telegram,enabled:true,botToken:'$TGTOKEN',dmPolicy:'open',allowFrom:['*']};
+        fs.writeFileSync('$OPENCLAW_CONFIG',JSON.stringify(c,null,2));
+      "
+      echo "  Telegram channel registered in OpenClaw config"
+    fi
   fi
 fi
 
@@ -232,10 +283,12 @@ echo "  Services started"
 echo ""
 echo "=== ClawBox Setup Complete ==="
 echo ""
-echo "  WiFi AP:    ClawBox-Setup (open network)"
-echo "  Dashboard:  http://clawbox.local  or  http://10.42.0.1"
+echo "  WiFi interface: $WIFI_IFACE"
+echo "  WiFi AP:        ClawBox-Setup (open network)"
+echo "  Dashboard:      http://clawbox.local  or  http://10.42.0.1"
 echo ""
 echo "  Services:"
 echo "    systemctl status clawbox-ap"
 echo "    systemctl status clawbox-setup"
+echo "    systemctl status clawbox-gateway"
 echo ""

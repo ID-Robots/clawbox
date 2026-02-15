@@ -6,6 +6,7 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 ExecStart=/home/clawbox/clawbox/scripts/start-ap.sh
 ExecStop=/home/clawbox/clawbox/scripts/stop-ap.sh
 

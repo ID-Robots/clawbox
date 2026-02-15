@@ -3,5 +3,6 @@ Description=ClawBox Root Update Step (%i)
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 ExecStart=/home/clawbox/clawbox/scripts/root-update-step.sh %i
 TimeoutStartSec=600
