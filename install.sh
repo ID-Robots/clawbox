@@ -236,19 +236,32 @@ fi
 # 9d. Configure local voice pipeline (Whisper STT + Edge TTS)
 OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
 if [ -f "$OPENCLAW_CONFIG" ]; then
-  node -e "
+  OPENCLAW_CONFIG="$OPENCLAW_CONFIG" CLAWBOX_HOME="$CLAWBOX_HOME" node <<'NODE'
     const fs=require('fs');
-    const c=JSON.parse(fs.readFileSync('$OPENCLAW_CONFIG','utf8'));
+    const cfgPath=process.env.OPENCLAW_CONFIG;
+    const home=process.env.CLAWBOX_HOME;
+    const c=JSON.parse(fs.readFileSync(cfgPath,'utf8'));
     // Local Whisper STT for inbound audio
     if(!c.tools)c.tools={};
     if(!c.tools.media)c.tools.media={};
     c.tools.media.audio={
       enabled:true,
-      models:[{type:'cli',command:'python3',args:['$CLAWBOX_HOME/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
+      models:[{type:'cli',command:'python3',args:[home+'/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
     };
-    fs.writeFileSync('$OPENCLAW_CONFIG',JSON.stringify(c,null,2));
-  "
-  echo "  Voice pipeline configured (Whisper STT with persistent server)"
+    // Local Kokoro TTS via OpenAI-compatible proxy
+    if(!c.messages)c.messages={};
+    c.messages.tts={
+      auto:'inbound',
+      mode:'final',
+      provider:'openai',
+      openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}
+    };
+    if(!c.env)c.env={};
+    if(!c.env.vars)c.env.vars={};
+    c.env.vars.OPENAI_TTS_BASE_URL='http://localhost:8880/v1';
+    fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
+NODE
+  echo "  Voice pipeline configured (Whisper STT + Kokoro TTS via OpenAI proxy)"
 fi
 
 # 9e. Deploy STT script to workspace
