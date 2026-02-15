@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import ClawIcon from "./ClawIcon";
 import ProgressBar from "./ProgressBar";
 import WifiStep from "./WifiStep";
 import AIModelsStep from "./AIModelsStep";
@@ -64,11 +64,11 @@ export default function SetupWizard() {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="text-center max-w-md">
-          <p className="text-red-400 text-sm mb-4">{setupError}</p>
+          <p className="text-[var(--coral-bright)] text-sm mb-4">{setupError}</p>
           <button
             type="button"
             onClick={() => setRetryCount((c) => c + 1)}
-            className="px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer"
+            className="px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105"
           >
             Retry
           </button>
@@ -79,17 +79,10 @@ export default function SetupWizard() {
 
   return (
     <>
-      <header className="bg-gray-900/80 backdrop-blur-md px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
+      <header className="bg-[var(--bg-surface)]/80 backdrop-blur-md border-b border-[var(--border-subtle)] px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
         <Link href="/" className="flex items-center gap-2.5 shrink-0">
-          <Image
-            src="/clawbox-icon.png"
-            alt="ClawBox"
-            width={36}
-            height={36}
-            className="w-9 h-9 object-contain"
-            priority
-          />
-          <span className="hidden sm:inline text-xl font-bold font-display bg-gradient-to-r from-orange-400 to-orange-700 bg-clip-text text-transparent">
+          <ClawIcon size={36} animated={false} />
+          <span className="hidden sm:inline text-xl font-bold font-display title-gradient">
             ClawBox
           </span>
         </Link>

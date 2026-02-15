@@ -5,15 +5,15 @@ interface ProgressBarProps {
 const STEP_LABELS = ["WiFi", "AI Model", "Done"];
 
 function stepColors(isDone: boolean, isActive: boolean): string {
-  if (isDone) return "text-green-400 bg-green-500/10";
-  if (isActive) return "text-orange-400 bg-orange-500/10";
-  return "text-gray-500 bg-gray-800";
+  if (isDone) return "text-[#00e5cc] bg-[rgba(0,229,204,0.1)]";
+  if (isActive) return "text-[#ff4d4d] bg-[rgba(255,77,77,0.1)]";
+  return "text-[var(--text-muted)] bg-[var(--bg-surface)]";
 }
 
 function badgeColor(isDone: boolean, isActive: boolean): string {
-  if (isDone) return "bg-green-500";
-  if (isActive) return "bg-orange-500";
-  return "bg-gray-600";
+  if (isDone) return "bg-[#00e5cc]";
+  if (isActive) return "bg-[#ff4d4d]";
+  return "bg-[var(--text-muted)]";
 }
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {

@@ -9,10 +9,10 @@ interface UpdateStepProps {
 
 function stepTextClass(status: StepStatus): string {
   switch (status) {
-    case "running": return "text-orange-400 font-medium";
-    case "completed": return "text-gray-300";
+    case "running": return "text-[var(--coral-bright)] font-medium";
+    case "completed": return "text-[var(--text-primary)]";
     case "failed": return "text-red-400";
-    default: return "text-gray-500";
+    default: return "text-[var(--text-muted)]";
   }
 }
 
@@ -22,7 +22,7 @@ function StepIcon({ status }: { status: StepStatus }) {
   }
   if (status === "completed") {
     return (
-      <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center text-white text-xs font-bold">
+      <div className="w-5 h-5 rounded-full bg-[#00e5cc] flex items-center justify-center text-white text-xs font-bold">
         &#10003;
       </div>
     );
@@ -166,7 +166,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (fetchError) {
     return (
       <div className="w-full max-w-[520px]">
-        <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
+        <div className="card-surface  rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
             System Update
           </h1>
@@ -177,14 +177,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             <button
               type="button"
               onClick={retry}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
+              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
             >
               Retry
             </button>
             <button
               type="button"
               onClick={onNext}
-              className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
+              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
             >
               Skip updates
             </button>
@@ -197,8 +197,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (!state) {
     return (
       <div className="w-full max-w-[520px]">
-        <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
-          <div className="flex items-center justify-center gap-2.5 p-6 text-gray-400 text-sm">
+        <div className="card-surface  rounded-2xl p-8">
+          <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> Preparing update...
           </div>
         </div>
@@ -215,7 +215,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   return (
     <div className="w-full max-w-[520px]">
-      <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
+      <div className="card-surface  rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           {isDone ? (
             <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
@@ -225,7 +225,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             "System Update"
           )}
         </h1>
-        <p className="text-gray-400 mb-6 leading-relaxed">
+        <p className="text-[var(--text-secondary)] mb-6 leading-relaxed">
           {isDone
             ? "All updates have been applied successfully."
             : isFailed
@@ -259,7 +259,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
         {/* Current step indicator */}
         {runningStep && (
-          <div className="flex items-center gap-2.5 py-3 text-orange-400 text-sm">
+          <div className="flex items-center gap-2.5 py-3 text-[var(--coral-bright)] text-sm">
             <div className="spinner !w-4 !h-4 !border-2" />
             {runningStep.label}...
           </div>
@@ -286,7 +286,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               <button
                 type="button"
                 onClick={onNext}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
+                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
               >
                 Continue
               </button>
@@ -296,14 +296,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 <button
                   type="button"
                   onClick={retry}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer"
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
                 >
                   Retry
                 </button>
                 <button
                   type="button"
                   onClick={onNext}
-                  className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
+                  className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
                 >
                   Skip updates
                 </button>

@@ -80,11 +80,11 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
 
   return (
     <div className="w-full max-w-[520px]">
-      <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-8">
+      <div className="card-surface  rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           Connect Telegram
         </h1>
-        <p className="text-gray-400 mb-5 leading-relaxed">
+        <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
           Link a Telegram bot so you can chat with your ClawBox from your phone.
         </p>
 
@@ -98,14 +98,14 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
               fgColor="#000000"
             />
           </div>
-          <ol className="ml-0 pl-5 leading-[1.8] text-sm text-gray-300 list-decimal">
+          <ol className="ml-0 pl-5 leading-[1.8] text-sm text-[var(--text-primary)] list-decimal">
             <li>
               Scan the QR code or search{" "}
               <a
                 href="https://t.me/BotFather"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-orange-400 hover:text-orange-300 font-semibold"
+                className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold"
               >
                 @BotFather
               </a>{" "}
@@ -113,7 +113,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             </li>
             <li>
               Send{" "}
-              <code className="bg-gray-700 px-1.5 py-0.5 rounded text-xs text-orange-400">
+              <code className="bg-[var(--bg-surface)] px-1.5 py-0.5 rounded text-xs text-[var(--coral-bright)]">
                 /newbot
               </code>{" "}
               and follow the prompts
@@ -123,7 +123,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             </li>
           </ol>
         </div>
-        <label htmlFor="telegram-bot-token" className="block text-xs font-semibold text-gray-400 mb-1.5 mt-4">
+        <label htmlFor="telegram-bot-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5 mt-4">
           Bot Token
         </label>
         <div className="relative">
@@ -135,13 +135,13 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
             spellCheck={false}
             autoComplete="off"
-            className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500"
+            className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
           />
           <button
             type="button"
             onClick={() => setShowToken((v) => !v)}
             aria-label={showToken ? "Hide token" : "Show token"}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5"
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
           >
             {showToken ? (
               <svg aria-labelledby="hide-token-title" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><title id="hide-token-title">Hide token</title><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
@@ -158,14 +158,14 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             type="button"
             onClick={saveTelegram}
             disabled={saving}
-            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-orange-500/25 cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? "Saving..." : "Save & Continue"}
           </button>
           <button
             type="button"
             onClick={onNext}
-            className="bg-transparent border-none text-orange-400 text-sm underline cursor-pointer p-1"
+            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
           >
             Skip for now
           </button>

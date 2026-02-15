@@ -6,8 +6,30 @@
 }
 
 :root {
-  --background: #111827;
-  --foreground: #f9fafb;
+  /* OpenClaw design tokens */
+  --bg-deep: #050810;
+  --bg-surface: #0a0f1a;
+  --bg-elevated: #111827;
+  --coral-bright: #ff4d4d;
+  --coral-mid: #e63946;
+  --coral-dark: #991b1b;
+  --cyan-bright: #00e5cc;
+  --cyan-mid: #14b8a6;
+  --text-primary: #f0f4ff;
+  --text-secondary: #8892b0;
+  --text-muted: #5a6480;
+  --border-subtle: rgba(136, 146, 176, 0.15);
+  --border-accent: rgba(255, 77, 77, 0.3);
+  --surface-card: rgba(10, 15, 26, 0.65);
+  --surface-card-strong: rgba(10, 15, 26, 0.8);
+  --shadow-coral-soft: rgba(255, 77, 77, 0.15);
+  --shadow-coral-mid: rgba(255, 77, 77, 0.25);
+  --logo-gradient-start: #ff4d4d;
+  --logo-gradient-end: #991b1b;
+  --logo-glow: rgba(255, 77, 77, 0.4);
+
+  --background: var(--bg-deep);
+  --foreground: var(--text-primary);
 }
 
 html,
@@ -31,19 +53,63 @@ h6 {
   font-family: var(--font-display);
 }
 
-/* Gradient button */
+/* OpenClaw title gradient — white to cyan through coral */
+.title-gradient {
+  background: linear-gradient(135deg, #f0f4ff 0%, var(--coral-bright) 52%, #00e5cc 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient button — coral red */
 .btn-gradient {
-  background: linear-gradient(135deg, #f97316, #ef4444, #a855f7);
+  background: linear-gradient(135deg, var(--coral-bright) 0%, var(--coral-dark) 100%);
   transition: opacity 0.2s, transform 0.2s;
+  box-shadow: 0 4px 20px var(--shadow-coral-mid);
 }
 .btn-gradient:hover {
   opacity: 0.9;
+  box-shadow: 0 8px 30px rgba(255, 77, 77, 0.35);
+}
+
+/* Card style matching openclaw.ai */
+.card-surface {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(12px);
+}
+
+/* Subtle star background */
+.bg-stars {
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.15) 0%, transparent 100%),
+    radial-gradient(1px 1px at 40% 70%, rgba(255,255,255,0.1) 0%, transparent 100%),
+    radial-gradient(1px 1px at 60% 20%, rgba(255,255,255,0.12) 0%, transparent 100%),
+    radial-gradient(1px 1px at 80% 60%, rgba(255,255,255,0.08) 0%, transparent 100%),
+    radial-gradient(1px 1px at 10% 80%, rgba(255,255,255,0.1) 0%, transparent 100%),
+    radial-gradient(1px 1px at 70% 90%, rgba(255,255,255,0.07) 0%, transparent 100%),
+    radial-gradient(1px 1px at 90% 10%, rgba(255,255,255,0.11) 0%, transparent 100%);
+}
+
+/* Nebula glow effect */
+.bg-nebula::before {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(ellipse at 30% 20%, rgba(255, 77, 77, 0.06) 0%, transparent 60%),
+              radial-gradient(ellipse at 70% 80%, rgba(0, 229, 204, 0.04) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 /* Custom scrollbar */
 html {
   scrollbar-width: thin;
-  scrollbar-color: #4b5563 #1f2937;
+  scrollbar-color: #4b5563 var(--bg-deep);
 }
 
 ::-webkit-scrollbar {
@@ -51,7 +117,7 @@ html {
 }
 
 ::-webkit-scrollbar-track {
-  background: #1f2937;
+  background: var(--bg-deep);
 }
 
 ::-webkit-scrollbar-thumb {
@@ -65,7 +131,7 @@ html {
 
 /* Selection color */
 ::selection {
-  background: rgba(249, 115, 22, 0.3);
+  background: rgba(255, 77, 77, 0.3);
   color: white;
 }
 
@@ -78,9 +144,29 @@ html {
 .spinner {
   width: 18px;
   height: 18px;
-  border: 2px solid #374151;
-  border-top-color: #f97316;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--coral-bright);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
   display: inline-block;
+}
+
+/* Claw icon animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes blink {
+  0%, 90%, 100% { opacity: 1; }
+  95% { opacity: 0.3; }
+}
+
+.claw-icon {
+  animation: float 3s ease-in-out infinite;
+  filter: drop-shadow(0 0 20px var(--logo-glow));
+}
+
+.claw-icon .eye-glow {
+  animation: blink 3s ease-in-out infinite;
 }

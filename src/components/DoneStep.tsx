@@ -51,10 +51,10 @@ function Chevron({ open }: { open: boolean }) {
 /* ── Update step helpers ── */
 function updateStepTextClass(status: StepStatus): string {
   switch (status) {
-    case "running": return "text-orange-400 font-medium";
-    case "completed": return "text-gray-400";
+    case "running": return "text-[var(--coral-bright)] font-medium";
+    case "completed": return "text-[var(--text-secondary)]";
     case "failed": return "text-red-400";
-    default: return "text-gray-600";
+    default: return "text-[var(--text-muted)]";
   }
 }
 
@@ -64,7 +64,7 @@ function UpdateStepIcon({ status }: { status: StepStatus }) {
   }
   if (status === "completed") {
     return (
-      <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px] font-bold">
+      <div className="w-4 h-4 rounded-full bg-[#00e5cc] flex items-center justify-center text-white text-[10px] font-bold">
         &#10003;
       </div>
     );
@@ -421,7 +421,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       {/* Page heading */}
       <div className="mb-6">
         <h1 className="text-2xl font-bold font-display text-gray-100">Administration</h1>
-        <p className="text-gray-500 text-sm mt-1">Device settings and management</p>
+        <p className="text-[var(--text-muted)] text-sm mt-1">Device settings and management</p>
       </div>
 
       {completeError && (
@@ -436,8 +436,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           disabled={finishing}
           className={`px-6 py-2.5 rounded-lg text-sm font-semibold transition transform cursor-pointer ${
             setupComplete
-              ? "bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600"
-              : "btn-gradient text-white hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100"
+              ? "bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 hover:bg-gray-600"
+              : "btn-gradient text-white hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] disabled:opacity-50 disabled:hover:scale-100"
           }`}
         >
           {finishing ? "Finishing..." : setupComplete ? "OpenClaw" : "Finish Setup"}
@@ -446,7 +446,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           type="button"
           onClick={triggerUpdate}
           disabled={updateStarted && updateState?.phase === "running"}
-          className="px-5 py-2.5 bg-transparent border border-orange-500/30 text-orange-400 rounded-lg text-sm font-medium hover:bg-orange-500/10 hover:border-orange-500/50 transition-colors cursor-pointer disabled:opacity-50"
+          className="px-5 py-2.5 bg-transparent border border-[var(--coral-bright)]/30 text-[var(--coral-bright)] rounded-lg text-sm font-medium hover:bg-orange-500/10 hover:border-[var(--coral-bright)]/50 transition-colors cursor-pointer disabled:opacity-50"
         >
           {updateStarted && updateState?.phase === "running" ? "Updating..." : "System Update"}
         </button>
@@ -454,10 +454,10 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
       {/* System Update Progress */}
       {updateStarted && (
-        <div className="mb-4 bg-gray-800/50 border border-gray-700/50 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-gray-300 mb-3">
+        <div className="mb-4 card-surface  rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
             {updateState?.phase === "completed" ? (
-              <span className="text-green-400">Update Complete</span>
+              <span className="text-[#00e5cc]">Update Complete</span>
             ) : updateState?.phase === "failed" ? (
               <span className="text-red-400">Update Failed</span>
             ) : (
@@ -486,26 +486,26 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       {/* Settings sections */}
       <div className="space-y-3">
         {/* System Info */}
-        <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+        <div className="card-surface  rounded-xl overflow-hidden">
           <button
             type="button"
             onClick={() => toggle("sysinfo")}
-            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-gray-300 hover:text-gray-100 hover:bg-gray-700/30 bg-transparent border-none cursor-pointer text-left transition-colors"
+            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-[var(--text-primary)] hover:text-gray-100 hover:bg-[var(--bg-surface)]/30 bg-transparent border-none cursor-pointer text-left transition-colors"
           >
             <Chevron open={openSection === "sysinfo"} />
             System Info
           </button>
           {openSection === "sysinfo" && (
-            <div className="px-5 pb-4 border-t border-gray-700/30">
+            <div className="px-5 pb-4 border-t border-[var(--border-subtle)]/30">
               {!info && !loadError && (
-                <div className="flex items-center justify-center gap-2.5 py-4 text-gray-400 text-sm">
+                <div className="flex items-center justify-center gap-2.5 py-4 text-[var(--text-secondary)] text-sm">
                   <div className="spinner" /> Loading...
                 </div>
               )}
               {loadError && <div className="py-3 text-center text-red-400 text-sm">Failed to load system info</div>}
               {info && infoItems.map(({ label, value }) => (
-                <div key={label} className="flex justify-between py-2.5 border-b border-gray-700/30 last:border-b-0 text-sm">
-                  <span className="text-gray-500 font-medium">{label}</span>
+                <div key={label} className="flex justify-between py-2.5 border-b border-[var(--border-subtle)]/30 last:border-b-0 text-sm">
+                  <span className="text-[var(--text-muted)] font-medium">{label}</span>
                   <span className="font-semibold text-gray-200 text-right">{value}</span>
                 </div>
               ))}
@@ -514,41 +514,41 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         </div>
 
         {/* Security */}
-        <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+        <div className="card-surface  rounded-xl overflow-hidden">
           <button
             type="button"
             onClick={() => toggle("security")}
-            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-gray-300 hover:text-gray-100 hover:bg-gray-700/30 bg-transparent border-none cursor-pointer text-left transition-colors"
+            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-[var(--text-primary)] hover:text-gray-100 hover:bg-[var(--bg-surface)]/30 bg-transparent border-none cursor-pointer text-left transition-colors"
           >
             <Chevron open={openSection === "security"} />
             Security
           </button>
           {openSection === "security" && (
-            <div className="px-5 pb-5 border-t border-gray-700/30 pt-4 space-y-4">
-              <p className="text-xs text-gray-500">Set system password and configure hotspot for next setup.</p>
+            <div className="px-5 pb-5 border-t border-[var(--border-subtle)]/30 pt-4 space-y-4">
+              <p className="text-xs text-[var(--text-muted)]">Set system password and configure hotspot for next setup.</p>
               <div>
-                <label htmlFor="sec-pw" className="block text-xs font-semibold text-gray-400 mb-1.5">New Password</label>
+                <label htmlFor="sec-pw" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">New Password</label>
                 <div className="relative">
-                  <input id="sec-pw" type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 8 characters" autoComplete="new-password" className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500" />
-                  <button type="button" onClick={() => setShowPassword((v) => !v)} aria-label={showPassword ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5">{showPassword ? EyeClosed : EyeOpen}</button>
+                  <input id="sec-pw" type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 8 characters" autoComplete="new-password" className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500" />
+                  <button type="button" onClick={() => setShowPassword((v) => !v)} aria-label={showPassword ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5">{showPassword ? EyeClosed : EyeOpen}</button>
                 </div>
               </div>
               <div>
-                <label htmlFor="sec-pw2" className="block text-xs font-semibold text-gray-400 mb-1.5">Confirm Password</label>
+                <label htmlFor="sec-pw2" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Confirm Password</label>
                 <div className="relative">
-                  <input id="sec-pw2" type={showConfirm ? "text" : "password"} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" autoComplete="new-password" className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500" />
-                  <button type="button" onClick={() => setShowConfirm((v) => !v)} aria-label={showConfirm ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5">{showConfirm ? EyeClosed : EyeOpen}</button>
+                  <input id="sec-pw2" type={showConfirm ? "text" : "password"} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" autoComplete="new-password" className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500" />
+                  <button type="button" onClick={() => setShowConfirm((v) => !v)} aria-label={showConfirm ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5">{showConfirm ? EyeClosed : EyeOpen}</button>
                 </div>
               </div>
-              <div className="border-t border-gray-700/50 pt-3">
-                <label htmlFor="hs-name" className="block text-xs font-semibold text-gray-400 mb-1.5">Hotspot Name</label>
-                <input id="hs-name" type="text" value={hotspotName} onChange={(e) => setHotspotName(e.target.value)} maxLength={32} className="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500" />
+              <div className="border-t border-[var(--border-subtle)] pt-3">
+                <label htmlFor="hs-name" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Hotspot Name</label>
+                <input id="hs-name" type="text" value={hotspotName} onChange={(e) => setHotspotName(e.target.value)} maxLength={32} className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500" />
               </div>
               <div>
-                <label htmlFor="hs-pw" className="block text-xs font-semibold text-gray-400 mb-1.5">Hotspot Password <span className="text-gray-500 font-normal">(optional)</span></label>
+                <label htmlFor="hs-pw" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span></label>
                 <div className="relative">
-                  <input id="hs-pw" type={showHotspotPassword ? "text" : "password"} value={hotspotPassword} onChange={(e) => setHotspotPassword(e.target.value)} placeholder="Leave empty for open network" className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500" />
-                  <button type="button" onClick={() => setShowHotspotPassword((v) => !v)} aria-label={showHotspotPassword ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5">{showHotspotPassword ? EyeClosed : EyeOpen}</button>
+                  <input id="hs-pw" type={showHotspotPassword ? "text" : "password"} value={hotspotPassword} onChange={(e) => setHotspotPassword(e.target.value)} placeholder="Leave empty for open network" className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500" />
+                  <button type="button" onClick={() => setShowHotspotPassword((v) => !v)} aria-label={showHotspotPassword ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5">{showHotspotPassword ? EyeClosed : EyeOpen}</button>
                 </div>
               </div>
               {secStatus && <StatusMessage type={secStatus.type} message={secStatus.message} />}
@@ -558,32 +558,32 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         </div>
 
         {/* Telegram */}
-        <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+        <div className="card-surface  rounded-xl overflow-hidden">
           <button
             type="button"
             onClick={() => toggle("telegram")}
-            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-gray-300 hover:text-gray-100 hover:bg-gray-700/30 bg-transparent border-none cursor-pointer text-left transition-colors"
+            className="flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-[var(--text-primary)] hover:text-gray-100 hover:bg-[var(--bg-surface)]/30 bg-transparent border-none cursor-pointer text-left transition-colors"
           >
             <Chevron open={openSection === "telegram"} />
             Telegram Bot
           </button>
           {openSection === "telegram" && (
-            <div className="px-5 pb-5 border-t border-gray-700/30 pt-4 space-y-4">
+            <div className="px-5 pb-5 border-t border-[var(--border-subtle)]/30 pt-4 space-y-4">
               <div className="flex gap-4 items-start">
                 <div className="shrink-0 p-1.5 bg-white rounded-lg">
                   <QRCodeSVG value="https://t.me/BotFather" size={80} level="M" bgColor="#ffffff" fgColor="#000000" />
                 </div>
-                <ol className="ml-0 pl-4 leading-[1.7] text-xs text-gray-300 list-decimal">
-                  <li>Scan QR or search <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:text-orange-300 font-semibold">@BotFather</a></li>
-                  <li>Send <code className="bg-gray-700 px-1 py-0.5 rounded text-[11px] text-orange-400">/newbot</code></li>
+                <ol className="ml-0 pl-4 leading-[1.7] text-xs text-[var(--text-primary)] list-decimal">
+                  <li>Scan QR or search <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold">@BotFather</a></li>
+                  <li>Send <code className="bg-[var(--bg-surface)] px-1 py-0.5 rounded text-[11px] text-[var(--coral-bright)]">/newbot</code></li>
                   <li>Paste the <strong>Bot Token</strong> below</li>
                 </ol>
               </div>
               <div>
-                <label htmlFor="tg-token" className="block text-xs font-semibold text-gray-400 mb-1.5">Bot Token</label>
+                <label htmlFor="tg-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Bot Token</label>
                 <div className="relative">
-                  <input id="tg-token" type={showBotToken ? "text" : "password"} value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder="123456789:ABCdefGHI..." spellCheck={false} autoComplete="off" className="w-full px-3.5 py-2.5 pr-10 bg-gray-900 border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-orange-500 transition-colors placeholder-gray-500" />
-                  <button type="button" onClick={() => setShowBotToken((v) => !v)} aria-label={showBotToken ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 bg-transparent border-none cursor-pointer p-0.5">{showBotToken ? EyeClosed : EyeOpen}</button>
+                  <input id="tg-token" type={showBotToken ? "text" : "password"} value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder="123456789:ABCdefGHI..." spellCheck={false} autoComplete="off" className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500" />
+                  <button type="button" onClick={() => setShowBotToken((v) => !v)} aria-label={showBotToken ? "Hide" : "Show"} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5">{showBotToken ? EyeClosed : EyeOpen}</button>
                 </div>
               </div>
               {tgStatus && <StatusMessage type={tgStatus.type} message={tgStatus.message} />}
@@ -593,7 +593,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         </div>
 
         {/* Danger Zone */}
-        <div className="bg-gray-800/30 border border-red-500/20 rounded-xl overflow-hidden">
+        <div className="card-surface border border-red-500/20 rounded-xl overflow-hidden">
           <button
             type="button"
             onClick={() => toggle("danger")}
@@ -604,7 +604,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </button>
           {openSection === "danger" && (
             <div className="px-5 pb-5 border-t border-red-500/10 pt-4">
-              <p className="text-xs text-gray-400 mb-3">Erase all settings and restart the setup wizard. This action cannot be undone.</p>
+              <p className="text-xs text-[var(--text-secondary)] mb-3">Erase all settings and restart the setup wizard. This action cannot be undone.</p>
               <button
                 type="button"
                 onClick={() => setShowResetConfirm(true)}
@@ -619,10 +619,10 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
       {/* Factory reset in progress overlay */}
       {resetInProgress && (
-        <div className="fixed inset-0 flex flex-col items-center justify-center z-[100] bg-gray-900">
+        <div className="fixed inset-0 flex flex-col items-center justify-center z-[100] bg-[var(--bg-deep)]">
           <div className="spinner !w-10 !h-10 !border-3 mb-6" />
           <h2 className="text-xl font-semibold font-display text-gray-200 mb-2">Factory Reset in Progress</h2>
-          <p className="text-gray-400 text-sm text-center max-w-xs">Cleaning up and reinstalling. This may take a few minutes. The page will reload automatically.</p>
+          <p className="text-[var(--text-secondary)] text-sm text-center max-w-xs">Cleaning up and reinstalling. This may take a few minutes. The page will reload automatically.</p>
         </div>
       )}
 
@@ -631,15 +631,15 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         <div className="fixed inset-0 flex items-center justify-center z-[100] p-6">
           <div className="fixed inset-0 bg-black/60" aria-hidden="true" role="presentation" />
           <div
-            className="relative z-[101] w-full max-w-[400px] bg-gray-800 border border-gray-700 rounded-2xl p-8 shadow-2xl"
+            className="relative z-[101] w-full max-w-[400px] bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl p-8 shadow-2xl"
             role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" ref={modalRef} tabIndex={-1}
           >
             <h2 id="reset-dialog-title" className="text-lg font-semibold font-display mb-2 text-red-400">Factory Reset</h2>
-            <p className="text-gray-400 text-sm leading-relaxed mb-5">This will erase all settings and restart the setup wizard. This action cannot be undone.</p>
+            <p className="text-[var(--text-secondary)] text-sm leading-relaxed mb-5">This will erase all settings and restart the setup wizard. This action cannot be undone.</p>
             {resetError && <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">{resetError}</div>}
             <div className="flex items-center gap-3">
               <button type="button" onClick={handleFactoryReset} disabled={resetting} className="px-7 py-3 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-500 transition-colors disabled:opacity-50 cursor-pointer">{resetting ? "Resetting..." : "Yes, Reset Everything"}</button>
-              <button type="button" onClick={closeResetModal} className="px-5 py-2.5 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer">Cancel</button>
+              <button type="button" onClick={closeResetModal} className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors cursor-pointer">Cancel</button>
             </div>
           </div>
         </div>
