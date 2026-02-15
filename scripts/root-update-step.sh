@@ -48,6 +48,10 @@ case "${1:-}" in
         echo "Restarting clawbox-setup.service..."
         systemctl restart clawbox-setup.service
         ;;
+    restart_ap)
+        echo "Restarting clawbox-ap.service..."
+        systemctl restart clawbox-ap.service
+        ;;
     openclaw_install)
         OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
         INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")

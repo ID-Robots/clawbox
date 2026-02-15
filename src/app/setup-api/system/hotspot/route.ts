@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
+
+const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +72,17 @@ export async function POST(request: Request) {
     await fs.writeFile(HOTSPOT_ENV_PATH, envLines.join("\n") + "\n", {
       mode: 0o600,
     });
+
+    // Restart the AP service via root-update mechanism so changes take effect
+    try {
+      await execFileAsync("systemctl", [
+        "start",
+        "clawbox-root-update@restart_ap.service",
+      ]);
+    } catch (apErr) {
+      console.warn("[hotspot] Failed to restart AP:", apErr);
+      // Non-fatal: settings are saved for next AP start
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

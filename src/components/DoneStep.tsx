@@ -48,6 +48,24 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/* ── Section status badge ── */
+function SectionBadge({ done }: { done: boolean }) {
+  if (done) {
+    return (
+      <span className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold text-[#00e5cc] uppercase tracking-wide">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        Done
+      </span>
+    );
+  }
+  return (
+    <span className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 uppercase tracking-wide">
+      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+      Pending
+    </span>
+  );
+}
+
 /* ── Update step helpers ── */
 function updateStepTextClass(status: StepStatus): string {
   switch (status) {
@@ -120,6 +138,25 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [showBotToken, setShowBotToken] = useState(false);
   const [tgSaving, setTgSaving] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  /* ── Section completion status ── */
+  const [securityDone, setSecurityDone] = useState(false);
+  const [telegramDone, setTelegramDone] = useState(false);
+
+  /* ── Fetch section status on mount ── */
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/setup-api/setup/status", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && !controller.signal.aborted) {
+          setSecurityDone(!!data.password_configured);
+          setTelegramDone(!!data.telegram_configured);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
 
   /* ── Fetch system info on mount ── */
   useEffect(() => {
@@ -356,6 +393,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         return;
       }
       setSecStatus({ type: "success", message: "Settings saved!" });
+      if (password) setSecurityDone(true);
       setPassword("");
       setConfirmPassword("");
     } catch (err) {
@@ -393,6 +431,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       const data = await res.json();
       if (data.success) {
         setTgStatus({ type: "success", message: "Telegram bot configured!" });
+        setTelegramDone(true);
       } else {
         setTgStatus({
           type: "error",
@@ -526,6 +565,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           >
             <Chevron open={openSection === "security"} />
             Security
+            <SectionBadge done={securityDone} />
           </button>
           {openSection === "security" && (
             <div className="px-5 pb-5 border-t border-[var(--border-subtle)]/30 pt-4 space-y-4">
@@ -570,6 +610,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           >
             <Chevron open={openSection === "telegram"} />
             Telegram Bot
+            <SectionBadge done={telegramDone} />
           </button>
           {openSection === "telegram" && (
             <div className="px-5 pb-5 border-t border-[var(--border-subtle)]/30 pt-4 space-y-4">
