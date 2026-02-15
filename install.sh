@@ -233,6 +233,46 @@ NODE
   fi
 fi
 
+# 9d. Configure local voice pipeline (Whisper STT + Edge TTS)
+OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
+if [ -f "$OPENCLAW_CONFIG" ]; then
+  node -e "
+    const fs=require('fs');
+    const c=JSON.parse(fs.readFileSync('$OPENCLAW_CONFIG','utf8'));
+    // Local Whisper STT for inbound audio
+    if(!c.tools)c.tools={};
+    if(!c.tools.media)c.tools.media={};
+    c.tools.media.audio={
+      enabled:true,
+      models:[{type:'cli',command:'python3',args:['$CLAWBOX_HOME/.openclaw/workspace/scripts/stt.py','{{MediaPath}}']}]
+    };
+    // Edge TTS for voice replies (responds with audio when user sends voice)
+    if(!c.messages)c.messages={};
+    c.messages.tts={...c.messages.tts,auto:'inbound',provider:'edge',edge:{enabled:true,voice:'en-US-AriaNeural',lang:'en-US'}};
+    fs.writeFileSync('$OPENCLAW_CONFIG',JSON.stringify(c,null,2));
+  "
+  echo "  Voice pipeline configured (Whisper STT + Edge TTS)"
+fi
+
+# 9e. Deploy STT script to workspace
+WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
+mkdir -p "$WORKSPACE/scripts"
+cp "$PROJECT_DIR/scripts/stt.py" "$WORKSPACE/scripts/stt.py" 2>/dev/null || \
+  cat > "$WORKSPACE/scripts/stt.py" << 'STTEOF'
+#!/usr/bin/env python3
+"""Transcribe audio using faster-whisper."""
+import sys
+from faster_whisper import WhisperModel
+def transcribe(path, model_size="tiny"):
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(path)
+    return " ".join(s.text.strip() for s in segments).strip()
+if __name__ == "__main__":
+    if len(sys.argv) < 2: sys.exit("Usage: stt.py <audio>")
+    print(transcribe(sys.argv[1], sys.argv[2] if len(sys.argv)>2 else "tiny"))
+STTEOF
+chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"
+
 # Fix ownership of openclaw config files
 chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
 

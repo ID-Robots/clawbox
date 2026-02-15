@@ -71,6 +71,9 @@ case "${1:-}" in
         systemctl enable clawbox-gateway.service
         systemctl restart clawbox-gateway.service
         ;;
+    ffmpeg_install)
+        apt-get install -y ffmpeg
+        ;;
     voice_install)
         bash /home/clawbox/clawbox/scripts/install-voice.sh
         ;;
