@@ -211,9 +211,12 @@ echo "  Services installed and enabled"
 # ── Step 13: Polkit rules for root updates ──────────────────────────────────
 
 log "Installing polkit rules..."
-POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
-mkdir -p "$POLKIT_RULES_DIR"
-cp "$PROJECT_DIR/config/49-clawbox-updates.rules" "$POLKIT_RULES_DIR/"
+# polkit 0.105 uses .pkla files in localauthority, not JavaScript .rules
+POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
+mkdir -p "$POLKIT_PKLA_DIR"
+cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
+# Clean up old .rules file if present (wrong format for polkit 0.105)
+rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
 echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
 
 # ── Step 14: Start services ─────────────────────────────────────────────────

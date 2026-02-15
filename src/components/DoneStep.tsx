@@ -265,7 +265,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 : "btn-gradient text-white hover:scale-105 shadow-lg shadow-orange-500/25 disabled:opacity-50 disabled:hover:scale-100"
             }`}
           >
-            {finishing ? "Finishing..." : completed ? "Open Control Panel" : "Finish Setup"}
+            {finishing ? "Finishing..." : completed ? "OpenClaw" : "Finish Setup"}
           </button>
           <button
             type="button"

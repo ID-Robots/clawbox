@@ -14,6 +14,15 @@ case "${1:-}" in
         nvpmodel -m 0
         jetson_clocks
         ;;
+    chpasswd)
+        INPUT_FILE="/home/clawbox/clawbox/data/.chpasswd-input"
+        if [ ! -f "$INPUT_FILE" ]; then
+            echo "Error: password input file not found" >&2
+            exit 1
+        fi
+        chpasswd < "$INPUT_FILE"
+        rm -f "$INPUT_FILE"
+        ;;
     *)
         echo "Unknown step: ${1:-<empty>}" >&2
         exit 1
