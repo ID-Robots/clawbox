@@ -244,33 +244,21 @@ if [ -f "$OPENCLAW_CONFIG" ]; then
     if(!c.tools.media)c.tools.media={};
     c.tools.media.audio={
       enabled:true,
-      models:[{type:'cli',command:'python3',args:['$CLAWBOX_HOME/.openclaw/workspace/scripts/stt.py','{{MediaPath}}']}]
+      models:[{type:'cli',command:'python3',args:['$CLAWBOX_HOME/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
     };
-    // Edge TTS for voice replies (responds with audio when user sends voice)
-    if(!c.messages)c.messages={};
-    c.messages.tts={...c.messages.tts,auto:'inbound',provider:'edge',edge:{enabled:true,voice:'en-US-AriaNeural',lang:'en-US'}};
     fs.writeFileSync('$OPENCLAW_CONFIG',JSON.stringify(c,null,2));
   "
-  echo "  Voice pipeline configured (Whisper STT + Edge TTS)"
+  echo "  Voice pipeline configured (Whisper STT with persistent server)"
 fi
 
 # 9e. Deploy STT script to workspace
 WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
 mkdir -p "$WORKSPACE/scripts"
-cp "$PROJECT_DIR/scripts/stt.py" "$WORKSPACE/scripts/stt.py" 2>/dev/null || \
-  cat > "$WORKSPACE/scripts/stt.py" << 'STTEOF'
-#!/usr/bin/env python3
-"""Transcribe audio using faster-whisper."""
-import sys
-from faster_whisper import WhisperModel
-def transcribe(path, model_size="tiny"):
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(path)
-    return " ".join(s.text.strip() for s in segments).strip()
-if __name__ == "__main__":
-    if len(sys.argv) < 2: sys.exit("Usage: stt.py <audio>")
-    print(transcribe(sys.argv[1], sys.argv[2] if len(sys.argv)>2 else "tiny"))
-STTEOF
+# Copy all voice scripts from repo to workspace
+for f in kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py; do
+  [ -f "$PROJECT_DIR/scripts/$f" ] && cp "$PROJECT_DIR/scripts/$f" "$WORKSPACE/scripts/$f"
+done
+chmod +x "$WORKSPACE/scripts/"*.sh 2>/dev/null || true
 chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"
 
 # Fix ownership of openclaw config files
