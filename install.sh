@@ -233,7 +233,7 @@ NODE
   fi
 fi
 
-# 9d. Configure local voice pipeline (Whisper STT + Edge TTS)
+# 9d. Configure local voice pipeline (Whisper STT + Kokoro TTS)
 OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
 if [ -f "$OPENCLAW_CONFIG" ]; then
   OPENCLAW_CONFIG="$OPENCLAW_CONFIG" CLAWBOX_HOME="$CLAWBOX_HOME" node <<'NODE'
