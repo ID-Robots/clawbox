@@ -89,7 +89,7 @@ fi
 # ── Step 4: Install Kokoro TTS ───────────────────────────────────────────────
 
 echo "[4/7] Installing Kokoro TTS..."
-su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy<2' kokoro soundfile Pillow" 2>&1 | tail -3
+su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy<2' 'transformers<5' kokoro soundfile Pillow" 2>&1 | tail -3
 
 # ── Step 5: Pre-download models ─────────────────────────────────────────────
 
