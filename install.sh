@@ -322,7 +322,7 @@ step_polkit_rules() {
 }
 
 step_voice_install() {
-  apt-get install -y -qq espeak-ng libsndfile1
+  apt-get install -y -qq espeak-ng libsndfile1 cmake build-essential
   bash "$PROJECT_DIR/scripts/install-voice.sh"
   echo "  Voice pipeline installed"
   bash "$PROJECT_DIR/scripts/setup-optimizations.sh"

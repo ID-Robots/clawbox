@@ -98,6 +98,12 @@ su - "$CLAWBOX_USER" -c "$PIP install --user 'transformers<5'" 2>&1 | tail -3
 # ── Step 5: Pre-download models ─────────────────────────────────────────────
 
 echo "[5/7] Pre-downloading Whisper model (base)..."
+# Clear corrupted cache (0-byte blobs from failed/rate-limited HF downloads)
+WHISPER_CACHE="$CLAWBOX_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-base"
+if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty | grep -q .; then
+  echo "  Clearing corrupted Whisper model cache..."
+  rm -rf "$WHISPER_CACHE"
+fi
 DEVICE="cpu"
 COMPUTE="auto"
 if $HAS_CUDA; then
