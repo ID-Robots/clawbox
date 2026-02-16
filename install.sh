@@ -258,7 +258,7 @@ c.tools.media.audio={
   models:[{type:'cli',command:'python3',args:[home+'/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
 };
 if(!c.messages)c.messages={};
-c.messages.tts={auto:'inbound',mode:'final',provider:'openai',openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}};
+c.messages.tts={auto:'tagged',mode:'all',provider:'openai',openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}};
 if(!c.agents)c.agents={};
 if(!c.agents.defaults)c.agents.defaults={};
 if(!c.agents.defaults.model)c.agents.defaults.model={};
@@ -325,7 +325,7 @@ step_polkit_rules() {
 }
 
 step_voice_install() {
-  apt-get install -y -qq espeak-ng libsndfile1 cmake build-essential
+  apt-get install -y -qq espeak-ng libsndfile1 cmake build-essential ffmpeg
   bash "$PROJECT_DIR/scripts/install-voice.sh"
   echo "  Voice pipeline installed"
   bash "$PROJECT_DIR/scripts/setup-optimizations.sh"

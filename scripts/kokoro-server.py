@@ -116,32 +116,21 @@ class TTSHandler(BaseHTTPRequestHandler):
 
             wav_data = generate_audio(text, voice)
 
-            # Convert to mp3 if requested
-            if resp_format == "mp3":
-                import subprocess
-                proc = subprocess.run(
-                    ["ffmpeg", "-y", "-i", "pipe:0", "-f", "mp3", "-ab", "64k", "pipe:1"],
-                    input=wav_data, capture_output=True, timeout=30)
-                if proc.returncode == 0:
-                    audio_data = proc.stdout
-                    content_type = "audio/mpeg"
-                else:
-                    audio_data = wav_data
-                    content_type = "audio/wav"
-            elif resp_format == "opus":
-                import subprocess
-                proc = subprocess.run(
-                    ["ffmpeg", "-y", "-i", "pipe:0", "-f", "opus", "-ab", "64k", "pipe:1"],
-                    input=wav_data, capture_output=True, timeout=30)
-                if proc.returncode == 0:
-                    audio_data = proc.stdout
-                    content_type = "audio/opus"
-                else:
-                    audio_data = wav_data
-                    content_type = "audio/wav"
-            else:
-                audio_data = wav_data
-                content_type = "audio/wav"
+            # Convert to requested format via ffmpeg, fall back to WAV
+            audio_data = wav_data
+            content_type = "audio/wav"
+            if resp_format in ("mp3", "opus"):
+                try:
+                    import subprocess
+                    fmt = {"mp3": ("mp3", "audio/mpeg"), "opus": ("opus", "audio/opus")}[resp_format]
+                    proc = subprocess.run(
+                        ["ffmpeg", "-y", "-i", "pipe:0", "-f", fmt[0], "-ab", "64k", "pipe:1"],
+                        input=wav_data, capture_output=True, timeout=30)
+                    if proc.returncode == 0:
+                        audio_data = proc.stdout
+                        content_type = fmt[1]
+                except FileNotFoundError:
+                    print("[HTTP] ffmpeg not found, returning WAV", flush=True)
 
             self.send_response(200)
             self.send_header("Content-Type", content_type)

@@ -13,6 +13,8 @@ RestartSec=5
 Environment=HOME=/home/clawbox
 Environment=NODE_ENV=production
 Environment=NODE_OPTIONS=--max-old-space-size=1024
+Environment=OPENAI_TTS_BASE_URL=http://localhost:8880/v1
+Environment=OPENCLAW_VERBOSE=1
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 
 [Install]
