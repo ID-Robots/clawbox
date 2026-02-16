@@ -69,12 +69,3 @@ export async function getAll(): Promise<Config> {
   return readConfig();
 }
 
-export async function resetConfig(): Promise<void> {
-  const prev = writeLock;
-  const done = (async () => {
-    await prev;
-    await writeConfig({});
-  })();
-  writeLock = done.catch(() => {});
-  await done;
-}

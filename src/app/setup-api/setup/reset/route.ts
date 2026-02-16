@@ -1,25 +1,29 @@
 import { NextResponse } from "next/server";
-import { resetConfig } from "@/lib/config-store";
+import { set } from "@/lib/config-store";
+import { resetUpdateState } from "@/lib/updater";
 
-export async function POST(request: Request) {
+export const dynamic = "force-dynamic";
+
+const STEP_KEYS = [
+  "setup_complete",
+  "wifi_configured",
+  "update_completed",
+  "update_completed_at",
+  "ai_model_configured",
+  "ai_model_provider",
+];
+
+export async function POST() {
   try {
-    const body = await request.json().catch(() => ({}));
-    if (body.confirm !== true) {
-      return NextResponse.json(
-        { error: "Missing confirmation. Send { \"confirm\": true } to reset." },
-        { status: 400 }
-      );
+    for (const key of STEP_KEYS) {
+      await set(key, undefined);
     }
-
-    await resetConfig();
+    resetUpdateState();
     return NextResponse.json({ success: true });
   } catch (err) {
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Failed to reset",
-      },
-      { status: 500 }
+      { error: err instanceof Error ? err.message : "Reset failed" },
+      { status: 500 },
     );
   }
 }

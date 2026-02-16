@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
@@ -41,6 +43,7 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
     let settled = false;
     const child = spawn(cmd, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: "/home/clawbox",
       uid: CLAWBOX_UID,
       gid: CLAWBOX_UID,
       env: { ...process.env, HOME: "/home/clawbox" },

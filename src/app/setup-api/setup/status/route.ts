@@ -12,6 +12,7 @@ export async function GET() {
       update_completed: !!config.update_completed,
       wifi_configured: !!config.wifi_configured,
       ai_model_configured: !!config.ai_model_configured,
+      ai_model_provider: config.ai_model_provider || null,
       telegram_configured: !!config.telegram_bot_token,
     });
   } catch (err) {

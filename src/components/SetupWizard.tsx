@@ -1,15 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import Image from "next/image";
 import ProgressBar from "./ProgressBar";
-import WelcomeStep from "./WelcomeStep";
-import CredentialsStep from "./CredentialsStep";
 import WifiStep from "./WifiStep";
 import UpdateStep from "./UpdateStep";
 import AIModelsStep from "./AIModelsStep";
-import TelegramStep from "./TelegramStep";
 import DoneStep from "./DoneStep";
 
 function applyStatusData(
@@ -19,15 +16,11 @@ function applyStatusData(
 ) {
   if (data.setup_complete) {
     setSetupComplete(true);
-    setCurrentStep(7);
-  } else if (data.ai_model_configured) {
-    setCurrentStep(6);
-  } else if (data.update_completed) {
-    setCurrentStep(5);
-  } else if (data.wifi_configured) {
     setCurrentStep(4);
-  } else if (data.password_configured) {
-    setCurrentStep(3);
+  } else if (data.ai_model_configured) {
+    setCurrentStep(4);
+  } else if (data.update_completed || data.wifi_configured) {
+    setCurrentStep(2);
   }
 }
 
@@ -72,11 +65,11 @@ export default function SetupWizard() {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="text-center max-w-md">
-          <p className="text-red-400 text-sm mb-4">{setupError}</p>
+          <p className="text-[var(--coral-bright)] text-sm mb-4">{setupError}</p>
           <button
             type="button"
             onClick={() => setRetryCount((c) => c + 1)}
-            className="px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer"
+            className="px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105"
           >
             Retry
           </button>
@@ -87,8 +80,8 @@ export default function SetupWizard() {
 
   return (
     <>
-      <header className="bg-gray-900/80 backdrop-blur-md px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
-        <Link href="/" className="flex items-center gap-2.5 shrink-0">
+      <header className="px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
+        <Link href="/" className="hidden sm:flex items-center gap-2.5 shrink-0">
           <Image
             src="/clawbox-icon.png"
             alt="ClawBox"
@@ -97,33 +90,26 @@ export default function SetupWizard() {
             className="w-9 h-9 object-contain"
             priority
           />
-          <span className="hidden sm:inline text-xl font-bold font-display bg-gradient-to-r from-orange-400 to-orange-700 bg-clip-text text-transparent">
+          <span className="text-xl font-bold font-display title-gradient">
             ClawBox
           </span>
         </Link>
-        {currentStep < 7 && <ProgressBar currentStep={currentStep} />}
+        {currentStep < 4 && <ProgressBar currentStep={currentStep} />}
       </header>
 
-      <main className="flex-1 flex items-start sm:items-center justify-center px-4 pt-2 pb-4 sm:p-6">
+      <main
+        className="flex-1 flex flex-col items-center justify-start sm:justify-center px-4 pt-2 pb-4 sm:p-6"
+      >
         {currentStep === 1 && (
-          <WelcomeStep onNext={() => setCurrentStep(2)} />
+          <WifiStep onNext={() => setCurrentStep(2)} />
         )}
         {currentStep === 2 && (
-          <CredentialsStep onNext={() => setCurrentStep(3)} />
+          <UpdateStep onNext={() => setCurrentStep(3)} />
         )}
         {currentStep === 3 && (
-          <WifiStep onNext={() => setCurrentStep(4)} />
+          <AIModelsStep onNext={() => setCurrentStep(4)} />
         )}
-        {currentStep === 4 && (
-          <UpdateStep onNext={() => setCurrentStep(5)} />
-        )}
-        {currentStep === 5 && (
-          <AIModelsStep onNext={() => setCurrentStep(6)} />
-        )}
-        {currentStep === 6 && (
-          <TelegramStep onNext={() => setCurrentStep(7)} />
-        )}
-        {currentStep === 7 && <DoneStep setupComplete={setupComplete} />}
+        {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
     </>
   );

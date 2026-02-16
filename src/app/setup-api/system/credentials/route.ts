@@ -1,6 +1,18 @@
 import { NextResponse } from "next/server";
-import { spawn } from "child_process";
+import { execFile as execFileCb } from "child_process";
+import { promisify } from "util";
+import fs from "fs/promises";
+import path from "path";
 import { set } from "@/lib/config-store";
+
+export const dynamic = "force-dynamic";
+
+const execFile = promisify(execFileCb);
+const CHPASSWD_INPUT_PATH = path.join(
+  process.env.CONFIG_ROOT || "/home/clawbox/clawbox",
+  "data",
+  ".chpasswd-input"
+);
 
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const RATE_LIMIT_MAX_ATTEMPTS = 5;
@@ -71,19 +83,26 @@ export async function POST(request: Request) {
       );
     }
 
-    // Use chpasswd via stdin to safely set password without shell injection
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn("chpasswd", [], { stdio: ["pipe", "pipe", "pipe"] });
-      let stderr = "";
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(stderr.trim() || `chpasswd exited with code ${code}`));
-      });
-      child.stdin.write(`clawbox:${password}\n`);
-      child.stdin.end();
+    // Write password to a secure temp file, then delegate to the root
+    // systemd service (clawbox-root-update@chpasswd) since the main
+    // service runs as clawbox with NoNewPrivileges=true.
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
+    await fs.writeFile(CHPASSWD_INPUT_PATH, `clawbox:${password}\n`, {
+      mode: 0o600,
     });
+    try {
+      const serviceName = "clawbox-root-update@chpasswd.service";
+      await execFile("systemctl", ["reset-failed", serviceName], {
+        timeout: 10_000,
+      }).catch(() => {});
+      await execFile("systemctl", ["start", serviceName], {
+        timeout: 30_000,
+      });
+    } catch (err) {
+      // Clean up the input file on failure
+      await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
+      throw err;
+    }
 
     resetRateLimit(clientIP);
 
