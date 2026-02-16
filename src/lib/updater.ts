@@ -68,6 +68,9 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
 }
 
 async function updateClawBoxAndReboot(): Promise<void> {
+  // Fix .git ownership — previous root operations (install.sh) may have
+  // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
+  await execAsRoot("fix_git_perms", 30_000);
   await execShell(
     "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },

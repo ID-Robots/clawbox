@@ -144,6 +144,9 @@ step_git_pull() {
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
+    # Fix .git ownership — git operations run as root create root-owned files
+    # which block the clawbox user from pulling later (e.g. FETCH_HEAD)
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
   fi
 }
 
@@ -397,6 +400,11 @@ step_openclaw_models() {
   as_clawbox "$OPENCLAW_BIN" models
 }
 
+step_fix_git_perms() {
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
+  echo "  Fixed .git ownership"
+}
+
 step_rebuild_reboot() {
   # Redeploy config files and scripts that may have changed after git pull
   step_directories_permissions
@@ -417,6 +425,7 @@ DISPATCH_STEPS=(
   openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
   git_pull build rebuild rebuild_reboot restart restart_ap
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  fix_git_perms
 )
 
 if [ "${1:-}" = "--step" ]; then
