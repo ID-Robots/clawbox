@@ -440,7 +440,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=15
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -455,6 +455,12 @@ step_ensure_user
 
 log "Installing system packages..."
 step_apt_update
+
+log "Installing NVIDIA JetPack..."
+step_nvidia_jetpack
+
+log "Enabling max performance mode..."
+step_performance_mode
 
 log "Detecting WiFi interface..."
 step_detect_wifi
@@ -492,6 +498,9 @@ step_polkit_rules
 
 log "Installing voice pipeline..."
 step_voice_install
+
+log "Installing Chromium..."
+step_chrome_install
 
 log "Starting services..."
 step_start_services
