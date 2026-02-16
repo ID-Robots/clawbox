@@ -77,7 +77,7 @@ step_ensure_user() {
 
 step_apt_update() {
   apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw
+  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -q '^v2[2-9]\|^v[3-9]'; then
     echo "  Node.js $(node --version) already installed"
