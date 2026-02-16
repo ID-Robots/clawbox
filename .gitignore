@@ -12,3 +12,4 @@ next-env.d.ts
 !.env.example
 !.env.template
 data/hotspot.env
+data/network.env
