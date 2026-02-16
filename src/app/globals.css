@@ -6,27 +6,27 @@
 }
 
 :root {
-  /* OpenClaw design tokens */
-  --bg-deep: #050810;
-  --bg-surface: #0a0f1a;
-  --bg-elevated: #111827;
-  --coral-bright: #ff4d4d;
-  --coral-mid: #e63946;
-  --coral-dark: #991b1b;
+  /* Design tokens — matching openclawhardware.dev dark sections */
+  --bg-deep: #111827;
+  --bg-surface: #172030;
+  --bg-elevated: #1e2939;
+  --coral-bright: #f97316;
+  --coral-mid: #ea580c;
+  --coral-dark: #c2410c;
   --cyan-bright: #00e5cc;
   --cyan-mid: #14b8a6;
-  --text-primary: #f0f4ff;
-  --text-secondary: #8892b0;
-  --text-muted: #5a6480;
-  --border-subtle: rgba(136, 146, 176, 0.15);
-  --border-accent: rgba(255, 77, 77, 0.3);
-  --surface-card: rgba(10, 15, 26, 0.65);
-  --surface-card-strong: rgba(10, 15, 26, 0.8);
-  --shadow-coral-soft: rgba(255, 77, 77, 0.15);
-  --shadow-coral-mid: rgba(255, 77, 77, 0.25);
-  --logo-gradient-start: #ff4d4d;
-  --logo-gradient-end: #991b1b;
-  --logo-glow: rgba(255, 77, 77, 0.4);
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --border-subtle: rgba(54, 65, 83, 0.6);
+  --border-accent: rgba(249, 115, 22, 0.3);
+  --surface-card: rgba(23, 32, 48, 0.75);
+  --surface-card-strong: rgba(23, 32, 48, 0.9);
+  --shadow-coral-soft: rgba(249, 115, 22, 0.15);
+  --shadow-coral-mid: rgba(249, 115, 22, 0.25);
+  --logo-gradient-start: #f97316;
+  --logo-gradient-end: #c2410c;
+  --logo-glow: rgba(249, 115, 22, 0.4);
 
   --background: var(--bg-deep);
   --foreground: var(--text-primary);
@@ -53,10 +53,9 @@ h6 {
   font-family: var(--font-display);
 }
 
-/* OpenClaw title gradient — white to cyan through coral */
+/* OpenClaw title gradient — orange brand */
 .title-gradient {
-  background: linear-gradient(135deg, #f0f4ff 0%, var(--coral-bright) 52%, #00e5cc 100%);
-  background-size: 200% 200%;
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -70,14 +69,15 @@ h6 {
 }
 .btn-gradient:hover {
   opacity: 0.9;
-  box-shadow: 0 8px 30px rgba(255, 77, 77, 0.35);
+  box-shadow: 0 8px 30px rgba(249, 115, 22, 0.35);
 }
 
-/* Card style matching openclaw.ai */
+/* Card surface — matching openclawhardware.dev dark sections */
 .card-surface {
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   backdrop-filter: blur(12px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
 }
 
 /* Subtle star background */
@@ -100,7 +100,7 @@ h6 {
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(ellipse at 30% 20%, rgba(255, 77, 77, 0.06) 0%, transparent 60%),
+  background: radial-gradient(ellipse at 30% 20%, rgba(249, 115, 22, 0.06) 0%, transparent 60%),
               radial-gradient(ellipse at 70% 80%, rgba(0, 229, 204, 0.04) 0%, transparent 60%);
   pointer-events: none;
   z-index: 0;
@@ -131,7 +131,7 @@ html {
 
 /* Selection color */
 ::selection {
-  background: rgba(255, 77, 77, 0.3);
+  background: rgba(249, 115, 22, 0.3);
   color: white;
 }
 

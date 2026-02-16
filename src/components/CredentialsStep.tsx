@@ -272,7 +272,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             type="button"
             onClick={save}
             disabled={saving}
-            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? "Saving..." : "Save"}
           </button>

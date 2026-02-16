@@ -14,9 +14,15 @@ echo "=== Voice Pipeline Installer (GPU-Accelerated) ==="
 # ── Detect CUDA availability ────────────────────────────────────────────────
 
 HAS_CUDA=false
-if command -v nvcc &>/dev/null; then
+# Check PATH first, then the standard Jetson CUDA location
+NVCC=$(command -v nvcc 2>/dev/null || echo "")
+if [ -z "$NVCC" ] && [ -x /usr/local/cuda/bin/nvcc ]; then
+  export PATH="/usr/local/cuda/bin:$PATH"
+  NVCC=/usr/local/cuda/bin/nvcc
+fi
+if [ -n "$NVCC" ]; then
   HAS_CUDA=true
-  echo "  CUDA detected: $(nvcc --version | tail -1)"
+  echo "  CUDA detected: $($NVCC --version | tail -1)"
 fi
 
 # ── Step 1: Install CUDA PyTorch (if available) ─────────────────────────────
@@ -89,7 +95,7 @@ su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy<2' kokoro soundfile Pillow" 
 
 echo "[5/7] Pre-downloading Whisper model (base)..."
 DEVICE="cpu"
-COMPUTE="int8"
+COMPUTE="auto"
 if $HAS_CUDA; then
   DEVICE="cuda"
   COMPUTE="float16"
@@ -142,8 +148,7 @@ After=default.target
 Type=simple
 Environment=LD_LIBRARY_PATH=$LD_PATH
 ExecStart=/usr/bin/python3 $SCRIPTS_DST/kokoro-server.py
-Restart=on-failure
-RestartSec=10
+Restart=no
 
 [Install]
 WantedBy=default.target
@@ -159,8 +164,7 @@ Type=simple
 Environment=LD_LIBRARY_PATH=$LD_PATH
 Environment=WHISPER_MODEL=base
 ExecStart=/usr/bin/python3 $SCRIPTS_DST/whisper-server.py
-Restart=on-failure
-RestartSec=10
+Restart=no
 
 [Install]
 WantedBy=default.target
@@ -171,15 +175,11 @@ chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$SYSTEMD_USER"
 # Enable lingering so user services start on boot without login
 loginctl enable-linger "$CLAWBOX_USER" 2>/dev/null || true
 
-# Enable and start the services
+# Reload service files (servers start on demand via stt-client.py)
 su - "$CLAWBOX_USER" -c "
   export XDG_RUNTIME_DIR=/run/user/\$(id -u)
   systemctl --user daemon-reload
-  systemctl --user enable kokoro-server.service
-  systemctl --user enable whisper-server.service
-  systemctl --user start kokoro-server.service || true
-  systemctl --user start whisper-server.service || true
-" 2>/dev/null || echo "  Note: systemd user services need a login session to start"
+" 2>/dev/null || true
 
 echo ""
 echo "=== Voice Pipeline Installed ==="
@@ -190,6 +190,6 @@ if $HAS_CUDA; then
 else
   echo "  Mode: CPU"
 fi
-echo "  STT: Whisper (base) via persistent server (~1.8s)"
-echo "  TTS: Kokoro-82M via persistent server (~2s)"
-echo "  Services: kokoro-server, whisper-server (systemd user)"
+echo "  STT: Whisper (base) via on-demand server (~1.8s)"
+echo "  TTS: Kokoro-82M via on-demand server (~2s)"
+echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"

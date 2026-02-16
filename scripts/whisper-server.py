@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 """Persistent Whisper STT server - keeps model loaded in GPU memory."""
-import sys, os, json, socket
+import sys, os, json, socket, time, threading
 
 os.environ.setdefault("LD_LIBRARY_PATH", "/home/clawbox/.local/lib:/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64")
 
 SOCKET_PATH = "/tmp/whisper-server.sock"
 MODEL_SIZE = os.environ.get("WHISPER_MODEL", "base")
+IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))  # 5 min default
+
+_last_activity = time.monotonic()
+
+def touch_activity():
+    global _last_activity
+    _last_activity = time.monotonic()
+
+def _idle_watchdog():
+    while True:
+        time.sleep(30)
+        idle = time.monotonic() - _last_activity
+        if idle >= IDLE_TIMEOUT:
+            print(f"Idle for {int(idle)}s, shutting down.", flush=True)
+            os._exit(0)
 
 def load_model():
     from faster_whisper import WhisperModel
@@ -36,6 +51,7 @@ def serve(model):
 
     while True:
         conn, _ = sock.accept()
+        touch_activity()
         try:
             data = b""
             while True:
@@ -58,4 +74,5 @@ def serve(model):
 
 if __name__ == "__main__":
     model = load_model()
+    threading.Thread(target=_idle_watchdog, daemon=True).start()
     serve(model)

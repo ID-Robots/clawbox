@@ -2,17 +2,17 @@ interface ProgressBarProps {
   currentStep: number;
 }
 
-const STEP_LABELS = ["WiFi", "AI Model", "Done"];
+const STEP_LABELS = ["WiFi", "Update", "AI Model", "Done"];
 
 function stepColors(isDone: boolean, isActive: boolean): string {
   if (isDone) return "text-[#00e5cc] bg-[rgba(0,229,204,0.1)]";
-  if (isActive) return "text-[#ff4d4d] bg-[rgba(255,77,77,0.1)]";
+  if (isActive) return "text-[#f97316] bg-[rgba(249,115,22,0.1)]";
   return "text-[var(--text-muted)] bg-[var(--bg-surface)]";
 }
 
 function badgeColor(isDone: boolean, isActive: boolean): string {
   if (isDone) return "bg-[#00e5cc]";
-  if (isActive) return "bg-[#ff4d4d]";
+  if (isActive) return "bg-[#f97316]";
   return "bg-[var(--text-muted)]";
 }
 

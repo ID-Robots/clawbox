@@ -40,10 +40,10 @@ function StepIcon({ status }: { status: StepStatus }) {
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
   const [fetchError, setFetchError] = useState(false);
-  const startedRef = useRef(false);
+  const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
-  const retryControllerRef = useRef<AbortController | null>(null);
+  const actionControllerRef = useRef<AbortController | null>(null);
   const onNextRef = useRef(onNext);
   onNextRef.current = onNext;
 
@@ -75,7 +75,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           if (consecutiveFailures >= 3) serverWentDown = true;
           return;
         }
-        // Server came back after being down — reload to pick up new code
         if (serverWentDown) {
           window.location.reload();
           return;
@@ -95,9 +94,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     }, 2000);
   }, [stopPolling]);
 
+  // Fetch initial status (but don't auto-start)
   useEffect(() => {
     const controller = new AbortController();
-
     async function init() {
       try {
         const res = await fetch("/setup-api/update/status", {
@@ -112,16 +111,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           onNextRef.current();
           return;
         }
-
-        if (data.phase === "idle" && !startedRef.current) {
-          startedRef.current = true;
-          const runRes = await fetch("/setup-api/update/run", {
-            method: "POST",
-            signal: controller.signal,
-          });
-          if (!runRes.ok) throw new Error(`Start update failed (${runRes.status})`);
-          startPolling();
-        } else if (data.phase === "running") {
+        if (data.phase === "running") {
           startPolling();
         }
       } catch (err) {
@@ -129,7 +119,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         setFetchError(true);
       }
     }
-
     init();
     return () => {
       controller.abort();
@@ -137,36 +126,44 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     };
   }, [startPolling, stopPolling]);
 
-  const retry = async () => {
-    retryControllerRef.current?.abort();
+  const triggerUpdate = async () => {
+    actionControllerRef.current?.abort();
     const controller = new AbortController();
-    retryControllerRef.current = controller;
-
-    startedRef.current = true;
+    actionControllerRef.current = controller;
+    setStarting(true);
     setFetchError(false);
     try {
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`Retry failed (${res.status})`);
+      if (!res.ok) throw new Error(`Start update failed (${res.status})`);
       startPolling();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setFetchError(true);
+      setStarting(false);
     }
   };
 
   useEffect(() => {
     return () => {
-      retryControllerRef.current?.abort();
+      actionControllerRef.current?.abort();
     };
   }, []);
+
+  const isIdle = !state || state.phase === "idle";
+  const isDone = state?.phase === "completed";
+  const isFailed = state?.phase === "failed";
+  const isRunning = state?.phase === "running";
+  const runningStep = isRunning && state && state.currentStepIndex >= 0
+    ? state.steps[state.currentStepIndex]
+    : null;
 
   if (fetchError) {
     return (
       <div className="w-full max-w-[520px]">
-        <div className="card-surface  rounded-2xl p-8">
+        <div className="card-surface rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
             System Update
           </h1>
@@ -176,8 +173,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={retry}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
+              onClick={triggerUpdate}
+              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
               Retry
             </button>
@@ -194,10 +191,43 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  if (!state) {
+  // Idle state — show trigger button
+  if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]">
-        <div className="card-surface  rounded-2xl p-8">
+        <div className="card-surface rounded-2xl p-8">
+          <h1 className="text-2xl font-bold font-display mb-2">
+            System Update
+          </h1>
+          <p className="text-[var(--text-secondary)] mb-6 leading-relaxed">
+            Update your ClawBox with the latest software, drivers, and AI models.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={triggerUpdate}
+              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+            >
+              Start Update
+            </button>
+            <button
+              type="button"
+              onClick={onNext}
+              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
+            >
+              Skip
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading / waiting for first poll after triggering
+  if (!state || (isIdle && starting)) {
+    return (
+      <div className="w-full max-w-[520px]">
+        <div className="card-surface rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> Preparing update...
           </div>
@@ -206,16 +236,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  const isDone = state.phase === "completed";
-  const isFailed = state.phase === "failed";
-  const isRunning = state.phase === "running";
-  const runningStep = isRunning && state.currentStepIndex >= 0
-    ? state.steps[state.currentStepIndex]
-    : null;
-
   return (
     <div className="w-full max-w-[520px]">
-      <div className="card-surface  rounded-2xl p-8">
+      <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           {isDone ? (
             <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
@@ -230,7 +253,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             ? "All updates have been applied successfully."
             : isFailed
               ? "The update process encountered an error."
-              : "Preparing your ClawBox with the latest software..."}
+              : "Updating your ClawBox with the latest software..."}
         </p>
 
         {/* Internet error (no steps shown) */}
@@ -286,7 +309,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               <button
                 type="button"
                 onClick={onNext}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
+                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
               >
                 Continue
               </button>
@@ -295,8 +318,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               <>
                 <button
                   type="button"
-                  onClick={retry}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
+                  onClick={triggerUpdate}
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                 >
                   Retry
                 </button>

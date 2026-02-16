@@ -1,39 +1,26 @@
+import { NextResponse } from "next/server";
+import { set } from "@/lib/config-store";
+
 export const dynamic = "force-dynamic";
 
-import { NextResponse } from "next/server";
-import { execFile as execFileCb } from "child_process";
-import { promisify } from "util";
-import { resetConfig } from "@/lib/config-store";
+const STEP_KEYS = [
+  "setup_complete",
+  "wifi_configured",
+  "update_completed",
+  "ai_model_configured",
+  "ai_model_provider",
+];
 
-const execFile = promisify(execFileCb);
-
-export async function POST(request: Request) {
+export async function POST() {
   try {
-    const body = await request.json().catch(() => ({}));
-    if (body.confirm !== true) {
-      return NextResponse.json(
-        { error: "Missing confirmation. Send { \"confirm\": true } to reset." },
-        { status: 400 }
-      );
+    for (const key of STEP_KEYS) {
+      await set(key, undefined);
     }
-
-    await resetConfig();
-
-    // Fire-and-forget: trigger factory reset via root service.
-    // Uses --no-block because the service will stop/restart clawbox-setup,
-    // killing this process before the service completes.
-    const service = "clawbox-root-update@factory_reset.service";
-    await execFile("systemctl", ["reset-failed", service], { timeout: 10_000 }).catch(() => {});
-    await execFile("systemctl", ["start", "--no-block", service], { timeout: 10_000 });
-
     return NextResponse.json({ success: true });
   } catch (err) {
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Failed to reset",
-      },
-      { status: 500 }
+      { error: err instanceof Error ? err.message : "Reset failed" },
+      { status: 500 },
     );
   }
 }

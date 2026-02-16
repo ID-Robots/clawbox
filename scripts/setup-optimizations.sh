@@ -125,38 +125,7 @@ echo "  ✓ CPU optimizer installed"
 
 # ── 3. Pre-cache Common Phrases ───────────────────────────────────────────
 
-echo "[3/4] Pre-caching common phrases..."
-
-# Wait for services to be ready
-sleep 5
-
-# Pre-cache as clawbox user
-su - "$CLAWBOX_USER" -c "
-phrases=(
-# Greetings
-'Hello!' 'Hey!' 'Hi there!' 'Good morning!' 'Good evening!'
-# Acknowledgments  
-'Got it.' 'Done.' 'On it.' 'Sure.' 'Okay.' 'Fixed.' 'Good.' 'Nice.' 'Right.'
-'Working on it.' 'Let me check.' 'Here you go.' 'No problem.' 'All done.' 'Ready.'
-# Questions
-'What'"'"'s up?' 'What do you need?' 'Anything else?' 'Want me to continue?'
-'Should I go ahead?' 'What'"'"'s next?'
-# Status
-'Everything looks good.' 'All systems running.' 'Nothing new.'
-'Still working on it.' 'Almost done.' 'That'"'"'s done.'
-# Common responses
-'Yes.' 'No.' 'Not sure.' 'Let me think about that.' 'Good question.'
-'Makes sense.' 'I agree.' 'You'"'"'re right.' 'My bad.' 'Sorry about that.'
-)
-
-cached=0
-for phrase in \"\${phrases[@]}\"; do
-    if timeout 10 bash \"$SCRIPTS_DST/tts-cached.sh\" \"\$phrase\" >/dev/null 2>&1; then
-        cached=\$((cached + 1))
-    fi
-done
-echo \"  ✓ Pre-cached \$cached phrases\"
-"
+echo "[3/4] Skipping TTS pre-cache (servers start on demand)"
 
 # ── 4. Apply CPU Optimization ─────────────────────────────────────────────
 
@@ -165,6 +134,6 @@ su - "$CLAWBOX_USER" -c "bash '$SCRIPTS_DST/optimize-cpu.sh'" 2>/dev/null || tru
 
 echo ""
 echo "=== Optimizations Complete ==="
-echo "  • TTS caching system with ~50 pre-cached phrases"
-echo "  • CPU affinity optimization for AI workloads"  
+echo "  • TTS caching system installed"
+echo "  • CPU affinity optimization for AI workloads"
 echo "  • Threading environment variables configured"

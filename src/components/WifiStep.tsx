@@ -152,18 +152,19 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
   return (
     <div className="w-full max-w-[520px]">
-      <div className="card-surface  rounded-2xl p-8">
-        <div className="flex flex-col items-center gap-3 mb-6">
+      <div className="card-surface rounded-2xl p-8">
+        <div className="flex flex-col items-center gap-2 mb-6">
           <Image
-            src="/clawbox-icon.png"
+            src="/clawbox-logo.png"
             alt="ClawBox"
-            width={48}
-            height={48}
-            className="w-12 h-12 object-contain"
+            width={120}
+            height={120}
+            className="w-[120px] h-[120px] object-contain"
+            priority
           />
           <h1 className="text-2xl font-bold font-display text-center">
             Welcome to{" "}
-            <span className="bg-gradient-to-r from-[#ff4d4d] to-[#991b1b] bg-clip-text text-transparent">
+            <span className="title-gradient">
               ClawBox
             </span>
           </h1>
@@ -304,7 +305,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   type="button"
                   onClick={connectWifi}
                   disabled={connecting}
-                  className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
+                  className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
                 >
                   {connecting ? "Connecting..." : "Connect"}
                 </button>

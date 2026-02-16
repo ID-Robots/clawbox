@@ -1,8 +1,30 @@
 #!/usr/bin/env python3
 """Fast Whisper STT client - talks to persistent server, falls back to direct."""
-import sys, os, json, socket
+import sys, os, json, socket, subprocess, time
 
 SOCKET_PATH = "/tmp/whisper-server.sock"
+
+def ensure_servers():
+    """Start voice servers on demand if not running."""
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    for svc in ["whisper-server", "kokoro-server"]:
+        subprocess.run(
+            ["systemctl", "--user", "start", f"{svc}.service"],
+            env=env, capture_output=True, timeout=10,
+        )
+    # Wait for whisper socket to be ready (model load can take a while)
+    for _ in range(60):
+        if os.path.exists(SOCKET_PATH):
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(SOCKET_PATH)
+                s.close()
+                return True
+            except (ConnectionRefusedError, OSError):
+                pass
+        time.sleep(1)
+    return False
 
 def transcribe_via_server(audio_path):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -40,11 +62,12 @@ if __name__ == "__main__":
         sys.exit(1)
     audio = sys.argv[1]
     model = sys.argv[2] if len(sys.argv) > 2 else "base"
-    
-    if os.path.exists(SOCKET_PATH):
-        try:
-            print(transcribe_via_server(audio))
-            sys.exit(0)
-        except Exception as e:
-            print(f"Server unavailable ({e}), falling back to direct", file=sys.stderr)
-    print(transcribe_direct(audio, model))
+
+    # Start servers on demand (whisper for STT, kokoro for upcoming TTS response)
+    ensure_servers()
+
+    try:
+        print(transcribe_via_server(audio))
+    except Exception as e:
+        print(f"Server error ({e}), falling back to direct", file=sys.stderr)
+        print(transcribe_direct(audio, model))

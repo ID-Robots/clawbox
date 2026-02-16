@@ -271,7 +271,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
   return (
     <div className="w-full max-w-[520px]">
-      <div className="card-surface  rounded-2xl p-8">
+      <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           Connect AI Model
         </h1>
@@ -364,7 +364,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                   <button
                     type="button"
                     onClick={startOAuth}
-                    className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer"
+                    className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                   >
                     Connect with Claude
                   </button>
@@ -475,7 +475,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                 type="button"
                 onClick={exchangeCode}
                 disabled={exchanging || !authCode.trim()}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
               >
                 {exchanging ? "Connecting..." : "Save & Continue"}
               </button>
@@ -485,7 +485,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               type="button"
               onClick={saveModel}
               disabled={saving || !selectedProvider}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(255,77,77,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
               {saving ? "Saving..." : "Save & Continue"}
             </button>

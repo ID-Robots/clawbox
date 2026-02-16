@@ -5,7 +5,7 @@ Exposes two interfaces:
 1. Unix socket at /tmp/kokoro-server.sock (legacy, used by kokoro-client.sh)
 2. HTTP server on port 8880 with OpenAI-compatible /v1/audio/speech endpoint
 """
-import sys, os, json, socket, struct, tempfile, io, threading
+import sys, os, json, socket, struct, tempfile, io, threading, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import soundfile as sf
 
@@ -16,6 +16,21 @@ os.environ.setdefault("LD_LIBRARY_PATH",
 
 SOCKET_PATH = "/tmp/kokoro-server.sock"
 HTTP_PORT = int(os.environ.get("KOKORO_HTTP_PORT", "8880"))
+IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))  # 5 min default
+
+_last_activity = time.monotonic()
+
+def touch_activity():
+    global _last_activity
+    _last_activity = time.monotonic()
+
+def _idle_watchdog():
+    while True:
+        time.sleep(30)
+        idle = time.monotonic() - _last_activity
+        if idle >= IDLE_TIMEOUT:
+            print(f"Idle for {int(idle)}s, shutting down.", flush=True)
+            os._exit(0)
 
 # Voice mapping: OpenAI voice names -> Kokoro voices
 VOICE_MAP = {
@@ -76,6 +91,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        touch_activity()
         if self.path != "/v1/audio/speech":
             self.send_response(404)
             self.send_header("Content-Type", "application/json")
@@ -153,6 +169,7 @@ def serve_unix(pipe):
 
     while True:
         conn, _ = sock.accept()
+        touch_activity()
         try:
             data = b""
             while True:
@@ -183,6 +200,9 @@ if __name__ == "__main__":
     # Start Unix socket server in background thread
     unix_thread = threading.Thread(target=serve_unix, args=(pipeline,), daemon=True)
     unix_thread.start()
+
+    # Start idle watchdog
+    threading.Thread(target=_idle_watchdog, daemon=True).start()
 
     # Start HTTP server in main thread
     server = HTTPServer(("0.0.0.0", HTTP_PORT), TTSHandler)

@@ -14,8 +14,8 @@ const PING_TARGETS = (process.env.PING_TARGETS || "8.8.8.8,1.1.1.1")
 interface UpdateStepDef {
   id: string;
   label: string;
-  command: string;
   timeoutMs: number;
+  command?: string;
   requiresRoot?: boolean;
   customRun?: () => Promise<void>;
 }
@@ -48,114 +48,121 @@ export interface UpdateState {
 
 const RESTART_STEP_ID = "restart";
 
+const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+const GATEWAY_DIST =
+  "/home/clawbox/.npm-global/lib/node_modules/openclaw/dist";
+
+/** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
+function waitForTermination(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 30_000));
+}
+
+/**
+ * Start a root systemd service in fire-and-forget mode.
+ * Used for steps that will kill the current process (rebuild, reboot).
+ */
+async function startRootServiceFireAndForget(stepId: string): Promise<void> {
+  const service = `clawbox-root-update@${stepId}.service`;
+  execFile("systemctl", ["reset-failed", service], {
+    timeout: 10_000,
+  }).catch(() => {});
+  await execFile("systemctl", ["start", "--no-block", service], {
+    timeout: 10_000,
+  });
+}
+
+async function patchOpenClawGateway(): Promise<void> {
+  // Enable insecure auth so Control UI works over plain HTTP
+  await execFile(OPENCLAW_BIN, [
+    "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
+  ], { timeout: 10_000 });
+
+  // Patch gateway JS to preserve operator scopes for token-only auth
+  let grepOutput = "";
+  try {
+    const result = await execFile("grep", [
+      "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
+    ], { timeout: 10_000 });
+    grepOutput = result.stdout;
+  } catch {
+    // grep exits 1 when no matches found -- already patched or pattern changed
+  }
+
+  const targets = grepOutput.trim().split("\n").filter(Boolean);
+  if (targets.length === 0) {
+    console.log("[Updater] Gateway scope patch: pattern not found (may already be patched)");
+    return;
+  }
+
+  for (const file of targets) {
+    await execFile("sed", [
+      "-i",
+      "s/if (scopes.length > 0) {/if (scopes.length > 0 \\&\\& !(isControlUi \\&\\& allowControlUiBypass)) {/",
+      "--",
+      file,
+    ], { timeout: 10_000 });
+  }
+  console.log(`[Updater] Gateway scope patch applied to ${targets.length} file(s)`);
+}
+
+async function updateClawBoxAndReboot(): Promise<void> {
+  await execShell(
+    "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
+    { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+  );
+  await set("update_needs_continuation", true);
+  await startRootServiceFireAndForget("rebuild_reboot");
+  await waitForTermination();
+}
+
 const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
     label: "Updating system packages",
-    command: "",
     timeoutMs: 120_000,
     requiresRoot: true,
   },
   {
     id: "nvidia_jetpack",
     label: "Installing NVIDIA JetPack",
-    command: "",
     timeoutMs: 600_000,
     requiresRoot: true,
   },
   {
     id: "performance_mode",
     label: "Enabling max performance mode",
-    command: "",
     timeoutMs: 60_000,
     requiresRoot: true,
   },
   {
     id: "chrome_install",
     label: "Installing Chromium",
-    command: "",
     timeoutMs: 300_000,
     requiresRoot: true,
   },
   {
-    id: "git_pull",
-    label: "Updating ClawBox",
-    command: "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
-    timeoutMs: 60_000,
-  },
-  {
-    id: RESTART_STEP_ID,
-    label: "Rebuilding & Restarting ClawBox",
-    command: "",
-    timeoutMs: 30_000,
-    customRun: async () => {
-      // Mark that post-restart steps still need to run
-      await set("update_needs_continuation", true);
-      // Fire-and-forget: root service stops server, rebuilds, starts server
-      const service = "clawbox-root-update@rebuild.service";
-      execFile("systemctl", ["reset-failed", service], {
-        timeout: 10_000,
-      }).catch(() => {});
-      await execFile("systemctl", ["start", "--no-block", service], {
-        timeout: 10_000,
-      });
-      // Wait for systemd to SIGTERM us during the rebuild
-      await new Promise((r) => setTimeout(r, 10_000));
-    },
-  },
-  {
     id: "openclaw_install",
     label: "Updating OpenClaw",
-    command: "",
     timeoutMs: 120_000,
     requiresRoot: true,
   },
   {
     id: "openclaw_patch",
     label: "Patching OpenClaw gateway",
-    command: "",
     timeoutMs: 30_000,
-    customRun: async () => {
-      const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
-      const GATEWAY_DIST =
-        "/home/clawbox/.npm-global/lib/node_modules/openclaw/dist";
-
-      // 1. Enable insecure auth so Control UI works over plain HTTP
-      await execFile(OPENCLAW_BIN, [
-        "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-      ], { timeout: 10_000 });
-
-      // 2. Patch gateway JS to preserve operator scopes for token-only auth.
-      let files = "";
-      try {
-        const result = await execFile("grep", [
-          "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
-        ], { timeout: 10_000 });
-        files = result.stdout;
-      } catch {
-        // grep exits 1 when no matches found — already patched or pattern changed
-      }
-      const targets = files.trim().split("\n").filter(Boolean);
-      if (targets.length === 0) {
-        console.log("[Updater] Gateway scope patch: pattern not found (may already be patched)");
-        return;
-      }
-      for (const file of targets) {
-        await execFile("sed", [
-          "-i",
-          "s/if (scopes.length > 0) {/if (scopes.length > 0 \\&\\& !(isControlUi \\&\\& allowControlUiBypass)) {/",
-          "--",
-          file,
-        ], { timeout: 10_000 });
-      }
-      console.log(`[Updater] Gateway scope patch applied to ${targets.length} file(s)`);
-    },
+    customRun: patchOpenClawGateway,
   },
   {
     id: "models_update",
     label: "Configuring AI models",
     command: "/home/clawbox/.npm-global/bin/openclaw models",
     timeoutMs: 600_000,
+  },
+  {
+    id: RESTART_STEP_ID,
+    label: "Updating ClawBox and restarting",
+    timeoutMs: 90_000,
+    customRun: updateClawBoxAndReboot,
   },
 ];
 
@@ -181,7 +188,7 @@ function createInitialState(): UpdateState {
     steps: UPDATE_STEPS.map((s) => ({
       id: s.id,
       label: s.label,
-      status: "pending",
+      status: "pending" as const,
     })),
     currentStepIndex: -1,
   };
@@ -196,6 +203,21 @@ export function getUpdateState(): UpdateState {
 
 export async function isUpdateCompleted(): Promise<boolean> {
   return !!(await get("update_completed"));
+}
+
+/**
+ * Launch runUpdate in the background with shared error handling.
+ * Used by both startUpdate (fresh run) and checkContinuation (post-reboot).
+ */
+function launchUpdate(startFrom: number): void {
+  runUpdate(startFrom)
+    .catch((err) => {
+      console.error("[Updater] Unexpected error:", err);
+      state.phase = "failed";
+    })
+    .finally(() => {
+      running = false;
+    });
 }
 
 /**
@@ -215,21 +237,12 @@ export async function checkContinuation(): Promise<boolean> {
   running = true;
   state = createInitialState();
   state.phase = "running";
-  // Mark all pre-restart steps (including restart) as completed
   for (let i = 0; i <= restartIndex; i++) {
     state.steps[i].status = "completed";
   }
   state.currentStepIndex = startFrom;
 
-  runUpdate(startFrom)
-    .catch((err) => {
-      console.error("[Updater] Unexpected error:", err);
-      state.phase = "failed";
-    })
-    .finally(() => {
-      running = false;
-    });
-
+  launchUpdate(startFrom);
   return true;
 }
 
@@ -243,15 +256,7 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  runUpdate(0)
-    .catch((err) => {
-      console.error("[Updater] Unexpected error:", err);
-      state.phase = "failed";
-    })
-    .finally(() => {
-      running = false;
-    });
-
+  launchUpdate(0);
   return { started: true };
 }
 
@@ -275,43 +280,42 @@ async function runUpdate(startFrom: number): Promise<void> {
     return;
   }
 
-  let hasFailures = false;
+  let failed = false;
 
   for (let i = startFrom; i < UPDATE_STEPS.length; i++) {
-    const stepDef = UPDATE_STEPS[i];
+    const step = UPDATE_STEPS[i];
     state.currentStepIndex = i;
     state.steps[i].status = "running";
     state.steps[i].error = undefined;
 
-    console.log(`[Updater] Running step: ${stepDef.label}`);
+    console.log(`[Updater] Running step: ${step.label}`);
 
     try {
-      if (stepDef.customRun) {
-        await stepDef.customRun();
-      } else if (stepDef.requiresRoot) {
-        await execAsRoot(stepDef.id, stepDef.timeoutMs);
-      } else {
-        await execShell(stepDef.command, {
-          timeout: stepDef.timeoutMs,
+      if (step.customRun) {
+        await step.customRun();
+      } else if (step.requiresRoot) {
+        await execAsRoot(step.id, step.timeoutMs);
+      } else if (step.command) {
+        await execShell(step.command, {
+          timeout: step.timeoutMs,
           maxBuffer: 2 * 1024 * 1024,
         });
       }
       state.steps[i].status = "completed";
-      console.log(`[Updater] Completed: ${stepDef.label}`);
+      console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Unknown error";
+      const message = err instanceof Error ? err.message : "Unknown error";
       state.steps[i].status = "failed";
       state.steps[i].error = message;
-      console.error(`[Updater] Failed: ${stepDef.label} — ${message}`);
-      hasFailures = true;
+      console.error(`[Updater] Failed: ${step.label} — ${message}`);
+      failed = true;
     }
   }
 
   state.currentStepIndex = -1;
-  state.phase = hasFailures ? "failed" : "completed";
+  state.phase = failed ? "failed" : "completed";
 
-  if (!hasFailures) {
+  if (!failed) {
     await set("update_completed", true);
     await set("update_completed_at", new Date().toISOString());
   }

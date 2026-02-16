@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import ClawIcon from "./ClawIcon";
+import Image from "next/image";
 import ProgressBar from "./ProgressBar";
 import WifiStep from "./WifiStep";
+import UpdateStep from "./UpdateStep";
 import AIModelsStep from "./AIModelsStep";
 import DoneStep from "./DoneStep";
 
@@ -15,8 +16,10 @@ function applyStatusData(
 ) {
   if (data.setup_complete) {
     setSetupComplete(true);
-    setCurrentStep(3);
+    setCurrentStep(4);
   } else if (data.ai_model_configured) {
+    setCurrentStep(4);
+  } else if (data.update_completed) {
     setCurrentStep(3);
   } else if (data.wifi_configured) {
     setCurrentStep(2);
@@ -79,30 +82,36 @@ export default function SetupWizard() {
 
   return (
     <>
-      <header className="bg-[var(--bg-surface)]/80 backdrop-blur-md border-b border-[var(--border-subtle)] px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
-        <Link href="/" className="flex items-center gap-2.5 shrink-0">
-          <ClawIcon size={36} animated={false} />
-          <span className="hidden sm:inline text-xl font-bold font-display title-gradient">
+      <header className="px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
+        <Link href="/" className="hidden sm:flex items-center gap-2.5 shrink-0">
+          <Image
+            src="/clawbox-icon.png"
+            alt="ClawBox"
+            width={36}
+            height={36}
+            className="w-9 h-9 object-contain"
+            priority
+          />
+          <span className="text-xl font-bold font-display title-gradient">
             ClawBox
           </span>
         </Link>
-        {currentStep < 3 && <ProgressBar currentStep={currentStep} />}
+        {currentStep < 4 && <ProgressBar currentStep={currentStep} />}
       </header>
 
       <main
-        className={`flex-1 ${
-          currentStep === 3
-            ? "px-4 py-4 sm:px-6 sm:py-6"
-            : "flex items-start sm:items-center justify-center px-4 pt-2 pb-4 sm:p-6"
-        }`}
+        className="flex-1 flex flex-col items-center justify-start sm:justify-center px-4 pt-2 pb-4 sm:p-6"
       >
         {currentStep === 1 && (
           <WifiStep onNext={() => setCurrentStep(2)} />
         )}
         {currentStep === 2 && (
-          <AIModelsStep onNext={() => setCurrentStep(3)} />
+          <UpdateStep onNext={() => setCurrentStep(3)} />
         )}
-        {currentStep === 3 && <DoneStep setupComplete={setupComplete} />}
+        {currentStep === 3 && (
+          <AIModelsStep onNext={() => setCurrentStep(4)} />
+        )}
+        {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
     </>
   );

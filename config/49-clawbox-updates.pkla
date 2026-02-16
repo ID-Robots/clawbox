@@ -7,7 +7,7 @@ ResultActive=yes
 
 [Allow clawbox to manage NetworkManager]
 Identity=unix-user:clawbox
-Action=org.freedesktop.NetworkManager.wifi.scan;org.freedesktop.NetworkManager.network-control
+Action=org.freedesktop.NetworkManager.wifi.scan;org.freedesktop.NetworkManager.network-control;org.freedesktop.NetworkManager.settings.modify.system
 ResultAny=yes
 ResultInactive=yes
 ResultActive=yes
