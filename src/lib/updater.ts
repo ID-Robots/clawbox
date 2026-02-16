@@ -48,10 +48,6 @@ export interface UpdateState {
 
 const RESTART_STEP_ID = "restart";
 
-const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
-const GATEWAY_DIST =
-  "/home/clawbox/.npm-global/lib/node_modules/openclaw/dist";
-
 /** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
 function waitForTermination(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 30_000));
@@ -69,40 +65,6 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   await execFile("systemctl", ["start", "--no-block", service], {
     timeout: 10_000,
   });
-}
-
-async function patchOpenClawGateway(): Promise<void> {
-  // Enable insecure auth so Control UI works over plain HTTP
-  await execFile(OPENCLAW_BIN, [
-    "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-  ], { timeout: 10_000 });
-
-  // Patch gateway JS to preserve operator scopes for token-only auth
-  let grepOutput = "";
-  try {
-    const result = await execFile("grep", [
-      "-rl", "if (scopes.length > 0) {", GATEWAY_DIST,
-    ], { timeout: 10_000 });
-    grepOutput = result.stdout;
-  } catch {
-    // grep exits 1 when no matches found -- already patched or pattern changed
-  }
-
-  const targets = grepOutput.trim().split("\n").filter(Boolean);
-  if (targets.length === 0) {
-    console.log("[Updater] Gateway scope patch: pattern not found (may already be patched)");
-    return;
-  }
-
-  for (const file of targets) {
-    await execFile("sed", [
-      "-i",
-      "s/if (scopes.length > 0) {/if (scopes.length > 0 \\&\\& !(isControlUi \\&\\& allowControlUiBypass)) {/",
-      "--",
-      file,
-    ], { timeout: 10_000 });
-  }
-  console.log(`[Updater] Gateway scope patch applied to ${targets.length} file(s)`);
 }
 
 async function updateClawBoxAndReboot(): Promise<void> {
@@ -150,13 +112,13 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     id: "openclaw_patch",
     label: "Patching OpenClaw gateway",
     timeoutMs: 30_000,
-    customRun: patchOpenClawGateway,
+    requiresRoot: true,
   },
   {
-    id: "models_update",
+    id: "openclaw_models",
     label: "Configuring AI models",
-    command: "/home/clawbox/.npm-global/bin/openclaw models",
     timeoutMs: 600_000,
+    requiresRoot: true,
   },
   {
     id: RESTART_STEP_ID,
@@ -199,6 +161,11 @@ let running = false;
 
 export function getUpdateState(): UpdateState {
   return { ...state, steps: state.steps.map((s) => ({ ...s })) };
+}
+
+export function resetUpdateState(): void {
+  state = createInitialState();
+  running = false;
 }
 
 export async function isUpdateCompleted(): Promise<boolean> {

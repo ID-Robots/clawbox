@@ -44,8 +44,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
   const actionControllerRef = useRef<AbortController | null>(null);
-  const onNextRef = useRef(onNext);
-  onNextRef.current = onNext;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -107,10 +105,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         if (controller.signal.aborted) return;
         setState(data);
 
-        if (data.phase === "completed") {
-          onNextRef.current();
-          return;
-        }
         if (data.phase === "running") {
           startPolling();
         }

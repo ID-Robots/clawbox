@@ -108,7 +108,11 @@ step_detect_wifi() {
   mkdir -p "$PROJECT_DIR/data"
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > "$IFACE_ENV"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data" "$IFACE_ENV"
-  echo "  WiFi interface saved to $IFACE_ENV"
+  # Also write to root-owned path for clawbox-root-update@ service
+  mkdir -p /etc/clawbox
+  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
+  chmod 644 /etc/clawbox/network.env
+  echo "  WiFi interface saved to $IFACE_ENV and /etc/clawbox/network.env"
 }
 
 step_hostname_mdns() {
@@ -168,12 +172,11 @@ step_build() {
 
 step_openclaw_install() {
   if [ -x "$OPENCLAW_BIN" ]; then
-    local INSTALLED LATEST
+    local INSTALLED
     INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
-    LATEST=$(npm view openclaw version 2>/dev/null || echo "unknown")
-    echo "  Installed: $INSTALLED, Latest: $LATEST"
-    if [ "$LATEST" != "unknown" ] && [ "$INSTALLED" = "$LATEST" ]; then
-      echo "  OpenClaw is already up to date"
+    echo "  Installed: $INSTALLED, Pinned: $OPENCLAW_VERSION"
+    if [ "$INSTALLED" = "$OPENCLAW_VERSION" ]; then
+      echo "  OpenClaw is already at pinned version"
       return 0
     fi
   fi
@@ -390,11 +393,16 @@ step_ffmpeg_install() {
   apt-get install -y ffmpeg
 }
 
+step_openclaw_models() {
+  as_clawbox "$OPENCLAW_BIN" models
+}
+
 step_rebuild_reboot() {
   # Redeploy config files and scripts that may have changed after git pull
   step_directories_permissions
   step_systemd_services
   step_polkit_rules
+  step_openclaw_patch
   step_openclaw_config
   do_rebuild
   echo "Rebooting system..."
@@ -406,7 +414,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode chrome_install
-  openclaw_install openclaw_patch openclaw_config voice_install
+  openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
   git_pull build rebuild rebuild_reboot restart restart_ap
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
 )

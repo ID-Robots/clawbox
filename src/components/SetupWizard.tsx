@@ -19,9 +19,7 @@ function applyStatusData(
     setCurrentStep(4);
   } else if (data.ai_model_configured) {
     setCurrentStep(4);
-  } else if (data.update_completed) {
-    setCurrentStep(3);
-  } else if (data.wifi_configured) {
+  } else if (data.update_completed || data.wifi_configured) {
     setCurrentStep(2);
   }
 }

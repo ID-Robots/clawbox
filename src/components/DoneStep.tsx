@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
+import SignalBars from "./SignalBars";
 
 /* ── Types ── */
 
@@ -35,6 +36,12 @@ interface StatsSnapshot {
   rxBytes: number;
   txBytes: number;
   time: number;
+}
+
+interface WifiNetwork {
+  ssid: string;
+  signal: number;
+  security: string;
 }
 
 interface DoneStepProps {
@@ -81,13 +88,6 @@ const AI_PROVIDERS = [
 ];
 
 /* ── Helper functions ── */
-
-function formatBytesPerSec(bps: number): string {
-  if (bps >= 1e9) return (bps / 1e9).toFixed(1) + " GB/s";
-  if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s";
-  if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s";
-  return Math.round(bps) + " B/s";
-}
 
 function thresholdColor(value: number, low: number, high: number): string {
   if (value > high) return "#ef4444";
@@ -386,6 +386,17 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [tgSaving, setTgSaving] = useState(false);
   const [tgStatus, setTgStatus] = useState<SectionStatusMessage | null>(null);
 
+  /* ── WiFi ── */
+  const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[] | null>(null);
+  const [wifiScanning, setWifiScanning] = useState(false);
+  const [wifiConnectedSSID, setWifiConnectedSSID] = useState<string | null>(null);
+  const [wifiSelectedSSID, setWifiSelectedSSID] = useState<string | null>(null);
+  const [wifiSelectedSecurity, setWifiSelectedSecurity] = useState("");
+  const [wifiPassword, setWifiPassword] = useState("");
+  const [showWifiPassword, setShowWifiPassword] = useState(false);
+  const [wifiConnecting, setWifiConnecting] = useState(false);
+  const [wifiStatus, setWifiStatus] = useState<SectionStatusMessage | null>(null);
+
   /* ── Section completion status ── */
   const [securityDone, setSecurityDone] = useState(false);
   const [telegramDone, setTelegramDone] = useState(false);
@@ -446,6 +457,20 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       .then((data) => {
         if (data && !controller.signal.aborted && data.ssid) {
           setHotspotName(data.ssid);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  /* ── Fetch current WiFi connection on mount ── */
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/setup-api/wifi/status", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && !controller.signal.aborted && data["GENERAL.CONNECTION"]) {
+          setWifiConnectedSSID(data["GENERAL.CONNECTION"]);
         }
       })
       .catch(() => {});
@@ -749,6 +774,50 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  const scanWifi = async () => {
+    setWifiScanning(true);
+    setWifiNetworks(null);
+    try {
+      const res = await fetch("/setup-api/wifi/scan");
+      if (!res.ok) throw new Error("Scan failed");
+      const data = await res.json();
+      setWifiNetworks(data.networks || []);
+    } catch {
+      setWifiNetworks([]);
+    } finally {
+      setWifiScanning(false);
+    }
+  };
+
+  const connectWifi = async () => {
+    setWifiConnecting(true);
+    setWifiStatus(null);
+    try {
+      const res = await fetch("/setup-api/wifi/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: wifiSelectedSSID, password: wifiPassword }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setWifiStatus({ type: "error", message: data.error || "Connection failed" });
+        return;
+      }
+      setWifiStatus({ type: "success", message: "Connected!" });
+      setWifiConnectedSSID(wifiSelectedSSID);
+      setWifiSelectedSSID(null);
+      setWifiPassword("");
+    } catch (err) {
+      if (err instanceof TypeError && err.message.includes("fetch")) {
+        setWifiStatus({ type: "error", message: "Lost connection. Reconnect to your WiFi and visit http://clawbox.local" });
+        return;
+      }
+      setWifiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
+    } finally {
+      setWifiConnecting(false);
+    }
+  };
+
   const resetSetup = async () => {
     setResetting(true);
     try {
@@ -798,7 +867,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             type="button"
             onClick={isUpdateRunning ? undefined : () => setUpdateConfirm(true)}
             disabled={isUpdateRunning}
-            className="py-3 bg-[var(--bg-elevated)] text-[var(--text-primary)] rounded-xl text-sm font-semibold hover:bg-[#2a3749] hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-black/20 border border-[var(--border-subtle)]"
+            className="py-3 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-500 hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
             {isUpdateRunning ? "Updating..." : "System Update"}
@@ -898,6 +967,91 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
       {/* Settings sections */}
       <div className="space-y-3 mb-6">
+        {/* WiFi */}
+        <CollapsibleSection id="wifi" title="WiFi" done={!!wifiConnectedSSID} open={openSection === "wifi"} onToggle={(id) => { toggle(id); if (openSection !== "wifi") scanWifi(); }}>
+          {wifiConnectedSSID && (
+            <p className="text-xs text-[var(--text-muted)]">
+              Connected to: <span className="text-[var(--text-secondary)] font-semibold">{wifiConnectedSSID}</span>
+            </p>
+          )}
+          <div className="border border-[var(--border-subtle)] rounded-lg max-h-[240px] overflow-y-auto bg-[var(--bg-deep)]/50">
+            {wifiScanning && (
+              <div className="flex items-center justify-center gap-2.5 p-5 text-[var(--text-secondary)] text-sm">
+                <div className="spinner" /> Scanning...
+              </div>
+            )}
+            {!wifiScanning && wifiNetworks?.length === 0 && (
+              <div className="p-5 text-center text-[var(--text-secondary)] text-sm">
+                No networks found.{" "}
+                <button type="button" onClick={scanWifi} className="text-[var(--coral-bright)] underline bg-transparent border-none cursor-pointer">Retry</button>
+              </div>
+            )}
+            {!wifiScanning && wifiNetworks?.map((n) => {
+              const bars = Math.min(4, Math.max(1, Math.ceil(n.signal / 25)));
+              const isConnected = n.ssid === wifiConnectedSSID;
+              return (
+                <button
+                  type="button"
+                  key={n.ssid}
+                  onClick={() => { setWifiSelectedSSID(n.ssid); setWifiSelectedSecurity(n.security || ""); setWifiPassword(""); setShowWifiPassword(false); setWifiStatus(null); }}
+                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer border-b border-gray-800 last:border-b-0 hover:bg-[var(--surface-card)] transition-colors w-full text-left bg-transparent border-x-0 border-t-0 ${isConnected ? "bg-[var(--surface-card)]" : ""}`}
+                >
+                  <SignalBars level={bars} />
+                  <span className="flex-1 text-sm font-medium text-gray-200">{n.ssid}</span>
+                  {isConnected && <span className="text-[10px] font-semibold text-[#00e5cc] uppercase">Connected</span>}
+                  {n.security && n.security !== "--" && <span className="text-sm shrink-0 text-[var(--text-muted)]">&#128274;</span>}
+                </button>
+              );
+            })}
+          </div>
+          {!wifiScanning && wifiNetworks && (
+            <button type="button" onClick={scanWifi} className="text-xs text-[var(--coral-bright)] underline bg-transparent border-none cursor-pointer p-0">Rescan</button>
+          )}
+          {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+        </CollapsibleSection>
+
+        {/* WiFi password modal */}
+        {wifiSelectedSSID && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+            <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+              <h3 className="text-lg font-bold text-gray-100 mb-2">Connect to {wifiSelectedSSID}</h3>
+              {wifiSelectedSecurity && wifiSelectedSecurity !== "--" && (
+                <div className="mt-3">
+                  <label htmlFor="wifi-pw-dash" className={LABEL_CLASS}>Password</label>
+                  <PasswordInput
+                    id="wifi-pw-dash"
+                    value={wifiPassword}
+                    onChange={setWifiPassword}
+                    visible={showWifiPassword}
+                    onToggle={() => setShowWifiPassword((v) => !v)}
+                    placeholder="Enter WiFi password"
+                    autoComplete="off"
+                  />
+                </div>
+              )}
+              {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+              <div className="flex items-center gap-3 mt-5 justify-end">
+                <button
+                  type="button"
+                  onClick={() => { setWifiSelectedSSID(null); setWifiStatus(null); }}
+                  disabled={wifiConnecting}
+                  className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={connectWifi}
+                  disabled={wifiConnecting}
+                  className={`${SAVE_BUTTON_CLASS} hover:scale-105 transition-transform`}
+                >
+                  {wifiConnecting ? "Connecting..." : "Connect"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* AI Provider */}
         <CollapsibleSection id="provider" title="AI Provider" done={providerDone} open={openSection === "provider"} onToggle={toggle}>
           {providerDone && providerName && (
