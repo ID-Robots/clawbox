@@ -285,8 +285,11 @@ NODE
 
 step_captive_portal_dns() {
   mkdir -p "$DNSMASQ_DIR"
-  cp "$PROJECT_DIR/config/dnsmasq-captive.conf" "$DNSMASQ_DIR/captive-portal.conf"
-  echo "  Installed $DNSMASQ_DIR/captive-portal.conf"
+  # Remove old captive portal DNS hijack (breaks internet for hotspot clients)
+  rm -f "$DNSMASQ_DIR/captive-portal.conf"
+  # Install upstream DNS forwarding for hotspot clients
+  cp "$PROJECT_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
+  echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
 step_directories_permissions() {
@@ -385,6 +388,13 @@ step_restart_ap() {
   systemctl restart clawbox-ap.service
 }
 
+step_recover() {
+  echo "Running ClawBox recovery..."
+  bash "$PROJECT_DIR/scripts/start-ap.sh"
+  systemctl restart clawbox-setup.service
+  echo "Recovery complete"
+}
+
 step_gateway_setup() {
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
   systemctl daemon-reload
@@ -423,7 +433,7 @@ step_rebuild_reboot() {
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode chrome_install
   openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
-  git_pull build rebuild rebuild_reboot restart restart_ap
+  git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
 )

@@ -74,37 +74,54 @@ else
   echo "[AP] Open network (no password)"
 fi
 
+# Configure dnsmasq upstream DNS before activating AP
+# (NetworkManager's shared mode starts dnsmasq which reads this config)
+rm -f "$CAPTIVE_CONF" 2>/dev/null || true
+if [ -w "$DNSMASQ_SHARED" ]; then
+  cat > "$DNSMASQ_SHARED/upstream-dns.conf" <<DNSEOF
+# Forward DNS queries to public resolvers
+server=8.8.8.8
+server=8.8.4.4
+server=1.1.1.1
+# Resolve clawbox.local to AP IP (mDNS doesn't work on hotspot)
+address=/clawbox.local/${AP_IP}
+DNSEOF
+  echo "[AP] Upstream DNS forwarding configured"
+else
+  echo "[AP] Note: dnsmasq config not writable (run install.sh to fix DNS)"
+fi
+
 echo "[AP] Activating access point..."
 nmcli connection up "$CON_NAME"
 
 # Wait for interface readiness instead of fixed sleep
 wait_for_interface || echo "[AP] Continuing despite interface timeout"
 
-if [ "$setup_complete" = true ]; then
-  # ── Internet-sharing mode ────────────────────────────────────────────────
-  # Remove captive portal DNS hijack so phones can resolve real domains
-  rm -f "$CAPTIVE_CONF"
-  echo "[AP] Captive portal DNS removed (internet-sharing mode)"
+# Remove any leftover captive portal iptables redirect
+iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null || true
 
-  # Remove any leftover captive portal iptables redirect
-  iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null || true
+# Enable IP forwarding and NAT masquerade for internet sharing
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-  # Enable IP forwarding (ipv4.method shared usually handles this, but be explicit)
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-  echo "[AP] Internet sharing active — phones will get internet via NAT"
-else
-  # ── Captive portal mode ──────────────────────────────────────────────────
-  # Install DNS hijack so all queries resolve to the setup wizard
-  mkdir -p "$DNSMASQ_SHARED"
-  echo "address=/#/${AP_IP}" > "$CAPTIVE_CONF"
-  echo "[AP] Captive portal DNS installed"
-
-  # Redirect HTTP to the setup wizard
-  if ! iptables -w 5 -t nat -C PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null; then
-    iptables -w 5 -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80"
+# Find the WAN interface (first connected ethernet)
+WAN_IFACE=$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '/ethernet:connected/{print $1; exit}')
+if [ -n "$WAN_IFACE" ]; then
+  # Ensure MASQUERADE rule exists for hotspot -> internet NAT
+  if ! iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null; then
+    iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
   fi
-  echo "[AP] Captive portal iptables rules active"
+  # Allow forwarding between hotspot and WAN
+  if ! iptables -C FORWARD -i "$IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null; then
+    iptables -A FORWARD -i "$IFACE" -o "$WAN_IFACE" -j ACCEPT
+  fi
+  if ! iptables -C FORWARD -i "$WAN_IFACE" -o "$IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+    iptables -A FORWARD -i "$WAN_IFACE" -o "$IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+  fi
+  echo "[AP] NAT masquerade enabled ($IFACE -> $WAN_IFACE)"
+else
+  echo "[AP] Warning: no WAN interface found, internet sharing unavailable"
 fi
+
+echo "[AP] Internet sharing active — access setup at http://${AP_IP}/setup"
 
 echo "[AP] WiFi access point '$SSID' is running on $IFACE ($AP_IP)"

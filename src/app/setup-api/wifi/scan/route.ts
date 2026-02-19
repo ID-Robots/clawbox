@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
-import { scanWifi } from "@/lib/network";
+import { triggerBackgroundScan, getScanStatus } from "@/lib/network";
 
 export const dynamic = "force-dynamic";
 
+/** Trigger a background WiFi scan. Returns immediately before AP goes down. */
+export async function POST() {
+  triggerBackgroundScan();
+  return NextResponse.json({ status: "scanning" });
+}
+
+/** Poll for scan results. */
 export async function GET() {
-  try {
-    const networks = await scanWifi();
-    return NextResponse.json({ networks });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Scan failed" },
-      { status: 500 }
-    );
-  }
+  const result = getScanStatus();
+  return NextResponse.json(result);
 }

@@ -14,6 +14,13 @@ const AP_STOP_SCRIPT =
 // Mutex to serialize concurrent scanWifi calls
 let scanLock: Promise<void> = Promise.resolve();
 
+// Cache scan results so retry requests after AP restore don't trigger another teardown
+let cachedScan: { networks: WifiNetwork[]; timestamp: number } | null = null;
+const SCAN_CACHE_TTL = 30_000; // 30 seconds
+
+// Background scan state
+let scanInProgress = false;
+
 export interface WifiNetwork {
   ssid: string;
   signal: number;
@@ -33,34 +40,73 @@ async function isAPMode(): Promise<boolean> {
 async function bringAPUp(): Promise<void> {
   for (let attempt = 1; attempt <= AP_RETRY_COUNT; attempt++) {
     try {
-      await exec("nmcli", ["connection", "up", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT });
-      console.log(`[WiFi] AP restored (attempt ${attempt})`);
-      return;
+      await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+      const apUp = await isAPMode();
+      if (apUp) {
+        console.log(`[WiFi] AP restored (attempt ${attempt})`);
+        return;
+      }
+      console.warn(`[WiFi] AP start returned success but AP not detected (attempt ${attempt})`);
     } catch (err) {
       console.error(
         `[WiFi] Failed to restore AP (attempt ${attempt}/${AP_RETRY_COUNT}):`,
         err instanceof Error ? err.message : err
       );
-      if (attempt < AP_RETRY_COUNT) {
-        await new Promise((resolve) => setTimeout(resolve, AP_RETRY_DELAY));
-      }
+    }
+    if (attempt < AP_RETRY_COUNT) {
+      await new Promise((resolve) => setTimeout(resolve, AP_RETRY_DELAY));
     }
   }
   throw new Error("[WiFi] All AP restore attempts failed");
 }
 
 export async function scanWifi(): Promise<WifiNetwork[]> {
+  // Return cached results if fresh (avoids tearing down AP again on retry)
+  if (cachedScan && (Date.now() - cachedScan.timestamp) < SCAN_CACHE_TTL) {
+    return cachedScan.networks;
+  }
+
   // Serialize concurrent scan requests
   let resolve: () => void;
   const prev = scanLock;
   scanLock = new Promise<void>((r) => { resolve = r; });
   await prev;
 
+  // Check cache again after acquiring lock (another request may have just scanned)
+  if (cachedScan && (Date.now() - cachedScan.timestamp) < SCAN_CACHE_TTL) {
+    resolve!();
+    return cachedScan.networks;
+  }
+
   try {
-    return await doScan();
+    const networks = await doScan();
+    cachedScan = { networks, timestamp: Date.now() };
+    return networks;
   } finally {
     resolve!();
   }
+}
+
+/** Fire-and-forget: kicks off a scan in the background. Returns immediately. */
+export function triggerBackgroundScan(): void {
+  if (scanInProgress) return;
+  if (cachedScan && (Date.now() - cachedScan.timestamp) < SCAN_CACHE_TTL) return;
+
+  scanInProgress = true;
+  scanWifi()
+    .catch((err) => console.error("[WiFi] Background scan failed:", err instanceof Error ? err.message : err))
+    .finally(() => { scanInProgress = false; });
+}
+
+/** Returns current scan state for polling. */
+export function getScanStatus(): { scanning: boolean; networks: WifiNetwork[] | null } {
+  if (scanInProgress) {
+    return { scanning: true, networks: null };
+  }
+  if (cachedScan) {
+    return { scanning: false, networks: cachedScan.networks };
+  }
+  return { scanning: false, networks: null };
 }
 
 async function doScan(): Promise<WifiNetwork[]> {
