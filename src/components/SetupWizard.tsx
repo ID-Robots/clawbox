@@ -111,6 +111,12 @@ export default function SetupWizard() {
         )}
         {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
+
+      <footer className="py-2 text-center">
+        <span className="text-xs text-[var(--text-muted)]">
+          {process.env.NEXT_PUBLIC_APP_VERSION}
+        </span>
+      </footer>
     </>
   );
 }

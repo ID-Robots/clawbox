@@ -1,12 +1,25 @@
 import type { NextConfig } from "next";
+import { execSync } from "child_process";
 
 const isDev = process.env.NODE_ENV === "development";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
+
+// Git-based version: "v2.0.0" on tag, "v2.0.0-3-gca62836" after commits
+const APP_VERSION = (() => {
+  try {
+    return execSync("git describe --tags --always", { encoding: "utf-8" }).trim();
+  } catch {
+    return "unknown";
+  }
+})();
 
 const nextConfig: NextConfig = {
   output: "standalone",
   compress: true,
   poweredByHeader: false,
+  env: {
+    NEXT_PUBLIC_APP_VERSION: APP_VERSION,
+  },
   async rewrites() {
     return {
       // Run before filesystem/pages check — proxy gateway paths
