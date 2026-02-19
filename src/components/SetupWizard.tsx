@@ -81,7 +81,7 @@ export default function SetupWizard() {
   return (
     <>
       <header className="px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
-        <Link href="/" className="hidden sm:flex items-center gap-2.5 shrink-0">
+        <Link href="/" className="flex items-center gap-2 shrink-0">
           <Image
             src="/clawbox-icon.png"
             alt="ClawBox"
@@ -90,9 +90,14 @@ export default function SetupWizard() {
             className="w-9 h-9 object-contain"
             priority
           />
-          <span className="text-xl font-bold font-display title-gradient">
-            ClawBox
-          </span>
+          <div className="flex flex-col leading-tight">
+            <span className="text-xl font-bold font-display title-gradient">
+              ClawBox
+            </span>
+            <span className="text-[10px] text-[var(--text-muted)] -mt-1">
+              {process.env.NEXT_PUBLIC_APP_VERSION}
+            </span>
+          </div>
         </Link>
         {currentStep < 4 && <ProgressBar currentStep={currentStep} />}
       </header>
@@ -112,11 +117,6 @@ export default function SetupWizard() {
         {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
 
-      <footer className="py-2 text-center">
-        <span className="text-xs text-[var(--text-muted)]">
-          {process.env.NEXT_PUBLIC_APP_VERSION}
-        </span>
-      </footer>
     </>
   );
 }
