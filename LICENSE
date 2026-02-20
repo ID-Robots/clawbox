@@ -1,0 +1,53 @@
+ClawBox Source Available License v1.0
+
+Copyright (c) 2026 IDRobots Ltd. (ID Robots)
+All rights reserved.
+
+PERSONAL USE LICENSE
+
+Permission is hereby granted, free of charge, to any individual obtaining a
+copy of this software and associated documentation files (the "Software"), to
+use, copy, modify, and run the Software for personal, non-commercial purposes,
+subject to the following conditions:
+
+1. PERSONAL USE PERMITTED
+   You may use, copy, modify, and run the Software for personal projects,
+   learning, experimentation, and non-commercial purposes at no cost.
+
+2. COMMERCIAL USE RESTRICTED
+   Commercial use of the Software is NOT permitted without a separate
+   commercial license agreement. Commercial use includes, but is not limited to:
+
+   a) Selling, reselling, or distributing ClawBox hardware or software
+      products based on this Software
+   b) Offering the Software as a hosted or managed service
+   c) Bundling the Software with commercial hardware or services
+   d) Using the Software to provide paid services to third parties
+   e) Incorporating the Software into products intended for sale
+
+3. REDISTRIBUTION
+   You may redistribute the Software in source or binary form for
+   non-commercial purposes, provided that:
+   a) This license notice is included in all copies
+   b) You do not misrepresent the origin of the Software
+   c) Modified versions are clearly marked as such
+
+4. COMMERCIAL LICENSING
+   Companies and individuals wishing to use the Software for commercial
+   purposes must contact IDRobots Ltd. to negotiate a commercial license:
+
+   Email: yanko@idrobots.com
+   Web:   https://openclawhardware.dev
+   
+5. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+   IN THE SOFTWARE.
+
+6. TRADEMARKS
+   "ClawBox" and the ClawBox logo are trademarks of IDRobots Ltd. This
+   license does not grant permission to use these trademarks.
