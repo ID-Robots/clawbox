@@ -71,10 +71,21 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
-  await execShell(
-    "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox pull --ff-only",
-    { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+  // Only pull from origin/main when on the main branch (production).
+  // On feature branches (local dev), skip git update and just rebuild current code.
+  const { stdout: branch } = await execShell(
+    "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox rev-parse --abbrev-ref HEAD",
+    { timeout: 10_000 },
   );
+  if (branch.trim() === "main") {
+    await execShell(
+      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox fetch origin" +
+      " && git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox merge --ff-only origin/main",
+      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+  } else {
+    console.log(`[Updater] On branch '${branch.trim()}', skipping git pull (dev mode)`);
+  }
   await set("update_needs_continuation", true);
   await startRootServiceFireAndForget("rebuild_reboot");
   await waitForTermination();

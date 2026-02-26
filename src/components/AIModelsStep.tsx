@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import StatusMessage from "./StatusMessage";
+import { parseAuthInput } from "@/lib/oauth-utils";
 
 interface AIModelsStepProps {
   onNext: () => void;
@@ -53,6 +54,12 @@ const PROVIDERS: Provider[] = [
     description: "GPT models by OpenAI",
     authOptions: [
       {
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your ChatGPT Plus/Pro subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-...",
@@ -94,6 +101,9 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
+// Providers that use device code flow instead of redirect-based OAuth
+const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
+
 export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
   const [authMode, setAuthMode] = useState<AuthMode>("subscription");
@@ -105,22 +115,41 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     message: string;
   } | null>(null);
 
-  // OAuth subscription state
+  // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
   const [authCode, setAuthCode] = useState("");
   const [exchanging, setExchanging] = useState(false);
 
+  // Device auth flow state (OpenAI)
+  const [deviceCode, setDeviceCode] = useState<string | null>(null);
+  const [deviceUrl, setDeviceUrl] = useState<string | null>(null);
+  const [devicePolling, setDevicePolling] = useState(false);
+  const [deviceSaving, setDeviceSaving] = useState(false);
+
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
   const exchangeControllerRef = useRef<AbortController | null>(null);
   const oauthStartControllerRef = useRef<AbortController | null>(null);
+  const pollControllerRef = useRef<AbortController | null>(null);
+
+  const stopPolling = useCallback(() => {
+    setDevicePolling(false);
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+    pollControllerRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if (pollRef.current) clearTimeout(pollRef.current);
       saveControllerRef.current?.abort();
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
+      pollControllerRef.current?.abort();
     };
   }, []);
 
@@ -138,6 +167,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const selectProvider = (id: string) => {
+    stopPolling();
     const provider = PROVIDERS.find((p) => p.id === id);
     setSelectedProvider(id);
     setAuthMode(provider?.authOptions[0]?.mode ?? "token");
@@ -146,6 +176,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     setStatus(null);
     setOauthStarted(false);
     setAuthCode("");
+    setDeviceCode(null);
+    setDeviceUrl(null);
+    setDeviceSaving(false);
   };
 
   const saveModel = async () => {
@@ -182,6 +215,131 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     }
   };
 
+  // Save token received from any OAuth flow (device or redirect)
+  const saveOAuthToken = useCallback(async (
+    tokenData: { access_token: string; refresh_token?: string; expires_in?: number },
+    successMessage: string
+  ) => {
+    saveControllerRef.current?.abort();
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
+
+    try {
+      const saveRes = await fetch("/setup-api/ai-models/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: selectedProvider,
+          apiKey: tokenData.access_token,
+          authMode: "subscription",
+          refreshToken: tokenData.refresh_token,
+          expiresIn: tokenData.expires_in,
+        }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!saveRes.ok) return showError(await extractError(saveRes, "Failed to save token"));
+      const saveData = await saveRes.json();
+      if (controller.signal.aborted) return;
+      if (saveData.success) {
+        showSuccessAndContinue(successMessage);
+      } else {
+        showError(saveData.error || "Failed to save token");
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }, [selectedProvider]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- Device auth flow (OpenAI) ---
+
+  const pollDeviceAuth = useCallback(async (interval: number) => {
+    pollControllerRef.current?.abort();
+    const controller = new AbortController();
+    pollControllerRef.current = controller;
+
+    try {
+      const res = await fetch("/setup-api/ai-models/oauth/device-poll", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+
+      if (!res.ok) {
+        const errMsg = await extractError(res, "Polling failed");
+        // Session expired or invalid — stop polling
+        stopPolling();
+        showError(errMsg);
+        return;
+      }
+
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+
+      if (data.status === "complete" && data.access_token) {
+        stopPolling();
+        setDeviceSaving(true);
+        await saveOAuthToken(data, "GPT subscription connected! Continuing...");
+        return;
+      }
+
+      if (data.status === "pending") {
+        // Schedule next poll
+        pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+        return;
+      }
+
+      // Unexpected response
+      if (data.error) {
+        stopPolling();
+        showError(data.error);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Network error — retry
+      pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+    }
+  }, [stopPolling, saveOAuthToken]);
+
+  const startDeviceAuth = async () => {
+    stopPolling();
+    oauthStartControllerRef.current?.abort();
+    const controller = new AbortController();
+    oauthStartControllerRef.current = controller;
+
+    setStatus(null);
+    setDeviceCode(null);
+    setDeviceUrl(null);
+
+    try {
+      const res = await fetch("/setup-api/ai-models/oauth/device-start", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) return showError(await extractError(res, "Failed to start device auth"));
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+
+      if (data.user_code && data.verification_url) {
+        setDeviceCode(data.user_code);
+        setDeviceUrl(data.verification_url);
+        setDevicePolling(true);
+        // Start polling
+        const interval = data.interval || 5;
+        pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+      } else {
+        showError("Unexpected response from device auth");
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
+    }
+  };
+
+  // --- Redirect OAuth flow (Anthropic) ---
+
   const startOAuth = async () => {
     oauthStartControllerRef.current?.abort();
     const controller = new AbortController();
@@ -193,6 +351,8 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     try {
       const res = await fetch("/setup-api/ai-models/oauth/start", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: selectedProvider }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -210,7 +370,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const exchangeCode = async () => {
-    if (!authCode.trim()) return showError("Please paste the authorization code");
+    if (!authCode.trim()) return showError(`Please paste the ${currentOAuth.inputLabel.toLowerCase()}`);
+
+    const parsedCode = parseAuthInput(authCode);
+    if (!parsedCode) return showError("Could not extract authorization code from input");
 
     exchangeControllerRef.current?.abort();
     const controller = new AbortController();
@@ -219,11 +382,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     setExchanging(true);
     setStatus(null);
     try {
-      // Exchange code for token
       const exchangeRes = await fetch("/setup-api/ai-models/oauth/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: authCode.trim() }),
+        body: JSON.stringify({ code: parsedCode }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -232,28 +394,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       if (controller.signal.aborted) return;
       if (!tokenData.access_token) return showError("No access token received");
 
-      // Save token via configure endpoint
-      const saveRes = await fetch("/setup-api/ai-models/configure", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: "anthropic",
-          apiKey: tokenData.access_token,
-          authMode: "subscription",
-          refreshToken: tokenData.refresh_token,
-          expiresIn: tokenData.expires_in,
-        }),
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      if (!saveRes.ok) return showError(await extractError(saveRes, "Failed to save token"));
-      const saveData = await saveRes.json();
-      if (controller.signal.aborted) return;
-      if (saveData.success) {
-        showSuccessAndContinue("Claude subscription connected! Continuing...");
-      } else {
-        showError(saveData.error || "Failed to save token");
-      }
+      await saveOAuthToken(tokenData, currentOAuth.success);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
@@ -266,8 +407,185 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const activeAuth =
     selected?.authOptions.find((a) => a.mode === authMode) ??
     selected?.authOptions[0];
-  const isSubscription =
-    selectedProvider === "anthropic" && authMode === "subscription";
+  const isSubscription = authMode === "subscription";
+  const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
+
+  const oauthLabels: Record<string, {
+    button: string;
+    description: string;
+    success: string;
+    steps: string[];
+    inputLabel: string;
+    inputPlaceholder: string;
+  }> = {
+    anthropic: {
+      button: "Connect with Claude",
+      description:
+        "Connect your Claude Pro or Max subscription. This will open claude.ai where you can authorize ClawBox to use your account.",
+      success: "Claude subscription connected! Continuing...",
+      steps: [
+        "Authorize in the browser tab that just opened.",
+        "Copy the authorization code shown after approval.",
+        "Paste it below.",
+      ],
+      inputLabel: "Authorization Code",
+      inputPlaceholder: "Paste code here...",
+    },
+    openai: {
+      button: "Connect to GPT",
+      description:
+        "Connect your ChatGPT Plus or Pro subscription. This will open OpenAI where you can authorize ClawBox to use your account.",
+      success: "GPT subscription connected! Continuing...",
+      steps: [
+        "Sign in and authorize in the browser tab that just opened.",
+        "After approval, the page will redirect to a URL that won\u2019t load \u2014 this is expected.",
+        "Copy the full URL from your browser\u2019s address bar and paste it below.",
+      ],
+      inputLabel: "Callback URL",
+      inputPlaceholder: "Paste the full URL here...",
+    },
+  };
+  const DEFAULT_OAUTH_PROVIDER = "anthropic";
+  const currentOAuth = oauthLabels[selectedProvider ?? DEFAULT_OAUTH_PROVIDER] ?? oauthLabels[DEFAULT_OAUTH_PROVIDER];
+
+  // --- Render helpers ---
+
+  const renderDeviceAuth = () => (
+    <div>
+      <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
+        Connect your ChatGPT Plus or Pro subscription. You&apos;ll get a code to enter on OpenAI&apos;s website.
+      </p>
+
+      {!deviceCode ? (
+        <button
+          type="button"
+          onClick={startDeviceAuth}
+          className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+        >
+          Connect to GPT
+        </button>
+      ) : (
+        <div>
+          <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
+            <p className="text-xs text-[var(--text-secondary)] mb-2">
+              Open this URL and enter the code:
+            </p>
+            <a
+              href={deviceUrl!}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
+            >
+              {deviceUrl}
+            </a>
+            <div className="mt-3 px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
+              <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
+                {deviceCode}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    const ta = document.createElement("textarea");
+                    ta.value = deviceCode!;
+                    ta.style.position = "fixed";
+                    ta.style.opacity = "0";
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(ta);
+                    const btn = document.getElementById("copy-code-btn");
+                    if (btn) { btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = "Copy"; }, 1500); }
+                  } catch { /* ignore */ }
+                }}
+                id="copy-code-btn"
+                className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-[var(--text-muted)]">
+              Code expires in 15 minutes
+            </p>
+          </div>
+
+          {(devicePolling || deviceSaving) && (
+            <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+              <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+              {deviceSaving ? "Authorized! Connecting..." : "Waiting for authorization..."}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={startDeviceAuth}
+            className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
+          >
+            Get a new code
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderRedirectOAuth = () => (
+    <div>
+      <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
+        {currentOAuth.description}
+      </p>
+
+      {!oauthStarted ? (
+        <button
+          type="button"
+          onClick={startOAuth}
+          className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+        >
+          {currentOAuth.button}
+        </button>
+      ) : (
+        <div>
+          <div className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
+            <p className="text-xs text-[var(--text-primary)] leading-relaxed">
+              {currentOAuth.steps.map((step, i) => (
+                <span key={i}>
+                  {i > 0 && <br />}
+                  <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
+                </span>
+              ))}
+            </p>
+          </div>
+
+          <label
+            htmlFor="oauth-auth-code"
+            className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+          >
+            {currentOAuth.inputLabel}
+          </label>
+          <input
+            id="oauth-auth-code"
+            type="text"
+            value={authCode}
+            onChange={(e) => setAuthCode(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") exchangeCode();
+            }}
+            placeholder={currentOAuth.inputPlaceholder}
+            spellCheck={false}
+            autoComplete="off"
+            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+          />
+
+          <button
+            type="button"
+            onClick={startOAuth}
+            className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
+          >
+            Restart authorization
+          </button>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="w-full max-w-[520px]">
@@ -333,12 +651,15 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     type="button"
                     key={opt.mode}
                     onClick={() => {
+                      stopPolling();
                       setAuthMode(opt.mode);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
                       setOauthStarted(false);
                       setAuthCode("");
+                      setDeviceCode(null);
+                      setDeviceUrl(null);
                     }}
                     className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
                       authMode === opt.mode
@@ -353,63 +674,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
             )}
 
             {isSubscription ? (
-              /* OAuth Subscription Flow */
-              <div>
-                <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
-                  Connect your Claude Pro or Max subscription. This will open claude.ai
-                  where you can authorize ClawBox to use your account.
-                </p>
-
-                {!oauthStarted ? (
-                  <button
-                    type="button"
-                    onClick={startOAuth}
-                    className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-                  >
-                    Connect with Claude
-                  </button>
-                ) : (
-                  <div>
-                    <div className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
-                      <p className="text-xs text-[var(--text-primary)] leading-relaxed">
-                        <strong className="text-[var(--coral-bright)]">1.</strong> Authorize in the
-                        browser tab that just opened.<br />
-                        <strong className="text-[var(--coral-bright)]">2.</strong> Copy the
-                        authorization code shown after approval.<br />
-                        <strong className="text-[var(--coral-bright)]">3.</strong> Paste it below.
-                      </p>
-                    </div>
-
-                    <label
-                      htmlFor="oauth-auth-code"
-                      className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-                    >
-                      Authorization Code
-                    </label>
-                    <input
-                      id="oauth-auth-code"
-                      type="text"
-                      value={authCode}
-                      onChange={(e) => setAuthCode(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") exchangeCode();
-                      }}
-                      placeholder="Paste code here..."
-                      spellCheck={false}
-                      autoComplete="off"
-                      className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={startOAuth}
-                      className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
-                    >
-                      Restart authorization
-                    </button>
-                  </div>
-                )}
-              </div>
+              useDeviceAuth ? renderDeviceAuth() : renderRedirectOAuth()
             ) : (
               /* Standard API Key Flow */
               <div>
@@ -470,15 +735,20 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
         <div className="flex items-center gap-3 mt-5">
           {isSubscription ? (
-            oauthStarted && (
-              <button
-                type="button"
-                onClick={exchangeCode}
-                disabled={exchanging || !authCode.trim()}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
-              >
-                {exchanging ? "Connecting..." : "Save & Continue"}
-              </button>
+            useDeviceAuth ? (
+              /* Device auth has no manual submit button — it auto-completes via polling */
+              null
+            ) : (
+              oauthStarted && (
+                <button
+                  type="button"
+                  onClick={exchangeCode}
+                  disabled={exchanging || !authCode.trim()}
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+                >
+                  {exchanging ? "Connecting..." : "Save & Continue"}
+                </button>
+              )
             )
           ) : (
             <button

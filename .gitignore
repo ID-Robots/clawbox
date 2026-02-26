@@ -3,7 +3,8 @@ node_modules/
 .next-old/
 out/
 build/
-data/config.json
+coverage/
+data/
 *.log
 *.tsbuildinfo
 next-env.d.ts
@@ -11,5 +12,3 @@ next-env.d.ts
 .env*
 !.env.example
 !.env.template
-data/hotspot.env
-data/network.env

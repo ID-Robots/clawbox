@@ -5,6 +5,7 @@ import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
+import { parseAuthInput } from "@/lib/oauth-utils";
 
 /* ── Types ── */
 
@@ -82,7 +83,7 @@ const WIDGET_LABEL_CLASS =
 
 const AI_PROVIDERS = [
   { id: "anthropic", name: "Anthropic Claude", hasSubscription: true, placeholder: "sk-ant-api03-...", hint: "Get your API key from console.anthropic.com", tokenUrl: "https://console.anthropic.com/settings/keys" },
-  { id: "openai", name: "OpenAI GPT", hasSubscription: false, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
+  { id: "openai", name: "OpenAI GPT", hasSubscription: true, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
   { id: "google", name: "Google Gemini", hasSubscription: false, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
   { id: "openrouter", name: "OpenRouter", hasSubscription: false, placeholder: "sk-or-v1-...", hint: "Get your API key from OpenRouter.", tokenUrl: "https://openrouter.ai/keys" },
 ];
@@ -402,7 +403,31 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [telegramDone, setTelegramDone] = useState(false);
 
   const selectedAiProvider = AI_PROVIDERS.find((p) => p.id === aiProvider);
-  const isAiSubscription = aiProvider === "anthropic" && aiAuthMode === "subscription";
+  const isAiSubscription = aiAuthMode === "subscription" && (selectedAiProvider?.hasSubscription ?? false);
+
+  const aiOauthLabels: Record<string, { button: string; description: string; success: string; steps: string[]; inputLabel: string; inputPlaceholder: string }> = {
+    anthropic: {
+      button: "Connect with Claude",
+      description: "Connect your Claude Pro or Max subscription via OAuth.",
+      success: "Claude subscription connected!",
+      steps: ["Authorize in the browser tab.", "Copy the authorization code.", "Paste it below."],
+      inputLabel: "Authorization Code",
+      inputPlaceholder: "Paste code here...",
+    },
+    openai: {
+      button: "Connect to GPT",
+      description: "Connect your ChatGPT Plus or Pro subscription via OAuth.",
+      success: "GPT subscription connected!",
+      steps: [
+        "Sign in and authorize in the browser tab.",
+        "After approval, the page will redirect to a URL that won\u2019t load \u2014 this is expected.",
+        "Copy the full URL from the address bar and paste it below.",
+      ],
+      inputLabel: "Callback URL",
+      inputPlaceholder: "Paste the full URL here...",
+    },
+  };
+  const currentAiOAuth = aiOauthLabels[aiProvider] ?? aiOauthLabels.anthropic;
   const isUpdateRunning = updateStarted && updateState?.phase === "running";
 
   /* ── Fetch section status on mount ── */
@@ -708,7 +733,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     setAiOauthStarted(false);
     setAiAuthCode("");
     try {
-      const res = await fetch("/setup-api/ai-models/oauth/start", { method: "POST" });
+      const res = await fetch("/setup-api/ai-models/oauth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: aiProvider }),
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setAiStatus({ type: "error", message: data.error || "Failed to start OAuth" });
@@ -726,7 +755,12 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
   const exchangeAiCode = async () => {
     if (!aiAuthCode.trim()) {
-      setAiStatus({ type: "error", message: "Please paste the authorization code" });
+      setAiStatus({ type: "error", message: `Please paste the ${currentAiOAuth.inputLabel.toLowerCase()}` });
+      return;
+    }
+    const parsedCode = parseAuthInput(aiAuthCode);
+    if (!parsedCode) {
+      setAiStatus({ type: "error", message: "Could not extract authorization code from input" });
       return;
     }
     setAiExchanging(true);
@@ -735,7 +769,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       const exchangeRes = await fetch("/setup-api/ai-models/oauth/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: aiAuthCode.trim() }),
+        body: JSON.stringify({ code: parsedCode }),
       });
       if (!exchangeRes.ok) {
         const data = await exchangeRes.json().catch(() => ({}));
@@ -750,7 +784,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "anthropic", apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in }),
+        body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in }),
       });
       if (!saveRes.ok) {
         const data = await saveRes.json().catch(() => ({}));
@@ -759,9 +793,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       }
       const saveData = await saveRes.json();
       if (saveData.success) {
-        setAiStatus({ type: "success", message: "Claude subscription connected!" });
+        setAiStatus({ type: "success", message: currentAiOAuth.success });
         setProviderDone(true);
-        setProviderName("anthropic");
+        setProviderName(aiProvider);
         setAiOauthStarted(false);
         setAiAuthCode("");
       } else {
@@ -1112,27 +1146,30 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
           {isAiSubscription ? (
             <div>
-              <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">Connect your Claude Pro or Max subscription via OAuth.</p>
+              <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">{currentAiOAuth.description}</p>
               {!aiOauthStarted ? (
-                <button type="button" onClick={startAiOAuth} className={SAVE_BUTTON_CLASS}>Connect with Claude</button>
+                <button type="button" onClick={startAiOAuth} className={SAVE_BUTTON_CLASS}>{currentAiOAuth.button}</button>
               ) : (
                 <div className="space-y-3">
                   <div className="p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
                     <p className="text-xs text-[var(--text-primary)] leading-relaxed">
-                      <strong className="text-[var(--coral-bright)]">1.</strong> Authorize in the browser tab.<br />
-                      <strong className="text-[var(--coral-bright)]">2.</strong> Copy the authorization code.<br />
-                      <strong className="text-[var(--coral-bright)]">3.</strong> Paste it below.
+                      {currentAiOAuth.steps.map((step, i) => (
+                        <span key={i}>
+                          {i > 0 && <br />}
+                          <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
+                        </span>
+                      ))}
                     </p>
                   </div>
                   <div>
-                    <label htmlFor="ai-oauth-code" className={LABEL_CLASS}>Authorization Code</label>
+                    <label htmlFor="ai-oauth-code" className={LABEL_CLASS}>{currentAiOAuth.inputLabel}</label>
                     <input
                       id="ai-oauth-code"
                       type="text"
                       value={aiAuthCode}
                       onChange={(e) => setAiAuthCode(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") exchangeAiCode(); }}
-                      placeholder="Paste code here..."
+                      placeholder={currentAiOAuth.inputPlaceholder}
                       spellCheck={false}
                       autoComplete="off"
                       className={INPUT_CLASS}
