@@ -197,7 +197,7 @@ export async function POST(request: Request) {
 
     // 6. Persist to ClawBox config store
     await set("ai_model_configured", true);
-    await set("ai_model_provider", provider);
+    await set("ai_model_provider", ocProvider);
     await set("ai_model_configured_at", new Date().toISOString());
 
     return NextResponse.json({ success: true });

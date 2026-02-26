@@ -359,6 +359,7 @@ step_jtop_install() {
     echo "  jtop already installed"
     return
   fi
+  # Intentionally unpinned: jetson-stats version must match the JetPack release
   pip3 install jetson-stats
   echo "  jtop installed"
 }

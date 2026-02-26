@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
@@ -97,9 +99,18 @@ export async function POST(request: Request) {
       redirect_uri: config.redirectUri,
       code_verifier: stored.codeVerifier,
     };
-    // Anthropic expects state in the token exchange; OpenAI does not
+    // Anthropic expects state in the token exchange; OpenAI does not.
+    // Validate state to enforce CSRF protection.
     if (provider === "anthropic") {
-      exchangeBody.state = codeState || stored.state;
+      if (!codeState || codeState !== stored.state) {
+        await fs.unlink(STATE_PATH).catch(() => {});
+        console.error("[oauth/exchange] State mismatch:", { codeState, expected: stored.state });
+        return NextResponse.json(
+          { error: "OAuth state mismatch. Please restart the authorization flow." },
+          { status: 403 }
+        );
+      }
+      exchangeBody.state = codeState;
     }
 
     // Anthropic accepts JSON; OpenAI requires form-urlencoded
@@ -166,18 +177,27 @@ export async function POST(request: Request) {
         });
 
         if (apiKeyRes.ok) {
-          const apiKeyData = await apiKeyRes.json();
-          apiKeyToken = apiKeyData.access_token || apiKeyData.api_key;
-          apiKeyExpires = apiKeyData.expires_in;
-          console.log("[oauth/exchange] API key exchange succeeded");
+          try {
+            const apiKeyData = await apiKeyRes.json();
+            apiKeyToken = apiKeyData.access_token || apiKeyData.api_key;
+            apiKeyExpires = apiKeyData.expires_in;
+            console.log("[oauth/exchange] API key exchange succeeded");
+          } catch (parseErr) {
+            const raw = await apiKeyRes.text().catch(() => "(unreadable)");
+            console.error("[oauth/exchange] API key exchange JSON parse error:", parseErr, "raw:", raw);
+          }
         } else {
-          console.log("[oauth/exchange] API key exchange failed, using access_token:", apiKeyRes.status);
+          const errBody = await apiKeyRes.text().catch(() => "");
+          console.error("[oauth/exchange] API key exchange failed:", apiKeyRes.status, errBody);
         }
       } catch (e) {
-        console.log("[oauth/exchange] API key exchange error, using access_token:", e);
+        console.error("[oauth/exchange] API key exchange error, using access_token:", e);
       }
 
       await fs.unlink(STATE_PATH).catch(() => {});
+      // Clean up saved org file now that exchange succeeded
+      const orgPath = path.join(path.dirname(STATE_PATH), "oauth-org.json");
+      await fs.unlink(orgPath).catch(() => {});
 
       return NextResponse.json({
         access_token: apiKeyToken || tokenData.access_token,

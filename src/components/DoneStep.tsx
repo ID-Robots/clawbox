@@ -5,6 +5,7 @@ import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
+import { parseAuthInput } from "@/lib/oauth-utils";
 
 /* ── Types ── */
 
@@ -752,25 +753,12 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
-  const parseAiAuthInput = (raw: string): string => {
-    const trimmed = raw.trim();
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-      try {
-        const url = new URL(trimmed);
-        const code = url.searchParams.get("code");
-        const state = url.searchParams.get("state");
-        if (code) return state ? `${code}#${state}` : code;
-      } catch { /* treat as raw code */ }
-    }
-    return trimmed;
-  };
-
   const exchangeAiCode = async () => {
     if (!aiAuthCode.trim()) {
       setAiStatus({ type: "error", message: `Please paste the ${currentAiOAuth.inputLabel.toLowerCase()}` });
       return;
     }
-    const parsedCode = parseAiAuthInput(aiAuthCode);
+    const parsedCode = parseAuthInput(aiAuthCode);
     if (!parsedCode) {
       setAiStatus({ type: "error", message: "Could not extract authorization code from input" });
       return;

@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
@@ -28,6 +30,7 @@ const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
       audience: "https://api.openai.com/v1",
       id_token_add_organizations: "true",
       codex_cli_simplified_flow: "true",
+      originator: "codex_cli_rs",
     },
   },
 };
@@ -89,6 +92,8 @@ export async function POST(request: Request) {
     // Including `organization` in the authorize URL causes Auth0 to embed
     // organization_id as a flat field in the id_token JWT, which is required
     // for the token exchange to succeed on ChatGPT Plus accounts.
+    // We leave oauth-org.json intact here so retries can reuse it;
+    // it is cleaned up in the exchange handler on successful token exchange.
     let savedOrg: Record<string, string> = {};
     if (provider === "openai") {
       const ORG_PATH = path.join(STATE_DIR, "oauth-org.json");
@@ -97,8 +102,6 @@ export async function POST(request: Request) {
         if (orgData.organizationId) {
           savedOrg = { organization: orgData.organizationId };
           console.log("[oauth/start] Using saved organization:", orgData.organizationId);
-          // Clean up — only needed once
-          await fs.unlink(ORG_PATH).catch(() => {});
         }
       } catch {
         // No saved org, that's fine
