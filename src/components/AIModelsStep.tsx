@@ -53,6 +53,12 @@ const PROVIDERS: Provider[] = [
     description: "GPT models by OpenAI",
     authOptions: [
       {
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your ChatGPT Plus/Pro subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-...",
@@ -193,6 +199,8 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     try {
       const res = await fetch("/setup-api/ai-models/oauth/start", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: selectedProvider }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -209,8 +217,27 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     }
   };
 
+  const parseAuthInput = (raw: string): string => {
+    // If the input looks like a URL, extract the code param
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+      try {
+        const url = new URL(trimmed);
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+        if (code) return state ? `${code}#${state}` : code;
+      } catch {
+        // Not a valid URL, treat as raw code
+      }
+    }
+    return trimmed;
+  };
+
   const exchangeCode = async () => {
-    if (!authCode.trim()) return showError("Please paste the authorization code");
+    if (!authCode.trim()) return showError(`Please paste the ${currentOAuth.inputLabel.toLowerCase()}`);
+
+    const parsedCode = parseAuthInput(authCode);
+    if (!parsedCode) return showError("Could not extract authorization code from input");
 
     exchangeControllerRef.current?.abort();
     const controller = new AbortController();
@@ -223,7 +250,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       const exchangeRes = await fetch("/setup-api/ai-models/oauth/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: authCode.trim() }),
+        body: JSON.stringify({ code: parsedCode }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -237,7 +264,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: "anthropic",
+          provider: selectedProvider,
           apiKey: tokenData.access_token,
           authMode: "subscription",
           refreshToken: tokenData.refresh_token,
@@ -250,7 +277,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        showSuccessAndContinue("Claude subscription connected! Continuing...");
+        showSuccessAndContinue(currentOAuth.success);
       } else {
         showError(saveData.error || "Failed to save token");
       }
@@ -266,8 +293,44 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const activeAuth =
     selected?.authOptions.find((a) => a.mode === authMode) ??
     selected?.authOptions[0];
-  const isSubscription =
-    selectedProvider === "anthropic" && authMode === "subscription";
+  const isSubscription = authMode === "subscription";
+
+  const oauthLabels: Record<string, {
+    button: string;
+    description: string;
+    success: string;
+    steps: string[];
+    inputLabel: string;
+    inputPlaceholder: string;
+  }> = {
+    anthropic: {
+      button: "Connect with Claude",
+      description:
+        "Connect your Claude Pro or Max subscription. This will open claude.ai where you can authorize ClawBox to use your account.",
+      success: "Claude subscription connected! Continuing...",
+      steps: [
+        "Authorize in the browser tab that just opened.",
+        "Copy the authorization code shown after approval.",
+        "Paste it below.",
+      ],
+      inputLabel: "Authorization Code",
+      inputPlaceholder: "Paste code here...",
+    },
+    openai: {
+      button: "Connect to GPT",
+      description:
+        "Connect your ChatGPT Plus or Pro subscription. This will open OpenAI where you can authorize ClawBox to use your account.",
+      success: "GPT subscription connected! Continuing...",
+      steps: [
+        "Sign in and authorize in the browser tab that just opened.",
+        "After approval, the page will redirect to a URL that won\u2019t load \u2014 this is expected.",
+        "Copy the full URL from your browser\u2019s address bar and paste it below.",
+      ],
+      inputLabel: "Callback URL",
+      inputPlaceholder: "Paste the full URL here...",
+    },
+  };
+  const currentOAuth = oauthLabels[selectedProvider ?? ""] ?? oauthLabels.anthropic;
 
   return (
     <div className="w-full max-w-[520px]">
@@ -356,8 +419,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               /* OAuth Subscription Flow */
               <div>
                 <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
-                  Connect your Claude Pro or Max subscription. This will open claude.ai
-                  where you can authorize ClawBox to use your account.
+                  {currentOAuth.description}
                 </p>
 
                 {!oauthStarted ? (
@@ -366,17 +428,18 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     onClick={startOAuth}
                     className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                   >
-                    Connect with Claude
+                    {currentOAuth.button}
                   </button>
                 ) : (
                   <div>
                     <div className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
                       <p className="text-xs text-[var(--text-primary)] leading-relaxed">
-                        <strong className="text-[var(--coral-bright)]">1.</strong> Authorize in the
-                        browser tab that just opened.<br />
-                        <strong className="text-[var(--coral-bright)]">2.</strong> Copy the
-                        authorization code shown after approval.<br />
-                        <strong className="text-[var(--coral-bright)]">3.</strong> Paste it below.
+                        {currentOAuth.steps.map((step, i) => (
+                          <span key={i}>
+                            {i > 0 && <br />}
+                            <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
+                          </span>
+                        ))}
                       </p>
                     </div>
 
@@ -384,7 +447,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                       htmlFor="oauth-auth-code"
                       className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
                     >
-                      Authorization Code
+                      {currentOAuth.inputLabel}
                     </label>
                     <input
                       id="oauth-auth-code"
@@ -394,7 +457,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                       onKeyDown={(e) => {
                         if (e.key === "Enter") exchangeCode();
                       }}
-                      placeholder="Paste code here..."
+                      placeholder={currentOAuth.inputPlaceholder}
                       spellCheck={false}
                       autoComplete="off"
                       className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"

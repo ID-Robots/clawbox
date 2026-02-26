@@ -16,6 +16,7 @@ interface ProviderConfig {
   profileKey: string;
 }
 
+// API key providers use "openai", OAuth subscription uses "openai-codex"
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: {
     defaultModel: "anthropic/claude-sonnet-4-5-20250929",
@@ -33,6 +34,12 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openrouter/anthropic/claude-sonnet-4-5",
     profileKey: "openrouter:default",
   },
+};
+
+// OpenAI OAuth subscriptions use the openai-codex provider in OpenClaw
+const OPENAI_CODEX_CONFIG: ProviderConfig = {
+  defaultModel: "openai-codex/gpt-5.3-codex",
+  profileKey: "openai-codex:default",
 };
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
@@ -106,13 +113,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const config = PROVIDERS[provider];
-    if (!config) {
+    const baseConfig = PROVIDERS[provider];
+    if (!baseConfig) {
       return NextResponse.json(
         { error: `Unknown provider: ${provider}` },
         { status: 400 }
       );
     }
+
+    // For OpenAI subscription (OAuth), use openai-codex provider in OpenClaw
+    const isOpenAISubscription = provider === "openai" && authMode === "subscription";
+    const config = isOpenAISubscription ? OPENAI_CODEX_CONFIG : baseConfig;
+    const ocProvider = isOpenAISubscription ? "openai-codex" : provider;
 
     // 1. Write token to auth-profiles.json
     let authProfiles: {
@@ -130,7 +142,7 @@ export async function POST(request: Request) {
       // { type: "oauth", provider, access, refresh, expires }
       authProfiles.profiles[config.profileKey] = {
         type: "oauth",
-        provider,
+        provider: ocProvider,
         access: apiKey,
         refresh: refreshToken || "",
         expires: expiresIn
@@ -140,7 +152,7 @@ export async function POST(request: Request) {
     } else {
       authProfiles.profiles[config.profileKey] = {
         type: "token",
-        provider,
+        provider: ocProvider,
         token: apiKey,
       };
     }
@@ -166,7 +178,7 @@ export async function POST(request: Request) {
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify({ provider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      JSON.stringify({ provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
 

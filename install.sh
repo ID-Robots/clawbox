@@ -143,7 +143,7 @@ step_git_pull() {
     echo "  Repository exists, pulling latest..."
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" pull --ff-only || echo "  Warning: pull failed (local changes?), continuing with current code"
+    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$REPO_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
     # Fix .git ownership — git operations run as root create root-owned files
     # which block the clawbox user from pulling later (e.g. FETCH_HEAD)
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
@@ -354,6 +354,15 @@ step_performance_mode() {
   jetson_clocks
 }
 
+step_jtop_install() {
+  if command -v jtop &>/dev/null; then
+    echo "  jtop already installed"
+    return
+  fi
+  pip3 install jetson-stats
+  echo "  jtop installed"
+}
+
 step_chrome_install() {
   if command -v chromium-browser &>/dev/null; then
     echo "  Chromium already installed"
@@ -431,7 +440,7 @@ step_rebuild_reboot() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode chrome_install
+  apt_update nvidia_jetpack performance_mode jtop_install chrome_install
   openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -459,7 +468,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
 step=0
 log() {
   step=$((step + 1))
@@ -517,6 +526,9 @@ step_polkit_rules
 
 log "Installing voice pipeline..."
 step_voice_install
+
+log "Installing jtop (jetson-stats)..."
+step_jtop_install
 
 log "Installing Chromium..."
 step_chrome_install
