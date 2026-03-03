@@ -125,6 +125,7 @@ const DEVICE_AUTH_LABELS: Record<string, {
 export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
   const [authMode, setAuthMode] = useState<AuthMode>("subscription");
+  const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -161,6 +162,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   }, []);
 
   useEffect(() => {
+    fetch("/setup-api/ai-models/oauth/providers")
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data.providers)) setAvailableOAuth(data.providers); })
+      .catch(() => {});
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if (pollRef.current) clearTimeout(pollRef.current);
@@ -188,7 +193,14 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     stopPolling();
     const provider = PROVIDERS.find((p) => p.id === id);
     setSelectedProvider(id);
-    setAuthMode(provider?.authOptions[0]?.mode ?? "token");
+    // Pick the first auth mode that's actually available
+    const options = provider?.authOptions.filter((opt) => {
+      if (opt.mode === "subscription" && availableOAuth !== null) {
+        return availableOAuth.includes(id);
+      }
+      return true;
+    }) ?? [];
+    setAuthMode(options[0]?.mode ?? "token");
     setApiKey("");
     setShowKey(false);
     setStatus(null);
@@ -429,9 +441,16 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const selected = PROVIDERS.find((p) => p.id === selectedProvider);
+  // Filter out subscription option for providers whose OAuth isn't configured on the backend
+  const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
+    if (opt.mode === "subscription" && availableOAuth !== null) {
+      return availableOAuth.includes(selected.id);
+    }
+    return true;
+  }) ?? [];
   const activeAuth =
-    selected?.authOptions.find((a) => a.mode === authMode) ??
-    selected?.authOptions[0];
+    effectiveAuthOptions.find((a) => a.mode === authMode) ??
+    effectiveAuthOptions[0];
   const isSubscription = authMode === "subscription";
   const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
 
@@ -682,9 +701,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
         {selected && activeAuth && (
           <div className="mt-5">
-            {selected.authOptions.length > 1 && (
+            {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
-                {selected.authOptions.map((opt) => (
+                {effectiveAuthOptions.map((opt) => (
                   <button
                     type="button"
                     key={opt.mode}

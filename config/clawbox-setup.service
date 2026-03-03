@@ -15,6 +15,7 @@ EnvironmentFile=-/home/clawbox/clawbox/.env
 Environment=NODE_ENV=production
 Environment=PORT=80
 Environment=HOSTNAME=0.0.0.0
+Environment=ALLOW_INSECURE_CONTROL_UI=true
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true

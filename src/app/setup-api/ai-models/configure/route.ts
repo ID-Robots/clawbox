@@ -10,7 +10,8 @@ import { restartGateway } from "@/lib/openclaw-config";
 const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
 const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
-const CLAWBOX_UID = 1000; // clawbox user
+const CLAWBOX_UID = process.getuid?.() ?? 1000;
+const CLAWBOX_GID = process.getgid?.() ?? 1000;
 
 interface ProviderConfig {
   defaultModel: string;
@@ -56,7 +57,7 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
       stdio: ["pipe", "pipe", "pipe"],
       cwd: "/home/clawbox",
       uid: CLAWBOX_UID,
-      gid: CLAWBOX_UID,
+      gid: CLAWBOX_GID,
       env: { ...process.env, HOME: "/home/clawbox" },
     });
     let stderr = "";
@@ -198,7 +199,7 @@ export async function POST(request: Request) {
     ]);
 
     // 4b. Allow insecure auth for control UI (needed for HTTP proxy from Next.js on local device)
-    if (process.env.ALLOW_INSECURE_CONTROL_UI !== "false") {
+    if (process.env.ALLOW_INSECURE_CONTROL_UI === "true") {
       await runCommand(OPENCLAW_BIN, [
         "config",
         "set",

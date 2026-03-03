@@ -19,6 +19,14 @@ export interface OAuthAuthorizeConfig extends OAuthProviderConfig {
   extraParams?: Record<string, string>;
 }
 
+// ── OpenAI constants (used in multiple configs below) ──
+
+export const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export const OPENAI_ISSUER = "https://auth.openai.com";
+export const OPENAI_DEVICE_TOKEN_URL = `${OPENAI_ISSUER}/api/accounts/deviceauth/token`;
+export const OPENAI_REDIRECT_URI = `${OPENAI_ISSUER}/deviceauth/callback`;
+export const OPENAI_TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`;
+
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 const GOOGLE_CONFIGURED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
@@ -37,9 +45,9 @@ export const OAUTH_PROVIDERS: Record<string, OAuthAuthorizeConfig> = {
     authorizeUrl: "https://claude.ai/oauth/authorize",
   },
   openai: {
-    clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+    clientId: OPENAI_CLIENT_ID,
     redirectUri: "http://localhost:1455/auth/callback",
-    tokenEndpoint: "https://auth.openai.com/oauth/token",
+    tokenEndpoint: OPENAI_TOKEN_URL,
     scopes: "openid profile email offline_access",
     authorizeUrl: "https://auth.openai.com/oauth/authorize",
     extraParams: {
@@ -82,9 +90,9 @@ export interface DeviceAuthProviderConfig {
 
 export const DEVICE_AUTH_PROVIDERS: Record<string, DeviceAuthProviderConfig> = {
   openai: {
-    clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
-    deviceCodeUrl: "https://auth.openai.com/api/accounts/deviceauth/usercode",
-    verificationUrl: "https://auth.openai.com/codex/device",
+    clientId: OPENAI_CLIENT_ID,
+    deviceCodeUrl: `${OPENAI_ISSUER}/api/accounts/deviceauth/usercode`,
+    verificationUrl: `${OPENAI_ISSUER}/codex/device`,
     requestFormat: "json",
     responseFields: {
       deviceId: "device_auth_id",
@@ -94,10 +102,3 @@ export const DEVICE_AUTH_PROVIDERS: Record<string, DeviceAuthProviderConfig> = {
   },
 };
 
-// ── OpenAI device-code polling constants ──
-
-export const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-export const OPENAI_ISSUER = "https://auth.openai.com";
-export const OPENAI_DEVICE_TOKEN_URL = `${OPENAI_ISSUER}/api/accounts/deviceauth/token`;
-export const OPENAI_REDIRECT_URI = `${OPENAI_ISSUER}/deviceauth/callback`;
-export const OPENAI_TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`;

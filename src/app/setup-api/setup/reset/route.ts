@@ -43,8 +43,9 @@ async function removeDirectoryContents(dir: string): Promise<string[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
-  } catch {
-    return []; // Directory doesn't exist
+  } catch (err: unknown) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
+    throw err;
   }
   const results = await Promise.allSettled(
     entries.map(entry => fs.rm(path.join(dir, entry), { recursive: true, force: true }))
@@ -76,8 +77,8 @@ export async function POST() {
       for (const r of results) {
         if (r.status === "rejected") dataFailures.push(String(r.reason));
       }
-    } catch {
-      // data dir doesn't exist, nothing to clean
+    } catch (err: unknown) {
+      if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
     }
 
     // 3. Wipe entire OpenClaw directory (config, agents, sessions, credentials, logs, workspace)
@@ -92,9 +93,21 @@ export async function POST() {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
 
-    // 5. Schedule a full system reboot (short delay so the response reaches the client)
-    setTimeout(() => {
-      execFileCb("systemctl", ["reboot"], { timeout: 10_000 }, () => {});
+    // 5. Return error if file cleanup had failures
+    if (allFailures.length > 0) {
+      return NextResponse.json(
+        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
+        { status: 500 },
+      );
+    }
+
+    // 6. Schedule a full system reboot (short delay so the response reaches the client)
+    setTimeout(async () => {
+      try {
+        await execFile("systemctl", ["reboot"], { timeout: 10_000 });
+      } catch (err) {
+        console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
+      }
     }, 1_000);
 
     return NextResponse.json({ success: true });

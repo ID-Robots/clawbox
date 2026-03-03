@@ -27,8 +27,9 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          set -o pipefail
           bun run test:coverage 2>&1 | tee test-output.log
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Parse coverage
         id: coverage
