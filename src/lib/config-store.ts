@@ -1,8 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
 
-const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
-const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
+export const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+export const DATA_DIR = path.join(CONFIG_ROOT, "data");
+const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 
 interface Config {
   [key: string]: unknown;
@@ -58,6 +59,24 @@ export async function set(key: string, value: unknown): Promise<void> {
       delete config[key];
     } else {
       config[key] = value;
+    }
+    await writeConfig(config);
+  })();
+  writeLock = done.catch(() => {});
+  await done;
+}
+
+export async function setMany(entries: Record<string, unknown>): Promise<void> {
+  const prev = writeLock;
+  const done = (async () => {
+    await prev;
+    const config = await readConfig();
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) {
+        delete config[key];
+      } else {
+        config[key] = value;
+      }
     }
     await writeConfig(config);
   })();

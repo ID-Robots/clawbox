@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { get, set } from "./config-store";
+import { get, set, setMany } from "./config-store";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -158,6 +158,87 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   });
 }
 
+let cachedTargetVersion: string | null = null;
+let targetVersionCacheTime = 0;
+const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
+
+const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+
+interface VersionInfo {
+  clawbox: { current: string; target: string | null };
+  openclaw: { current: string | null; target: string | null };
+}
+
+let cachedVersionInfo: VersionInfo | null = null;
+let versionInfoCacheTime = 0;
+
+export async function getVersionInfo(): Promise<VersionInfo> {
+  if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
+    return cachedVersionInfo;
+  }
+
+  const [targetVersion, openclawCurrent, openclawTarget] = await Promise.all([
+    getTargetVersion(),
+    execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
+      .then(({ stdout }) => stdout.trim() || null)
+      .catch(() => null),
+    execShell("npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
+      .then(({ stdout }) => stdout.trim() || null)
+      .catch(() => null),
+  ]);
+
+  cachedVersionInfo = {
+    clawbox: {
+      current: process.env.NEXT_PUBLIC_APP_VERSION || "unknown",
+      target: targetVersion,
+    },
+    openclaw: {
+      current: openclawCurrent,
+      target: openclawTarget,
+    },
+  };
+  versionInfoCacheTime = Date.now();
+  return cachedVersionInfo;
+}
+
+export async function getTargetVersion(): Promise<string | null> {
+  if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
+  try {
+    const { stdout } = await execShell(
+      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox ls-remote --tags --refs origin",
+      { timeout: 10_000 },
+    );
+    const tags = stdout
+      .trim()
+      .split("\n")
+      .map((line) => line.match(/refs\/tags\/(v.+)$/)?.[1])
+      .filter((t): t is string => !!t);
+    // Only consider strict semver tags (vX.Y.Z)
+    const semverTags = tags.filter((t) => /^v\d+\.\d+\.\d+$/.test(t));
+    if (semverTags.length === 0) {
+      cachedTargetVersion = null;
+      targetVersionCacheTime = Date.now();
+      return null;
+    }
+    semverTags.sort((a, b) => {
+      const pa = a.replace(/^v/, "").split(".").map(Number);
+      const pb = b.replace(/^v/, "").split(".").map(Number);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const diff = (pa[i] || 0) - (pb[i] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    });
+    cachedTargetVersion = semverTags[semverTags.length - 1];
+    targetVersionCacheTime = Date.now();
+    return cachedTargetVersion;
+  } catch {
+    cachedTargetVersion = null;
+    targetVersionCacheTime = Date.now();
+    return null;
+  }
+}
+
 function createInitialState(): UpdateState {
   return {
     phase: "idle",
@@ -297,8 +378,10 @@ async function runUpdate(startFrom: number): Promise<void> {
   state.phase = failed ? "failed" : "completed";
 
   if (!failed) {
-    await set("update_completed", true);
-    await set("update_completed_at", new Date().toISOString());
+    await setMany({
+      update_completed: true,
+      update_completed_at: new Date().toISOString(),
+    });
   }
   console.log("[Updater] Update process finished");
 }

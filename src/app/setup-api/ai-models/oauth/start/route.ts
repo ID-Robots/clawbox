@@ -4,40 +4,10 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { DATA_DIR } from "@/lib/config-store";
+import { OAUTH_PROVIDERS } from "@/lib/oauth-config";
 
-interface OAuthProviderConfig {
-  clientId: string;
-  redirectUri: string;
-  scopes: string;
-  authorizeUrl: string;
-  extraParams?: Record<string, string>;
-}
-
-const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
-  anthropic: {
-    clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-    redirectUri: "https://console.anthropic.com/oauth/code/callback",
-    scopes:
-      "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers",
-    authorizeUrl: "https://claude.ai/oauth/authorize",
-  },
-  openai: {
-    clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
-    redirectUri: "http://localhost:1455/auth/callback",
-    scopes: "openid profile email offline_access",
-    authorizeUrl: "https://auth.openai.com/oauth/authorize",
-    extraParams: {
-      audience: "https://api.openai.com/v1",
-      id_token_add_organizations: "true",
-      codex_cli_simplified_flow: "true",
-      originator: "codex_cli_rs",
-    },
-  },
-};
-
-const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
-const STATE_DIR = path.join(CONFIG_ROOT, "data");
-const STATE_PATH = path.join(STATE_DIR, "oauth-state.json");
+const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
 
 function base64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -67,19 +37,9 @@ export async function POST(request: Request) {
     );
     const state = base64url(crypto.randomBytes(32));
 
-    await fs.mkdir(STATE_DIR, { recursive: true });
+    await fs.mkdir(DATA_DIR, { recursive: true });
 
-    // Check that STATE_PATH is not a symlink
-    try {
-      const stat = await fs.lstat(STATE_PATH);
-      if (stat.isSymbolicLink()) {
-        await fs.unlink(STATE_PATH);
-      }
-    } catch {
-      // File doesn't exist, which is fine
-    }
-
-    // Write atomically via temp file + rename
+    // Write atomically via temp file + rename (rename replaces symlinks atomically)
     const tmpPath = STATE_PATH + `.tmp.${crypto.randomBytes(4).toString("hex")}`;
     await fs.writeFile(
       tmpPath,
@@ -96,7 +56,7 @@ export async function POST(request: Request) {
     // it is cleaned up in the exchange handler on successful token exchange.
     let savedOrg: Record<string, string> = {};
     if (provider === "openai") {
-      const ORG_PATH = path.join(STATE_DIR, "oauth-org.json");
+      const ORG_PATH = path.join(DATA_DIR, "oauth-org.json");
       try {
         const orgData = JSON.parse(await fs.readFile(ORG_PATH, "utf-8"));
         if (orgData.organizationId) {

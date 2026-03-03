@@ -94,7 +94,7 @@ export default function SetupWizard() {
             <span className="text-xl font-bold font-display title-gradient">
               ClawBox
             </span>
-            <span className="text-[10px] text-[var(--text-muted)] -mt-1">
+            <span className="text-[10px] text-green-400 -mt-1">
               {process.env.NEXT_PUBLIC_APP_VERSION}
             </span>
           </div>
@@ -117,6 +117,16 @@ export default function SetupWizard() {
         {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
 
+      <footer className="px-4 py-3 flex justify-center">
+        <a
+          href="https://openclawhardware.dev/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-4 py-2 rounded-lg text-sm font-semibold text-white btn-gradient transition transform hover:scale-105"
+        >
+          openclawhardware.dev
+        </a>
+      </footer>
     </>
   );
 }

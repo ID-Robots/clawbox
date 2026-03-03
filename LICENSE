@@ -1,6 +1,6 @@
 ClawBox Source Available License v1.0
 
-Copyright (c) 2026 IDRobots Ltd. (ID Robots)
+Copyright (c) 2025-2026 IDRobots Ltd. (ID Robots)
 All rights reserved.
 
 PERSONAL USE LICENSE
@@ -38,8 +38,13 @@ subject to the following conditions:
 
    Email: yanko@idrobots.com
    Web:   https://openclawhardware.dev
-   
-5. NO WARRANTY
+
+5. CONTRIBUTIONS
+   By submitting code, documentation, or other material to this project
+   (via pull request, patch, or otherwise), you agree to license your
+   contribution under the same terms as this license.
+
+6. NO WARRANTY
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -48,6 +53,12 @@ subject to the following conditions:
    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
    IN THE SOFTWARE.
 
-6. TRADEMARKS
+7. TRADEMARKS
    "ClawBox" and the ClawBox logo are trademarks of IDRobots Ltd. This
-   license does not grant permission to use these trademarks.
+   license does not grant permission to use these trademarks except as
+   required for reasonable attribution.
+
+8. TERMINATION
+   This license is automatically terminated if you violate any of its
+   terms. Upon termination, you must destroy all copies of the Software
+   in your possession.

@@ -2,35 +2,50 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { DATA_DIR } from "@/lib/config-store";
+import { DEVICE_AUTH_PROVIDERS } from "@/lib/oauth-config";
 
 export const dynamic = "force-dynamic";
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEVICE_CODE_URL =
-  "https://auth.openai.com/api/accounts/deviceauth/usercode";
-const VERIFICATION_URL = "https://auth.openai.com/codex/device";
+const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
 
-const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
-const STATE_DIR = path.join(CONFIG_ROOT, "data");
-const STATE_PATH = path.join(STATE_DIR, "oauth-device-state.json");
-
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    // OpenAI device auth: server generates its own PKCE pair.
-    // We do NOT send code_challenge — the poll response will include
-    // the code_verifier we need for the token exchange.
-    const res = await fetch(DEVICE_CODE_URL, {
+    let body: { provider?: string } = {};
+    try {
+      body = await request.json();
+    } catch {
+      // No body or invalid JSON — default to openai for backward compat
+    }
+
+    const providerName = body.provider || "openai";
+    const config = DEVICE_AUTH_PROVIDERS[providerName];
+    if (!config) {
+      return NextResponse.json(
+        { error: `Device auth not supported for provider: ${providerName}` },
+        { status: 400 }
+      );
+    }
+
+    const reqBody =
+      config.requestFormat === "form"
+        ? new URLSearchParams({ client_id: config.clientId }).toString()
+        : JSON.stringify({ client_id: config.clientId });
+    const contentType =
+      config.requestFormat === "form"
+        ? "application/x-www-form-urlencoded"
+        : "application/json";
+
+    const res = await fetch(config.deviceCodeUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: CLIENT_ID,
-      }),
+      headers: { "Content-Type": contentType },
+      body: reqBody,
       signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      console.error("[device-start] Failed:", res.status, errText);
+      console.error(`[device-start/${providerName}] Failed:`, res.status, errText);
       return NextResponse.json(
         { error: `Device auth request failed (${res.status})` },
         { status: 502 }
@@ -38,17 +53,20 @@ export async function POST() {
     }
 
     const data = await res.json();
-    const { device_auth_id, user_code, interval } = data;
+    const deviceId = data[config.responseFields.deviceId];
+    const userCode = data[config.responseFields.userCode];
+    const interval = data[config.responseFields.interval] || 5;
+    const verificationUrl = config.verificationUrl;
 
-    if (!device_auth_id || !user_code) {
-      console.error("[device-start] Unexpected response:", data);
+    if (!deviceId || !userCode) {
+      console.error(`[device-start/${providerName}] Unexpected response:`, data);
       return NextResponse.json(
-        { error: "Unexpected response from OpenAI device auth" },
+        { error: `Unexpected response from ${providerName} device auth` },
         { status: 502 }
       );
     }
 
-    await fs.mkdir(STATE_DIR, { recursive: true });
+    await fs.mkdir(DATA_DIR, { recursive: true });
 
     // Atomic write
     const tmpPath =
@@ -56,9 +74,10 @@ export async function POST() {
     await fs.writeFile(
       tmpPath,
       JSON.stringify({
-        device_auth_id,
-        user_code,
-        interval: interval || 5,
+        provider: providerName,
+        device_id: deviceId,
+        user_code: userCode,
+        interval,
         createdAt: Date.now(),
       }),
       { mode: 0o600 }
@@ -66,9 +85,9 @@ export async function POST() {
     await fs.rename(tmpPath, STATE_PATH);
 
     return NextResponse.json({
-      verification_url: VERIFICATION_URL,
-      user_code,
-      interval: interval || 5,
+      verification_url: verificationUrl,
+      user_code: userCode,
+      interval,
     });
   } catch (err) {
     console.error("[device-start] Error:", err);

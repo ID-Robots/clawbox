@@ -296,6 +296,14 @@ step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
   find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
+  # Create .env with defaults if it doesn't already exist
+  local ENV_FILE="$PROJECT_DIR/.env"
+  if [ ! -f "$ENV_FILE" ]; then
+    printf 'ALLOW_INSECURE_CONTROL_UI=true\n' > "$ENV_FILE"
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    echo "  Created $ENV_FILE with defaults"
+  fi
   echo "  Done"
 }
 

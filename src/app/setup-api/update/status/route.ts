@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUpdateState, isUpdateCompleted, checkContinuation } from "@/lib/updater";
+import { getUpdateState, isUpdateCompleted, checkContinuation, getVersionInfo } from "@/lib/updater";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +23,9 @@ export async function GET() {
           steps: state.steps.map((s) => ({ ...s, status: "completed" })),
         });
       }
+
+      const versions = await getVersionInfo();
+      return NextResponse.json({ ...state, targetVersion: versions.clawbox.target, versions });
     }
 
     return NextResponse.json(state);
