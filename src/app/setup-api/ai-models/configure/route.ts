@@ -42,7 +42,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     },
   },
   openrouter: {
-    defaultModel: "openrouter/anthropic/claude-sonnet-4-5",
+    defaultModel: "openrouter/anthropic/claude-sonnet-4.5",
     profileKey: "openrouter:default",
   },
 };
