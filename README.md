@@ -149,5 +149,5 @@ ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). 
 
 <p align="center">
   <a href="https://openclawhardware.dev/">openclawhardware.dev</a><br/>
-  Built by <a href="https://github.com/ID-Robots">ID Robots</a>
+  Built by <a href="https://github.com/ID-Robots">ID Robots</a> — source available
 </p>
