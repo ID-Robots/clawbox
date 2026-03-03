@@ -71,7 +71,7 @@ NODE
           fi
 
       - name: Comment PR with results
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         env:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
