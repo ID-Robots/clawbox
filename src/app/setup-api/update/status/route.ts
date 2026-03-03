@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUpdateState, isUpdateCompleted, checkContinuation } from "@/lib/updater";
+import { getUpdateState, isUpdateCompleted, checkContinuation, getTargetVersion } from "@/lib/updater";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +23,11 @@ export async function GET() {
           steps: state.steps.map((s) => ({ ...s, status: "completed" })),
         });
       }
+    }
+
+    if (state.phase === "idle") {
+      const targetVersion = await getTargetVersion();
+      return NextResponse.json({ ...state, targetVersion });
     }
 
     return NextResponse.json(state);

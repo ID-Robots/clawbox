@@ -58,6 +58,15 @@ interface SectionStatusMessage {
 
 const MAX_HISTORY = 30;
 
+const RESET_STEPS = [
+  "Clearing configuration...",
+  "Removing credentials...",
+  "Wiping AI model data...",
+  "Resetting gateway...",
+  "Finalizing...",
+  "Restarting device...",
+];
+
 const INPUT_CLASS =
   "w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500";
 
@@ -84,7 +93,7 @@ const WIDGET_LABEL_CLASS =
 const AI_PROVIDERS = [
   { id: "anthropic", name: "Anthropic Claude", hasSubscription: true, placeholder: "sk-ant-api03-...", hint: "Get your API key from console.anthropic.com", tokenUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI GPT", hasSubscription: true, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
-  { id: "google", name: "Google Gemini", hasSubscription: false, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
+  { id: "google", name: "Google Gemini", hasSubscription: true, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
   { id: "openrouter", name: "OpenRouter", hasSubscription: false, placeholder: "sk-or-v1-...", hint: "Get your API key from OpenRouter.", tokenUrl: "https://openrouter.ai/keys" },
 ];
 
@@ -380,6 +389,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [updateConfirm, setUpdateConfirm] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [resetStep, setResetStep] = useState(0);
+  const [resetProgress, setResetProgress] = useState(0);
 
   /* ── Telegram ── */
   const [botToken, setBotToken] = useState("");
@@ -425,6 +436,14 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       ],
       inputLabel: "Callback URL",
       inputPlaceholder: "Paste the full URL here...",
+    },
+    google: {
+      button: "Connect to Gemini",
+      description: "Connect your Google Gemini subscription via OAuth.",
+      success: "Gemini subscription connected!",
+      steps: ["Sign in with your Google account in the browser tab.", "Copy the authorization code shown after approval.", "Paste it below."],
+      inputLabel: "Authorization Code",
+      inputPlaceholder: "Paste code here...",
     },
   };
   const currentAiOAuth = aiOauthLabels[aiProvider] ?? aiOauthLabels.anthropic;
@@ -494,7 +513,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     fetch("/setup-api/wifi/status", { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data && !controller.signal.aborted && data["GENERAL.CONNECTION"]) {
+        if (data && !controller.signal.aborted && data["GENERAL.CONNECTION"] && data["GENERAL.CONNECTION"] !== "ClawBox-Setup") {
           setWifiConnectedSSID(data["GENERAL.CONNECTION"]);
         }
       })
@@ -784,7 +803,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in }),
+        body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in, ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}) }),
       });
       if (!saveRes.ok) {
         const data = await saveRes.json().catch(() => ({}));
@@ -854,18 +873,42 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
   const resetSetup = async () => {
     setResetting(true);
+    setResetStep(0);
+    setResetProgress(0);
+
+    // Single timer: advance step + derive progress from step index
+    const stepDuration = 800;
+    let currentStep = 0;
+    const stepInterval = setInterval(() => {
+      currentStep++;
+      if (currentStep < RESET_STEPS.length) {
+        setResetStep(currentStep);
+        setResetProgress(Math.round((currentStep / RESET_STEPS.length) * 100));
+      }
+    }, stepDuration);
+
     try {
       const res = await fetch("/setup-api/setup/reset", { method: "POST" });
+      clearInterval(stepInterval);
+
       if (res.ok) {
+        // Show final "Restarting device..." step
+        setResetStep(RESET_STEPS.length - 1);
+        setResetProgress(100);
+        // Device is rebooting — wait then try to reload (page will come back after reboot)
+        await new Promise((r) => setTimeout(r, 3000));
         window.location.href = "/setup";
         return;
       }
-      setCompleteError("Failed to reset setup");
+      setCompleteError("Factory reset failed");
     } catch {
-      setCompleteError("Failed to reset setup");
+      setCompleteError("Factory reset failed");
     } finally {
+      clearInterval(stepInterval);
       setResetting(false);
       setResetConfirm(false);
+      setResetStep(0);
+      setResetProgress(0);
     }
   };
 
@@ -912,7 +955,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             className="py-3 bg-red-500/10 text-red-400 rounded-xl text-sm font-semibold hover:bg-red-500/20 hover:scale-105 transition-all cursor-pointer flex items-center justify-center gap-2 border border-red-500/20"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-            Reset Setup
+            Factory Reset
           </button>
       </div>
 
@@ -944,32 +987,61 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         </div>
       )}
 
-      {/* Reset confirmation popup */}
+      {/* Reset confirmation / progress popup */}
       {resetConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
-            <h3 className="text-lg font-bold text-gray-100 mb-2">Reset Setup?</h3>
-            <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
-              This will clear all setup progress and restart the wizard from the beginning. Your credentials and tokens will be kept.
-            </p>
-            <div className="flex items-center gap-3 justify-end">
-              <button
-                type="button"
-                onClick={() => setResetConfirm(false)}
-                disabled={resetting}
-                className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={resetSetup}
-                disabled={resetting}
-                className="px-5 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-red-600 transition-colors disabled:opacity-50"
-              >
-                {resetting ? "Resetting..." : "Reset"}
-              </button>
-            </div>
+            {!resetting ? (
+              <>
+                <h3 className="text-lg font-bold text-gray-100 mb-2">Factory Reset?</h3>
+                <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
+                  This will erase all settings, credentials, and tokens and restart the setup wizard from scratch.
+                </p>
+                <div className="flex items-center gap-3 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setResetConfirm(false)}
+                    className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetSetup}
+                    className="px-5 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-red-600 transition-colors"
+                  >
+                    Factory Reset
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-lg font-bold text-gray-100 mb-4">Resetting Device...</h3>
+                <div className="space-y-3 mb-5">
+                  {RESET_STEPS.map((step, i) => (
+                    <div key={i} className="flex items-center gap-2.5 text-sm">
+                      {i < resetStep ? (
+                        <svg className="w-4 h-4 text-green-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                      ) : i === resetStep ? (
+                        <span className="w-4 h-4 shrink-0 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <span className="w-4 h-4 shrink-0 rounded-full border-2 border-gray-600" />
+                      )}
+                      <span className={i <= resetStep ? "text-gray-200" : "text-gray-500"}>
+                        {step}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="h-full bg-red-500 rounded-full transition-all duration-300 ease-out"
+                    style={{ width: `${resetProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-[var(--text-muted)] mt-2 text-center">{resetProgress}%</p>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -11,6 +11,7 @@ ExecStart=/usr/bin/node production-server.js
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
+EnvironmentFile=-/home/clawbox/clawbox/.env
 Environment=NODE_ENV=production
 Environment=PORT=80
 Environment=HOSTNAME=0.0.0.0

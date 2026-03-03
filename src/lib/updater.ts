@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { get, set } from "./config-store";
+import { get, set, setMany } from "./config-store";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -158,6 +158,44 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   });
 }
 
+let cachedTargetVersion: string | null = null;
+let targetVersionCacheTime = 0;
+const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
+
+export async function getTargetVersion(): Promise<string | null> {
+  if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
+  try {
+    const { stdout } = await execShell(
+      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox ls-remote --tags --refs origin",
+      { timeout: 10_000 },
+    );
+    const tags = stdout
+      .trim()
+      .split("\n")
+      .map((line) => line.match(/refs\/tags\/(v.+)$/)?.[1])
+      .filter((t): t is string => !!t);
+    if (tags.length === 0) {
+      targetVersionCacheTime = Date.now();
+      return null;
+    }
+    tags.sort((a, b) => {
+      const pa = a.replace(/^v/, "").split(".").map(Number);
+      const pb = b.replace(/^v/, "").split(".").map(Number);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const diff = (pa[i] || 0) - (pb[i] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    });
+    cachedTargetVersion = tags[tags.length - 1];
+    targetVersionCacheTime = Date.now();
+    return cachedTargetVersion;
+  } catch {
+    targetVersionCacheTime = Date.now();
+    return null;
+  }
+}
+
 function createInitialState(): UpdateState {
   return {
     phase: "idle",
@@ -297,8 +335,10 @@ async function runUpdate(startFrom: number): Promise<void> {
   state.phase = failed ? "failed" : "completed";
 
   if (!failed) {
-    await set("update_completed", true);
-    await set("update_completed_at", new Date().toISOString());
+    await setMany({
+      update_completed: true,
+      update_completed_at: new Date().toISOString(),
+    });
   }
   console.log("[Updater] Update process finished");
 }

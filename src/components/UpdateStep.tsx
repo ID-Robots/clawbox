@@ -39,6 +39,7 @@ function StepIcon({ status }: { status: StepStatus }) {
 
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
+  const [targetVersion, setTargetVersion] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -101,9 +102,10 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`Status check failed (${res.status})`);
-        const data: UpdateState = await res.json();
+        const data = await res.json();
         if (controller.signal.aborted) return;
         setState(data);
+        if (data.targetVersion) setTargetVersion(data.targetVersion);
 
         if (data.phase === "running") {
           startPolling();
@@ -193,9 +195,18 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <h1 className="text-2xl font-bold font-display mb-2">
             System Update
           </h1>
-          <p className="text-[var(--text-secondary)] mb-6 leading-relaxed">
+          <p className="text-[var(--text-secondary)] mb-4 leading-relaxed">
             Update your ClawBox with the latest software, drivers, and AI models.
           </p>
+          {targetVersion && (
+            <div className="mb-6 flex items-center gap-2 text-sm">
+              <span className="text-[var(--text-muted)]">
+                {process.env.NEXT_PUBLIC_APP_VERSION}
+              </span>
+              <span className="text-[var(--text-muted)]">&rarr;</span>
+              <span className="text-green-400 font-semibold">{targetVersion}</span>
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <button
               type="button"

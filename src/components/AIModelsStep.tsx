@@ -75,6 +75,12 @@ const PROVIDERS: Provider[] = [
     description: "Gemini models by Google",
     authOptions: [
       {
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your Google One AI Premium subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "AIza...",
@@ -103,6 +109,18 @@ const PROVIDERS: Provider[] = [
 
 // Providers that use device code flow instead of redirect-based OAuth
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
+
+const DEVICE_AUTH_LABELS: Record<string, {
+  description: string;
+  button: string;
+  success: string;
+}> = {
+  openai: {
+    description: "Connect your ChatGPT Plus or Pro subscription. You\u2019ll get a code to enter on OpenAI\u2019s website.",
+    button: "Connect to GPT",
+    success: "GPT subscription connected! Continuing...",
+  },
+};
 
 export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
@@ -217,7 +235,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; refresh_token?: string; expires_in?: number },
+    tokenData: { access_token: string; refresh_token?: string; expires_in?: number; projectId?: string },
     successMessage: string
   ) => {
     saveControllerRef.current?.abort();
@@ -234,6 +252,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           authMode: "subscription",
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
+          ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
         }),
         signal: controller.signal,
       });
@@ -252,7 +271,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     }
   }, [selectedProvider]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // --- Device auth flow (OpenAI) ---
+  // --- Device auth flow (OpenAI, Google) ---
+
+  const currentDevice = DEVICE_AUTH_LABELS[selectedProvider ?? "openai"] ?? DEVICE_AUTH_LABELS.openai;
 
   const pollDeviceAuth = useCallback(async (interval: number) => {
     pollControllerRef.current?.abort();
@@ -280,7 +301,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       if (data.status === "complete" && data.access_token) {
         stopPolling();
         setDeviceSaving(true);
-        await saveOAuthToken(data, "GPT subscription connected! Continuing...");
+        const successMsg = DEVICE_AUTH_LABELS[selectedProvider ?? "openai"]?.success
+          ?? "Subscription connected! Continuing...";
+        await saveOAuthToken(data, successMsg);
         return;
       }
 
@@ -300,7 +323,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       // Network error — retry
       pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
     }
-  }, [stopPolling, saveOAuthToken]);
+  }, [stopPolling, saveOAuthToken, selectedProvider]);
 
   const startDeviceAuth = async () => {
     stopPolling();
@@ -315,6 +338,8 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     try {
       const res = await fetch("/setup-api/ai-models/oauth/device-start", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: selectedProvider }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -444,6 +469,19 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       inputLabel: "Callback URL",
       inputPlaceholder: "Paste the full URL here...",
     },
+    google: {
+      button: "Connect to Gemini",
+      description:
+        "Connect your Google Gemini subscription. This will open Google where you can authorize ClawBox to use your account.",
+      success: "Gemini subscription connected! Continuing...",
+      steps: [
+        "Sign in with your Google account in the tab that just opened.",
+        "Copy the authorization code shown after approval.",
+        "Paste it below.",
+      ],
+      inputLabel: "Authorization Code",
+      inputPlaceholder: "Paste code here...",
+    },
   };
   const DEFAULT_OAUTH_PROVIDER = "anthropic";
   const currentOAuth = oauthLabels[selectedProvider ?? DEFAULT_OAUTH_PROVIDER] ?? oauthLabels[DEFAULT_OAUTH_PROVIDER];
@@ -453,7 +491,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const renderDeviceAuth = () => (
     <div>
       <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
-        Connect your ChatGPT Plus or Pro subscription. You&apos;ll get a code to enter on OpenAI&apos;s website.
+        {currentDevice.description}
       </p>
 
       {!deviceCode ? (
@@ -462,7 +500,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           onClick={startDeviceAuth}
           className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
         >
-          Connect to GPT
+          {currentDevice.button}
         </button>
       ) : (
         <div>

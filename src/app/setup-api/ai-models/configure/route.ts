@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { set } from "@/lib/config-store";
+import { setMany } from "@/lib/config-store";
+import { restartGateway } from "@/lib/openclaw-config";
 
 const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
 const AUTH_PROFILES_PATH =
@@ -14,9 +15,10 @@ const CLAWBOX_UID = 1000; // clawbox user
 interface ProviderConfig {
   defaultModel: string;
   profileKey: string;
+  /** Override config used when authMode is "subscription" (OAuth). */
+  subscriptionOverride?: { defaultModel: string; profileKey: string };
 }
 
-// API key providers use "openai", OAuth subscription uses "openai-codex"
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: {
     defaultModel: "anthropic/claude-sonnet-4-5-20250929",
@@ -25,21 +27,23 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   openai: {
     defaultModel: "openai/gpt-4o",
     profileKey: "openai:default",
+    subscriptionOverride: {
+      defaultModel: "openai-codex/gpt-5.3-codex",
+      profileKey: "openai-codex:default",
+    },
   },
   google: {
     defaultModel: "google/gemini-2.0-flash",
     profileKey: "google:default",
+    subscriptionOverride: {
+      defaultModel: "google-gemini-cli/gemini-2.5-flash",
+      profileKey: "google-gemini-cli:default",
+    },
   },
   openrouter: {
     defaultModel: "openrouter/anthropic/claude-sonnet-4-5",
     profileKey: "openrouter:default",
   },
-};
-
-// OpenAI OAuth subscriptions use the openai-codex provider in OpenClaw
-const OPENAI_CODEX_CONFIG: ProviderConfig = {
-  defaultModel: "openai-codex/gpt-5.3-codex",
-  profileKey: "openai-codex:default",
 };
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
@@ -98,6 +102,7 @@ export async function POST(request: Request) {
       authMode?: string;
       refreshToken?: string;
       expiresIn?: number;
+      projectId?: string;
     };
     try {
       body = await request.json();
@@ -105,7 +110,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     if (!provider || !apiKey) {
       return NextResponse.json(
         { error: "Provider and API key are required" },
@@ -121,10 +126,11 @@ export async function POST(request: Request) {
       );
     }
 
-    // For OpenAI subscription (OAuth), use openai-codex provider in OpenClaw
-    const isOpenAISubscription = provider === "openai" && authMode === "subscription";
-    const config = isOpenAISubscription ? OPENAI_CODEX_CONFIG : baseConfig;
-    const ocProvider = isOpenAISubscription ? "openai-codex" : provider;
+    // For subscription (OAuth) providers, use the subscription-specific config
+    const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
+      ? baseConfig.subscriptionOverride
+      : baseConfig;
+    const ocProvider = config.profileKey.split(":")[0];
 
     // 1. Write token to auth-profiles.json
     let authProfiles: {
@@ -139,7 +145,7 @@ export async function POST(request: Request) {
     }
     if (authMode === "subscription") {
       // OAuth credential format expected by OpenClaw:
-      // { type: "oauth", provider, access, refresh, expires }
+      // { type: "oauth", provider, access, refresh, expires, projectId? }
       authProfiles.profiles[config.profileKey] = {
         type: "oauth",
         provider: ocProvider,
@@ -148,6 +154,7 @@ export async function POST(request: Request) {
         expires: expiresIn
           ? Date.now() + expiresIn * 1000
           : Date.now() + 8 * 60 * 60 * 1000, // default 8h
+        ...(projectId ? { projectId } : {}),
       };
     } else {
       authProfiles.profiles[config.profileKey] = {
@@ -190,15 +197,30 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
+    // 4b. Ensure control UI allows insecure auth (HTTP proxy from Next.js)
+    await runCommand(OPENCLAW_BIN, [
+      "config",
+      "set",
+      "gateway.controlUi.allowInsecureAuth",
+      "true",
+      "--json",
+    ]);
+
     // 5. Ensure openclaw config files are owned by clawbox
-    for (const name of ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]) {
-      await fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_UID).catch(() => {});
-    }
+    await Promise.all(
+      ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]
+        .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_UID).catch(() => {}))
+    );
 
     // 6. Persist to ClawBox config store
-    await set("ai_model_configured", true);
-    await set("ai_model_provider", ocProvider);
-    await set("ai_model_configured_at", new Date().toISOString());
+    await setMany({
+      ai_model_configured: true,
+      ai_model_provider: ocProvider,
+      ai_model_configured_at: new Date().toISOString(),
+    });
+
+    // 7. Restart OpenClaw gateway so it picks up the new auth profile and model
+    await restartGateway().catch(() => {});
 
     return NextResponse.json({ success: true });
   } catch (err) {
