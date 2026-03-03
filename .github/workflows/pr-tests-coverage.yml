@@ -1,6 +1,8 @@
 name: PR Tests and Coverage
 
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -70,7 +72,7 @@ NODE
           fi
 
       - name: Comment PR with results
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}

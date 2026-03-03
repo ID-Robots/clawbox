@@ -40,6 +40,10 @@ function StepIcon({ status }: { status: StepStatus }) {
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
   const [targetVersion, setTargetVersion] = useState<string | null>(null);
+  const [versions, setVersions] = useState<{
+    clawbox: { current: string; target: string | null };
+    openclaw: { current: string | null; target: string | null };
+  } | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -106,6 +110,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         if (controller.signal.aborted) return;
         setState(data);
         if (data.targetVersion) setTargetVersion(data.targetVersion);
+        if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
           startPolling();
@@ -198,13 +203,30 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <p className="text-[var(--text-secondary)] mb-4 leading-relaxed">
             Update your ClawBox with the latest software, drivers, and AI models.
           </p>
-          {targetVersion && (
-            <div className="mb-6 flex items-center gap-2 text-sm">
-              <span className="text-[var(--text-muted)]">
-                {process.env.NEXT_PUBLIC_APP_VERSION}
-              </span>
-              <span className="text-[var(--text-muted)]">&rarr;</span>
-              <span className="text-green-400 font-semibold">{targetVersion}</span>
+          {versions && (
+            <div className="mb-6 space-y-1.5 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-[var(--text-muted)] w-20">ClawBox</span>
+                <span className="text-[var(--text-muted)]">{versions.clawbox.current}</span>
+                {versions.clawbox.target && (
+                  <>
+                    <span className="text-[var(--text-muted)]">&rarr;</span>
+                    <span className="text-green-400 font-semibold">{versions.clawbox.target}</span>
+                  </>
+                )}
+              </div>
+              {versions.openclaw.current && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[var(--text-muted)] w-20">OpenClaw</span>
+                  <span className="text-[var(--text-muted)]">{versions.openclaw.current}</span>
+                  {versions.openclaw.target && versions.openclaw.target !== versions.openclaw.current && (
+                    <>
+                      <span className="text-[var(--text-muted)]">&rarr;</span>
+                      <span className="text-green-400 font-semibold">{versions.openclaw.target}</span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
           <div className="flex items-center gap-3">
