@@ -165,7 +165,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     fetch("/setup-api/ai-models/oauth/providers")
       .then((res) => res.json())
       .then((data) => { if (Array.isArray(data.providers)) setAvailableOAuth(data.providers); })
-      .catch(() => {});
+      .catch((err) => {
+        console.error("[AIModelsStep] Failed to fetch OAuth providers:", err);
+        setAvailableOAuth([]);
+      });
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if (pollRef.current) clearTimeout(pollRef.current);

@@ -64,7 +64,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/github-script@v7
         env:
-          INSTALL_OK: ${{ needs.test.result }}
           TEST_RESULT: ${{ needs.test.result }}
         with:
           script: |

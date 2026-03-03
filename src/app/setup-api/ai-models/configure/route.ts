@@ -171,7 +171,7 @@ export async function POST(request: Request) {
     });
     await fs.rename(tmpPath, AUTH_PROFILES_PATH);
     // Fix ownership so the gateway (running as clawbox) can read it
-    await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_UID);
+    await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 
     // 2. Validate profileKey before interpolating into config path
     if (!PROFILE_KEY_RE.test(config.profileKey)) {
@@ -212,7 +212,7 @@ export async function POST(request: Request) {
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
       ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]
-        .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_UID).catch(() => {}))
+        .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
     );
 
     // 6. Persist to ClawBox config store

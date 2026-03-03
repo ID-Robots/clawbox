@@ -387,6 +387,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
   /* ── Confirmations ── */
   const [updateConfirm, setUpdateConfirm] = useState(false);
+  const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
+  const [versionLoading, setVersionLoading] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -568,6 +570,22 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
 
   /* ── Actions ── */
+
+  const openUpdateConfirm = async () => {
+    setVersionLoading(true);
+    setUpdateConfirm(true);
+    try {
+      const res = await fetch("/setup-api/update/status");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.versions) setVersionInfo(data.versions);
+      }
+    } catch {
+      // versions are nice-to-have, dialog still works without them
+    } finally {
+      setVersionLoading(false);
+    }
+  };
 
   const triggerUpdate = async () => {
     setUpdateStarted(true);
@@ -942,7 +960,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </a>
           <button
             type="button"
-            onClick={isUpdateRunning ? undefined : () => setUpdateConfirm(true)}
+            onClick={isUpdateRunning ? undefined : openUpdateConfirm}
             disabled={isUpdateRunning}
             className="py-3 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-500 hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25"
           >
@@ -964,9 +982,33 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
             <h3 className="text-lg font-bold text-gray-100 mb-2">System Update</h3>
-            <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
+            <p className="text-sm text-[var(--text-secondary)] mb-4 leading-relaxed">
               This will pull the latest updates and restart the device. The process may take a few minutes.
             </p>
+            {versionLoading ? (
+              <div className="mb-4 text-xs text-[var(--text-muted)]">Checking versions...</div>
+            ) : versionInfo && (
+              <div className="mb-4 space-y-2 text-xs">
+                <div className="flex items-center justify-between bg-[var(--bg-deep)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--text-secondary)] font-medium">ClawBox</span>
+                  <span className="text-[var(--text-primary)]">
+                    {versionInfo.clawbox.current}
+                    {versionInfo.clawbox.target && versionInfo.clawbox.target !== versionInfo.clawbox.current && (
+                      <span className="text-[var(--text-muted)]">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between bg-[var(--bg-deep)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--text-secondary)] font-medium">OpenClaw</span>
+                  <span className="text-[var(--text-primary)]">
+                    {versionInfo.openclaw.current ?? "not installed"}
+                    {versionInfo.openclaw.target && versionInfo.openclaw.target !== versionInfo.openclaw.current && (
+                      <span className="text-[var(--text-muted)]">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex items-center gap-3 justify-end">
               <button
                 type="button"

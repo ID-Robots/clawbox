@@ -59,8 +59,8 @@ export const OAUTH_PROVIDERS: Record<string, OAuthAuthorizeConfig> = {
   },
   ...(GOOGLE_CONFIGURED ? {
     google: {
-      clientId: GOOGLE_CLIENT_ID,
-      clientSecret: GOOGLE_CLIENT_SECRET,
+      clientId: GOOGLE_CLIENT_ID as string,
+      clientSecret: GOOGLE_CLIENT_SECRET as string,
       redirectUri: "https://codeassist.google.com/authcode",
       tokenEndpoint: "https://oauth2.googleapis.com/token",
       scopes:
