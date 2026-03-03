@@ -24,6 +24,12 @@ interface StoredState {
 
 async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
   const deviceAuthId = stored.device_id || stored.device_auth_id;
+  if (!deviceAuthId) {
+    return NextResponse.json(
+      { error: "Missing device_id in stored state. Restart the device auth flow." },
+      { status: 400 },
+    );
+  }
 
   const pollRes = await fetch(OPENAI_DEVICE_TOKEN_URL, {
     method: "POST",
@@ -43,6 +49,13 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
   if (!pollRes.ok) {
     const errText = await pollRes.text().catch(() => "");
     console.error("[device-poll/openai] Poll failed:", pollRes.status, errText);
+    // 5xx = server error, surface it; 4xx (not 403/404) = client error
+    if (pollRes.status >= 500) {
+      return NextResponse.json(
+        { error: `OpenAI poll error (${pollRes.status})` },
+        { status: 502 },
+      );
+    }
     return NextResponse.json({ status: "pending" });
   }
 

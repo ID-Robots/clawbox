@@ -23,9 +23,7 @@ export async function GET() {
           steps: state.steps.map((s) => ({ ...s, status: "completed" })),
         });
       }
-    }
 
-    if (state.phase === "idle") {
       const versions = await getVersionInfo();
       return NextResponse.json({ ...state, targetVersion: versions.clawbox.target, versions });
     }

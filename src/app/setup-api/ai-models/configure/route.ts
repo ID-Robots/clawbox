@@ -197,14 +197,16 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4b. Ensure control UI allows insecure auth (HTTP proxy from Next.js)
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "gateway.controlUi.allowInsecureAuth",
-      "true",
-      "--json",
-    ]);
+    // 4b. Allow insecure auth for control UI (needed for HTTP proxy from Next.js on local device)
+    if (process.env.ALLOW_INSECURE_CONTROL_UI !== "false") {
+      await runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "gateway.controlUi.allowInsecureAuth",
+        "true",
+        "--json",
+      ]);
+    }
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -220,7 +222,15 @@ export async function POST(request: Request) {
     });
 
     // 7. Restart OpenClaw gateway so it picks up the new auth profile and model
-    await restartGateway().catch(() => {});
+    try {
+      await restartGateway();
+    } catch (err) {
+      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? err.message : err);
+      return NextResponse.json(
+        { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
+        { status: 502 },
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

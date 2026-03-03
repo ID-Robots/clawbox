@@ -19,10 +19,13 @@ export interface OAuthAuthorizeConfig extends OAuthProviderConfig {
   extraParams?: Record<string, string>;
 }
 
-const GOOGLE_CLIENT_ID =
-  process.env.GOOGLE_OAUTH_CLIENT_ID || "";
-const GOOGLE_CLIENT_SECRET =
-  process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+const GOOGLE_CONFIGURED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
+
+if (!GOOGLE_CONFIGURED) {
+  console.warn("[oauth-config] GOOGLE_OAUTH_CLIENT_ID/SECRET not set — Google OAuth disabled");
+}
 
 export const OAUTH_PROVIDERS: Record<string, OAuthAuthorizeConfig> = {
   anthropic: {
@@ -46,19 +49,21 @@ export const OAUTH_PROVIDERS: Record<string, OAuthAuthorizeConfig> = {
       originator: "codex_cli_rs",
     },
   },
-  google: {
-    clientId: GOOGLE_CLIENT_ID,
-    clientSecret: GOOGLE_CLIENT_SECRET,
-    redirectUri: "https://codeassist.google.com/authcode",
-    tokenEndpoint: "https://oauth2.googleapis.com/token",
-    scopes:
-      "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-    authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-    extraParams: {
-      access_type: "offline",
-      prompt: "consent",
+  ...(GOOGLE_CONFIGURED ? {
+    google: {
+      clientId: GOOGLE_CLIENT_ID,
+      clientSecret: GOOGLE_CLIENT_SECRET,
+      redirectUri: "https://codeassist.google.com/authcode",
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      scopes:
+        "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+      authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+      extraParams: {
+        access_type: "offline",
+        prompt: "consent",
+      },
     },
-  },
+  } : {}),
 };
 
 // ── Device-code flow (OpenAI) ──

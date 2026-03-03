@@ -39,16 +39,23 @@ async function deleteWifiConnections(): Promise<void> {
   }
 }
 
-async function removeDirectoryContents(dir: string) {
+async function removeDirectoryContents(dir: string): Promise<string[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
   } catch {
-    return; // Directory doesn't exist
+    return []; // Directory doesn't exist
   }
-  await Promise.all(
-    entries.map(entry => fs.rm(path.join(dir, entry), { recursive: true, force: true }).catch(() => {}))
+  const results = await Promise.allSettled(
+    entries.map(entry => fs.rm(path.join(dir, entry), { recursive: true, force: true }))
   );
+  const failures = results
+    .map((r, i) => r.status === "rejected" ? `${entries[i]}: ${r.reason}` : null)
+    .filter((f): f is string => f !== null);
+  if (failures.length > 0) {
+    console.warn(`[Reset] Failed to remove ${failures.length} item(s) in ${dir}:`, failures);
+  }
+  return failures;
 }
 
 
@@ -58,19 +65,27 @@ export async function POST() {
     resetUpdateState();
 
     // 2. Wipe data directory (config.json, OAuth state, etc.) — preserve hardware-specific files
+    const dataFailures: string[] = [];
     try {
       const entries = await fs.readdir(DATA_DIR);
-      await Promise.all(
+      const results = await Promise.allSettled(
         entries
           .filter(entry => !PRESERVE_FILES.has(entry))
-          .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }).catch(() => {}))
+          .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
       );
+      for (const r of results) {
+        if (r.status === "rejected") dataFailures.push(String(r.reason));
+      }
     } catch {
       // data dir doesn't exist, nothing to clean
     }
 
     // 3. Wipe entire OpenClaw directory (config, agents, sessions, credentials, logs, workspace)
-    await removeDirectoryContents(OPENCLAW_DIR);
+    const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
+    const allFailures = [...dataFailures, ...openclawFailures];
+    if (allFailures.length > 0) {
+      console.warn(`[Reset] ${allFailures.length} file deletion(s) failed — continuing with reboot`);
+    }
 
     // 4. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {

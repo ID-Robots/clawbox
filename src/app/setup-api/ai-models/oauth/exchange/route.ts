@@ -94,10 +94,11 @@ async function discoverGoogleProject(accessToken: string): Promise<string | unde
     response?: { cloudaicompanionProject?: { id?: string } };
   };
 
-  // Step 3: Poll LRO if not immediately done
+  // Step 3: Poll LRO if not immediately done (max 2 minutes total)
   if (!lro.done && lro.name) {
     console.log("[oauth/exchange] Polling onboard LRO:", lro.name);
-    for (let attempt = 0; attempt < 24; attempt++) {
+    const deadline = Date.now() + 120_000;
+    for (let attempt = 0; attempt < 24 && Date.now() < deadline; attempt++) {
       await new Promise((r) => setTimeout(r, 5000));
       const pollRes = await fetch(`${CODE_ASSIST_ENDPOINT}/v1internal/${lro.name}`, {
         headers,

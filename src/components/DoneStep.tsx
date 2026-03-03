@@ -1021,7 +1021,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                   {RESET_STEPS.map((step, i) => (
                     <div key={i} className="flex items-center gap-2.5 text-sm">
                       {i < resetStep ? (
-                        <svg className="w-4 h-4 text-green-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                        <svg className="w-4 h-4 text-green-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>
                       ) : i === resetStep ? (
                         <span className="w-4 h-4 shrink-0 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
                       ) : (

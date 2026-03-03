@@ -213,11 +213,14 @@ export async function getTargetVersion(): Promise<string | null> {
       .split("\n")
       .map((line) => line.match(/refs\/tags\/(v.+)$/)?.[1])
       .filter((t): t is string => !!t);
-    if (tags.length === 0) {
+    // Only consider strict semver tags (vX.Y.Z)
+    const semverTags = tags.filter((t) => /^v\d+\.\d+\.\d+$/.test(t));
+    if (semverTags.length === 0) {
+      cachedTargetVersion = null;
       targetVersionCacheTime = Date.now();
       return null;
     }
-    tags.sort((a, b) => {
+    semverTags.sort((a, b) => {
       const pa = a.replace(/^v/, "").split(".").map(Number);
       const pb = b.replace(/^v/, "").split(".").map(Number);
       for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
@@ -226,10 +229,11 @@ export async function getTargetVersion(): Promise<string | null> {
       }
       return 0;
     });
-    cachedTargetVersion = tags[tags.length - 1];
+    cachedTargetVersion = semverTags[semverTags.length - 1];
     targetVersionCacheTime = Date.now();
     return cachedTargetVersion;
   } catch {
+    cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
     return null;
   }
