@@ -1,6 +1,24 @@
-# ClawBox
+<p align="center">
+  <img src="public/clawbox-logo.png" alt="ClawBox" width="180" />
+</p>
 
-Setup wizard and dashboard for NVIDIA Jetson devices. Provides a browser-based interface for configuring OpenClaw — connect to the device's WiFi hotspot, open `http://clawbox.local/`, and walk through the guided setup.
+<h1 align="center">ClawBox</h1>
+
+<p align="center">
+  Setup wizard and dashboard for <a href="https://openclawhardware.dev/">OpenClaw Hardware</a> — a private AI assistant running on NVIDIA Jetson.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-NVIDIA_Jetson-76b900?style=flat-square&logo=nvidia" />
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js_16-black?style=flat-square&logo=next.js" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178c6?style=flat-square&logo=typescript&logoColor=white" />
+  <img alt="Bun" src="https://img.shields.io/badge/Bun-fbf0df?style=flat-square&logo=bun&logoColor=black" />
+</p>
+
+---
+
+ClawBox turns a bare Jetson device into a ready-to-use [OpenClaw](https://openclawhardware.dev/) AI assistant. Connect to the device's WiFi hotspot, open `http://clawbox.local/`, and walk through the guided setup — WiFi, system updates, AI provider credentials, and Telegram integration. Once configured, the same URL serves the OpenClaw Control UI with a ClawBox navigation bar.
 
 ## Quick Start
 
@@ -20,11 +38,11 @@ The wizard guides you through 7 steps:
 2. **Security** — Set device password
 3. **WiFi** — Connect to your home/office network
 4. **Update** — System packages, JetPack, OpenClaw
-5. **AI Models** — API key or Claude subscription (OAuth)
+5. **AI Models** — API key or subscription (OAuth) for Claude, GPT, Gemini, or OpenRouter
 6. **Telegram** — Optional bot integration
 7. **Done** — System dashboard with status and factory reset
 
-After setup completes, the root URL serves the OpenClaw gateway Control UI with a ClawBox navigation bar.
+After setup completes, the root URL serves the OpenClaw gateway Control UI.
 
 ## Architecture
 
@@ -34,7 +52,7 @@ Browser (http://clawbox.local)
   ├── Port 80: Next.js (production-server.js)
   │     ├── /setup          → Setup wizard (React SPA)
   │     ├── /setup-api/*    → Setup API routes
-  │     ├── /api/*          → Proxy to gateway
+  │     ├── /api/*          → Proxy to OpenClaw gateway
   │     ├── /               → Gateway HTML + ClawBox bar
   │     └── WebSocket       → Proxy to gateway (upgrade handler)
   │
@@ -121,3 +139,15 @@ bun run lint
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
 | `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,localhost` | Trusted hostnames |
+| `ALLOW_INSECURE_CONTROL_UI` | `true` | Allow HTTP proxy to gateway control UI |
+
+## License
+
+ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). You're free to use, modify, and redistribute it for **personal, non-commercial purposes**. Commercial use (selling devices, offering hosted services, bundling with commercial products) requires a separate license from [IDRobots Ltd.](https://openclawhardware.dev/) — reach out at yanko@idrobots.com.
+
+---
+
+<p align="center">
+  <a href="https://openclawhardware.dev/">openclawhardware.dev</a><br/>
+  Built by <a href="https://github.com/ID-Robots">ID Robots</a>
+</p>
