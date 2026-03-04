@@ -174,19 +174,22 @@ step_build() {
 }
 
 step_openclaw_install() {
+  local LATEST
+  LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
+  local TARGET="${LATEST:-$OPENCLAW_VERSION}"
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED
     INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
-    echo "  Installed: $INSTALLED, Pinned: $OPENCLAW_VERSION"
-    if [ "$INSTALLED" = "$OPENCLAW_VERSION" ]; then
-      echo "  OpenClaw is already at pinned version"
+    echo "  Installed: $INSTALLED, Target: $TARGET"
+    if [ "$INSTALLED" = "$TARGET" ]; then
+      echo "  OpenClaw is already up to date"
       return 0
     fi
   fi
   mkdir -p "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-  as_clawbox -H npm install -g "openclaw@$OPENCLAW_VERSION" --prefix "$NPM_PREFIX"
+  as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
   if [ ! -x "$OPENCLAW_BIN" ]; then
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
