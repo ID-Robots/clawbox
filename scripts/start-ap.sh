@@ -28,22 +28,22 @@ fi
 # After setup is complete, try to connect to saved WiFi instead of starting AP.
 # If WiFi connect fails (e.g. out of range), fall through to AP mode as fallback.
 if [ "$setup_complete" = true ]; then
-  # Find saved WiFi connection profiles for our interface (exclude the AP itself)
-  SAVED_WIFI=$(nmcli -t -f NAME,TYPE connection show | awk -F: '/wifi/ && !/ClawBox-Setup/{print $1; exit}')
-  if [ -n "$SAVED_WIFI" ]; then
-    echo "[AP] Setup complete — trying saved WiFi connection: $SAVED_WIFI"
-    if nmcli connection up "$SAVED_WIFI" ifname "$IFACE" 2>/dev/null; then
-      # nmcli connection up blocks until connected; verify state immediately
-      WIFI_STATE=$(nmcli -t -f GENERAL.STATE device show "$IFACE" 2>/dev/null | cut -d: -f2)
+  # Try all saved WiFi profiles (exclude the AP itself) until one connects
+  while IFS= read -r profile; do
+    [ -z "$profile" ] && continue
+    echo "[AP] Setup complete — trying saved WiFi: $profile"
+    if nmcli connection up "$profile" ifname "wlP1p1s0" 2>/dev/null; then
+      WIFI_STATE=$(nmcli -t -f GENERAL.STATE device show "wlP1p1s0" 2>/dev/null | cut -d: -f2)
       if echo "$WIFI_STATE" | grep -q '(connected)'; then
-        echo "[AP] WiFi connected to '$SAVED_WIFI' — skipping AP mode"
+        echo "[AP] WiFi connected to '$profile' — skipping AP mode"
         exit 0
       fi
-      echo "[AP] WiFi connection returned success but interface not connected, falling back to AP"
+      echo "[AP] '$profile' returned success but interface not connected, trying next"
     else
-      echo "[AP] WiFi connection failed, falling back to AP mode"
+      echo "[AP] '$profile' connection failed, trying next"
     fi
-  fi
+  done < <(nmcli -t -f NAME,TYPE connection show | awk -F: '/wifi/ && !/ClawBox-Setup/{print $1}')
+  echo "[AP] No saved WiFi profiles connected, falling back to AP mode"
 fi
 
 wait_for_interface() {

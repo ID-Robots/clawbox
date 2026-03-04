@@ -314,8 +314,12 @@ step_directories_permissions() {
   fi
   # Ensure Google OAuth credentials are present (added in v2.2.0)
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_ID=' "$ENV_FILE" 2>/dev/null; then
-    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\nGOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_CID" "$G_SEC" >> "$ENV_FILE"
-    echo "  Added Google OAuth credentials to $ENV_FILE"
+    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" >> "$ENV_FILE"
+    echo "  Added GOOGLE_OAUTH_CLIENT_ID to $ENV_FILE"
+  fi
+  if ! grep -q '^GOOGLE_OAUTH_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null; then
+    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
+    echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   echo "  Done"
 }

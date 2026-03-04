@@ -541,8 +541,11 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => {
-                e.preventDefault();
-                oauthWindowRef.current = window.open(deviceUrl!, "_blank");
+                const win = window.open(deviceUrl!, "_blank");
+                if (win) {
+                  e.preventDefault();
+                  oauthWindowRef.current = win;
+                }
               }}
               className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
             >

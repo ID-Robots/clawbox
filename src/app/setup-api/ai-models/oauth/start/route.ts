@@ -5,7 +5,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { OAUTH_PROVIDERS } from "@/lib/oauth-config";
+import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
 
@@ -23,6 +23,12 @@ export async function POST(request: Request) {
     }
 
     const provider = body.provider || "anthropic";
+    if (provider === "google" && !isGoogleConfigured) {
+      return NextResponse.json(
+        { error: "Google OAuth credentials not configured. Run install.sh to set them up." },
+        { status: 500 }
+      );
+    }
     const config = OAUTH_PROVIDERS[provider];
     if (!config) {
       return NextResponse.json(

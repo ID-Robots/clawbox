@@ -783,7 +783,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        setAiStatus({ type: "success", message: "GPT subscription connected!" });
+        const { closeHint } = tryCloseOAuthWindow(oauthWindowRef);
+        setAiStatus({ type: "success", message: "GPT subscription connected!" + closeHint });
         setProviderDone(true);
         setProviderName(aiProvider);
         setDeviceCode(null);
@@ -1396,7 +1397,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               /* Device code flow (OpenAI) */
               <div>
                 <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
-                  Connect your ChatGPT Plus or Pro subscription. You'll get a code to enter on OpenAI's website.
+                  Connect your ChatGPT Plus or Pro subscription. You&apos;ll get a code to enter on OpenAI&apos;s website.
                 </p>
                 {!deviceCode ? (
                   <button type="button" onClick={startDeviceAuth} className={SAVE_BUTTON_CLASS}>Connect to GPT</button>
@@ -1408,7 +1409,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                         href={deviceUrl!}
                         target="_blank"
                         rel="noopener noreferrer"
-                        onClick={(e) => { e.preventDefault(); oauthWindowRef.current = window.open(deviceUrl!, "_blank"); }}
+                        onClick={(e) => { const win = window.open(deviceUrl!, "_blank"); if (win) { e.preventDefault(); oauthWindowRef.current = win; } }}
                         className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
                       >
                         {deviceUrl}

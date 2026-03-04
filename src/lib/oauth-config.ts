@@ -32,6 +32,7 @@ export const OPENAI_TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`;
 // Loaded from env vars (set by install.sh from .env.example).
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID ?? "";
 export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "";
+export const isGoogleConfigured = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
 const GOOGLE_SCOPES =
   "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 

@@ -89,17 +89,24 @@ export async function discoverGoogleProject(accessToken: string): Promise<string
   if (!lro.done && lro.name) {
     console.log("[google-project] Polling onboard LRO:", lro.name);
     const deadline = Date.now() + 120_000;
-    for (let attempt = 0; attempt < 24 && Date.now() < deadline; attempt++) {
+    for (let attempt = 1; attempt <= 24 && Date.now() < deadline; attempt++) {
       await new Promise((r) => setTimeout(r, 5000));
-      const pollRes = await fetch(`${CODE_ASSIST_ENDPOINT}/v1internal/${lro.name}`, {
-        headers,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!pollRes.ok) continue;
-      const pollData = await pollRes.json() as typeof lro;
-      if (pollData.done) {
-        lro = pollData;
-        break;
+      try {
+        const pollRes = await fetch(`${CODE_ASSIST_ENDPOINT}/v1internal/${lro.name}`, {
+          headers,
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!pollRes.ok) {
+          console.warn(`[google-project] Poll attempt ${attempt} failed: ${pollRes.status} ${pollRes.statusText} (LRO: ${lro.name})`);
+          continue;
+        }
+        const pollData = await pollRes.json() as typeof lro;
+        if (pollData.done) {
+          lro = pollData;
+          break;
+        }
+      } catch (err) {
+        console.warn(`[google-project] Poll attempt ${attempt} error (LRO: ${lro.name}):`, err);
       }
     }
   }
