@@ -117,14 +117,26 @@ export default function SetupWizard() {
         {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
       </main>
 
-      <footer className="px-4 py-3 flex justify-center">
+      <footer className="px-4 py-3 flex items-center justify-center gap-3">
         <a
           href="https://openclawhardware.dev/"
           target="_blank"
           rel="noopener noreferrer"
-          className="px-4 py-2 rounded-lg text-sm font-semibold text-white btn-gradient transition transform hover:scale-105"
+          aria-label="ClawBox website"
+          className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] transition transform hover:scale-105"
         >
-          openclawhardware.dev
+          <Image src="/clawbox-logo.png" alt="ClawBox" width={28} height={28} className="w-7 h-7 object-contain" />
+        </a>
+        <a
+          href="https://discord.gg/FbKmnxYnpq"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Join our Discord"
+          className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[#5865F2] transition transform hover:scale-105"
+        >
+          <svg width="18" height="14" viewBox="0 0 71 55" fill="currentColor" aria-hidden="true">
+            <path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A37.4 37.4 0 0 0 25.4.3a.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.6 4.9a.2.2 0 0 0-.1.1C1.5 18.7-.9 32.2.3 45.5v.2a58.9 58.9 0 0 0 17.7 9a.2.2 0 0 0 .3-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.8 38.8 0 0 1-5.5-2.6.2.2 0 0 1 0-.4l1.1-.9a.2.2 0 0 1 .2 0 42 42 0 0 0 35.8 0 .2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4 36.4 36.4 0 0 1-5.5 2.6.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.6 5.9.2.2 0 0 0 .3.1 58.7 58.7 0 0 0 17.7-9 .2.2 0 0 0 .1-.2c1.4-15-2.3-28-9.8-39.6a.2.2 0 0 0-.1 0ZM23.7 37.3c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Zm23.3 0c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Z"/>
+          </svg>
         </a>
       </footer>
     </>

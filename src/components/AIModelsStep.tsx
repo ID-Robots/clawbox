@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import StatusMessage from "./StatusMessage";
-import { parseAuthInput } from "@/lib/oauth-utils";
+import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 
 interface AIModelsStepProps {
   onNext: () => void;
@@ -25,6 +25,10 @@ interface Provider {
   description: string;
   authOptions: AuthOption[];
 }
+
+const ButtonSpinner = (
+  <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+);
 
 const PROVIDERS: Provider[] = [
   {
@@ -151,6 +155,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const exchangeControllerRef = useRef<AbortController | null>(null);
   const oauthStartControllerRef = useRef<AbortController | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
+  const oauthWindowRef = useRef<Window | null>(null);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -182,9 +187,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const showError = (message: string) => setStatus({ type: "error", message });
 
   const showSuccessAndContinue = (message: string) => {
-    setStatus({ type: "success", message });
+    const { tabClosed, closeHint } = tryCloseOAuthWindow(oauthWindowRef);
+    setStatus({ type: "success", message: message + closeHint });
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => onNext(), 1500);
+    timeoutRef.current = setTimeout(() => onNext(), tabClosed ? 1500 : 3000);
   };
 
   const extractError = async (res: Response, fallback: string) => {
@@ -400,7 +406,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.url) {
-        window.open(data.url, "_blank");
+        oauthWindowRef.current = window.open(data.url, "_blank");
         setOauthStarted(true);
       }
     } catch (err) {
@@ -528,17 +534,22 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         <div>
           <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
             <p className="text-xs text-[var(--text-secondary)] mb-2">
-              Open this URL and enter the code:
+              Open this URL:
             </p>
             <a
               href={deviceUrl!}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                oauthWindowRef.current = window.open(deviceUrl!, "_blank");
+              }}
               className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
             >
               {deviceUrl}
             </a>
-            <div className="mt-3 px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
+            <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
+            <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
               <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
                 {deviceCode}
               </span>
@@ -804,8 +815,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                   type="button"
                   onClick={exchangeCode}
                   disabled={exchanging || !authCode.trim()}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2"
                 >
+                  {exchanging && ButtonSpinner}
                   {exchanging ? "Connecting..." : "Save & Continue"}
                 </button>
               )

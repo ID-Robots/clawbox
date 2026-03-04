@@ -4,8 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
-import SignalBars from "./SignalBars";
-import { parseAuthInput } from "@/lib/oauth-utils";
+
+import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 
 /* ── Types ── */
 
@@ -39,11 +39,6 @@ interface StatsSnapshot {
   time: number;
 }
 
-interface WifiNetwork {
-  ssid: string;
-  signal: number;
-  security: string;
-}
 
 interface DoneStepProps {
   setupComplete?: boolean;
@@ -112,6 +107,10 @@ const EyeOpen = (
 );
 const EyeClosed = (
   <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+);
+
+const ButtonSpinner = (
+  <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
 );
 
 /* ── Reusable components ── */
@@ -356,6 +355,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const updatePollControllerRef = useRef<AbortController | null>(null);
+  const oauthWindowRef = useRef<Window | null>(null);
+  const aiSaveControllerRef = useRef<AbortController | null>(null);
+  const aiExchangeControllerRef = useRef<AbortController | null>(null);
+  const aiOauthStartControllerRef = useRef<AbortController | null>(null);
+  const aiPollControllerRef = useRef<AbortController | null>(null);
 
   /* ── Collapsible sections ── */
   const [openSection, setOpenSection] = useState<string | null>(null);
@@ -373,6 +377,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [aiExchanging, setAiExchanging] = useState(false);
   const [providerDone, setProviderDone] = useState(false);
   const [providerName, setProviderName] = useState<string | null>(null);
+  const [deviceCode, setDeviceCode] = useState<string | null>(null);
+  const [deviceUrl, setDeviceUrl] = useState<string | null>(null);
+  const [devicePolling, setDevicePolling] = useState(false);
+  const [deviceSaving, setDeviceSaving] = useState(false);
+  const devicePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
@@ -401,15 +410,13 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [tgStatus, setTgStatus] = useState<SectionStatusMessage | null>(null);
 
   /* ── WiFi ── */
-  const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[] | null>(null);
-  const [wifiScanning, setWifiScanning] = useState(false);
   const [wifiConnectedSSID, setWifiConnectedSSID] = useState<string | null>(null);
-  const [wifiSelectedSSID, setWifiSelectedSSID] = useState<string | null>(null);
-  const [wifiSelectedSecurity, setWifiSelectedSecurity] = useState("");
+  const [wifiSSID, setWifiSSID] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
   const [showWifiPassword, setShowWifiPassword] = useState(false);
   const [wifiConnecting, setWifiConnecting] = useState(false);
   const [wifiStatus, setWifiStatus] = useState<SectionStatusMessage | null>(null);
+  const wifiControllerRef = useRef<AbortController | null>(null);
 
   /* ── Section completion status ── */
   const [securityDone, setSecurityDone] = useState(false);
@@ -417,6 +424,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
   const selectedAiProvider = AI_PROVIDERS.find((p) => p.id === aiProvider);
   const isAiSubscription = aiAuthMode === "subscription" && (selectedAiProvider?.hasSubscription ?? false);
+  const useDeviceAuth = isAiSubscription && aiProvider === "openai";
 
   const aiOauthLabels: Record<string, { button: string; description: string; success: string; steps: string[]; inputLabel: string; inputPlaceholder: string }> = {
     anthropic: {
@@ -723,12 +731,151 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  const stopDevicePolling = useCallback(() => {
+    setDevicePolling(false);
+    if (devicePollRef.current) {
+      clearTimeout(devicePollRef.current);
+      devicePollRef.current = null;
+    }
+    aiPollControllerRef.current?.abort();
+  }, []);
+  useEffect(() => {
+    return () => {
+      stopDevicePolling();
+      aiSaveControllerRef.current?.abort();
+      aiExchangeControllerRef.current?.abort();
+      aiOauthStartControllerRef.current?.abort();
+      wifiControllerRef.current?.abort();
+    };
+  }, [stopDevicePolling]);
+
   const resetAiFields = () => {
+    stopDevicePolling();
     setAiApiKey("");
     setShowAiKey(false);
     setAiStatus(null);
     setAiOauthStarted(false);
     setAiAuthCode("");
+    setDeviceCode(null);
+    setDeviceUrl(null);
+    setDeviceSaving(false);
+  };
+
+  const saveDeviceToken = async (tokenData: { access_token: string; refresh_token?: string; expires_in?: number }) => {
+    aiSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiSaveControllerRef.current = controller;
+
+    setDeviceSaving(true);
+    try {
+      const saveRes = await fetch("/setup-api/ai-models/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!saveRes.ok) {
+        const data = await saveRes.json().catch(() => ({}));
+        setAiStatus({ type: "error", message: data.error || "Failed to save token" });
+        return;
+      }
+      const saveData = await saveRes.json();
+      if (controller.signal.aborted) return;
+      if (saveData.success) {
+        setAiStatus({ type: "success", message: "GPT subscription connected!" });
+        setProviderDone(true);
+        setProviderName(aiProvider);
+        setDeviceCode(null);
+        setDeviceUrl(null);
+        setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
+      } else {
+        setAiStatus({ type: "error", message: saveData.error || "Failed to save token" });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
+    } finally {
+      if (!controller.signal.aborted) setDeviceSaving(false);
+    }
+  };
+
+  const pollDeviceAuth = useCallback(async (interval: number) => {
+    aiPollControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiPollControllerRef.current = controller;
+
+    try {
+      const res = await fetch("/setup-api/ai-models/oauth/device-poll", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        stopDevicePolling();
+        setAiStatus({ type: "error", message: data.error || "Polling failed" });
+        return;
+      }
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+      if (data.status === "complete" && data.access_token) {
+        stopDevicePolling();
+        await saveDeviceToken(data);
+        return;
+      }
+      if (data.status === "pending") {
+        devicePollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+        return;
+      }
+      if (data.error) {
+        stopDevicePolling();
+        setAiStatus({ type: "error", message: data.error });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Network error — retry
+      devicePollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+    }
+  }, [stopDevicePolling, aiProvider]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startDeviceAuth = async () => {
+    stopDevicePolling();
+    aiOauthStartControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiOauthStartControllerRef.current = controller;
+
+    setAiStatus(null);
+    setDeviceCode(null);
+    setDeviceUrl(null);
+    try {
+      const res = await fetch("/setup-api/ai-models/oauth/device-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: aiProvider }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setAiStatus({ type: "error", message: data.error || "Failed to start device auth" });
+        return;
+      }
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+      if (data.user_code && data.verification_url) {
+        setDeviceCode(data.user_code);
+        setDeviceUrl(data.verification_url);
+        setDevicePolling(true);
+        const interval = data.interval || 5;
+        devicePollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
+      } else {
+        setAiStatus({ type: "error", message: "Unexpected response from device auth" });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
+    }
   };
 
   const saveAiProvider = async () => {
@@ -736,6 +883,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       setAiStatus({ type: "error", message: "Please enter your API key" });
       return;
     }
+
+    aiSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiSaveControllerRef.current = controller;
+
     setAiSaving(true);
     setAiStatus(null);
     try {
@@ -743,29 +895,38 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: aiProvider, apiKey: aiApiKey.trim(), authMode: aiAuthMode }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setAiStatus({ type: "error", message: data.error || "Failed to configure" });
         return;
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       if (data.success) {
         setAiStatus({ type: "success", message: "AI provider configured!" });
         setProviderDone(true);
         setProviderName(aiProvider);
         setAiApiKey("");
+        setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
       } else {
         setAiStatus({ type: "error", message: data.error || "Failed to configure" });
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
-      setAiSaving(false);
+      if (!controller.signal.aborted) setAiSaving(false);
     }
   };
 
   const startAiOAuth = async () => {
+    aiOauthStartControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiOauthStartControllerRef.current = controller;
+
     setAiStatus(null);
     setAiOauthStarted(false);
     setAiAuthCode("");
@@ -774,18 +935,22 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: aiProvider }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setAiStatus({ type: "error", message: data.error || "Failed to start OAuth" });
         return;
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       if (data.url) {
-        window.open(data.url, "_blank");
+        oauthWindowRef.current = window.open(data.url, "_blank");
         setAiOauthStarted(true);
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     }
   };
@@ -800,6 +965,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       setAiStatus({ type: "error", message: "Could not extract authorization code from input" });
       return;
     }
+
+    aiExchangeControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiExchangeControllerRef.current = controller;
+
     setAiExchanging(true);
     setAiStatus(null);
     try {
@@ -807,13 +977,16 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: parsedCode }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!exchangeRes.ok) {
         const data = await exchangeRes.json().catch(() => ({}));
         setAiStatus({ type: "error", message: data.error || "Token exchange failed" });
         return;
       }
       const tokenData = await exchangeRes.json();
+      if (controller.signal.aborted) return;
       if (!tokenData.access_token) {
         setAiStatus({ type: "error", message: "No access token received" });
         return;
@@ -822,70 +995,71 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in, ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}) }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!saveRes.ok) {
         const data = await saveRes.json().catch(() => ({}));
         setAiStatus({ type: "error", message: data.error || "Failed to save token" });
         return;
       }
       const saveData = await saveRes.json();
+      if (controller.signal.aborted) return;
       if (saveData.success) {
-        setAiStatus({ type: "success", message: currentAiOAuth.success });
+        const { tabClosed, closeHint } = tryCloseOAuthWindow(oauthWindowRef);
+        setAiStatus({ type: "success", message: currentAiOAuth.success + closeHint });
         setProviderDone(true);
         setProviderName(aiProvider);
         setAiOauthStarted(false);
         setAiAuthCode("");
+        setTimeout(() => { setOpenSection(null); setAiStatus(null); }, tabClosed ? 1500 : 3000);
       } else {
         setAiStatus({ type: "error", message: saveData.error || "Failed to save token" });
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
-      setAiExchanging(false);
-    }
-  };
-
-  const scanWifi = async () => {
-    setWifiScanning(true);
-    setWifiNetworks(null);
-    try {
-      const res = await fetch("/setup-api/wifi/scan");
-      if (!res.ok) throw new Error("Scan failed");
-      const data = await res.json();
-      setWifiNetworks(data.networks || []);
-    } catch {
-      setWifiNetworks([]);
-    } finally {
-      setWifiScanning(false);
+      if (!controller.signal.aborted) setAiExchanging(false);
     }
   };
 
   const connectWifi = async () => {
+    if (!wifiSSID.trim()) return;
+
+    wifiControllerRef.current?.abort();
+    const controller = new AbortController();
+    wifiControllerRef.current = controller;
+
     setWifiConnecting(true);
     setWifiStatus(null);
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid: wifiSelectedSSID, password: wifiPassword }),
+        body: JSON.stringify({ ssid: wifiSSID.trim(), password: wifiPassword }),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setWifiStatus({ type: "error", message: data.error || "Connection failed" });
         return;
       }
       setWifiStatus({ type: "success", message: "Connected!" });
-      setWifiConnectedSSID(wifiSelectedSSID);
-      setWifiSelectedSSID(null);
+      setWifiConnectedSSID(wifiSSID.trim());
+      setWifiSSID("");
       setWifiPassword("");
+      setTimeout(() => { setOpenSection(null); setWifiStatus(null); }, 1500);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof TypeError && err.message.includes("fetch")) {
         setWifiStatus({ type: "error", message: "Lost connection. Reconnect to your WiFi and visit http://clawbox.local" });
         return;
       }
       setWifiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
-      setWifiConnecting(false);
+      if (!controller.signal.aborted) setWifiConnecting(false);
     }
   };
 
@@ -1116,89 +1290,48 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       {/* Settings sections */}
       <div className="space-y-3 mb-6">
         {/* WiFi */}
-        <CollapsibleSection id="wifi" title="WiFi" done={!!wifiConnectedSSID} open={openSection === "wifi"} onToggle={(id) => { toggle(id); if (openSection !== "wifi") scanWifi(); }}>
+        <CollapsibleSection id="wifi" title="WiFi" done={!!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
           {wifiConnectedSSID && (
             <p className="text-xs text-[var(--text-muted)]">
               Connected to: <span className="text-[var(--text-secondary)] font-semibold">{wifiConnectedSSID}</span>
             </p>
           )}
-          <div className="border border-[var(--border-subtle)] rounded-lg max-h-[240px] overflow-y-auto bg-[var(--bg-deep)]/50">
-            {wifiScanning && (
-              <div className="flex items-center justify-center gap-2.5 p-5 text-[var(--text-secondary)] text-sm">
-                <div className="spinner" /> Scanning...
-              </div>
-            )}
-            {!wifiScanning && wifiNetworks?.length === 0 && (
-              <div className="p-5 text-center text-[var(--text-secondary)] text-sm">
-                No networks found.{" "}
-                <button type="button" onClick={scanWifi} className="text-[var(--coral-bright)] underline bg-transparent border-none cursor-pointer">Retry</button>
-              </div>
-            )}
-            {!wifiScanning && wifiNetworks?.map((n) => {
-              const bars = Math.min(4, Math.max(1, Math.ceil(n.signal / 25)));
-              const isConnected = n.ssid === wifiConnectedSSID;
-              return (
-                <button
-                  type="button"
-                  key={n.ssid}
-                  onClick={() => { setWifiSelectedSSID(n.ssid); setWifiSelectedSecurity(n.security || ""); setWifiPassword(""); setShowWifiPassword(false); setWifiStatus(null); }}
-                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer border-b border-gray-800 last:border-b-0 hover:bg-[var(--surface-card)] transition-colors w-full text-left bg-transparent border-x-0 border-t-0 ${isConnected ? "bg-[var(--surface-card)]" : ""}`}
-                >
-                  <SignalBars level={bars} />
-                  <span className="flex-1 text-sm font-medium text-gray-200">{n.ssid}</span>
-                  {isConnected && <span className="text-[10px] font-semibold text-[#00e5cc] uppercase">Connected</span>}
-                  {n.security && n.security !== "--" && <span className="text-sm shrink-0 text-[var(--text-muted)]">&#128274;</span>}
-                </button>
-              );
-            })}
+          <div>
+            <label htmlFor="wifi-ssid-dash" className={LABEL_CLASS}>Network Name (SSID)</label>
+            <input
+              id="wifi-ssid-dash"
+              type="text"
+              value={wifiSSID}
+              onChange={(e) => setWifiSSID(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") connectWifi(); }}
+              placeholder="Enter WiFi network name"
+              autoComplete="off"
+              className={INPUT_CLASS}
+            />
           </div>
-          {!wifiScanning && wifiNetworks && (
-            <button type="button" onClick={scanWifi} className="text-xs text-[var(--coral-bright)] underline bg-transparent border-none cursor-pointer p-0">Rescan</button>
-          )}
+          <div>
+            <label htmlFor="wifi-pw-dash" className={LABEL_CLASS}>Password</label>
+            <PasswordInput
+              id="wifi-pw-dash"
+              value={wifiPassword}
+              onChange={setWifiPassword}
+              visible={showWifiPassword}
+              onToggle={() => setShowWifiPassword((v) => !v)}
+              placeholder="Enter password (leave empty for open network)"
+              autoComplete="off"
+            />
+          </div>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+          <button
+            type="button"
+            onClick={connectWifi}
+            disabled={wifiConnecting || !wifiSSID.trim()}
+            className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+          >
+            {wifiConnecting && ButtonSpinner}
+            {wifiConnecting ? "Connecting..." : "Connect"}
+          </button>
         </CollapsibleSection>
-
-        {/* WiFi password modal */}
-        {wifiSelectedSSID && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-            <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
-              <h3 className="text-lg font-bold text-gray-100 mb-2">Connect to {wifiSelectedSSID}</h3>
-              {wifiSelectedSecurity && wifiSelectedSecurity !== "--" && (
-                <div className="mt-3">
-                  <label htmlFor="wifi-pw-dash" className={LABEL_CLASS}>Password</label>
-                  <PasswordInput
-                    id="wifi-pw-dash"
-                    value={wifiPassword}
-                    onChange={setWifiPassword}
-                    visible={showWifiPassword}
-                    onToggle={() => setShowWifiPassword((v) => !v)}
-                    placeholder="Enter WiFi password"
-                    autoComplete="off"
-                  />
-                </div>
-              )}
-              {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
-              <div className="flex items-center gap-3 mt-5 justify-end">
-                <button
-                  type="button"
-                  onClick={() => { setWifiSelectedSSID(null); setWifiStatus(null); }}
-                  disabled={wifiConnecting}
-                  className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={connectWifi}
-                  disabled={wifiConnecting}
-                  className={`${SAVE_BUTTON_CLASS} hover:scale-105 transition-transform`}
-                >
-                  {wifiConnecting ? "Connecting..." : "Connect"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* AI Provider */}
         <CollapsibleSection id="provider" title="AI Provider" done={providerDone} open={openSection === "provider"} onToggle={toggle}>
@@ -1259,43 +1392,104 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           )}
 
           {isAiSubscription ? (
-            <div>
-              <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">{currentAiOAuth.description}</p>
-              {!aiOauthStarted ? (
-                <button type="button" onClick={startAiOAuth} className={SAVE_BUTTON_CLASS}>{currentAiOAuth.button}</button>
-              ) : (
-                <div className="space-y-3">
-                  <div className="p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
-                    <p className="text-xs text-[var(--text-primary)] leading-relaxed">
-                      {currentAiOAuth.steps.map((step, i) => (
-                        <span key={i}>
-                          {i > 0 && <br />}
-                          <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
-                        </span>
-                      ))}
-                    </p>
+            useDeviceAuth ? (
+              /* Device code flow (OpenAI) */
+              <div>
+                <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
+                  Connect your ChatGPT Plus or Pro subscription. You'll get a code to enter on OpenAI's website.
+                </p>
+                {!deviceCode ? (
+                  <button type="button" onClick={startDeviceAuth} className={SAVE_BUTTON_CLASS}>Connect to GPT</button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
+                      <p className="text-xs text-[var(--text-secondary)] mb-2">Open this URL:</p>
+                      <a
+                        href={deviceUrl!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => { e.preventDefault(); oauthWindowRef.current = window.open(deviceUrl!, "_blank"); }}
+                        className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
+                      >
+                        {deviceUrl}
+                      </a>
+                      <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
+                      <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
+                        <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">{deviceCode}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            try {
+                              const ta = document.createElement("textarea");
+                              ta.value = deviceCode!;
+                              ta.style.position = "fixed";
+                              ta.style.opacity = "0";
+                              document.body.appendChild(ta);
+                              ta.select();
+                              document.execCommand("copy");
+                              document.body.removeChild(ta);
+                              const btn = document.getElementById("copy-code-btn-dash");
+                              if (btn) { btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = "Copy"; }, 1500); }
+                            } catch { /* ignore */ }
+                          }}
+                          id="copy-code-btn-dash"
+                          className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <p className="mt-2 text-xs text-[var(--text-muted)]">Code expires in 15 minutes</p>
+                    </div>
+                    {(devicePolling || deviceSaving) && (
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+                        {deviceSaving ? "Authorized! Connecting..." : "Waiting for authorization..."}
+                      </div>
+                    )}
+                    <button type="button" onClick={startDeviceAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Get a new code</button>
                   </div>
-                  <div>
-                    <label htmlFor="ai-oauth-code" className={LABEL_CLASS}>{currentAiOAuth.inputLabel}</label>
-                    <input
-                      id="ai-oauth-code"
-                      type="text"
-                      value={aiAuthCode}
-                      onChange={(e) => setAiAuthCode(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") exchangeAiCode(); }}
-                      placeholder={currentAiOAuth.inputPlaceholder}
-                      spellCheck={false}
-                      autoComplete="off"
-                      className={INPUT_CLASS}
-                    />
+                )}
+              </div>
+            ) : (
+              /* Redirect OAuth flow (Anthropic, Google) */
+              <div>
+                <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">{currentAiOAuth.description}</p>
+                {!aiOauthStarted ? (
+                  <button type="button" onClick={startAiOAuth} className={SAVE_BUTTON_CLASS}>{currentAiOAuth.button}</button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
+                      <p className="text-xs text-[var(--text-primary)] leading-relaxed">
+                        {currentAiOAuth.steps.map((step, i) => (
+                          <span key={i}>
+                            {i > 0 && <br />}
+                            <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
+                          </span>
+                        ))}
+                      </p>
+                    </div>
+                    <div>
+                      <label htmlFor="ai-oauth-code" className={LABEL_CLASS}>{currentAiOAuth.inputLabel}</label>
+                      <input
+                        id="ai-oauth-code"
+                        type="text"
+                        value={aiAuthCode}
+                        onChange={(e) => setAiAuthCode(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") exchangeAiCode(); }}
+                        placeholder={currentAiOAuth.inputPlaceholder}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className={INPUT_CLASS}
+                      />
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiExchanging && ButtonSpinner}{aiExchanging ? "Connecting..." : "Save"}</button>
+                      <button type="button" onClick={startAiOAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Restart authorization</button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={SAVE_BUTTON_CLASS}>{aiExchanging ? "Connecting..." : "Save"}</button>
-                    <button type="button" onClick={startAiOAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Restart authorization</button>
-                  </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )
           ) : (
             <div>
               {selectedAiProvider?.tokenUrl && (
@@ -1315,7 +1509,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 autoComplete="off"
               />
               <p className="mt-1.5 text-xs text-[var(--text-muted)]">{selectedAiProvider?.hint}</p>
-              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS}`}>{aiSaving ? "Saving..." : "Save"}</button>
+              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Saving..." : "Save"}</button>
             </div>
           )}
 
@@ -1365,7 +1559,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             />
           </div>
           {secStatus && <StatusMessage type={secStatus.type} message={secStatus.message} />}
-          <button type="button" onClick={saveSecurity} disabled={secSaving} className={SAVE_BUTTON_CLASS}>{secSaving ? "Saving..." : "Save"}</button>
+          <button type="button" onClick={saveSecurity} disabled={secSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{secSaving && ButtonSpinner}{secSaving ? "Saving..." : "Save"}</button>
         </CollapsibleSection>
 
         {/* Telegram */}
@@ -1393,7 +1587,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             />
           </div>
           {tgStatus && <StatusMessage type={tgStatus.type} message={tgStatus.message} />}
-          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={SAVE_BUTTON_CLASS}>{tgSaving ? "Saving..." : "Save"}</button>
+          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{tgSaving && ButtonSpinner}{tgSaving ? "Saving..." : "Save"}</button>
         </CollapsibleSection>
       </div>
 

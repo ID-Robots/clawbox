@@ -2,8 +2,6 @@
   <img src="public/clawbox-logo.png" alt="ClawBox" width="180" />
 </p>
 
-<h1 align="center">ClawBox</h1>
-
 <p align="center">
   Setup wizard and dashboard for <a href="https://openclawhardware.dev/">OpenClaw Hardware</a> — a private AI assistant running on NVIDIA Jetson.
 </p>

@@ -308,7 +308,7 @@ step_directories_permissions() {
 }
 
 step_systemd_services() {
-  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service "clawbox-root-update@.service")
+  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service")
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"
@@ -345,7 +345,7 @@ step_voice_install() {
 
 step_start_services() {
   local svc
-  for svc in clawbox-ap clawbox-setup clawbox-gateway; do
+  for svc in clawbox-ap clawbox-setup clawbox-gateway clawbox-performance; do
     systemctl restart "$svc.service"
   done
   echo "  Services started"
@@ -360,6 +360,12 @@ step_nvidia_jetpack() {
 step_performance_mode() {
   nvpmodel -m 0
   jetson_clocks
+  # Ensure persistent service is installed and enabled for next boot
+  if [ -f "$PROJECT_DIR/config/clawbox-performance.service" ]; then
+    cp "$PROJECT_DIR/config/clawbox-performance.service" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable clawbox-performance.service
+  fi
 }
 
 step_jtop_install() {

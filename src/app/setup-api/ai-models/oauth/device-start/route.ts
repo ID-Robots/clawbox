@@ -27,10 +27,13 @@ export async function POST(request: Request) {
       );
     }
 
+    const bodyParams: Record<string, string> = { client_id: config.clientId };
+    if (config.scope) bodyParams.scope = config.scope;
+
     const reqBody =
       config.requestFormat === "form"
-        ? new URLSearchParams({ client_id: config.clientId }).toString()
-        : JSON.stringify({ client_id: config.clientId });
+        ? new URLSearchParams(bodyParams).toString()
+        : JSON.stringify(bodyParams);
     const contentType =
       config.requestFormat === "form"
         ? "application/x-www-form-urlencoded"
@@ -56,7 +59,7 @@ export async function POST(request: Request) {
     const deviceId = data[config.responseFields.deviceId];
     const userCode = data[config.responseFields.userCode];
     const interval = data[config.responseFields.interval] || 5;
-    const verificationUrl = config.verificationUrl;
+    const verificationUrl = config.verificationUrl || data.verification_url || data.verification_uri;
 
     if (!deviceId || !userCode) {
       console.error(`[device-start/${providerName}] Unexpected response:`, data);
