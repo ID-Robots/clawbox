@@ -647,7 +647,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         return;
       }
     }
-    if (!hotspotName.trim()) {
+    if (hotspotEnabled && !hotspotName.trim()) {
       setSecStatus({ type: "error", message: "Hotspot name is required" });
       return;
     }
@@ -1327,7 +1327,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </div>
           <p className="text-[11px] text-amber-400/80 leading-relaxed">
             <span className="font-semibold">Note:</span> Connecting to WiFi will stop the hotspot.
-            You'll need to reach the device via your WiFi network at <span className="font-semibold">http://clawbox.local</span>.
+            {"You'll"} need to reach the device via your WiFi network at <span className="font-semibold">http://clawbox.local</span>.
           </p>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
           <button
@@ -1571,7 +1571,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               </p>
             ) : (
               <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
-                Enabling the hotspot will disconnect WiFi. The device will only be reachable via the hotspot network.
+                Enabling the hotspot will disconnect WiFi. The device will be reachable via the hotspot or Ethernet at <span className="font-semibold">http://clawbox.local</span>.
               </p>
             )}
             <label htmlFor="hs-name" className={LABEL_CLASS}>Hotspot Name</label>
