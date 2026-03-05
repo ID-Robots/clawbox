@@ -411,6 +411,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [tgStatus, setTgStatus] = useState<SectionStatusMessage | null>(null);
 
   /* ── WiFi ── */
+  const [wifiDone, setWifiDone] = useState(false);
   const [wifiConnectedSSID, setWifiConnectedSSID] = useState<string | null>(null);
   const [wifiSSID, setWifiSSID] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
@@ -470,6 +471,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           setSecurityDone(!!data.password_configured);
           setTelegramDone(!!data.telegram_configured);
           setProviderDone(!!data.ai_model_configured);
+          if (data.wifi_configured) setWifiDone(true);
           if (data.ai_model_provider) setProviderName(data.ai_model_provider);
         }
       })
@@ -1294,7 +1296,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       {/* Settings sections */}
       <div className="space-y-3 mb-6">
         {/* WiFi */}
-        <CollapsibleSection id="wifi" title="WiFi" done={!!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
+        <CollapsibleSection id="wifi" title="WiFi" done={wifiDone || !!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
           {wifiConnectedSSID && (
             <p className="text-xs text-[var(--text-muted)]">
               Connected to: <span className="text-[var(--text-secondary)] font-semibold">{wifiConnectedSSID}</span>
