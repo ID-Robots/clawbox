@@ -5,7 +5,7 @@ After=multi-user.target nvpmodel.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'nvpmodel -m 0 && jetson_clocks'
+ExecStart=/bin/bash -c 'MAXN_ID=$(grep -oP "(?<=POWER_MODEL ID=)\\d+(?=\\s+NAME=MAXN)" /etc/nvpmodel.conf | tail -1); nvpmodel -m ${MAXN_ID:-0} && jetson_clocks'
 ExecStop=/bin/bash -c 'jetson_clocks --restore 2>/dev/null || true'
 
 [Install]

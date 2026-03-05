@@ -55,13 +55,11 @@ async function getGatewayToken(): Promise<string> {
 export async function serveGatewayHTML(
   request: NextRequest
 ): Promise<NextResponse> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
     const [res, gatewayToken] = await Promise.all([
       fetch(`http://127.0.0.1:${GATEWAY_PORT}/`, {
         cache: "no-store",
-        signal: controller.signal,
+        signal: AbortSignal.timeout(3000),
       }),
       getGatewayToken(),
     ]);
@@ -71,7 +69,10 @@ export async function serveGatewayHTML(
     let html = await res.text();
 
     const safeToken = gatewayToken
-      ? JSON.stringify(gatewayToken).replace(/</g, "\\u003c")
+      ? JSON.stringify(gatewayToken)
+          .replace(/&/g, "\\u0026")
+          .replace(/</g, "\\u003c")
+          .replace(/>/g, "\\u003e")
       : "";
     const tokenScript = safeToken
       ? `<script id="clawbox-token" type="application/json">${safeToken}</script>
@@ -97,7 +98,5 @@ export async function serveGatewayHTML(
     });
   } catch {
     return redirectToSetup(request);
-  } finally {
-    clearTimeout(timeout);
   }
 }

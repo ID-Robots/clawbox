@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { get, set } from "@/lib/config-store";
+import { get, setMany, getAll } from "@/lib/config-store";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,21 +16,23 @@ const HOTSPOT_ENV_PATH = path.join(
 );
 
 export async function GET() {
-  const ssid = ((await get("hotspot_ssid")) as string) || "ClawBox-Setup";
-  const hasPassword = !!(await get("hotspot_password"));
-  return NextResponse.json({ ssid, hasPassword });
+  const config = await getAll();
+  const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
+  const hasPassword = !!config.hotspot_password;
+  const enabled = config.hotspot_enabled !== false;
+  return NextResponse.json({ ssid, hasPassword, enabled });
 }
 
 export async function POST(request: Request) {
   try {
-    let body: { ssid?: string; password?: string };
+    let body: { ssid?: string; password?: string; enabled?: boolean };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { ssid, password } = body;
+    const { ssid, password, enabled } = body;
 
     if (!ssid || !ssid.trim()) {
       return NextResponse.json(
@@ -60,27 +62,48 @@ export async function POST(request: Request) {
       );
     }
 
-    await set("hotspot_ssid", ssid.trim());
-    await set("hotspot_password", password || undefined);
+    const updates: Record<string, unknown> = {
+      hotspot_ssid: ssid.trim(),
+      hotspot_password: password || undefined,
+    };
+    if (typeof enabled === "boolean") {
+      updates.hotspot_enabled = enabled;
+    }
+    await setMany(updates);
+
+    const isEnabled = typeof enabled === "boolean" ? enabled : (await get("hotspot_enabled")) !== false;
 
     // Write shell-sourceable env file for start-ap.sh
     const envLines = [`HOTSPOT_SSID=${shellQuote(ssid.trim())}`];
     if (password) {
       envLines.push(`HOTSPOT_PASSWORD=${shellQuote(password)}`);
     }
+    if (!isEnabled) {
+      envLines.push(`HOTSPOT_DISABLED=1`);
+    }
     await fs.mkdir(path.dirname(HOTSPOT_ENV_PATH), { recursive: true });
     await fs.writeFile(HOTSPOT_ENV_PATH, envLines.join("\n") + "\n", {
       mode: 0o600,
     });
 
-    // Restart the AP service via root-update mechanism so changes take effect
+    // Start or stop the AP service based on enabled state
     try {
-      await execFileAsync("systemctl", [
-        "start",
-        "clawbox-root-update@restart_ap.service",
-      ]);
+      if (isEnabled) {
+        await execFileAsync("systemctl", [
+          "start",
+          "clawbox-root-update@restart_ap.service",
+        ]);
+      } else {
+        // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
+        const stopScript = path.join(
+          process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+          "scripts",
+          "stop-ap.sh"
+        );
+        await execFileAsync("bash", [stopScript], { timeout: 15_000 });
+      }
     } catch (apErr) {
-      console.warn("[hotspot] Failed to restart AP:", apErr);
+      console.warn("[hotspot] Failed to toggle AP:", apErr);
       // Non-fatal: settings are saved for next AP start
     }
 

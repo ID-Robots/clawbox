@@ -47,25 +47,27 @@ function parseSizeToMB(s: string): number {
 }
 
 function parseDfOutput(stdout: string): {
+  diskTotal: string;
   diskUsed: string;
   diskFree: string;
   diskUsedPercent: number;
 } {
   const lines = stdout.trim().split("\n");
   if (lines.length < 2) {
-    return { diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
+    return { diskTotal: "unknown", diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
   }
 
   const [size, used, avail] = lines[1].trim().split(/\s+/);
+  const diskTotal = size || "unknown";
   const diskUsed = used || "unknown";
   const diskFree = avail || "unknown";
 
-  const totalMB = parseSizeToMB(size || "0");
+  const totalMB = parseSizeToMB(diskTotal);
   const usedMB = parseSizeToMB(diskUsed);
   const diskUsedPercent =
     totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
 
-  return { diskUsed, diskFree, diskUsedPercent };
+  return { diskTotal, diskUsed, diskFree, diskUsedPercent };
 }
 
 function parseTemperature(raw: string): {
@@ -131,7 +133,7 @@ export async function gather(): Promise<SystemInfo> {
   const dfOutput = settledValue(dfRes);
   const disk = dfOutput
     ? parseDfOutput(dfOutput.stdout)
-    : { diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
+    : { diskTotal: "unknown", diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
 
   const tempRaw = settledValue(tempRes);
   const temp = tempRaw
@@ -158,7 +160,7 @@ export async function gather(): Promise<SystemInfo> {
     disk: dfOutput?.stdout.trim() ?? "unknown",
     diskUsed: disk.diskUsed,
     diskFree: disk.diskFree,
-    diskTotal: "512 GB",
+    diskTotal: disk.diskTotal,
     diskUsedPercent: disk.diskUsedPercent,
     temperature: temp.temperature,
     temperatureValue: temp.temperatureValue,

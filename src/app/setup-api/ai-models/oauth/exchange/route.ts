@@ -110,9 +110,6 @@ export async function POST(request: Request) {
 
     // Anthropic accepts JSON; OpenAI and Google require form-urlencoded
     const useFormEncoding = provider !== "anthropic";
-    const tokenController = new AbortController();
-    const tokenTimeout = setTimeout(() => tokenController.abort(), 30_000);
-
     let tokenRes: Response;
     try {
       tokenRes = await fetch(config.tokenEndpoint, {
@@ -125,19 +122,16 @@ export async function POST(request: Request) {
         body: useFormEncoding
           ? new URLSearchParams(exchangeBody).toString()
           : JSON.stringify(exchangeBody),
-        signal: tokenController.signal,
+        signal: AbortSignal.timeout(30_000),
       });
     } catch (fetchErr) {
-      clearTimeout(tokenTimeout);
-      if (fetchErr instanceof DOMException && fetchErr.name === "AbortError") {
+      if (fetchErr instanceof DOMException && fetchErr.name === "TimeoutError") {
         return NextResponse.json(
           { error: "Token exchange timed out" },
           { status: 504 }
         );
       }
       throw fetchErr;
-    } finally {
-      clearTimeout(tokenTimeout);
     }
 
     if (!tokenRes.ok) {
