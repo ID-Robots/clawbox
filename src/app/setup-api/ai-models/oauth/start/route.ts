@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     if (provider === "google" && !isGoogleConfigured) {
       return NextResponse.json(
         { error: "Google OAuth credentials not configured. Run install.sh to set them up." },
-        { status: 500 }
+        { status: 400 }
       );
     }
     const config = OAUTH_PROVIDERS[provider];

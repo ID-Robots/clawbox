@@ -79,7 +79,7 @@ step_apt_update() {
   apt-get update -qq
   apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
-  if node --version 2>/dev/null | grep -q '^v2[2-9]\|^v[3-9]'; then
+  if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
   else
     echo "  Installing Node.js 22..."
@@ -375,7 +375,14 @@ step_nvidia_jetpack() {
 }
 
 step_performance_mode() {
-  nvpmodel -m 0
+  # Find the highest MAXN mode (MAXN_SUPER > MAXN); fall back to mode 0
+  local MAXN_LINE MAXN_ID MAXN_NAME
+  MAXN_LINE=$(grep -oP 'POWER_MODEL ID=\K\d+\s+NAME=\S+' /etc/nvpmodel.conf | grep 'NAME=MAXN' | tail -1)
+  MAXN_ID="${MAXN_LINE%% *}"
+  MAXN_ID="${MAXN_ID:-0}"
+  MAXN_NAME="${MAXN_LINE#*NAME=}"
+  echo "  Setting power mode to $MAXN_ID (${MAXN_NAME:-unknown})"
+  nvpmodel -m "$MAXN_ID"
   jetson_clocks
   # Ensure persistent service is installed and enabled for next boot
   if [ -f "$PROJECT_DIR/config/clawbox-performance.service" ]; then
@@ -537,7 +544,7 @@ step_install_bun
 log "Building ClawBox..."
 step_build
 
-log "Installing OpenClaw ($OPENCLAW_VERSION)..."
+log "Installing OpenClaw..."
 step_openclaw_install
 
 log "Patching and configuring OpenClaw..."

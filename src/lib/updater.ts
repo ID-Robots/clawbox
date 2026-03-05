@@ -1,5 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
+import { readFile } from "fs/promises";
 import { get, set, setMany } from "./config-store";
 
 const execShell = promisify(execCb);
@@ -156,6 +157,7 @@ let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
 
 const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
@@ -174,20 +176,30 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     getTargetVersion(),
     execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
       .then(({ stdout }) => stdout.trim() || null)
-      .catch(() => null),
+      .catch(() =>
+        // Fallback: read version from installed package.json
+        readFile(OPENCLAW_PKG, "utf-8")
+          .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
+          .catch(() => null)
+      ),
     execShell("npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
       .then(({ stdout }) => stdout.trim() || null)
       .catch(() => null),
   ]);
 
+  // git describe gives "v2.2.0-3-gad4bf5a" for commits after a tag;
+  // extract the base tag so we can compare properly with the target tag
+  const rawVersion = process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
+  const baseTag = rawVersion.match(/^(v\d+\.\d+\.\d+)/)?.[1] ?? rawVersion;
+
   cachedVersionInfo = {
     clawbox: {
-      current: process.env.NEXT_PUBLIC_APP_VERSION || "unknown",
-      target: targetVersion,
+      current: rawVersion,
+      target: targetVersion && targetVersion === baseTag ? null : targetVersion,
     },
     openclaw: {
       current: openclawCurrent,
-      target: openclawTarget,
+      target: openclawTarget && openclawTarget === openclawCurrent ? null : openclawTarget,
     },
   };
   versionInfoCacheTime = Date.now();

@@ -391,6 +391,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [showHotspotPassword, setShowHotspotPassword] = useState(false);
+  const [hotspotEnabled, setHotspotEnabled] = useState(true);
   const [secSaving, setSecSaving] = useState(false);
   const [secStatus, setSecStatus] = useState<SectionStatusMessage | null>(null);
 
@@ -410,6 +411,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [tgStatus, setTgStatus] = useState<SectionStatusMessage | null>(null);
 
   /* ── WiFi ── */
+  const [wifiDone, setWifiDone] = useState(false);
   const [wifiConnectedSSID, setWifiConnectedSSID] = useState<string | null>(null);
   const [wifiSSID, setWifiSSID] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
@@ -469,6 +471,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           setSecurityDone(!!data.password_configured);
           setTelegramDone(!!data.telegram_configured);
           setProviderDone(!!data.ai_model_configured);
+          if (data.wifi_configured) setWifiDone(true);
           if (data.ai_model_provider) setProviderName(data.ai_model_provider);
         }
       })
@@ -509,8 +512,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     fetch("/setup-api/system/hotspot", { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data && !controller.signal.aborted && data.ssid) {
-          setHotspotName(data.ssid);
+        if (data && !controller.signal.aborted) {
+          if (data.ssid) setHotspotName(data.ssid);
+          if (typeof data.enabled === "boolean") setHotspotEnabled(data.enabled);
         }
       })
       .catch(() => {});
@@ -645,7 +649,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         return;
       }
     }
-    if (!hotspotName.trim()) {
+    if (hotspotEnabled && !hotspotName.trim()) {
       setSecStatus({ type: "error", message: "Hotspot name is required" });
       return;
     }
@@ -675,6 +679,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         body: JSON.stringify({
           ssid: hotspotName.trim(),
           password: hotspotPassword || undefined,
+          enabled: hotspotEnabled,
         }),
       });
       if (!hotspotRes.ok) {
@@ -1291,7 +1296,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
       {/* Settings sections */}
       <div className="space-y-3 mb-6">
         {/* WiFi */}
-        <CollapsibleSection id="wifi" title="WiFi" done={!!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
+        <CollapsibleSection id="wifi" title="WiFi" done={wifiDone || !!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
           {wifiConnectedSSID && (
             <p className="text-xs text-[var(--text-muted)]">
               Connected to: <span className="text-[var(--text-secondary)] font-semibold">{wifiConnectedSSID}</span>
@@ -1322,6 +1327,10 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               autoComplete="off"
             />
           </div>
+          <p className="text-[11px] text-amber-400/80 leading-relaxed">
+            <span className="font-semibold">Note:</span> Connecting to WiFi will stop the hotspot.
+            {"You'll"} need to reach the device via your WiFi network at <span className="font-semibold">http://clawbox.local</span>.
+          </p>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
           <button
             type="button"
@@ -1545,8 +1554,30 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             />
           </div>
           <div className="border-t border-[var(--border-subtle)] pt-3">
+            <div className="flex items-center justify-between mb-3">
+              <label htmlFor="hs-toggle" className="text-xs font-semibold text-[var(--text-secondary)]">Hotspot</label>
+              <button
+                id="hs-toggle"
+                type="button"
+                role="switch"
+                aria-checked={hotspotEnabled}
+                onClick={() => setHotspotEnabled((v) => !v)}
+                className={`relative w-10 h-[22px] rounded-full transition-colors cursor-pointer border-none ${hotspotEnabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"}`}
+              >
+                <span className={`absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white transition-transform shadow-sm ${hotspotEnabled ? "translate-x-[18px]" : ""}`} />
+              </button>
+            </div>
+            {!hotspotEnabled ? (
+              <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
+                Hotspot will be disabled on next boot. The device will only be reachable via WiFi or Ethernet.
+              </p>
+            ) : (
+              <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
+                Enabling the hotspot will disconnect WiFi. The device will be reachable via the hotspot or Ethernet at <span className="font-semibold">http://clawbox.local</span>.
+              </p>
+            )}
             <label htmlFor="hs-name" className={LABEL_CLASS}>Hotspot Name</label>
-            <input id="hs-name" type="text" value={hotspotName} onChange={(e) => setHotspotName(e.target.value)} maxLength={32} className={INPUT_CLASS} />
+            <input id="hs-name" type="text" value={hotspotName} onChange={(e) => setHotspotName(e.target.value)} maxLength={32} className={INPUT_CLASS} disabled={!hotspotEnabled} />
           </div>
           <div>
             <label htmlFor="hs-pw" className={LABEL_CLASS}>Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span></label>

@@ -160,7 +160,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           </div>
         )}
 
-        <div className="flex items-center gap-3 mt-5">
+        <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
+          <span className="font-semibold">Note:</span> Connecting to WiFi will stop the ClawBox-Setup hotspot.
+          You will lose this connection and need to join your home WiFi to continue setup at{" "}
+          <span className="font-semibold">http://clawbox.local</span>.
+        </p>
+
+        <div className="flex items-center gap-3 mt-3">
           <button
             type="button"
             onClick={connectWifi}
@@ -171,7 +177,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           </button>
           <button
             type="button"
-            onClick={onNext}
+            onClick={() => {
+              fetch("/setup-api/wifi/connect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ skip: true }),
+              }).catch(() => {});
+              onNext();
+            }}
             className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
           >
             Skip (Ethernet only)
