@@ -5,11 +5,17 @@ import { set, setMany } from "@/lib/config-store";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  let body: { ssid?: unknown; password?: unknown };
+  let body: { ssid?: unknown; password?: unknown; skip?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  // Skip WiFi setup (Ethernet only) — just mark as configured
+  if (body.skip) {
+    await set("wifi_configured", true);
+    return NextResponse.json({ success: true, message: "WiFi skipped (Ethernet only)" });
   }
 
   const { ssid, password } = body;

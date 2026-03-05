@@ -177,7 +177,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           </button>
           <button
             type="button"
-            onClick={onNext}
+            onClick={() => {
+              fetch("/setup-api/wifi/connect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ skip: true }),
+              }).catch(() => {});
+              onNext();
+            }}
             className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
           >
             Skip (Ethernet only)
