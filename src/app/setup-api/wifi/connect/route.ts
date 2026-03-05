@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { switchToClient } from "@/lib/network";
-import { set } from "@/lib/config-store";
+import { set, setMany } from "@/lib/config-store";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     // Actually attempt connection before responding
     await switchToClient(ssid, password as string | undefined);
 
-    await set("wifi_configured", true);
+    await setMany({ wifi_configured: true, hotspot_enabled: false });
 
     return NextResponse.json({
       success: true,
