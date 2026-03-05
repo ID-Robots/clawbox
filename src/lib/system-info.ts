@@ -7,6 +7,8 @@ const exec = promisify(execFile);
 
 const BYTES_PER_MB = 1024 * 1024;
 
+const UNKNOWN_DISK = { diskTotal: "unknown", diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 } as const;
+
 const SIZE_MULTIPLIERS: Record<string, number> = {
   T: 1024 * 1024,
   G: 1024,
@@ -54,7 +56,7 @@ function parseDfOutput(stdout: string): {
 } {
   const lines = stdout.trim().split("\n");
   if (lines.length < 2) {
-    return { diskTotal: "unknown", diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
+    return { ...UNKNOWN_DISK };
   }
 
   const [size, used, avail] = lines[1].trim().split(/\s+/);
@@ -133,7 +135,7 @@ export async function gather(): Promise<SystemInfo> {
   const dfOutput = settledValue(dfRes);
   const disk = dfOutput
     ? parseDfOutput(dfOutput.stdout)
-    : { diskTotal: "unknown", diskUsed: "unknown", diskFree: "unknown", diskUsedPercent: 0 };
+    : { ...UNKNOWN_DISK };
 
   const tempRaw = settledValue(tempRes);
   const temp = tempRaw

@@ -1326,8 +1326,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             />
           </div>
           <p className="text-[11px] text-amber-400/80 leading-relaxed">
-            <span className="font-semibold">Note:</span> Connecting to a new WiFi network will temporarily stop the hotspot.
-            If you are connected via the hotspot, you will lose access until the device reconnects.
+            <span className="font-semibold">Note:</span> Connecting to WiFi will stop the hotspot.
+            You'll need to reach the device via your WiFi network at <span className="font-semibold">http://clawbox.local</span>.
           </p>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
           <button
@@ -1565,9 +1565,13 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 <span className={`absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white transition-transform shadow-sm ${hotspotEnabled ? "translate-x-[18px]" : ""}`} />
               </button>
             </div>
-            {!hotspotEnabled && (
+            {!hotspotEnabled ? (
               <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
                 Hotspot will be disabled on next boot. The device will only be reachable via WiFi or Ethernet.
+              </p>
+            ) : (
+              <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
+                Enabling the hotspot will disconnect WiFi. The device will only be reachable via the hotspot network.
               </p>
             )}
             <label htmlFor="hs-name" className={LABEL_CLASS}>Hotspot Name</label>
