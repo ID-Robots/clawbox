@@ -1,7 +1,11 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile } from "fs/promises";
+import path from "path";
 import { get, set, setMany } from "./config-store";
+
+const PROJECT_DIR = "/home/clawbox/clawbox";
+const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -68,16 +72,72 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   });
 }
 
+/** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
+const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+
+/**
+ * Determine which branch to update to, in priority order:
+ * 1. `.update-branch` file in project root (survives factory reset + git reset)
+ * 2. Current branch if it tracks a remote
+ * 3. "main" as the default fallback
+ */
+interface ResolvedBranch {
+  /** Local branch to checkout */
+  local: string;
+  /** Full upstream ref to reset to (e.g. "origin/feature/foo") */
+  upstream: string;
+}
+
+async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
+  const main: ResolvedBranch = { local: "main", upstream: "origin/main" };
+
+  // 1. Check .update-branch file
+  try {
+    const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+    if (pinned && SAFE_BRANCH.test(pinned)) {
+      return { local: pinned, upstream: `origin/${pinned}` };
+    }
+  } catch { /* file doesn't exist */ }
+
+  // 2. Check current branch's configured upstream via git
+  try {
+    const { stdout: branchOut } = await execShell(
+      `${gitCmd} symbolic-ref --short HEAD`,
+      { timeout: 10_000 },
+    );
+    const current = branchOut.trim();
+    if (!current || current === "main" || !SAFE_BRANCH.test(current)) return main;
+
+    const { stdout: upstreamOut } = await execShell(
+      `${gitCmd} rev-parse --abbrev-ref ${current}@{u}`,
+      { timeout: 10_000 },
+    );
+    const upstream = upstreamOut.trim();
+    if (upstream && SAFE_BRANCH.test(upstream)) {
+      return { local: current, upstream };
+    }
+  } catch {
+    // No upstream configured — fall back to main
+  }
+
+  // 3. Default
+  return main;
+}
+
 async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
-  // Always update to latest main branch
-  const gitCmd = "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox";
+
+  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
+  const { local, upstream } = await resolveUpdateBranch(gitCmd);
+
+  console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
+
   await execShell(
     `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout main` +
-    ` && ${gitCmd} reset --hard origin/main`,
+    ` && ${gitCmd} checkout ${local}` +
+    ` && ${gitCmd} reset --hard ${upstream}`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);
@@ -120,12 +180,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     id: "openclaw_patch",
     label: "Patching OpenClaw gateway",
     timeoutMs: 30_000,
-    requiresRoot: true,
-  },
-  {
-    id: "openclaw_models",
-    label: "Configuring AI models",
-    timeoutMs: 600_000,
     requiresRoot: true,
   },
   {

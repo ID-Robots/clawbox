@@ -227,13 +227,58 @@ step_openclaw_patch() {
     exit 1
   fi
   echo "  Gateway scope patch applied and verified"
+
+  # --- Device identity bypass patch ---
+  # OpenClaw bug: dangerouslyDisableDeviceAuth sets allowBypass but
+  # handleMissingDeviceIdentity doesn't check it before the final rejection.
+  # Add: allow Control UI when bypass flag is set.
+  local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
+
+  local DEVICE_FILES
+  DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  if [ -z "$DEVICE_FILES" ]; then
+    echo "  Device identity bypass patch: pattern not found, skipping"
+    return
+  fi
+
+  # Only patch files that contain the target but NOT the marker yet
+  local NEEDS_PATCH=""
+  for file in $DEVICE_FILES; do
+    if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
+      NEEDS_PATCH="$NEEDS_PATCH $file"
+    fi
+  done
+
+  if [ -z "$NEEDS_PATCH" ]; then
+    echo "  Device identity bypass patch: already applied"
+    return
+  fi
+
+  for file in $NEEDS_PATCH; do
+    sed -i 's|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };\n\tif (params.isControlUi \&\& params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "$file"
+  done
+
+  # Verify ALL files with reject-device-required now have the patch
+  local UNPATCHED
+  UNPATCHED=""
+  for file in $DEVICE_FILES; do
+    if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
+      UNPATCHED="$UNPATCHED $file"
+    fi
+  done
+
+  if [ -n "$UNPATCHED" ]; then
+    echo "Error: Device identity bypass patch failed for:$UNPATCHED"
+    exit 1
+  fi
+  echo "  Device identity bypass patch applied and verified"
 }
 
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
 
-  # Register Telegram channel (if token exists) and configure voice pipeline
+  # Register Telegram channel (if token exists) and set default model
   # in a single node invocation to avoid reading/writing the config file twice
   if [ -f "$OPENCLAW_CONFIG" ]; then
     CLAWBOX_CONFIG="$CLAWBOX_CONFIG" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" \
@@ -253,36 +298,25 @@ try {
   }
 } catch {}
 
-// Voice pipeline (Whisper STT + Kokoro TTS)
-if(!c.tools)c.tools={};
-if(!c.tools.media)c.tools.media={};
-c.tools.media.audio={
-  enabled:true,
-  models:[{type:'cli',command:'python3',args:[home+'/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
-};
-if(!c.messages)c.messages={};
-c.messages.tts={auto:'tagged',mode:'all',provider:'openai',openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}};
 if(!c.agents)c.agents={};
 if(!c.agents.defaults)c.agents.defaults={};
 if(!c.agents.defaults.model)c.agents.defaults.model={};
 c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
-if(!c.env)c.env={};
-if(!c.env.vars)c.env.vars={};
-c.env.vars.OPENAI_TTS_BASE_URL='http://localhost:8880/v1';
+
+// Local device: disable gateway auth (no HTTPS for browser token exchange)
+// and enable insecure auth + device auth bypass for Control UI
+if(!c.gateway)c.gateway={};
+if(!c.gateway.auth)c.gateway.auth={};
+c.gateway.auth.mode='none';
+if(!c.gateway.controlUi)c.gateway.controlUi={};
+c.gateway.controlUi.allowInsecureAuth=true;
+c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
-    echo "  Voice pipeline configured (Whisper STT + Kokoro TTS via OpenAI proxy)"
+    echo "  OpenClaw config updated"
   fi
 
-  # Deploy voice scripts to workspace
-  local WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
-  mkdir -p "$WORKSPACE/scripts"
-  for f in kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py; do
-    [ -f "$PROJECT_DIR/scripts/$f" ] && cp "$PROJECT_DIR/scripts/$f" "$WORKSPACE/scripts/$f"
-  done
-  chmod +x "$WORKSPACE/scripts/"*.sh 2>/dev/null || true
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
 }
 
@@ -352,14 +386,6 @@ step_polkit_rules() {
   echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
 }
 
-step_voice_install() {
-  apt-get install -y -qq espeak-ng libsndfile1 cmake build-essential ffmpeg
-  bash "$PROJECT_DIR/scripts/install-voice.sh"
-  echo "  Voice pipeline installed"
-  bash "$PROJECT_DIR/scripts/setup-optimizations.sh"
-  echo "  Optimizations applied"
-}
-
 step_start_services() {
   local svc
   for svc in clawbox-ap clawbox-setup clawbox-gateway clawbox-performance; do
@@ -390,6 +416,16 @@ step_performance_mode() {
     systemctl daemon-reload
     systemctl enable clawbox-performance.service
   fi
+  # Disable snapd to free ~22MB RAM — not needed on this device
+  if systemctl is-enabled --quiet snapd 2>/dev/null; then
+    systemctl disable --now snapd snapd.socket 2>/dev/null || true
+    echo "  Disabled snapd"
+  fi
+  # Optimize Ollama for 8GB Jetson
+  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  # Install sudoers rule so the web UI can run optimize-ollama.sh as root
+  cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
+  chmod 440 /etc/sudoers.d/clawbox-ollama
 }
 
 step_jtop_install() {
@@ -480,7 +516,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
-  openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
+  openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
@@ -507,7 +543,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=19
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -562,9 +598,6 @@ step_systemd_services
 
 log "Installing polkit rules..."
 step_polkit_rules
-
-log "Installing voice pipeline..."
-step_voice_install
 
 log "Installing jtop (jetson-stats)..."
 step_jtop_install

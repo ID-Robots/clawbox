@@ -13,6 +13,14 @@ const AUTH_PROFILES_PATH =
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 
+// Ollama pre-allocates KV cache for the full context window. The default 128K
+// context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
+// OpenClaw requires minimum 16K context. At Q4_K_M this uses ~3.5-4 GB total.
+// We define the model in openclaw.json with a capped contextWindow so the
+// gateway generates models.json with the correct value on every restart.
+const OLLAMA_CONTEXT_WINDOW = 16384;
+const OLLAMA_MAX_TOKENS = 8192;
+
 interface ProviderConfig {
   defaultModel: string;
   profileKey: string;
@@ -44,6 +52,10 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   openrouter: {
     defaultModel: "openrouter/anthropic/claude-sonnet-4.5",
     profileKey: "openrouter:default",
+  },
+  ollama: {
+    defaultModel: "ollama/llama3.2:3b",
+    profileKey: "ollama:default",
   },
 };
 
@@ -112,9 +124,10 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
-    if (!provider || !apiKey) {
+    const isOllama = provider === "ollama";
+    if (!provider || (!apiKey && !isOllama)) {
       return NextResponse.json(
-        { error: "Provider and API key are required" },
+        { error: "Provider is required; API key required for non-Ollama providers" },
         { status: 400 }
       );
     }
@@ -129,49 +142,65 @@ export async function POST(request: Request) {
 
     // For subscription (OAuth) providers, use the subscription-specific config
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
-      ? baseConfig.subscriptionOverride
-      : baseConfig;
+      ? { ...baseConfig.subscriptionOverride }
+      : { ...baseConfig };
     const ocProvider = config.profileKey.split(":")[0];
 
+    // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
+    // via the `apiKey` field — there is no real API key for a local provider.
+    if (isOllama) {
+      const modelName = apiKey || "llama3.2:3b";
+      config.defaultModel = `ollama/${modelName}`;
+    }
+
     // 1. Write token to auth-profiles.json
-    let authProfiles: {
-      version: number;
-      profiles: Record<string, unknown>;
-    };
-    try {
-      const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
-      authProfiles = JSON.parse(raw);
-    } catch {
-      authProfiles = { version: 1, profiles: {} };
-    }
-    if (authMode === "subscription") {
-      // OAuth credential format expected by OpenClaw:
-      // { type: "oauth", provider, access, refresh, expires, projectId? }
-      authProfiles.profiles[config.profileKey] = {
-        type: "oauth",
-        provider: ocProvider,
-        access: apiKey,
-        refresh: refreshToken || "",
-        expires: expiresIn
-          ? Date.now() + expiresIn * 1000
-          : Date.now() + 8 * 60 * 60 * 1000, // default 8h
-        ...(projectId ? { projectId } : {}),
+    {
+      let authProfiles: {
+        version: number;
+        profiles: Record<string, unknown>;
       };
-    } else {
-      authProfiles.profiles[config.profileKey] = {
-        type: "token",
-        provider: ocProvider,
-        token: apiKey,
-      };
+      try {
+        const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
+        authProfiles = JSON.parse(raw);
+      } catch {
+        authProfiles = { version: 1, profiles: {} };
+      }
+      if (isOllama) {
+        // Ollama runs locally — use a dummy api_key entry
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: ocProvider,
+          key: "ollama-local",
+        };
+      } else if (authMode === "subscription") {
+        // OAuth credential format expected by OpenClaw:
+        // { type: "oauth", provider, access, refresh, expires, projectId? }
+        authProfiles.profiles[config.profileKey] = {
+          type: "oauth",
+          provider: ocProvider,
+          access: apiKey,
+          refresh: refreshToken || "",
+          expires: expiresIn
+            ? Date.now() + expiresIn * 1000
+            : Date.now() + 8 * 60 * 60 * 1000, // default 8h
+          ...(projectId ? { projectId } : {}),
+        };
+      } else {
+        authProfiles.profiles[config.profileKey] = {
+          type: "token",
+          provider: ocProvider,
+          token: apiKey,
+        };
+      }
+      await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
+      const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
+      await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
+        mode: 0o600,
+      });
+      await fs.rename(tmpPath, AUTH_PROFILES_PATH);
+      // Fix ownership so the gateway (running as clawbox) can read it
+      await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
     }
-    await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
-    const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
-    await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
-      mode: 0o600,
-    });
-    await fs.rename(tmpPath, AUTH_PROFILES_PATH);
-    // Fix ownership so the gateway (running as clawbox) can read it
-    await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 
     // 2. Validate profileKey before interpolating into config path
     if (!PROFILE_KEY_RE.test(config.profileKey)) {
@@ -186,7 +215,9 @@ export async function POST(request: Request) {
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify({ provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      JSON.stringify(isOllama
+        ? { provider: ocProvider, mode: "api_key" }
+        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
 
@@ -198,16 +229,21 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4b. Allow insecure auth for control UI (needed for HTTP proxy from Next.js on local device)
-    if (process.env.ALLOW_INSECURE_CONTROL_UI === "true") {
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "gateway.controlUi.allowInsecureAuth",
-        "true",
-        "--json",
-      ]);
-    }
+    // 4c. Local device gateway setup: disable gateway auth (no HTTPS for browser
+    // token exchange) and disable device identity checks (no secure context for
+    // browser crypto key-pair). The gateway is only reachable via local proxy.
+    console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
+    await Promise.all([
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.auth.mode", "none",
+      ]),
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
+      ]),
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
+      ]),
+    ]);
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -222,7 +258,55 @@ export async function POST(request: Request) {
       ai_model_configured_at: new Date().toISOString(),
     });
 
-    // 7. Restart OpenClaw gateway so it picks up the new auth profile and model
+    // 7. For Ollama, define the model in openclaw.json with a capped contextWindow
+    // and set models.mode=replace so the gateway uses our definition instead of
+    // auto-detecting the native context length from Ollama (which would be 128K).
+    // Also ensure the Ollama systemd service is optimized for 8GB RAM.
+    if (isOllama) {
+      const modelName = config.defaultModel.replace(/^ollama\//, "");
+      const providerDef = JSON.stringify({
+        baseUrl: "http://127.0.0.1:11434",
+        api: "ollama",
+        apiKey: "ollama-local",
+        models: [{
+          id: modelName,
+          name: modelName,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: OLLAMA_CONTEXT_WINDOW,
+          maxTokens: OLLAMA_MAX_TOKENS,
+        }],
+      });
+      await Promise.all([
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.providers.ollama", providerDef, "--json",
+        ]),
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "replace",
+        ]),
+      ]);
+      // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
+      try {
+        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+      } catch (err) {
+        // Non-fatal: Ollama will still work, just use more memory
+        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
+      }
+      console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+    } else {
+      // Switching away from Ollama — reset models.mode so cloud providers
+      // auto-detect their model catalog normally.
+      try {
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "merge",
+        ]);
+      } catch {
+        // Non-fatal: merge is the default behavior anyway
+      }
+    }
+
+    // 8. Restart OpenClaw gateway so it picks up the new auth profile and model
     try {
       await restartGateway();
     } catch (err) {

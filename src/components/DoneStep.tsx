@@ -1,11 +1,14 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
+import OllamaModelPanel from "./OllamaModelPanel";
+import { useOllamaModels } from "@/hooks/useOllamaModels";
+import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
 /* ── Types ── */
 
@@ -90,7 +93,8 @@ const AI_PROVIDERS = [
   { id: "openai", name: "OpenAI GPT", hasSubscription: true, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
   { id: "google", name: "Google Gemini", hasSubscription: true, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
   { id: "openrouter", name: "OpenRouter", hasSubscription: false, placeholder: "sk-or-v1-...", hint: "Get your API key from OpenRouter.", tokenUrl: "https://openrouter.ai/keys" },
-];
+  { id: "ollama", name: "Ollama Local", hasSubscription: false, isLocal: true, placeholder: "", hint: "Run AI models locally on this device.", tokenUrl: "" },
+] as const;
 
 /* ── Helper functions ── */
 
@@ -383,6 +387,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [deviceSaving, setDeviceSaving] = useState(false);
   const devicePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /* ── Ollama Local ── */
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -399,6 +406,10 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [updateConfirm, setUpdateConfirm] = useState(false);
   const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
+  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
+  const [branchInput, setBranchInput] = useState("");
+  const [branchSaving, setBranchSaving] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -587,15 +598,45 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     setVersionLoading(true);
     setUpdateConfirm(true);
     try {
-      const res = await fetch("/setup-api/update/status");
-      if (res.ok) {
-        const data = await res.json();
+      const [statusRes, branchRes] = await Promise.all([
+        fetch("/setup-api/update/status"),
+        fetch("/setup-api/system/update-branch"),
+      ]);
+      if (statusRes.ok) {
+        const data = await statusRes.json();
         if (data.versions) setVersionInfo(data.versions);
+      }
+      if (branchRes.ok) {
+        const data = await branchRes.json();
+        setUpdateBranch(data.branch ?? null);
+        setBranchInput(data.branch ?? "");
       }
     } catch {
       // versions are nice-to-have, dialog still works without them
     } finally {
       setVersionLoading(false);
+    }
+  };
+
+  const saveUpdateBranch = async (branch: string) => {
+    setBranchSaving(true);
+    setBranchError(null);
+    try {
+      const res = await fetch("/setup-api/system/update-branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: branch || null }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setUpdateBranch(data.branch ?? null);
+      } else {
+        setBranchError(data.error || "Failed to set branch");
+      }
+    } catch (err) {
+      setBranchError(err instanceof Error ? err.message : "Failed to set branch");
+    } finally {
+      setBranchSaving(false);
     }
   };
 
@@ -928,6 +969,37 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  // Ollama hook
+  const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
+    onSaveSuccess: (model: string) => {
+      setAiStatus({ type: "success", message: `Ollama configured with ${model}!` });
+      setProviderDone(true);
+      setProviderName("ollama");
+      setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
+    },
+    onSaveError: (message: string) => setAiStatus({ type: "error", message }),
+    onPullError: (message: string) => setAiStatus({ type: "error", message }),
+    onClearStatus: () => setAiStatus(null),
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const {
+    ollamaRunning,
+    ollamaModels,
+    ollamaSearch,
+    ollamaSearchResults,
+    ollamaSearching,
+    ollamaPulling,
+    ollamaPullProgress,
+    ollamaSaving,
+    checkOllamaStatus,
+    handleOllamaSearchChange,
+    pullOllamaModel,
+    saveOllamaConfig,
+    deleteOllamaModel,
+    formatOllamaBytes,
+    clearSearch,
+  } = useOllamaModels(ollamaCallbacks);
+
   const startAiOAuth = async () => {
     aiOauthStartControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1189,6 +1261,48 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 </div>
               </div>
             )}
+            {/* Branch selector — only visible in dev (non-tag version) or when a branch is pinned */}
+            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
+              <div className="mb-4">
+                <label htmlFor="update-branch-input" className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
+                <div className="flex gap-2">
+                  <input
+                    id="update-branch-input"
+                    type="text"
+                    value={branchInput}
+                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
+                    placeholder="main"
+                    className="flex-1 bg-[var(--bg-deep)] border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#00e5cc]"
+                  />
+                  <button
+                    type="button"
+                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
+                    onClick={() => saveUpdateBranch(branchInput)}
+                    className="px-3 py-1.5 text-xs font-semibold text-white btn-gradient rounded-lg cursor-pointer disabled:opacity-40"
+                  >
+                    {branchSaving ? "..." : "Set"}
+                  </button>
+                </div>
+                {branchError && (
+                  <p className="mt-1 text-xs text-red-400">{branchError}</p>
+                )}
+                {updateBranch && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
+                    <button
+                      type="button"
+                      onClick={() => { setBranchInput(""); saveUpdateBranch(""); }}
+                      className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+                {!updateBranch && !branchError && (
+                  <p className="mt-1 text-xs text-[var(--text-muted)]">Leave empty to follow current branch or main</p>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-3 justify-end">
               <button
                 type="button"
@@ -1199,8 +1313,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               </button>
               <button
                 type="button"
+                disabled={branchSaving}
                 onClick={() => { setUpdateConfirm(false); triggerUpdate(); }}
-                className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform"
+                className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100"
               >
                 Update
               </button>
@@ -1367,6 +1482,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                       setAiProvider(provider.id);
                       setAiAuthMode(provider.hasSubscription ? "subscription" : "token");
                       resetAiFields();
+                      if (provider.id === "ollama") checkOllamaStatus();
                     }}
                     className="sr-only"
                   />
@@ -1378,6 +1494,34 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               );
             })}
           </div>
+
+          {aiProvider === "ollama" ? (
+            <div className="space-y-3">
+              <OllamaModelPanel
+                ollamaRunning={ollamaRunning}
+                ollamaModels={ollamaModels}
+                ollamaSaving={ollamaSaving}
+                ollamaSearch={ollamaSearch}
+                ollamaSearching={ollamaSearching}
+                ollamaSearchResults={ollamaSearchResults}
+                ollamaPulling={ollamaPulling}
+                ollamaPullProgress={ollamaPullProgress}
+                selectedOllamaModel={selectedOllamaModel}
+                setSelectedOllamaModel={setSelectedOllamaModel}
+                saveOllamaConfig={saveOllamaConfig}
+                deleteOllamaModel={deleteOllamaModel}
+                handleOllamaSearchChange={handleOllamaSearchChange}
+                clearSearch={clearSearch}
+                pullOllamaModel={pullOllamaModel}
+                formatOllamaBytes={formatOllamaBytes}
+                radioGroupName="ollama-model-dash"
+                inputClassName={INPUT_CLASS}
+                buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+                buttonSpinner={ButtonSpinner}
+              />
+            </div>
+          ) : (
+            <>
 
           {selectedAiProvider?.hasSubscription && (
             <div className="flex gap-1 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -1521,6 +1665,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               <p className="mt-1.5 text-xs text-[var(--text-muted)]">{selectedAiProvider?.hint}</p>
               <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Saving..." : "Save"}</button>
             </div>
+          )}
+
+            </>
           )}
 
           {aiStatus && <StatusMessage type={aiStatus.type} message={aiStatus.message} />}

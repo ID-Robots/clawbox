@@ -1,14 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import StatusMessage from "./StatusMessage";
+import OllamaModelPanel from "./OllamaModelPanel";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
+import { useOllamaModels } from "@/hooks/useOllamaModels";
+import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
 interface AIModelsStepProps {
   onNext: () => void;
 }
 
-type AuthMode = "token" | "subscription";
+type AuthMode = "token" | "subscription" | "local";
 
 interface AuthOption {
   mode: AuthMode;
@@ -109,6 +112,19 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
+  {
+    id: "ollama",
+    name: "Ollama Local",
+    description: "Run AI models locally on device",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Local",
+        placeholder: "",
+        hint: "No API key needed. Models run on this device.",
+      },
+    ],
+  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
@@ -137,6 +153,8 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     type: "success" | "error";
     message: string;
   } | null>(null);
+
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
 
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
@@ -198,6 +216,32 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     return typeof data.error === "string" ? data.error : fallback;
   };
 
+  // Ollama hook
+  const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
+    onSaveSuccess: (model: string) => showSuccessAndContinue(`Ollama configured with ${model}!`),
+    onSaveError: (message: string) => showError(message),
+    onPullError: (message: string) => showError(message),
+    onClearStatus: () => setStatus(null),
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const {
+    ollamaRunning,
+    ollamaModels,
+    ollamaSearch,
+    ollamaSearchResults,
+    ollamaSearching,
+    ollamaPulling,
+    ollamaPullProgress,
+    ollamaSaving,
+    checkOllamaStatus,
+    handleOllamaSearchChange,
+    pullOllamaModel,
+    saveOllamaConfig,
+    deleteOllamaModel,
+    formatOllamaBytes,
+    clearSearch,
+  } = useOllamaModels(ollamaCallbacks);
+
   const selectProvider = (id: string) => {
     stopPolling();
     const provider = PROVIDERS.find((p) => p.id === id);
@@ -218,6 +262,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     setDeviceCode(null);
     setDeviceUrl(null);
     setDeviceSaving(false);
+    if (id === "ollama") checkOllamaStatus();
   };
 
   const saveModel = async () => {
@@ -716,7 +761,32 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           })}
         </div>
 
-        {selected && activeAuth && (
+        {selected?.id === "ollama" && (
+          <div className="mt-5 space-y-4">
+            <OllamaModelPanel
+              ollamaRunning={ollamaRunning}
+              ollamaModels={ollamaModels}
+              ollamaSaving={ollamaSaving}
+              ollamaSearch={ollamaSearch}
+              ollamaSearching={ollamaSearching}
+              ollamaSearchResults={ollamaSearchResults}
+              ollamaPulling={ollamaPulling}
+              ollamaPullProgress={ollamaPullProgress}
+              selectedOllamaModel={selectedOllamaModel}
+              setSelectedOllamaModel={setSelectedOllamaModel}
+              saveOllamaConfig={saveOllamaConfig}
+              deleteOllamaModel={deleteOllamaModel}
+              handleOllamaSearchChange={handleOllamaSearchChange}
+              clearSearch={clearSearch}
+              pullOllamaModel={pullOllamaModel}
+              formatOllamaBytes={formatOllamaBytes}
+              radioGroupName="ollama-model"
+              buttonSpinner={ButtonSpinner}
+            />
+          </div>
+        )}
+
+        {selected && selected.id !== "ollama" && activeAuth && (
           <div className="mt-5">
             {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -808,7 +878,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         )}
 
         <div className="flex items-center gap-3 mt-5">
-          {isSubscription ? (
+          {selected?.id === "ollama" ? (
+            null /* Ollama has its own buttons above */
+          ) : isSubscription ? (
             useDeviceAuth ? (
               /* Device auth has no manual submit button — it auto-completes via polling */
               null
