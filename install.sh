@@ -438,6 +438,21 @@ step_jtop_install() {
   echo "  jtop installed"
 }
 
+step_ollama_install() {
+  if command -v ollama &>/dev/null; then
+    echo "  Ollama already installed"
+  else
+    echo "  Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+  fi
+  # Ensure the service is enabled and running
+  systemctl enable ollama 2>/dev/null || true
+  systemctl start ollama 2>/dev/null || true
+  # Apply Jetson memory optimizations
+  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  echo "  Ollama installed and running"
+}
+
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   if [ ! -f "$INPUT_FILE" ]; then
@@ -507,7 +522,7 @@ step_rebuild_reboot() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode jtop_install
+  apt_update nvidia_jetpack performance_mode jtop_install ollama_install
   openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -535,7 +550,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -593,6 +608,9 @@ step_polkit_rules
 
 log "Installing jtop (jetson-stats)..."
 step_jtop_install
+
+log "Installing Ollama..."
+step_ollama_install
 
 log "Starting services..."
 step_start_services

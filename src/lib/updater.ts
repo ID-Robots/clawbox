@@ -165,6 +165,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
 {
+    id: "ollama_install",
+    label: "Installing Ollama",
+    timeoutMs: 300_000,
+    requiresRoot: true,
+  },
+  {
     id: "openclaw_install",
     label: "Updating OpenClaw",
     timeoutMs: 120_000,
