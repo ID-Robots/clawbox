@@ -234,11 +234,6 @@ step_openclaw_patch() {
   # Add: allow Control UI when bypass flag is set.
   local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
 
-  if grep -qrl "$DEVICE_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
-    echo "  Device identity bypass patch: already applied"
-    return
-  fi
-
   local DEVICE_FILES
   DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
   if [ -z "$DEVICE_FILES" ]; then
@@ -246,16 +241,37 @@ step_openclaw_patch() {
     return
   fi
 
+  # Only patch files that contain the target but NOT the marker yet
+  local NEEDS_PATCH=""
   for file in $DEVICE_FILES; do
+    if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
+      NEEDS_PATCH="$NEEDS_PATCH $file"
+    fi
+  done
+
+  if [ -z "$NEEDS_PATCH" ]; then
+    echo "  Device identity bypass patch: already applied"
+    return
+  fi
+
+  for file in $NEEDS_PATCH; do
     sed -i 's|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };\n\tif (params.isControlUi \&\& params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "$file"
   done
 
-  if grep -qrl "$DEVICE_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
-    echo "  Device identity bypass patch applied and verified"
-  else
-    echo "Error: Device identity bypass patch could not be verified"
+  # Verify ALL files with reject-device-required now have the patch
+  local UNPATCHED
+  UNPATCHED=""
+  for file in $DEVICE_FILES; do
+    if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
+      UNPATCHED="$UNPATCHED $file"
+    fi
+  done
+
+  if [ -n "$UNPATCHED" ]; then
+    echo "Error: Device identity bypass patch failed for:$UNPATCHED"
     exit 1
   fi
+  echo "  Device identity bypass patch applied and verified"
 }
 
 step_openclaw_config() {
