@@ -157,7 +157,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [ollamaPulling, setOllamaPulling] = useState(false);
   const [ollamaPullProgress, setOllamaPullProgress] = useState<{ status: string; completed?: number; total?: number } | null>(null);
-  const [ollamaSaving, setOllamaSaving] = useState(false);
+  const [ollamaSaving, setOllamaSaving] = useState<string | false>(false);
 
   // Ollama search state
   const [ollamaSearch, setOllamaSearch] = useState("");
@@ -332,7 +332,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
   };
 
   const saveOllamaConfig = async (model: string) => {
-    setOllamaSaving(true);
+    setOllamaSaving(model);
     setStatus(null);
     try {
       const res = await fetch("/setup-api/ai-models/configure", {
@@ -865,7 +865,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     {ollamaModels.map((m) => (
                       <div key={m.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg mb-1">
                         <span className="text-sm text-gray-200">{m.name} <span className="text-xs text-[var(--text-muted)]">({formatOllamaBytes(m.size)})</span></span>
-                        <button type="button" onClick={() => selectExistingOllamaModel(m.name)} disabled={ollamaSaving} className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50">Use</button>
+                        <button type="button" onClick={() => selectExistingOllamaModel(m.name)} disabled={!!ollamaSaving} className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50 flex items-center gap-1.5">{ollamaSaving === m.name && <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />}{ollamaSaving === m.name ? "Saving..." : "Use"}</button>
                       </div>
                     ))}
                   </div>

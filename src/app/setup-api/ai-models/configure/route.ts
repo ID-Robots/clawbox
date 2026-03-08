@@ -144,8 +144,8 @@ export async function POST(request: Request) {
       config.defaultModel = `ollama/${modelName}`;
     }
 
-    // 1. Write token to auth-profiles.json (skip for Ollama — no API key needed)
-    if (!isOllama) {
+    // 1. Write token to auth-profiles.json
+    {
       let authProfiles: {
         version: number;
         profiles: Record<string, unknown>;
@@ -156,7 +156,14 @@ export async function POST(request: Request) {
       } catch {
         authProfiles = { version: 1, profiles: {} };
       }
-      if (authMode === "subscription") {
+      if (isOllama) {
+        // Ollama runs locally — use a dummy api_key entry
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: ocProvider,
+          key: "ollama-local",
+        };
+      } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, refresh, expires, projectId? }
         authProfiles.profiles[config.profileKey] = {
@@ -194,13 +201,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile in main config (for Ollama, set a dummy local profile)
+    // 3. Set auth profile in main config
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
       JSON.stringify(isOllama
-        ? { provider: ocProvider, mode: "none" }
+        ? { provider: ocProvider, mode: "api_key" }
         : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
