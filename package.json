@@ -1,6 +1,6 @@
 {
   "name": "clawbox-setup",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
