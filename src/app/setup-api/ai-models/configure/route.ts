@@ -138,7 +138,8 @@ export async function POST(request: Request) {
       : { ...baseConfig };
     const ocProvider = config.profileKey.split(":")[0];
 
-    // For Ollama, use the model name passed as apiKey (or default)
+    // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
+    // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
       const modelName = apiKey || "llama3.2:3b";
       config.defaultModel = `ollama/${modelName}`;
@@ -231,8 +232,12 @@ export async function POST(request: Request) {
       ]);
     }
 
-    // 4c. For Ollama (local provider), bypass device identity checks (no external identity provider)
+    // 4c. For Ollama (local provider), bypass device identity checks.
+    // Ollama runs on localhost with no external identity provider, so browser
+    // crypto key-pair auth (device identity) is not viable over plain HTTP.
+    // TODO: Remove once OpenClaw supports allowBypass in handleMissingDeviceIdentity
     if (isOllama) {
+      console.log(`[AI Config] Disabling device auth for local Ollama provider (${provider})`);
       await runCommand(OPENCLAW_BIN, [
         "config",
         "set",

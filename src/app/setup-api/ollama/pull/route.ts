@@ -50,10 +50,10 @@ export async function POST(request: Request) {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            controller.enqueue(value);
 
-            // Parse to check for errors in the stream
+            // Decode and check for errors before forwarding
             const text = decoder.decode(value, { stream: true });
+            let hasError = false;
             for (const line of text.split("\n")) {
               if (!line.trim()) continue;
               try {
@@ -61,12 +61,14 @@ export async function POST(request: Request) {
                 if (parsed.error) {
                   controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: parsed.error }) + "\n"));
                   controller.close();
+                  hasError = true;
                   return;
                 }
               } catch {
                 // partial JSON, ignore
               }
             }
+            if (!hasError) controller.enqueue(value);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Stream error";

@@ -6,6 +6,7 @@ import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
+import OllamaModelPanel from "./OllamaModelPanel";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
@@ -1484,131 +1485,27 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
           {aiProvider === "ollama" ? (
             <div className="space-y-3">
-              {!ollamaRunning ? (
-                <p className="text-xs text-yellow-400">Ollama is not running. Make sure it is installed and started.</p>
-              ) : (
-                <>
-                  {ollamaModels.length > 0 && (
-                    <div>
-                      <p className="text-xs text-[var(--text-secondary)] mb-2">Installed models:</p>
-                      {ollamaModels.map((m) => (
-                        <div key={m.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg mb-1">
-                          <span className="text-sm text-gray-200">{m.name} <span className="text-xs text-[var(--text-muted)]">({formatOllamaBytes(m.size)})</span></span>
-                          <button type="button" onClick={() => saveOllamaConfig(m.name)} disabled={!!ollamaSaving} className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50 flex items-center gap-1.5">{ollamaSaving === m.name && <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />}{ollamaSaving === m.name ? "Saving..." : "Use"}</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <div>
-                    <label className={LABEL_CLASS}>Download a model</label>
-                    <div className="space-y-1">
-                      {[{ id: "llama3.2:3b", label: "Llama 3.2 3B" }, { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B Instruct (Q4_K_M)" }].map((m) => (
-                        <label key={m.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${selectedOllamaModel === m.id ? "bg-orange-500/10" : "hover:bg-[var(--bg-surface)]/30"}`}>
-                          <input type="radio" name="ollama-model-dash" value={m.id} checked={selectedOllamaModel === m.id} onChange={() => setSelectedOllamaModel(m.id)} className="sr-only" />
-                          <span className={`flex items-center justify-center w-4 h-4 rounded-full border-2 shrink-0 ${selectedOllamaModel === m.id ? "border-[var(--coral-bright)]" : "border-gray-600"}`}>
-                            {selectedOllamaModel === m.id && <span className="w-2 h-2 rounded-full bg-orange-500" />}
-                          </span>
-                          <span className="text-sm text-gray-200">{m.label}</span>
-                        </label>
-                      ))}
-                    </div>
-
-                    {/* Search for more models */}
-                    <div className="mt-3 pt-3 border-t border-gray-800">
-                      <p className="text-xs text-[var(--text-muted)] mb-1.5">Or search for more models (filtered for 8GB RAM)</p>
-                      <div className="relative">
-                        <input
-                          type="text"
-                          value={ollamaSearch}
-                          onChange={(e) => handleOllamaSearchChange(e.target.value)}
-                          placeholder="Search Ollama models..."
-                          spellCheck={false}
-                          autoComplete="off"
-                          className={INPUT_CLASS}
-                        />
-                        {ollamaSearching && (
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
-                        )}
-                      </div>
-                      {ollamaSearchResults.length > 0 && (
-                        <div className="mt-2 max-h-48 overflow-y-auto space-y-1">
-                          {ollamaSearchResults.map((r) => (
-                            <div key={r.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg">
-                              <div className="min-w-0 flex-1 mr-2">
-                                <span className="text-sm text-gray-200 block truncate">{r.name}</span>
-                                {r.description && <span className="text-xs text-[var(--text-muted)] block truncate">{r.description}</span>}
-                                {r.filteredSizes.length > 0 && (
-                                  <span className="text-xs text-[var(--text-muted)]">
-                                    Sizes: {r.filteredSizes.join(", ")}
-                                    {r.pulls && <> · {r.pulls} pulls</>}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex gap-1 shrink-0">
-                                {r.filteredSizes.length > 0 ? (
-                                  r.filteredSizes.map((size) => (
-                                    <button
-                                      key={size}
-                                      type="button"
-                                      onClick={() => {
-                                        const modelTag = `${r.name}:${size}`;
-                                        setSelectedOllamaModel(modelTag);
-                                        clearSearch();
-                                      }}
-                                      className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
-                                    >
-                                      {size}
-                                    </button>
-                                  ))
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedOllamaModel(r.name);
-                                      clearSearch();
-                                    }}
-                                    className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
-                                  >
-                                    Select
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {ollamaSearch && !ollamaSearching && ollamaSearchResults.length === 0 && (
-                        <p className="mt-1 text-xs text-[var(--text-muted)]">No models found matching &quot;{ollamaSearch}&quot; for 8GB devices</p>
-                      )}
-                    </div>
-
-                    {/* Show selected custom model if not in preset list */}
-                    {!["llama3.2:3b", "qwen2.5:3b-instruct-q4_K_M"].includes(selectedOllamaModel) && (
-                      <div className="mt-2 px-3 py-2 bg-orange-500/10 rounded-lg">
-                        <span className="text-sm text-gray-200">Selected: <strong>{selectedOllamaModel}</strong></span>
-                      </div>
-                    )}
-
-                    {ollamaPulling && ollamaPullProgress && (
-                      <div className="mt-2">
-                        <div className="flex justify-between text-xs text-[var(--text-muted)] mb-1">
-                          <span>{ollamaPullProgress.status}</span>
-                          {ollamaPullProgress.total ? <span>{Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%</span> : null}
-                        </div>
-                        {ollamaPullProgress.total && (
-                          <div className="w-full h-2 bg-[var(--bg-deep)] rounded-full overflow-hidden">
-                            <div className="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all" style={{ width: `${Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%` }} />
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <button type="button" onClick={() => pullOllamaModel(selectedOllamaModel)} disabled={ollamaPulling} className={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>
-                      {ollamaPulling && ButtonSpinner}
-                      {ollamaPulling ? "Downloading..." : "Download & Configure"}
-                    </button>
-                  </div>
-                </>
-              )}
+              <OllamaModelPanel
+                ollamaRunning={ollamaRunning}
+                ollamaModels={ollamaModels}
+                ollamaSaving={ollamaSaving}
+                ollamaSearch={ollamaSearch}
+                ollamaSearching={ollamaSearching}
+                ollamaSearchResults={ollamaSearchResults}
+                ollamaPulling={ollamaPulling}
+                ollamaPullProgress={ollamaPullProgress}
+                selectedOllamaModel={selectedOllamaModel}
+                setSelectedOllamaModel={setSelectedOllamaModel}
+                saveOllamaConfig={saveOllamaConfig}
+                handleOllamaSearchChange={handleOllamaSearchChange}
+                clearSearch={clearSearch}
+                pullOllamaModel={pullOllamaModel}
+                formatOllamaBytes={formatOllamaBytes}
+                radioGroupName="ollama-model-dash"
+                inputClassName={INPUT_CLASS}
+                buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+                buttonSpinner={ButtonSpinner}
+              />
             </div>
           ) : (
             <>

@@ -138,12 +138,12 @@ export async function GET(request: Request) {
     const filtered = filterForJetson(allResults);
     const results = filtered.slice(0, 20);
 
-    // Store in cache (evict old entries to prevent unbounded growth)
-    searchCache.set(cacheKey, { results, ts: Date.now() });
-    if (searchCache.size > 50) {
+    // Evict oldest entry before inserting to keep cache within limit
+    if (searchCache.size >= 50) {
       const oldest = [...searchCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
       if (oldest) searchCache.delete(oldest[0]);
     }
+    searchCache.set(cacheKey, { results, ts: Date.now() });
 
     return NextResponse.json({ results });
   } catch (err) {

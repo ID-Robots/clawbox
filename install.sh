@@ -253,7 +253,8 @@ step_openclaw_patch() {
   if grep -qrl "$DEVICE_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
     echo "  Device identity bypass patch applied and verified"
   else
-    echo "Warning: Device identity bypass patch could not be verified"
+    echo "Error: Device identity bypass patch could not be verified"
+    exit 1
   fi
 }
 
@@ -507,7 +508,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=20
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))

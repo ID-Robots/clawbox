@@ -48,6 +48,11 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
   const checkOllamaStatus = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/ollama/status");
+      if (!res.ok) {
+        setOllamaRunning(false);
+        setOllamaModels([]);
+        return;
+      }
       const data = await res.json();
       setOllamaRunning(data.running);
       setOllamaModels(data.models || []);
@@ -67,6 +72,10 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
       const res = await fetch(
         `/setup-api/ollama/search?q=${encodeURIComponent(query)}`
       );
+      if (!res.ok) {
+        setOllamaSearchResults([]);
+        return;
+      }
       const data = await res.json();
       setOllamaSearchResults(data.results || []);
     } catch {
