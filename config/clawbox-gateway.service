@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox
+ExecStartPre=/home/clawbox/clawbox/scripts/gateway-pre-start.sh
 ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind loopback
 Restart=always
 RestartSec=5
