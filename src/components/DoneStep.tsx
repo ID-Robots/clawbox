@@ -1260,8 +1260,8 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 </div>
               </div>
             )}
-            {/* Branch selector */}
-            {!versionLoading && (
+            {/* Branch selector — only visible in dev (non-tag version) or when a branch is pinned */}
+            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
               <div className="mb-4">
                 <label htmlFor="update-branch-input" className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
                 <div className="flex gap-2">
@@ -1312,7 +1312,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               </button>
               <button
                 type="button"
-                disabled={branchSaving || branchInput !== (updateBranch ?? "")}
+                disabled={branchSaving}
                 onClick={() => { setUpdateConfirm(false); triggerUpdate(); }}
                 className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100"
               >
