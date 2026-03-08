@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
+import { useOllamaModels } from "@/hooks/useOllamaModels";
+import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
 /* ── Types ── */
 
@@ -385,16 +387,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const devicePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* ── Ollama Local ── */
-  const [ollamaRunning, setOllamaRunning] = useState(false);
-  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: number }[]>([]);
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
-  const [ollamaPulling, setOllamaPulling] = useState(false);
-  const [ollamaPullProgress, setOllamaPullProgress] = useState<{ status: string; completed?: number; total?: number } | null>(null);
-  const [ollamaSaving, setOllamaSaving] = useState<string | false>(false);
-  const [ollamaSearch, setOllamaSearch] = useState("");
-  const [ollamaSearchResults, setOllamaSearchResults] = useState<{ name: string; description: string; pulls: string; filteredSizes: string[] }[]>([]);
-  const [ollamaSearching, setOllamaSearching] = useState(false);
-  const ollamaSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
@@ -941,112 +934,35 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
-  const checkOllamaStatus = async () => {
-    try {
-      const res = await fetch("/setup-api/ollama/status");
-      const data = await res.json();
-      setOllamaRunning(data.running);
-      setOllamaModels(data.models || []);
-    } catch {
-      setOllamaRunning(false);
-      setOllamaModels([]);
-    }
-  };
+  // Ollama hook
+  const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
+    onSaveSuccess: (model: string) => {
+      setAiStatus({ type: "success", message: `Ollama configured with ${model}!` });
+      setProviderDone(true);
+      setProviderName("ollama");
+      setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
+    },
+    onSaveError: (message: string) => setAiStatus({ type: "error", message }),
+    onPullError: (message: string) => setAiStatus({ type: "error", message }),
+    onClearStatus: () => setAiStatus(null),
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const searchOllamaModels = useCallback(async (query: string) => {
-    if (!query.trim()) {
-      setOllamaSearchResults([]);
-      return;
-    }
-    setOllamaSearching(true);
-    try {
-      const res = await fetch(`/setup-api/ollama/search?q=${encodeURIComponent(query)}`);
-      const data = await res.json();
-      setOllamaSearchResults(data.results || []);
-    } catch {
-      setOllamaSearchResults([]);
-    } finally {
-      setOllamaSearching(false);
-    }
-  }, []);
-
-  const handleOllamaSearchChange = (value: string) => {
-    setOllamaSearch(value);
-    if (ollamaSearchTimerRef.current) clearTimeout(ollamaSearchTimerRef.current);
-    ollamaSearchTimerRef.current = setTimeout(() => searchOllamaModels(value), 400);
-  };
-
-  const formatOllamaBytes = (bytes: number) => {
-    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-    return `${bytes} B`;
-  };
-
-  const pullOllamaModel = async (model: string) => {
-    setOllamaPulling(true);
-    setOllamaPullProgress(null);
-    setAiStatus(null);
-    try {
-      const res = await fetch("/setup-api/ollama/pull", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model }),
-      });
-      if (!res.ok || !res.body) {
-        setAiStatus({ type: "error", message: "Failed to start model download" });
-        setOllamaPulling(false);
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const prog = JSON.parse(line);
-            setOllamaPullProgress(prog);
-          } catch { /* skip */ }
-        }
-      }
-      await checkOllamaStatus();
-      setOllamaPulling(false);
-      await saveOllamaConfig(model);
-    } catch (err) {
-      setAiStatus({ type: "error", message: `Download failed: ${err instanceof Error ? err.message : err}` });
-      setOllamaPulling(false);
-    }
-  };
-
-  const saveOllamaConfig = async (model: string) => {
-    setOllamaSaving(model);
-    setAiStatus(null);
-    try {
-      const res = await fetch("/setup-api/ai-models/configure", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "ollama", apiKey: model, authMode: "local" }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setAiStatus({ type: "success", message: `Ollama configured with ${model}!` });
-        setProviderDone(true);
-        setProviderName("ollama");
-        setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
-      } else {
-        setAiStatus({ type: "error", message: data.error || "Failed to configure" });
-      }
-    } catch (err) {
-      setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
-    } finally {
-      setOllamaSaving(false);
-    }
-  };
+  const {
+    ollamaRunning,
+    ollamaModels,
+    ollamaSearch,
+    ollamaSearchResults,
+    ollamaSearching,
+    ollamaPulling,
+    ollamaPullProgress,
+    ollamaSaving,
+    checkOllamaStatus,
+    handleOllamaSearchChange,
+    pullOllamaModel,
+    saveOllamaConfig,
+    formatOllamaBytes,
+    clearSearch,
+  } = useOllamaModels(ollamaCallbacks);
 
   const startAiOAuth = async () => {
     aiOauthStartControllerRef.current?.abort();
@@ -1571,8 +1487,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                                       onClick={() => {
                                         const modelTag = `${r.name}:${size}`;
                                         setSelectedOllamaModel(modelTag);
-                                        setOllamaSearch("");
-                                        setOllamaSearchResults([]);
+                                        clearSearch();
                                       }}
                                       className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
                                     >
@@ -1584,8 +1499,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                                     type="button"
                                     onClick={() => {
                                       setSelectedOllamaModel(r.name);
-                                      setOllamaSearch("");
-                                      setOllamaSearchResults([]);
+                                      clearSearch();
                                     }}
                                     className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
                                   >

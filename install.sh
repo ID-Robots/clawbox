@@ -227,13 +227,41 @@ step_openclaw_patch() {
     exit 1
   fi
   echo "  Gateway scope patch applied and verified"
+
+  # --- Device identity bypass patch ---
+  # OpenClaw bug: dangerouslyDisableDeviceAuth sets allowBypass but
+  # handleMissingDeviceIdentity doesn't check it before the final rejection.
+  # Add: allow Control UI when bypass flag is set.
+  local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
+
+  if grep -qrl "$DEVICE_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+    echo "  Device identity bypass patch: already applied"
+    return
+  fi
+
+  local DEVICE_FILES
+  DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  if [ -z "$DEVICE_FILES" ]; then
+    echo "  Device identity bypass patch: pattern not found, skipping"
+    return
+  fi
+
+  for file in $DEVICE_FILES; do
+    sed -i 's|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };\n\tif (params.isControlUi \&\& params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "$file"
+  done
+
+  if grep -qrl "$DEVICE_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+    echo "  Device identity bypass patch applied and verified"
+  else
+    echo "Warning: Device identity bypass patch could not be verified"
+  fi
 }
 
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
 
-  # Register Telegram channel (if token exists) and configure voice pipeline
+  # Register Telegram channel (if token exists) and set default model
   # in a single node invocation to avoid reading/writing the config file twice
   if [ -f "$OPENCLAW_CONFIG" ]; then
     CLAWBOX_CONFIG="$CLAWBOX_CONFIG" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" \
@@ -253,36 +281,16 @@ try {
   }
 } catch {}
 
-// Voice pipeline (Whisper STT + Kokoro TTS)
-if(!c.tools)c.tools={};
-if(!c.tools.media)c.tools.media={};
-c.tools.media.audio={
-  enabled:true,
-  models:[{type:'cli',command:'python3',args:[home+'/.openclaw/workspace/scripts/stt-client.py','{{MediaPath}}']}]
-};
-if(!c.messages)c.messages={};
-c.messages.tts={auto:'tagged',mode:'all',provider:'openai',openai:{apiKey:'local',model:'kokoro-82m',voice:'af_heart'}};
 if(!c.agents)c.agents={};
 if(!c.agents.defaults)c.agents.defaults={};
 if(!c.agents.defaults.model)c.agents.defaults.model={};
 c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
-if(!c.env)c.env={};
-if(!c.env.vars)c.env.vars={};
-c.env.vars.OPENAI_TTS_BASE_URL='http://localhost:8880/v1';
 
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
-    echo "  Voice pipeline configured (Whisper STT + Kokoro TTS via OpenAI proxy)"
+    echo "  OpenClaw config updated"
   fi
 
-  # Deploy voice scripts to workspace
-  local WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
-  mkdir -p "$WORKSPACE/scripts"
-  for f in kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py; do
-    [ -f "$PROJECT_DIR/scripts/$f" ] && cp "$PROJECT_DIR/scripts/$f" "$WORKSPACE/scripts/$f"
-  done
-  chmod +x "$WORKSPACE/scripts/"*.sh 2>/dev/null || true
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
 }
 
@@ -350,14 +358,6 @@ step_polkit_rules() {
   cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
   rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
   echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
-}
-
-step_voice_install() {
-  apt-get install -y -qq espeak-ng libsndfile1 cmake build-essential ffmpeg
-  bash "$PROJECT_DIR/scripts/install-voice.sh"
-  echo "  Voice pipeline installed"
-  bash "$PROJECT_DIR/scripts/setup-optimizations.sh"
-  echo "  Optimizations applied"
 }
 
 step_start_services() {
@@ -458,29 +458,6 @@ step_openclaw_models() {
   as_clawbox "$OPENCLAW_BIN" models
 }
 
-step_ollama_install() {
-  if command -v ollama &>/dev/null; then
-    echo "  Ollama already installed: $(ollama --version 2>/dev/null || echo 'unknown')"
-  else
-    echo "  Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
-    if ! command -v ollama &>/dev/null; then
-      echo "Error: Ollama installation failed"
-      exit 1
-    fi
-    echo "  Ollama installed: $(ollama --version 2>/dev/null || echo 'unknown')"
-  fi
-  systemctl enable ollama 2>/dev/null || true
-  systemctl start ollama 2>/dev/null || true
-}
-
-step_ollama_pull() {
-  local MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
-  echo "  Pulling model $MODEL (this may take a while)..."
-  ollama pull "$MODEL"
-  echo "  Model $MODEL ready"
-}
-
 step_fix_git_perms() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
   echo "  Fixed .git ownership"
@@ -503,8 +480,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
-  openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
-  ollama_install ollama_pull
+  openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
@@ -587,17 +563,11 @@ step_systemd_services
 log "Installing polkit rules..."
 step_polkit_rules
 
-log "Installing voice pipeline..."
-step_voice_install
-
 log "Installing jtop (jetson-stats)..."
 step_jtop_install
 
 log "Installing Chromium..."
 step_chrome_install
-
-log "Installing Ollama..."
-step_ollama_install
 
 log "Starting services..."
 step_start_services

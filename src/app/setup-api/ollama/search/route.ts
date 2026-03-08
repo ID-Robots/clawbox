@@ -22,6 +22,10 @@ interface SearchResult {
   sizes: string[];      // available parameter sizes like "3b", "7b"
 }
 
+// WARNING: This function scrapes HTML from ollama.com. It is inherently fragile
+// and may break if Ollama changes their page structure. Any field extraction
+// (description, pulls, tags, sizes) should fail gracefully — only the model
+// name is required for a result to be included.
 function parseSearchResults(html: string): SearchResult[] {
   const results: SearchResult[] = [];
 
@@ -40,23 +44,34 @@ function parseSearchResults(html: string): SearchResult[] {
     if (!nameMatch) continue;
     const name = nameMatch[1];
 
-    // Extract description - usually in a <p> tag
-    const descMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
-    const description = descMatch
-      ? descMatch[1].replace(/<[^>]+>/g, "").trim()
-      : "";
+    // All remaining fields are best-effort — if any extraction fails,
+    // we still keep the model with sensible defaults.
+    let description = "";
+    let pulls = "";
+    let tags: string[] = [];
+    let sizes: string[] = [];
 
-    // Extract pull count
-    const pullMatch = block.match(/([\d.]+[KMB]?)\s*Pull/i);
-    const pulls = pullMatch ? pullMatch[1] : "";
+    try {
+      const descMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+      description = descMatch
+        ? descMatch[1].replace(/<[^>]+>/g, "").trim()
+        : "";
+    } catch { /* keep default */ }
 
-    // Extract capability tags (vision, tools, thinking, etc.)
-    const tagMatches = block.match(/(?:vision|tools|thinking|code|embedding)/gi) || [];
-    const tags = [...new Set(tagMatches.map(t => t.toLowerCase()))];
+    try {
+      const pullMatch = block.match(/([\d.]+[KMB]?)\s*Pull/i);
+      pulls = pullMatch ? pullMatch[1] : "";
+    } catch { /* keep default */ }
 
-    // Extract parameter sizes (e.g., "1b", "3b", "7b", "8b", "70b")
-    const sizeMatches = block.match(/\b(\d+(?:\.\d+)?b)\b/gi) || [];
-    const sizes = [...new Set(sizeMatches.map(s => s.toLowerCase()))];
+    try {
+      const tagMatches = block.match(/(?:vision|tools|thinking|code|embedding)/gi) || [];
+      tags = [...new Set(tagMatches.map(t => t.toLowerCase()))];
+    } catch { /* keep default */ }
+
+    try {
+      const sizeMatches = block.match(/\b(\d+(?:\.\d+)?b)\b/gi) || [];
+      sizes = [...new Set(sizeMatches.map(s => s.toLowerCase()))];
+    } catch { /* keep default */ }
 
     results.push({ name, description, pulls, tags, sizes });
   }
@@ -80,12 +95,23 @@ function filterForJetson(results: SearchResult[]): (SearchResult & { filteredSiz
     .filter((r): r is SearchResult & { filteredSizes: string[] } => r !== null);
 }
 
+// Short-lived in-memory cache to avoid hammering ollama.com on repeated searches
+const searchCache = new Map<string, { results: (SearchResult & { filteredSizes: string[] })[]; ts: number }>();
+const CACHE_TTL_MS = 45_000; // 45 seconds
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("q")?.trim();
 
   if (!query) {
     return NextResponse.json({ results: [] });
+  }
+
+  // Check cache first
+  const cacheKey = query.toLowerCase();
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return NextResponse.json({ results: cached.results });
   }
 
   try {
@@ -110,8 +136,16 @@ export async function GET(request: Request) {
     const html = await res.text();
     const allResults = parseSearchResults(html);
     const filtered = filterForJetson(allResults);
+    const results = filtered.slice(0, 20);
 
-    return NextResponse.json({ results: filtered.slice(0, 20) });
+    // Store in cache (evict old entries to prevent unbounded growth)
+    searchCache.set(cacheKey, { results, ts: Date.now() });
+    if (searchCache.size > 50) {
+      const oldest = [...searchCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+      if (oldest) searchCache.delete(oldest[0]);
+    }
+
+    return NextResponse.json({ results });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Search failed" },

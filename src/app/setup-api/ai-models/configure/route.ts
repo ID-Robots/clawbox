@@ -119,7 +119,7 @@ export async function POST(request: Request) {
     const isOllama = provider === "ollama";
     if (!provider || (!apiKey && !isOllama)) {
       return NextResponse.json(
-        { error: "Provider and API key are required" },
+        { error: "Provider is required; API key required for non-Ollama providers" },
         { status: 400 }
       );
     }
@@ -226,6 +226,17 @@ export async function POST(request: Request) {
         "config",
         "set",
         "gateway.controlUi.allowInsecureAuth",
+        "true",
+        "--json",
+      ]);
+    }
+
+    // 4c. For Ollama (local provider), bypass device identity checks (no external identity provider)
+    if (isOllama) {
+      await runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "gateway.controlUi.dangerouslyDisableDeviceAuth",
         "true",
         "--json",
       ]);

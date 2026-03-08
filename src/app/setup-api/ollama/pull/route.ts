@@ -14,6 +14,14 @@ export async function POST(request: Request) {
 
   const model = body.model || "llama3.2:3b";
 
+  // Validate model name format (e.g. "llama3.2:3b", "mistral", "qwen2.5-coder:1.5b")
+  if (!/^[a-z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/i.test(model)) {
+    return NextResponse.json(
+      { error: "Invalid model name format" },
+      { status: 400 },
+    );
+  }
+
   try {
     const ollamaRes = await fetch(`${OLLAMA_BASE}/api/pull`, {
       method: "POST",
@@ -73,7 +81,6 @@ export async function POST(request: Request) {
       headers: {
         "Content-Type": "application/x-ndjson",
         "Cache-Control": "no-cache",
-        "Transfer-Encoding": "chunked",
       },
     });
   } catch (err) {

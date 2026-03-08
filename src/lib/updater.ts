@@ -123,18 +123,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
   {
-    id: "openclaw_models",
-    label: "Configuring AI models",
-    timeoutMs: 600_000,
-    requiresRoot: true,
-  },
-  {
-    id: "ollama_install",
-    label: "Installing Ollama",
-    timeoutMs: 300_000,
-    requiresRoot: true,
-  },
-  {
     id: RESTART_STEP_ID,
     label: "Updating ClawBox and restarting",
     timeoutMs: 90_000,
