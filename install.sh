@@ -438,14 +438,6 @@ step_jtop_install() {
   echo "  jtop installed"
 }
 
-step_chrome_install() {
-  if command -v chromium-browser &>/dev/null; then
-    echo "  Chromium already installed"
-    return
-  fi
-  apt-get install -y chromium-browser
-}
-
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   if [ ! -f "$INPUT_FILE" ]; then
@@ -515,7 +507,7 @@ step_rebuild_reboot() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode jtop_install chrome_install
+  apt_update nvidia_jetpack performance_mode jtop_install
   openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -543,7 +535,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=17
 step=0
 log() {
   step=$((step + 1))
@@ -601,9 +593,6 @@ step_polkit_rules
 
 log "Installing jtop (jetson-stats)..."
 step_jtop_install
-
-log "Installing Chromium..."
-step_chrome_install
 
 log "Starting services..."
 step_start_services
