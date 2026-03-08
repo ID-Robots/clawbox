@@ -254,11 +254,11 @@ export default function OllamaModelPanel({
         <button
           type="button"
           onClick={() => pullOllamaModel(selectedOllamaModel)}
-          disabled={ollamaPulling}
+          disabled={ollamaPulling || !!ollamaSaving}
           className={buttonClassName}
         >
-          {ollamaPulling && buttonSpinner}
-          {ollamaPulling ? "Downloading..." : "Download & Configure"}
+          {(ollamaPulling || !!ollamaSaving) && buttonSpinner}
+          {ollamaPulling ? "Downloading..." : ollamaSaving ? "Configuring..." : "Download & Configure"}
         </button>
       </div>
     </>
