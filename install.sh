@@ -303,6 +303,15 @@ if(!c.agents.defaults)c.agents.defaults={};
 if(!c.agents.defaults.model)c.agents.defaults.model={};
 c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
 
+// Local device: disable gateway auth (no HTTPS for browser token exchange)
+// and enable insecure auth + device auth bypass for Control UI
+if(!c.gateway)c.gateway={};
+if(!c.gateway.auth)c.gateway.auth={};
+c.gateway.auth.mode='none';
+if(!c.gateway.controlUi)c.gateway.controlUi={};
+c.gateway.controlUi.allowInsecureAuth=true;
+c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
+
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
     echo "  OpenClaw config updated"

@@ -221,31 +221,21 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4b. Allow insecure auth for control UI (needed for HTTP proxy from Next.js on local device)
-    if (process.env.ALLOW_INSECURE_CONTROL_UI === "true") {
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "gateway.controlUi.allowInsecureAuth",
-        "true",
-        "--json",
-      ]);
-    }
-
-    // 4c. For Ollama (local provider), bypass device identity checks.
-    // Ollama runs on localhost with no external identity provider, so browser
-    // crypto key-pair auth (device identity) is not viable over plain HTTP.
-    // TODO: Remove once OpenClaw supports allowBypass in handleMissingDeviceIdentity
-    if (isOllama) {
-      console.log(`[AI Config] Disabling device auth for local Ollama provider (${provider})`);
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "gateway.controlUi.dangerouslyDisableDeviceAuth",
-        "true",
-        "--json",
-      ]);
-    }
+    // 4b. Local device gateway setup: disable gateway auth (no HTTPS for browser
+    // token exchange) and disable device identity checks (no secure context for
+    // browser crypto key-pair). The gateway is only reachable via local proxy.
+    console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
+    await Promise.all([
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.auth.mode", "none",
+      ]),
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
+      ]),
+      runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
+      ]),
+    ]);
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
