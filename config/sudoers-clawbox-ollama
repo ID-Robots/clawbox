@@ -1,0 +1,2 @@
+# Allow clawbox user to optimize Ollama service without password
+clawbox ALL=(root) NOPASSWD: /home/clawbox/clawbox/scripts/optimize-ollama.sh

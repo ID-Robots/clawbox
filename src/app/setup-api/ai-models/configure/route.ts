@@ -13,14 +13,13 @@ const AUTH_PROFILES_PATH =
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 
-const MODELS_JSON_PATH =
-  "/home/clawbox/.openclaw/agents/main/agent/models.json";
-
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
-// We patch models.json after gateway restart to cap the context window.
-const OLLAMA_CONTEXT_WINDOW = 8192;
-const OLLAMA_MAX_TOKENS = 4096;
+// OpenClaw requires minimum 16K context. At Q4_K_M this uses ~3.5-4 GB total.
+// We define the model in openclaw.json with a capped contextWindow so the
+// gateway generates models.json with the correct value on every restart.
+const OLLAMA_CONTEXT_WINDOW = 16384;
+const OLLAMA_MAX_TOKENS = 8192;
 
 interface ProviderConfig {
   defaultModel: string;
@@ -259,7 +258,55 @@ export async function POST(request: Request) {
       ai_model_configured_at: new Date().toISOString(),
     });
 
-    // 7. Restart OpenClaw gateway so it picks up the new auth profile and model
+    // 7. For Ollama, define the model in openclaw.json with a capped contextWindow
+    // and set models.mode=replace so the gateway uses our definition instead of
+    // auto-detecting the native context length from Ollama (which would be 128K).
+    // Also ensure the Ollama systemd service is optimized for 8GB RAM.
+    if (isOllama) {
+      const modelName = config.defaultModel.replace(/^ollama\//, "");
+      const providerDef = JSON.stringify({
+        baseUrl: "http://127.0.0.1:11434",
+        api: "ollama",
+        apiKey: "ollama-local",
+        models: [{
+          id: modelName,
+          name: modelName,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: OLLAMA_CONTEXT_WINDOW,
+          maxTokens: OLLAMA_MAX_TOKENS,
+        }],
+      });
+      await Promise.all([
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.providers.ollama", providerDef, "--json",
+        ]),
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "replace",
+        ]),
+      ]);
+      // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
+      try {
+        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+      } catch (err) {
+        // Non-fatal: Ollama will still work, just use more memory
+        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
+      }
+      console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+    } else {
+      // Switching away from Ollama — reset models.mode so cloud providers
+      // auto-detect their model catalog normally.
+      try {
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "merge",
+        ]);
+      } catch {
+        // Non-fatal: merge is the default behavior anyway
+      }
+    }
+
+    // 8. Restart OpenClaw gateway so it picks up the new auth profile and model
     try {
       await restartGateway();
     } catch (err) {
@@ -268,49 +315,6 @@ export async function POST(request: Request) {
         { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
         { status: 502 },
       );
-    }
-
-    // 8. For Ollama, patch models.json to cap contextWindow. OpenClaw passes
-    // the model's native context length (128K) as num_ctx to Ollama, which
-    // pre-allocates KV cache for it — exceeding the Jetson's 8GB RAM.
-    // We patch after gateway restart so we overwrite any auto-generated values.
-    // Poll for models.json until the ollama provider appears, then cap contextWindow.
-    // The gateway may still be writing models.json after restart.
-    if (isOllama) {
-      const POLL_INTERVAL = 500;
-      const POLL_MAX = 5_000;
-      let patched = false;
-      for (let elapsed = 0; elapsed < POLL_MAX; elapsed += POLL_INTERVAL) {
-        try {
-          const raw = await fs.readFile(MODELS_JSON_PATH, "utf-8");
-          const modelsConfig = JSON.parse(raw);
-          const ollamaModels = modelsConfig.providers?.ollama?.models;
-          if (!Array.isArray(ollamaModels) || ollamaModels.length === 0) {
-            await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-            continue;
-          }
-          for (const m of ollamaModels) {
-            if ((m.contextWindow ?? 0) > OLLAMA_CONTEXT_WINDOW) {
-              m.contextWindow = OLLAMA_CONTEXT_WINDOW;
-              m.maxTokens = OLLAMA_MAX_TOKENS;
-              patched = true;
-            }
-          }
-          if (patched) {
-            const tmp = MODELS_JSON_PATH + `.tmp.${Date.now()}`;
-            await fs.writeFile(tmp, JSON.stringify(modelsConfig, null, 2), { mode: 0o600 });
-            await fs.rename(tmp, MODELS_JSON_PATH);
-            await fs.chown(MODELS_JSON_PATH, CLAWBOX_UID, CLAWBOX_GID);
-            console.log(`[AI Config] Patched models.json contextWindow to ${OLLAMA_CONTEXT_WINDOW}`);
-          }
-          break;
-        } catch {
-          await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-        }
-      }
-      if (!patched) {
-        console.warn("[AI Config] models.json patching skipped — ollama provider not found or already capped");
-      }
     }
 
     return NextResponse.json({ success: true });

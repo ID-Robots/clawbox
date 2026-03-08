@@ -421,6 +421,11 @@ step_performance_mode() {
     systemctl disable --now snapd snapd.socket 2>/dev/null || true
     echo "  Disabled snapd"
   fi
+  # Optimize Ollama for 8GB Jetson
+  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  # Install sudoers rule so the web UI can run optimize-ollama.sh as root
+  cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
+  chmod 440 /etc/sudoers.d/clawbox-ollama
 }
 
 step_jtop_install() {
