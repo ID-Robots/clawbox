@@ -72,14 +72,48 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
-  // Always update to latest main branch
+
   const gitCmd = "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox";
-  await execShell(
-    `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout main` +
-    ` && ${gitCmd} reset --hard origin/main`,
-    { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+
+  // If the current branch tracks a remote, pull it; otherwise fall back to main.
+  // This lets custom branches (e.g. feature/*) survive updates.
+  const { stdout: branch } = await execShell(
+    `${gitCmd} symbolic-ref --short HEAD 2>/dev/null || echo ""`,
+    { timeout: 10_000 },
   );
+  const currentBranch = branch.trim();
+
+  // Validate branch name to prevent shell injection (only allow safe git ref chars)
+  const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+
+  let hasTracking = false;
+  if (currentBranch && currentBranch !== "main" && SAFE_BRANCH.test(currentBranch)) {
+    try {
+      const { stdout: remote } = await execShell(
+        `${gitCmd} config --get branch.${currentBranch}.remote`,
+        { timeout: 10_000 },
+      );
+      hasTracking = !!remote.trim();
+    } catch {
+      // No tracking remote configured
+    }
+  }
+
+  if (hasTracking) {
+    // Pull current branch from its tracking remote
+    await execShell(
+      `${gitCmd} fetch origin && ${gitCmd} reset --hard origin/${currentBranch}`,
+      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+  } else {
+    // Default: switch to main and update
+    await execShell(
+      `${gitCmd} fetch origin` +
+      ` && ${gitCmd} checkout main` +
+      ` && ${gitCmd} reset --hard origin/main`,
+      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+  }
   await set("update_needs_continuation", true);
   await startRootServiceFireAndForget("rebuild_reboot");
   await waitForTermination();
