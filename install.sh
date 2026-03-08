@@ -416,6 +416,11 @@ step_performance_mode() {
     systemctl daemon-reload
     systemctl enable clawbox-performance.service
   fi
+  # Disable snapd to free ~22MB RAM — not needed on this device
+  if systemctl is-enabled --quiet snapd 2>/dev/null; then
+    systemctl disable --now snapd snapd.socket 2>/dev/null || true
+    echo "  Disabled snapd"
+  fi
 }
 
 step_jtop_install() {

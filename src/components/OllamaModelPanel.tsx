@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 
 const PRESET_MODELS = [
   { id: "llama3.2:3b", label: "Llama 3.2 3B" },
-  { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B Instruct (Q4_K_M)" },
+  { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B" },
 ];
 
 interface OllamaModelPanelProps {

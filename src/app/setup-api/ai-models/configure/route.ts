@@ -274,29 +274,42 @@ export async function POST(request: Request) {
     // the model's native context length (128K) as num_ctx to Ollama, which
     // pre-allocates KV cache for it — exceeding the Jetson's 8GB RAM.
     // We patch after gateway restart so we overwrite any auto-generated values.
+    // Poll for models.json until the ollama provider appears, then cap contextWindow.
+    // The gateway may still be writing models.json after restart.
     if (isOllama) {
-      try {
-        const raw = await fs.readFile(MODELS_JSON_PATH, "utf-8");
-        const modelsConfig = JSON.parse(raw);
-        let patched = false;
-        for (const prov of Object.values(modelsConfig.providers ?? {}) as Array<{ models?: Array<{ contextWindow?: number; maxTokens?: number }> }>) {
-          for (const m of prov.models ?? []) {
+      const POLL_INTERVAL = 500;
+      const POLL_MAX = 5_000;
+      let patched = false;
+      for (let elapsed = 0; elapsed < POLL_MAX; elapsed += POLL_INTERVAL) {
+        try {
+          const raw = await fs.readFile(MODELS_JSON_PATH, "utf-8");
+          const modelsConfig = JSON.parse(raw);
+          const ollamaModels = modelsConfig.providers?.ollama?.models;
+          if (!Array.isArray(ollamaModels) || ollamaModels.length === 0) {
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+            continue;
+          }
+          for (const m of ollamaModels) {
             if ((m.contextWindow ?? 0) > OLLAMA_CONTEXT_WINDOW) {
               m.contextWindow = OLLAMA_CONTEXT_WINDOW;
               m.maxTokens = OLLAMA_MAX_TOKENS;
               patched = true;
             }
           }
+          if (patched) {
+            const tmp = MODELS_JSON_PATH + `.tmp.${Date.now()}`;
+            await fs.writeFile(tmp, JSON.stringify(modelsConfig, null, 2), { mode: 0o600 });
+            await fs.rename(tmp, MODELS_JSON_PATH);
+            await fs.chown(MODELS_JSON_PATH, CLAWBOX_UID, CLAWBOX_GID);
+            console.log(`[AI Config] Patched models.json contextWindow to ${OLLAMA_CONTEXT_WINDOW}`);
+          }
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL));
         }
-        if (patched) {
-          const tmp = MODELS_JSON_PATH + `.tmp.${Date.now()}`;
-          await fs.writeFile(tmp, JSON.stringify(modelsConfig, null, 2), { mode: 0o600 });
-          await fs.rename(tmp, MODELS_JSON_PATH);
-          await fs.chown(MODELS_JSON_PATH, CLAWBOX_UID, CLAWBOX_GID);
-          console.log(`[AI Config] Patched models.json contextWindow to ${OLLAMA_CONTEXT_WINDOW}`);
-        }
-      } catch (err) {
-        console.warn("[AI Config] Failed to patch models.json:", err instanceof Error ? err.message : err);
+      }
+      if (!patched) {
+        console.warn("[AI Config] models.json patching skipped — ollama provider not found or already capped");
       }
     }
 
