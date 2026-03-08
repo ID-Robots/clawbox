@@ -116,17 +116,43 @@ export async function POST() {
       console.warn(`[Reset] ${allFailures.length} file deletion(s) failed — continuing with reboot`);
     }
 
-    // 4. Delete all Ollama models
+    // 4. Seed minimal openclaw.json with auth disabled so the gateway
+    // is accessible after reboot without requiring a browser token exchange
+    try {
+      await fs.mkdir(OPENCLAW_DIR, { recursive: true });
+      const seed = {
+        gateway: {
+          auth: { mode: "none" },
+          controlUi: {
+            allowInsecureAuth: true,
+            dangerouslyDisableDeviceAuth: true,
+          },
+        },
+      };
+      await fs.writeFile(
+        path.join(OPENCLAW_DIR, "openclaw.json"),
+        JSON.stringify(seed, null, 2),
+        { mode: 0o600 },
+      );
+      const uid = process.getuid?.() ?? 1000;
+      const gid = process.getgid?.() ?? 1000;
+      await fs.chown(path.join(OPENCLAW_DIR, "openclaw.json"), uid, gid);
+      console.log("[Reset] Seeded openclaw.json with auth disabled");
+    } catch (err) {
+      console.warn("[Reset] Failed to seed openclaw.json:", err instanceof Error ? err.message : err);
+    }
+
+    // 5. Delete all Ollama models
     await deleteOllamaModels().catch((err) => {
       console.error("[Reset] Ollama cleanup failed:", err instanceof Error ? err.message : err);
     });
 
-    // 5. Delete saved WiFi connections so device returns to AP mode after reboot
+    // 6. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
 
-    // 6. Return error if file cleanup had failures
+    // 7. Return error if file cleanup had failures
     if (allFailures.length > 0) {
       return NextResponse.json(
         { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
@@ -134,7 +160,7 @@ export async function POST() {
       );
     }
 
-    // 7. Schedule a full system reboot (short delay so the response reaches the client)
+    // 8. Schedule a full system reboot (short delay so the response reaches the client)
     setTimeout(async () => {
       try {
         await execFile("systemctl", ["reboot"], { timeout: 10_000 });

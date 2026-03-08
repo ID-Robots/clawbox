@@ -183,6 +183,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
   {
+    id: "gateway_setup",
+    label: "Configuring gateway service",
+    timeoutMs: 30_000,
+    requiresRoot: true,
+  },
+  {
     id: RESTART_STEP_ID,
     label: "Updating ClawBox and restarting",
     timeoutMs: 90_000,
