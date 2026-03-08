@@ -1,7 +1,11 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile } from "fs/promises";
+import path from "path";
 import { get, set, setMany } from "./config-store";
+
+const PROJECT_DIR = "/home/clawbox/clawbox";
+const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -68,52 +72,58 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   });
 }
 
+/** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
+const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+
+/**
+ * Determine which branch to update to, in priority order:
+ * 1. `.update-branch` file in project root (survives factory reset + git reset)
+ * 2. Current branch if it tracks a remote
+ * 3. "main" as the default fallback
+ */
+async function resolveUpdateBranch(gitCmd: string): Promise<string> {
+  // 1. Check .update-branch file
+  try {
+    const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+    if (pinned && SAFE_BRANCH.test(pinned)) return pinned;
+  } catch { /* file doesn't exist */ }
+
+  // 2. Check current branch tracking
+  try {
+    const { stdout } = await execShell(
+      `${gitCmd} symbolic-ref --short HEAD 2>/dev/null || echo ""`,
+      { timeout: 10_000 },
+    );
+    const current = stdout.trim();
+    if (current && current !== "main" && SAFE_BRANCH.test(current)) {
+      const { stdout: remote } = await execShell(
+        `${gitCmd} config --get branch.${current}.remote`,
+        { timeout: 10_000 },
+      );
+      if (remote.trim()) return current;
+    }
+  } catch { /* no tracking */ }
+
+  // 3. Default
+  return "main";
+}
+
 async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
 
-  const gitCmd = "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox";
+  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
+  const targetBranch = await resolveUpdateBranch(gitCmd);
 
-  // If the current branch tracks a remote, pull it; otherwise fall back to main.
-  // This lets custom branches (e.g. feature/*) survive updates.
-  const { stdout: branch } = await execShell(
-    `${gitCmd} symbolic-ref --short HEAD 2>/dev/null || echo ""`,
-    { timeout: 10_000 },
+  console.log(`[Updater] Updating to branch: ${targetBranch}`);
+
+  await execShell(
+    `${gitCmd} fetch origin` +
+    ` && ${gitCmd} checkout ${targetBranch}` +
+    ` && ${gitCmd} reset --hard origin/${targetBranch}`,
+    { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
-  const currentBranch = branch.trim();
-
-  // Validate branch name to prevent shell injection (only allow safe git ref chars)
-  const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
-
-  let hasTracking = false;
-  if (currentBranch && currentBranch !== "main" && SAFE_BRANCH.test(currentBranch)) {
-    try {
-      const { stdout: remote } = await execShell(
-        `${gitCmd} config --get branch.${currentBranch}.remote`,
-        { timeout: 10_000 },
-      );
-      hasTracking = !!remote.trim();
-    } catch {
-      // No tracking remote configured
-    }
-  }
-
-  if (hasTracking) {
-    // Pull current branch from its tracking remote
-    await execShell(
-      `${gitCmd} fetch origin && ${gitCmd} reset --hard origin/${currentBranch}`,
-      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
-    );
-  } else {
-    // Default: switch to main and update
-    await execShell(
-      `${gitCmd} fetch origin` +
-      ` && ${gitCmd} checkout main` +
-      ` && ${gitCmd} reset --hard origin/main`,
-      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
-    );
-  }
   await set("update_needs_continuation", true);
   await startRootServiceFireAndForget("rebuild_reboot");
   await waitForTermination();

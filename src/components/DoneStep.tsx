@@ -405,6 +405,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [updateConfirm, setUpdateConfirm] = useState(false);
   const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
+  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
+  const [branchInput, setBranchInput] = useState("");
+  const [branchSaving, setBranchSaving] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -593,15 +596,40 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     setVersionLoading(true);
     setUpdateConfirm(true);
     try {
-      const res = await fetch("/setup-api/update/status");
-      if (res.ok) {
-        const data = await res.json();
+      const [statusRes, branchRes] = await Promise.all([
+        fetch("/setup-api/update/status"),
+        fetch("/setup-api/system/update-branch"),
+      ]);
+      if (statusRes.ok) {
+        const data = await statusRes.json();
         if (data.versions) setVersionInfo(data.versions);
+      }
+      if (branchRes.ok) {
+        const data = await branchRes.json();
+        setUpdateBranch(data.branch ?? null);
+        setBranchInput(data.branch ?? "");
       }
     } catch {
       // versions are nice-to-have, dialog still works without them
     } finally {
       setVersionLoading(false);
+    }
+  };
+
+  const saveUpdateBranch = async (branch: string) => {
+    setBranchSaving(true);
+    try {
+      const res = await fetch("/setup-api/system/update-branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: branch || null }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUpdateBranch(data.branch ?? null);
+      }
+    } catch { /* ignore */ } finally {
+      setBranchSaving(false);
     }
   };
 
@@ -1223,6 +1251,44 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                     )}
                   </span>
                 </div>
+              </div>
+            )}
+            {/* Branch selector */}
+            {!versionLoading && (
+              <div className="mb-4">
+                <label className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={branchInput}
+                    onChange={(e) => setBranchInput(e.target.value)}
+                    placeholder="main"
+                    className="flex-1 bg-[var(--bg-deep)] border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#00e5cc]"
+                  />
+                  <button
+                    type="button"
+                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
+                    onClick={() => saveUpdateBranch(branchInput)}
+                    className="px-3 py-1.5 text-xs font-semibold text-white btn-gradient rounded-lg cursor-pointer disabled:opacity-40"
+                  >
+                    {branchSaving ? "..." : "Set"}
+                  </button>
+                </div>
+                {updateBranch && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
+                    <button
+                      type="button"
+                      onClick={() => { setBranchInput(""); saveUpdateBranch(""); }}
+                      className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+                {!updateBranch && (
+                  <p className="mt-1 text-xs text-[var(--text-muted)]">Leave empty to follow current branch or main</p>
+                )}
               </div>
             )}
             <div className="flex items-center gap-3 justify-end">
