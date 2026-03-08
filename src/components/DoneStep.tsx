@@ -391,6 +391,10 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [ollamaPulling, setOllamaPulling] = useState(false);
   const [ollamaPullProgress, setOllamaPullProgress] = useState<{ status: string; completed?: number; total?: number } | null>(null);
   const [ollamaSaving, setOllamaSaving] = useState(false);
+  const [ollamaSearch, setOllamaSearch] = useState("");
+  const [ollamaSearchResults, setOllamaSearchResults] = useState<{ name: string; description: string; pulls: string; filteredSizes: string[] }[]>([]);
+  const [ollamaSearching, setOllamaSearching] = useState(false);
+  const ollamaSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
@@ -949,6 +953,29 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  const searchOllamaModels = useCallback(async (query: string) => {
+    if (!query.trim()) {
+      setOllamaSearchResults([]);
+      return;
+    }
+    setOllamaSearching(true);
+    try {
+      const res = await fetch(`/setup-api/ollama/search?q=${encodeURIComponent(query)}`);
+      const data = await res.json();
+      setOllamaSearchResults(data.results || []);
+    } catch {
+      setOllamaSearchResults([]);
+    } finally {
+      setOllamaSearching(false);
+    }
+  }, []);
+
+  const handleOllamaSearchChange = (value: string) => {
+    setOllamaSearch(value);
+    if (ollamaSearchTimerRef.current) clearTimeout(ollamaSearchTimerRef.current);
+    ollamaSearchTimerRef.current = setTimeout(() => searchOllamaModels(value), 400);
+  };
+
   const formatOllamaBytes = (bytes: number) => {
     if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
     if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
@@ -1503,6 +1530,85 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                         </label>
                       ))}
                     </div>
+
+                    {/* Search for more models */}
+                    <div className="mt-3 pt-3 border-t border-gray-800">
+                      <p className="text-xs text-[var(--text-muted)] mb-1.5">Or search for more models (filtered for 8GB RAM)</p>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={ollamaSearch}
+                          onChange={(e) => handleOllamaSearchChange(e.target.value)}
+                          placeholder="Search Ollama models..."
+                          spellCheck={false}
+                          autoComplete="off"
+                          className={INPUT_CLASS}
+                        />
+                        {ollamaSearching && (
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+                        )}
+                      </div>
+                      {ollamaSearchResults.length > 0 && (
+                        <div className="mt-2 max-h-48 overflow-y-auto space-y-1">
+                          {ollamaSearchResults.map((r) => (
+                            <div key={r.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg">
+                              <div className="min-w-0 flex-1 mr-2">
+                                <span className="text-sm text-gray-200 block truncate">{r.name}</span>
+                                {r.description && <span className="text-xs text-[var(--text-muted)] block truncate">{r.description}</span>}
+                                {r.filteredSizes.length > 0 && (
+                                  <span className="text-xs text-[var(--text-muted)]">
+                                    Sizes: {r.filteredSizes.join(", ")}
+                                    {r.pulls && <> · {r.pulls} pulls</>}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex gap-1 shrink-0">
+                                {r.filteredSizes.length > 0 ? (
+                                  r.filteredSizes.map((size) => (
+                                    <button
+                                      key={size}
+                                      type="button"
+                                      onClick={() => {
+                                        const modelTag = `${r.name}:${size}`;
+                                        setSelectedOllamaModel(modelTag);
+                                        setOllamaSearch("");
+                                        setOllamaSearchResults([]);
+                                      }}
+                                      className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
+                                    >
+                                      {size}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedOllamaModel(r.name);
+                                      setOllamaSearch("");
+                                      setOllamaSearchResults([]);
+                                    }}
+                                    className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
+                                  >
+                                    Select
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ollamaSearch && !ollamaSearching && ollamaSearchResults.length === 0 && (
+                        <p className="mt-1 text-xs text-[var(--text-muted)]">No models found matching &quot;{ollamaSearch}&quot; for 8GB devices</p>
+                      )}
+                    </div>
+
+                    {/* Show selected custom model if not in preset list */}
+                    {!["llama3.2:3b", "qwen2.5:3b-instruct-q4_K_M"].includes(selectedOllamaModel) && (
+                      <div className="mt-2 px-3 py-2 bg-orange-500/10 rounded-lg">
+                        <span className="text-sm text-gray-200">Selected: <strong>{selectedOllamaModel}</strong></span>
+                      </div>
+                    )}
+
                     {ollamaPulling && ollamaPullProgress && (
                       <div className="mt-2">
                         <div className="flex justify-between text-xs text-[var(--text-muted)] mb-1">
