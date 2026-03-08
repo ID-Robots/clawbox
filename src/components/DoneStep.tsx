@@ -995,6 +995,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     handleOllamaSearchChange,
     pullOllamaModel,
     saveOllamaConfig,
+    deleteOllamaModel,
     formatOllamaBytes,
     clearSearch,
   } = useOllamaModels(ollamaCallbacks);
@@ -1508,6 +1509,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                 selectedOllamaModel={selectedOllamaModel}
                 setSelectedOllamaModel={setSelectedOllamaModel}
                 saveOllamaConfig={saveOllamaConfig}
+                deleteOllamaModel={deleteOllamaModel}
                 handleOllamaSearchChange={handleOllamaSearchChange}
                 clearSearch={clearSearch}
                 pullOllamaModel={pullOllamaModel}

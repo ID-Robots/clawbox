@@ -182,6 +182,24 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
     [callbacks, checkOllamaStatus, saveOllamaConfig]
   );
 
+  const deleteOllamaModel = useCallback(
+    async (model: string) => {
+      try {
+        const res = await fetch("/setup-api/ollama/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model }),
+        });
+        if (res.ok) {
+          await checkOllamaStatus();
+        }
+      } catch {
+        /* silently fail — model list will refresh next status check */
+      }
+    },
+    [checkOllamaStatus]
+  );
+
   const selectExistingOllamaModel = useCallback(
     async (model: string) => {
       await saveOllamaConfig(model);
@@ -209,6 +227,7 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
     pullOllamaModel,
     saveOllamaConfig,
     selectExistingOllamaModel,
+    deleteOllamaModel,
     formatOllamaBytes,
     clearSearch,
   };

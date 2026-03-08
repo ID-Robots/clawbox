@@ -10,13 +10,15 @@ import { restartGateway } from "@/lib/openclaw-config";
 const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
 const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
-const MODELS_JSON_PATH =
-  "/home/clawbox/.openclaw/agents/main/agent/models.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 
+const MODELS_JSON_PATH =
+  "/home/clawbox/.openclaw/agents/main/agent/models.json";
+
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
+// We patch models.json after gateway restart to cap the context window.
 const OLLAMA_CONTEXT_WINDOW = 8192;
 const OLLAMA_MAX_TOKENS = 4096;
 
@@ -228,37 +230,6 @@ export async function POST(request: Request) {
       config.defaultModel,
     ]);
 
-    // 4b. For Ollama, write models.json with a reduced context window so Ollama
-    // doesn't pre-allocate KV cache for 128K tokens (which exceeds 8GB RAM).
-    if (isOllama) {
-      const modelName = apiKey || "llama3.2:3b";
-      const modelsConfig = {
-        providers: {
-          ollama: {
-            baseUrl: "http://127.0.0.1:11434",
-            api: "ollama",
-            models: [
-              {
-                id: modelName,
-                name: modelName,
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: OLLAMA_CONTEXT_WINDOW,
-                maxTokens: OLLAMA_MAX_TOKENS,
-              },
-            ],
-            apiKey: "ollama-local",
-          },
-        },
-      };
-      await fs.mkdir(path.dirname(MODELS_JSON_PATH), { recursive: true });
-      const tmpModels = MODELS_JSON_PATH + `.tmp.${Date.now()}.${process.pid}`;
-      await fs.writeFile(tmpModels, JSON.stringify(modelsConfig, null, 2), { mode: 0o600 });
-      await fs.rename(tmpModels, MODELS_JSON_PATH);
-      await fs.chown(MODELS_JSON_PATH, CLAWBOX_UID, CLAWBOX_GID);
-    }
-
     // 4c. Local device gateway setup: disable gateway auth (no HTTPS for browser
     // token exchange) and disable device identity checks (no secure context for
     // browser crypto key-pair). The gateway is only reachable via local proxy.
@@ -297,6 +268,36 @@ export async function POST(request: Request) {
         { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
         { status: 502 },
       );
+    }
+
+    // 8. For Ollama, patch models.json to cap contextWindow. OpenClaw passes
+    // the model's native context length (128K) as num_ctx to Ollama, which
+    // pre-allocates KV cache for it — exceeding the Jetson's 8GB RAM.
+    // We patch after gateway restart so we overwrite any auto-generated values.
+    if (isOllama) {
+      try {
+        const raw = await fs.readFile(MODELS_JSON_PATH, "utf-8");
+        const modelsConfig = JSON.parse(raw);
+        let patched = false;
+        for (const prov of Object.values(modelsConfig.providers ?? {}) as Array<{ models?: Array<{ contextWindow?: number; maxTokens?: number }> }>) {
+          for (const m of prov.models ?? []) {
+            if ((m.contextWindow ?? 0) > OLLAMA_CONTEXT_WINDOW) {
+              m.contextWindow = OLLAMA_CONTEXT_WINDOW;
+              m.maxTokens = OLLAMA_MAX_TOKENS;
+              patched = true;
+            }
+          }
+        }
+        if (patched) {
+          const tmp = MODELS_JSON_PATH + `.tmp.${Date.now()}`;
+          await fs.writeFile(tmp, JSON.stringify(modelsConfig, null, 2), { mode: 0o600 });
+          await fs.rename(tmp, MODELS_JSON_PATH);
+          await fs.chown(MODELS_JSON_PATH, CLAWBOX_UID, CLAWBOX_GID);
+          console.log(`[AI Config] Patched models.json contextWindow to ${OLLAMA_CONTEXT_WINDOW}`);
+        }
+      } catch (err) {
+        console.warn("[AI Config] Failed to patch models.json:", err instanceof Error ? err.message : err);
+      }
     }
 
     return NextResponse.json({ success: true });

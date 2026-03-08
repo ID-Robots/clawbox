@@ -20,6 +20,7 @@ interface OllamaModelPanelProps {
   selectedOllamaModel: string;
   setSelectedOllamaModel: (model: string) => void;
   saveOllamaConfig: (model: string) => void;
+  deleteOllamaModel: (model: string) => void;
   handleOllamaSearchChange: (value: string) => void;
   clearSearch: () => void;
   pullOllamaModel: (model: string) => void;
@@ -54,6 +55,7 @@ export default function OllamaModelPanel({
   selectedOllamaModel,
   setSelectedOllamaModel,
   saveOllamaConfig,
+  deleteOllamaModel,
   handleOllamaSearchChange,
   clearSearch,
   pullOllamaModel,
@@ -87,17 +89,31 @@ export default function OllamaModelPanel({
                   ({formatOllamaBytes(m.size)})
                 </span>
               </span>
-              <button
-                type="button"
-                onClick={() => saveOllamaConfig(m.name)}
-                disabled={!!ollamaSaving}
-                className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
-              >
-                {ollamaSaving === m.name && (
-                  <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                )}
-                {ollamaSaving === m.name ? "Saving..." : "Use"}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => saveOllamaConfig(m.name)}
+                  disabled={!!ollamaSaving}
+                  className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {ollamaSaving === m.name && (
+                    <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  )}
+                  {ollamaSaving === m.name ? "Saving..." : "Use"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteOllamaModel(m.name)}
+                  disabled={!!ollamaSaving || ollamaPulling}
+                  className="p-1 text-gray-500 hover:text-red-400 transition-colors cursor-pointer disabled:opacity-50"
+                  title={`Delete ${m.name}`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              </div>
             </div>
           ))}
         </div>

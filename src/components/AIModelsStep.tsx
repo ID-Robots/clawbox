@@ -237,6 +237,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     handleOllamaSearchChange,
     pullOllamaModel,
     saveOllamaConfig,
+    deleteOllamaModel,
     formatOllamaBytes,
     clearSearch,
   } = useOllamaModels(ollamaCallbacks);
@@ -774,6 +775,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               selectedOllamaModel={selectedOllamaModel}
               setSelectedOllamaModel={setSelectedOllamaModel}
               saveOllamaConfig={saveOllamaConfig}
+              deleteOllamaModel={deleteOllamaModel}
               handleOllamaSearchChange={handleOllamaSearchChange}
               clearSearch={clearSearch}
               pullOllamaModel={pullOllamaModel}
