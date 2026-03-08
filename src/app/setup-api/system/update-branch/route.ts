@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readFile, writeFile } from "fs/promises";
+import { readFile, writeFile, unlink } from "fs/promises";
 import path from "path";
 
 export const dynamic = "force-dynamic";
@@ -8,12 +8,20 @@ const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
 
+function isEnoent(err: unknown): boolean {
+  return !!(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
+}
+
 export async function GET() {
   try {
     const branch = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
     return NextResponse.json({ branch: branch || null });
-  } catch {
-    return NextResponse.json({ branch: null });
+  } catch (err) {
+    if (isEnoent(err)) return NextResponse.json({ branch: null });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to read update branch" },
+      { status: 500 },
+    );
   }
 }
 
@@ -23,8 +31,11 @@ export async function POST(request: Request) {
 
     if (branch === null || branch === "") {
       // Clear the pinned branch (revert to default behavior)
-      const { unlink } = await import("fs/promises");
-      await unlink(UPDATE_BRANCH_FILE).catch(() => {});
+      try {
+        await unlink(UPDATE_BRANCH_FILE);
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
       return NextResponse.json({ success: true, branch: null });
     }
 

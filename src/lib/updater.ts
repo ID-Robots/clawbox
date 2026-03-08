@@ -81,31 +81,47 @@ const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
  * 2. Current branch if it tracks a remote
  * 3. "main" as the default fallback
  */
-async function resolveUpdateBranch(gitCmd: string): Promise<string> {
+interface ResolvedBranch {
+  /** Local branch to checkout */
+  local: string;
+  /** Full upstream ref to reset to (e.g. "origin/feature/foo") */
+  upstream: string;
+}
+
+async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
+  const main: ResolvedBranch = { local: "main", upstream: "origin/main" };
+
   // 1. Check .update-branch file
   try {
     const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
-    if (pinned && SAFE_BRANCH.test(pinned)) return pinned;
+    if (pinned && SAFE_BRANCH.test(pinned)) {
+      return { local: pinned, upstream: `origin/${pinned}` };
+    }
   } catch { /* file doesn't exist */ }
 
-  // 2. Check current branch tracking
+  // 2. Check current branch's configured upstream via git
   try {
-    const { stdout } = await execShell(
-      `${gitCmd} symbolic-ref --short HEAD 2>/dev/null || echo ""`,
+    const { stdout: branchOut } = await execShell(
+      `${gitCmd} symbolic-ref --short HEAD`,
       { timeout: 10_000 },
     );
-    const current = stdout.trim();
-    if (current && current !== "main" && SAFE_BRANCH.test(current)) {
-      const { stdout: remote } = await execShell(
-        `${gitCmd} config --get branch.${current}.remote`,
-        { timeout: 10_000 },
-      );
-      if (remote.trim()) return current;
+    const current = branchOut.trim();
+    if (!current || current === "main" || !SAFE_BRANCH.test(current)) return main;
+
+    const { stdout: upstreamOut } = await execShell(
+      `${gitCmd} rev-parse --abbrev-ref ${current}@{u}`,
+      { timeout: 10_000 },
+    );
+    const upstream = upstreamOut.trim();
+    if (upstream && SAFE_BRANCH.test(upstream)) {
+      return { local: current, upstream };
     }
-  } catch { /* no tracking */ }
+  } catch {
+    // No upstream configured — fall back to main
+  }
 
   // 3. Default
-  return "main";
+  return main;
 }
 
 async function updateClawBoxAndReboot(): Promise<void> {
@@ -114,14 +130,14 @@ async function updateClawBoxAndReboot(): Promise<void> {
   await execAsRoot("fix_git_perms", 30_000);
 
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
-  const targetBranch = await resolveUpdateBranch(gitCmd);
+  const { local, upstream } = await resolveUpdateBranch(gitCmd);
 
-  console.log(`[Updater] Updating to branch: ${targetBranch}`);
+  console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
 
   await execShell(
     `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout ${targetBranch}` +
-    ` && ${gitCmd} reset --hard origin/${targetBranch}`,
+    ` && ${gitCmd} checkout ${local}` +
+    ` && ${gitCmd} reset --hard ${upstream}`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);

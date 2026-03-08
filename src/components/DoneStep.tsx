@@ -409,6 +409,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [updateBranch, setUpdateBranch] = useState<string | null>(null);
   const [branchInput, setBranchInput] = useState("");
   const [branchSaving, setBranchSaving] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -619,17 +620,22 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
 
   const saveUpdateBranch = async (branch: string) => {
     setBranchSaving(true);
+    setBranchError(null);
     try {
       const res = await fetch("/setup-api/system/update-branch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ branch: branch || null }),
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setUpdateBranch(data.branch ?? null);
+      } else {
+        setBranchError(data.error || "Failed to set branch");
       }
-    } catch { /* ignore */ } finally {
+    } catch (err) {
+      setBranchError(err instanceof Error ? err.message : "Failed to set branch");
+    } finally {
       setBranchSaving(false);
     }
   };
@@ -1257,12 +1263,13 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             {/* Branch selector */}
             {!versionLoading && (
               <div className="mb-4">
-                <label className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
+                <label htmlFor="update-branch-input" className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
                 <div className="flex gap-2">
                   <input
+                    id="update-branch-input"
                     type="text"
                     value={branchInput}
-                    onChange={(e) => setBranchInput(e.target.value)}
+                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
                     placeholder="main"
                     className="flex-1 bg-[var(--bg-deep)] border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#00e5cc]"
                   />
@@ -1275,6 +1282,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                     {branchSaving ? "..." : "Set"}
                   </button>
                 </div>
+                {branchError && (
+                  <p className="mt-1 text-xs text-red-400">{branchError}</p>
+                )}
                 {updateBranch && (
                   <div className="mt-1 flex items-center gap-2">
                     <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
@@ -1287,7 +1297,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                     </button>
                   </div>
                 )}
-                {!updateBranch && (
+                {!updateBranch && !branchError && (
                   <p className="mt-1 text-xs text-[var(--text-muted)]">Leave empty to follow current branch or main</p>
                 )}
               </div>
@@ -1302,8 +1312,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               </button>
               <button
                 type="button"
+                disabled={branchSaving || branchInput !== (updateBranch ?? "")}
                 onClick={() => { setUpdateConfirm(false); triggerUpdate(); }}
-                className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform"
+                className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100"
               >
                 Update
               </button>
