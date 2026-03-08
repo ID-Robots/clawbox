@@ -164,13 +164,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 60_000,
     requiresRoot: true,
   },
-  {
-    id: "chrome_install",
-    label: "Installing Chromium",
-    timeoutMs: 300_000,
-    requiresRoot: true,
-  },
-  {
+{
     id: "openclaw_install",
     label: "Updating OpenClaw",
     timeoutMs: 120_000,
