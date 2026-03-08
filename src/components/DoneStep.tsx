@@ -90,7 +90,8 @@ const AI_PROVIDERS = [
   { id: "openai", name: "OpenAI GPT", hasSubscription: true, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
   { id: "google", name: "Google Gemini", hasSubscription: true, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
   { id: "openrouter", name: "OpenRouter", hasSubscription: false, placeholder: "sk-or-v1-...", hint: "Get your API key from OpenRouter.", tokenUrl: "https://openrouter.ai/keys" },
-];
+  { id: "ollama", name: "Ollama Local", hasSubscription: false, isLocal: true, placeholder: "", hint: "Run AI models locally on this device.", tokenUrl: "" },
+] as const;
 
 /* ── Helper functions ── */
 
@@ -382,6 +383,14 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [devicePolling, setDevicePolling] = useState(false);
   const [deviceSaving, setDeviceSaving] = useState(false);
   const devicePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* ── Ollama Local ── */
+  const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: number }[]>([]);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+  const [ollamaPulling, setOllamaPulling] = useState(false);
+  const [ollamaPullProgress, setOllamaPullProgress] = useState<{ status: string; completed?: number; total?: number } | null>(null);
+  const [ollamaSaving, setOllamaSaving] = useState(false);
 
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
@@ -928,6 +937,90 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
+  const checkOllamaStatus = async () => {
+    try {
+      const res = await fetch("/setup-api/ollama/status");
+      const data = await res.json();
+      setOllamaRunning(data.running);
+      setOllamaModels(data.models || []);
+    } catch {
+      setOllamaRunning(false);
+      setOllamaModels([]);
+    }
+  };
+
+  const formatOllamaBytes = (bytes: number) => {
+    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+    return `${bytes} B`;
+  };
+
+  const pullOllamaModel = async (model: string) => {
+    setOllamaPulling(true);
+    setOllamaPullProgress(null);
+    setAiStatus(null);
+    try {
+      const res = await fetch("/setup-api/ollama/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      if (!res.ok || !res.body) {
+        setAiStatus({ type: "error", message: "Failed to start model download" });
+        setOllamaPulling(false);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const prog = JSON.parse(line);
+            setOllamaPullProgress(prog);
+          } catch { /* skip */ }
+        }
+      }
+      await checkOllamaStatus();
+      setOllamaPulling(false);
+      await saveOllamaConfig(model);
+    } catch (err) {
+      setAiStatus({ type: "error", message: `Download failed: ${err instanceof Error ? err.message : err}` });
+      setOllamaPulling(false);
+    }
+  };
+
+  const saveOllamaConfig = async (model: string) => {
+    setOllamaSaving(true);
+    setAiStatus(null);
+    try {
+      const res = await fetch("/setup-api/ai-models/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "ollama", apiKey: model, authMode: "local" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAiStatus({ type: "success", message: `Ollama configured with ${model}!` });
+        setProviderDone(true);
+        setProviderName("ollama");
+        setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
+      } else {
+        setAiStatus({ type: "error", message: data.error || "Failed to configure" });
+      }
+    } catch (err) {
+      setAiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
+    } finally {
+      setOllamaSaving(false);
+    }
+  };
+
   const startAiOAuth = async () => {
     aiOauthStartControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1367,6 +1460,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                       setAiProvider(provider.id);
                       setAiAuthMode(provider.hasSubscription ? "subscription" : "token");
                       resetAiFields();
+                      if (provider.id === "ollama") checkOllamaStatus();
                     }}
                     className="sr-only"
                   />
@@ -1378,6 +1472,60 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               );
             })}
           </div>
+
+          {aiProvider === "ollama" ? (
+            <div className="space-y-3">
+              {!ollamaRunning ? (
+                <p className="text-xs text-yellow-400">Ollama is not running. Make sure it is installed and started.</p>
+              ) : (
+                <>
+                  {ollamaModels.length > 0 && (
+                    <div>
+                      <p className="text-xs text-[var(--text-secondary)] mb-2">Installed models:</p>
+                      {ollamaModels.map((m) => (
+                        <div key={m.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg mb-1">
+                          <span className="text-sm text-gray-200">{m.name} <span className="text-xs text-[var(--text-muted)]">({formatOllamaBytes(m.size)})</span></span>
+                          <button type="button" onClick={() => saveOllamaConfig(m.name)} disabled={ollamaSaving} className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50">Use</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div>
+                    <label className={LABEL_CLASS}>Download a model</label>
+                    <div className="space-y-1">
+                      {[{ id: "llama3.2:3b", label: "Llama 3.2 3B" }, { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B Instruct (Q4_K_M)" }].map((m) => (
+                        <label key={m.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${selectedOllamaModel === m.id ? "bg-orange-500/10" : "hover:bg-[var(--bg-surface)]/30"}`}>
+                          <input type="radio" name="ollama-model-dash" value={m.id} checked={selectedOllamaModel === m.id} onChange={() => setSelectedOllamaModel(m.id)} className="sr-only" />
+                          <span className={`flex items-center justify-center w-4 h-4 rounded-full border-2 shrink-0 ${selectedOllamaModel === m.id ? "border-[var(--coral-bright)]" : "border-gray-600"}`}>
+                            {selectedOllamaModel === m.id && <span className="w-2 h-2 rounded-full bg-orange-500" />}
+                          </span>
+                          <span className="text-sm text-gray-200">{m.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {ollamaPulling && ollamaPullProgress && (
+                      <div className="mt-2">
+                        <div className="flex justify-between text-xs text-[var(--text-muted)] mb-1">
+                          <span>{ollamaPullProgress.status}</span>
+                          {ollamaPullProgress.total ? <span>{Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%</span> : null}
+                        </div>
+                        {ollamaPullProgress.total && (
+                          <div className="w-full h-2 bg-[var(--bg-deep)] rounded-full overflow-hidden">
+                            <div className="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all" style={{ width: `${Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%` }} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <button type="button" onClick={() => pullOllamaModel(selectedOllamaModel)} disabled={ollamaPulling} className={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>
+                      {ollamaPulling && ButtonSpinner}
+                      {ollamaPulling ? "Downloading..." : "Download & Configure"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
 
           {selectedAiProvider?.hasSubscription && (
             <div className="flex gap-1 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -1521,6 +1669,9 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               <p className="mt-1.5 text-xs text-[var(--text-muted)]">{selectedAiProvider?.hint}</p>
               <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Saving..." : "Save"}</button>
             </div>
+          )}
+
+            </>
           )}
 
           {aiStatus && <StatusMessage type={aiStatus.type} message={aiStatus.message} />}

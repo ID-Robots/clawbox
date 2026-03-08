@@ -45,6 +45,10 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openrouter/anthropic/claude-sonnet-4.5",
     profileKey: "openrouter:default",
   },
+  ollama: {
+    defaultModel: "ollama/llama3.2:3b",
+    profileKey: "ollama:default",
+  },
 };
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
@@ -112,7 +116,8 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
-    if (!provider || !apiKey) {
+    const isOllama = provider === "ollama";
+    if (!provider || (!apiKey && !isOllama)) {
       return NextResponse.json(
         { error: "Provider and API key are required" },
         { status: 400 }
@@ -129,49 +134,57 @@ export async function POST(request: Request) {
 
     // For subscription (OAuth) providers, use the subscription-specific config
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
-      ? baseConfig.subscriptionOverride
-      : baseConfig;
+      ? { ...baseConfig.subscriptionOverride }
+      : { ...baseConfig };
     const ocProvider = config.profileKey.split(":")[0];
 
-    // 1. Write token to auth-profiles.json
-    let authProfiles: {
-      version: number;
-      profiles: Record<string, unknown>;
-    };
-    try {
-      const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
-      authProfiles = JSON.parse(raw);
-    } catch {
-      authProfiles = { version: 1, profiles: {} };
+    // For Ollama, use the model name passed as apiKey (or default)
+    if (isOllama) {
+      const modelName = apiKey || "llama3.2:3b";
+      config.defaultModel = `ollama/${modelName}`;
     }
-    if (authMode === "subscription") {
-      // OAuth credential format expected by OpenClaw:
-      // { type: "oauth", provider, access, refresh, expires, projectId? }
-      authProfiles.profiles[config.profileKey] = {
-        type: "oauth",
-        provider: ocProvider,
-        access: apiKey,
-        refresh: refreshToken || "",
-        expires: expiresIn
-          ? Date.now() + expiresIn * 1000
-          : Date.now() + 8 * 60 * 60 * 1000, // default 8h
-        ...(projectId ? { projectId } : {}),
+
+    // 1. Write token to auth-profiles.json (skip for Ollama — no API key needed)
+    if (!isOllama) {
+      let authProfiles: {
+        version: number;
+        profiles: Record<string, unknown>;
       };
-    } else {
-      authProfiles.profiles[config.profileKey] = {
-        type: "token",
-        provider: ocProvider,
-        token: apiKey,
-      };
+      try {
+        const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
+        authProfiles = JSON.parse(raw);
+      } catch {
+        authProfiles = { version: 1, profiles: {} };
+      }
+      if (authMode === "subscription") {
+        // OAuth credential format expected by OpenClaw:
+        // { type: "oauth", provider, access, refresh, expires, projectId? }
+        authProfiles.profiles[config.profileKey] = {
+          type: "oauth",
+          provider: ocProvider,
+          access: apiKey,
+          refresh: refreshToken || "",
+          expires: expiresIn
+            ? Date.now() + expiresIn * 1000
+            : Date.now() + 8 * 60 * 60 * 1000, // default 8h
+          ...(projectId ? { projectId } : {}),
+        };
+      } else {
+        authProfiles.profiles[config.profileKey] = {
+          type: "token",
+          provider: ocProvider,
+          token: apiKey,
+        };
+      }
+      await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
+      const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
+      await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
+        mode: 0o600,
+      });
+      await fs.rename(tmpPath, AUTH_PROFILES_PATH);
+      // Fix ownership so the gateway (running as clawbox) can read it
+      await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
     }
-    await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
-    const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
-    await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
-      mode: 0o600,
-    });
-    await fs.rename(tmpPath, AUTH_PROFILES_PATH);
-    // Fix ownership so the gateway (running as clawbox) can read it
-    await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 
     // 2. Validate profileKey before interpolating into config path
     if (!PROFILE_KEY_RE.test(config.profileKey)) {
@@ -181,12 +194,14 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile in main config
+    // 3. Set auth profile in main config (for Ollama, set a dummy local profile)
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify({ provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      JSON.stringify(isOllama
+        ? { provider: ocProvider, mode: "none" }
+        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
 

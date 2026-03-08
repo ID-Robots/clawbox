@@ -458,6 +458,29 @@ step_openclaw_models() {
   as_clawbox "$OPENCLAW_BIN" models
 }
 
+step_ollama_install() {
+  if command -v ollama &>/dev/null; then
+    echo "  Ollama already installed: $(ollama --version 2>/dev/null || echo 'unknown')"
+  else
+    echo "  Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+    if ! command -v ollama &>/dev/null; then
+      echo "Error: Ollama installation failed"
+      exit 1
+    fi
+    echo "  Ollama installed: $(ollama --version 2>/dev/null || echo 'unknown')"
+  fi
+  systemctl enable ollama 2>/dev/null || true
+  systemctl start ollama 2>/dev/null || true
+}
+
+step_ollama_pull() {
+  local MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
+  echo "  Pulling model $MODEL (this may take a while)..."
+  ollama pull "$MODEL"
+  echo "  Model $MODEL ready"
+}
+
 step_fix_git_perms() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
   echo "  Fixed .git ownership"
@@ -481,6 +504,7 @@ step_rebuild_reboot() {
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
   openclaw_install openclaw_patch openclaw_config openclaw_models voice_install
+  ollama_install ollama_pull
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
@@ -507,7 +531,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=19
+TOTAL_STEPS=20
 step=0
 log() {
   step=$((step + 1))
@@ -571,6 +595,9 @@ step_jtop_install
 
 log "Installing Chromium..."
 step_chrome_install
+
+log "Installing Ollama..."
+step_ollama_install
 
 log "Starting services..."
 step_start_services

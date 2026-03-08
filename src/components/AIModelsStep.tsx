@@ -8,7 +8,7 @@ interface AIModelsStepProps {
   onNext: () => void;
 }
 
-type AuthMode = "token" | "subscription";
+type AuthMode = "token" | "subscription" | "local";
 
 interface AuthOption {
   mode: AuthMode;
@@ -109,6 +109,19 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
+  {
+    id: "ollama",
+    name: "Ollama Local",
+    description: "Run AI models locally on device",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Local",
+        placeholder: "",
+        hint: "No API key needed. Models run on this device.",
+      },
+    ],
+  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
@@ -137,6 +150,14 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     type: "success" | "error";
     message: string;
   } | null>(null);
+
+  // Ollama state
+  const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: number }[]>([]);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+  const [ollamaPulling, setOllamaPulling] = useState(false);
+  const [ollamaPullProgress, setOllamaPullProgress] = useState<{ status: string; completed?: number; total?: number } | null>(null);
+  const [ollamaSaving, setOllamaSaving] = useState(false);
 
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
@@ -218,6 +239,92 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
     setDeviceCode(null);
     setDeviceUrl(null);
     setDeviceSaving(false);
+    if (id === "ollama") checkOllamaStatus();
+  };
+
+  const checkOllamaStatus = async () => {
+    try {
+      const res = await fetch("/setup-api/ollama/status");
+      const data = await res.json();
+      setOllamaRunning(data.running);
+      setOllamaModels(data.models || []);
+    } catch {
+      setOllamaRunning(false);
+      setOllamaModels([]);
+    }
+  };
+
+  const formatOllamaBytes = (bytes: number) => {
+    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+    return `${bytes} B`;
+  };
+
+  const pullOllamaModel = async (model: string) => {
+    setOllamaPulling(true);
+    setOllamaPullProgress(null);
+    setStatus(null);
+    try {
+      const res = await fetch("/setup-api/ollama/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      if (!res.ok || !res.body) {
+        showError("Failed to start model download");
+        setOllamaPulling(false);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const prog = JSON.parse(line);
+            setOllamaPullProgress(prog);
+          } catch { /* skip */ }
+        }
+      }
+      await checkOllamaStatus();
+      setOllamaPulling(false);
+      await saveOllamaConfig(model);
+    } catch (err) {
+      showError(`Download failed: ${err instanceof Error ? err.message : err}`);
+      setOllamaPulling(false);
+    }
+  };
+
+  const saveOllamaConfig = async (model: string) => {
+    setOllamaSaving(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/setup-api/ai-models/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "ollama", apiKey: model, authMode: "local" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccessAndContinue(`Ollama configured with ${model}!`);
+      } else {
+        showError(data.error || "Failed to configure");
+      }
+    } catch (err) {
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      setOllamaSaving(false);
+    }
+  };
+
+  const selectExistingOllamaModel = async (model: string) => {
+    await saveOllamaConfig(model);
   };
 
   const saveModel = async () => {
@@ -716,7 +823,60 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           })}
         </div>
 
-        {selected && activeAuth && (
+        {selected?.id === "ollama" && (
+          <div className="mt-5 space-y-4">
+            {!ollamaRunning ? (
+              <p className="text-xs text-yellow-400">Ollama is not running. Make sure it is installed and started on this device.</p>
+            ) : (
+              <>
+                {ollamaModels.length > 0 && (
+                  <div>
+                    <p className="text-xs text-[var(--text-secondary)] mb-2">Installed models:</p>
+                    {ollamaModels.map((m) => (
+                      <div key={m.name} className="flex items-center justify-between py-1.5 px-3 bg-[var(--bg-deep)] rounded-lg mb-1">
+                        <span className="text-sm text-gray-200">{m.name} <span className="text-xs text-[var(--text-muted)]">({formatOllamaBytes(m.size)})</span></span>
+                        <button type="button" onClick={() => selectExistingOllamaModel(m.name)} disabled={ollamaSaving} className="px-3 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer disabled:opacity-50">Use</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div>
+                  <p className="text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Download a model</p>
+                  <div className="space-y-1">
+                    {[{ id: "llama3.2:3b", label: "Llama 3.2 3B" }, { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B Instruct (Q4_K_M)" }].map((m) => (
+                      <label key={m.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${selectedOllamaModel === m.id ? "bg-orange-500/10" : "hover:bg-[var(--bg-surface)]/30"}`}>
+                        <input type="radio" name="ollama-model" value={m.id} checked={selectedOllamaModel === m.id} onChange={() => setSelectedOllamaModel(m.id)} className="sr-only" />
+                        <span className={`flex items-center justify-center w-4 h-4 rounded-full border-2 shrink-0 ${selectedOllamaModel === m.id ? "border-[var(--coral-bright)]" : "border-gray-600"}`}>
+                          {selectedOllamaModel === m.id && <span className="w-2 h-2 rounded-full bg-orange-500" />}
+                        </span>
+                        <span className="text-sm text-gray-200">{m.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {ollamaPulling && ollamaPullProgress && (
+                    <div className="mt-2">
+                      <div className="flex justify-between text-xs text-[var(--text-muted)] mb-1">
+                        <span>{ollamaPullProgress.status}</span>
+                        {ollamaPullProgress.total ? <span>{Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%</span> : null}
+                      </div>
+                      {ollamaPullProgress.total && (
+                        <div className="w-full h-2 bg-[var(--bg-deep)] rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all" style={{ width: `${Math.round(((ollamaPullProgress.completed || 0) / ollamaPullProgress.total) * 100)}%` }} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <button type="button" onClick={() => pullOllamaModel(selectedOllamaModel)} disabled={ollamaPulling} className="mt-3 px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2">
+                    {ollamaPulling && ButtonSpinner}
+                    {ollamaPulling ? "Downloading..." : "Download & Configure"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {selected && selected.id !== "ollama" && activeAuth && (
           <div className="mt-5">
             {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -808,7 +968,9 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         )}
 
         <div className="flex items-center gap-3 mt-5">
-          {isSubscription ? (
+          {selected?.id === "ollama" ? (
+            null /* Ollama has its own buttons above */
+          ) : isSubscription ? (
             useDeviceAuth ? (
               /* Device auth has no manual submit button — it auto-completes via polling */
               null
