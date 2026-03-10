@@ -511,6 +511,7 @@ step_rebuild_reboot() {
   step_directories_permissions
   step_systemd_services
   step_polkit_rules
+  step_ollama_install
   step_openclaw_patch
   step_openclaw_config
   do_rebuild
