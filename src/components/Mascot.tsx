@@ -299,6 +299,7 @@ function ClawBoxMascot() {
     lastPointerTime: 0,
   })
   const physicsRAF = useRef<number>(0)
+  const physicsPosRef = useRef({ x: 0, y: 0 }) // last physics position for React render
   // Box physics (separate entity)
   const boxDraggingRef = useRef(false)
   const boxDragOffsetRef = useRef({ x: 0, y: 0 })
@@ -485,6 +486,7 @@ function ClawBoxMascot() {
     // Render
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
+      physicsPosRef.current = { x: xRef.current, y: p.posY }
       crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px)`
     }
@@ -546,6 +548,7 @@ function ClawBoxMascot() {
     dragYRef.current = Math.max(0, vh - e.clientY - 20)
 
     if (crabElRef.current) {
+      physicsPosRef.current = { x: xRef.current, y: dragYRef.current }
       crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px)`
     }
@@ -1125,7 +1128,9 @@ function ClawBoxMascot() {
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : -3,
-        transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
+        transform: physicsActive
+          ? `translateX(calc(${physicsPosRef.current.x}vw - 50%)) translateY(${-physicsPosRef.current.y}px)`
+          : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
