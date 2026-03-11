@@ -195,11 +195,11 @@ function ClawBoxMascot() {
     velX: 0,        // px/s
     velY: 0,        // px/s
     posY: 0,        // px from bottom of screen
-    gravity: 1800,  // px/s² (ImpactJS default ~similar)
-    friction: 600,  // px/s decel
-    bounciness: 0.5,
-    minBounceVel: 60,
-    maxVel: 1200,
+    gravity: 800,   // px/s² — lighter, more floaty
+    friction: 200,  // px/s decel — less friction, slides more
+    bounciness: 0.6,
+    minBounceVel: 40,
+    maxVel: 2500,   // higher max so you can really fling it
     lastTime: 0,
     lastPointerX: 0,
     lastPointerY: 0,
