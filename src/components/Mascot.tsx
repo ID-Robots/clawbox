@@ -409,25 +409,26 @@ function ClawBoxMascot() {
 
     // ─── Collision: platforms (desktop icons with data-crab-platform) ───
     const crabPxX = (xRef.current / 100) * vw
-    const crabBottom = vh - p.posY  // crab bottom edge in screen coords (from top)
-    const crabSize = 150 // crab image size
+    const crabBottom = vh - p.posY  // crab's feet in screen coords (from top)
+    // Crab hitbox: narrower than the full 150px image — just the body (~60px wide, centered)
+    const crabHitW = 60
+    const crabLeft = crabPxX - crabHitW / 2
+    const crabRight = crabPxX + crabHitW / 2
     let landedOnPlatform = false
 
     const platforms = document.querySelectorAll('[data-crab-platform]')
     platforms.forEach((el) => {
       const rect = (el as HTMLElement).getBoundingClientRect()
-      // Check horizontal overlap (use crab center ± half size)
-      const crabLeft = crabPxX - crabSize / 2
-      const crabRight = crabPxX + crabSize / 2
+      // Horizontal overlap check with tight hitbox
       if (crabRight > rect.left && crabLeft < rect.right) {
         const platformTop = rect.top
-        // Falling and crab bottom is at or below platform top
-        if (p.velY > 0 && crabBottom >= platformTop - 10 && crabBottom <= platformTop + rect.height) {
+        // Falling onto platform: crab feet crossing platform top
+        if (p.velY > 0 && crabBottom >= platformTop && crabBottom <= platformTop + rect.height * 0.5) {
           p.posY = vh - platformTop
           landedOnPlatform = true
         }
-        // Already standing on platform (generous threshold)
-        if (Math.abs(crabBottom - platformTop) < 10 && p.velY >= 0) {
+        // Already standing on platform
+        if (Math.abs(crabBottom - platformTop) < 5 && p.velY >= 0) {
           p.posY = vh - platformTop
           landedOnPlatform = true
         }
