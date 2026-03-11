@@ -316,10 +316,9 @@ function ClawBoxMascot() {
   const updateCrabPos = useCallback(() => {
     if (!crabElRef.current) return
     const posX = onBoxRef.current ? boxXRef.current : xRef.current
-    const yOffset = onBoxRef.current ? -68 : 48  // 48px = resting (partially hidden), -68 = on top of box
     const scaleX = facingRef.current === 'left' ? -1 : 1
-    crabElRef.current.style.bottom = '0px'
-    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${yOffset + jumpYRef.current}px) scaleX(${scaleX})`
+    crabElRef.current.style.bottom = '-48px'
+    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${jumpYRef.current}px) scaleX(${scaleX})`
   }, [])
 
   const updateBoxPos = useCallback(() => {
@@ -488,9 +487,7 @@ function ClawBoxMascot() {
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
       crabElRef.current.style.bottom = '0px'
-      // 48 = resting offset (crab partially below screen edge at rest)
-      // During physics: posY=0 means ground, so translateY = 48 - 0 = 48 (resting), posY=100 = translateY = -52 (in air)
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${48 - p.posY}px) scaleX(${scaleX})`
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`
     }
 
     physicsRAF.current = requestAnimationFrame(physicsLoop)
@@ -555,7 +552,7 @@ function ClawBoxMascot() {
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
       crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${48 - dragYRef.current}px) scaleX(${scaleX})`
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`
     }
   }, [])
 
@@ -1132,8 +1129,8 @@ function ClawBoxMascot() {
         onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
-        bottom: 0,
-        transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(48px) scaleX(${facing === 'left' ? -1 : 1})`,
+        bottom: physicsActive ? 0 : -48,
+        transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
