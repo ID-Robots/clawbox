@@ -119,9 +119,14 @@ export default function ChromeLauncher({
               <input
                 ref={searchRef}
                 type="text"
-                placeholder="Search apps..."
+                placeholder="Search apps or store..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && searchQuery.trim()) {
+                    window.open(`https://openclawhardware.dev/store?q=${encodeURIComponent(searchQuery.trim())}`, "_blank", "noopener,noreferrer");
+                  }
+                }}
                 className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-full text-white placeholder-white/40 text-sm focus:outline-none focus:border-white/20 focus:bg-white/10 transition-colors"
               />
             </div>

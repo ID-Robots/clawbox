@@ -95,53 +95,8 @@ export default function ChromeShelf({
         className="absolute right-2 flex items-center gap-3 h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
         title="System Settings"
       >
-        {/* WiFi icon */}
-        <svg
-          className="w-4 h-4 text-white/70"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M5 12.55a11 11 0 0 1 14.08 0" />
-          <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-          <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-          <circle cx="12" cy="20" r="1" fill="currentColor" />
-        </svg>
-
-        {/* Battery icon */}
-        <svg
-          className="w-4 h-4 text-white/70"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <rect x="1" y="6" width="18" height="12" rx="2" />
-          <line x1="23" y1="10" x2="23" y2="14" />
-          <rect x="3" y="8" width="12" height="8" rx="1" fill="currentColor" opacity="0.5" />
-        </svg>
-
         {/* Time */}
         <span className="text-sm text-white/80 font-medium">{time}</span>
-
-        {/* Notification bell */}
-        <svg
-          className="w-4 h-4 text-white/70"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-        </svg>
       </button>
     </div>
   );
