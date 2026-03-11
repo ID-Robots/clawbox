@@ -250,6 +250,29 @@ export default function ChromeDesktop() {
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
+  // ─── Context menu ───
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string } | null>(null);
+
+  useEffect(() => {
+    const close = () => setCtxMenu(null);
+    if (ctxMenu) {
+      window.addEventListener("click", close);
+      window.addEventListener("contextmenu", close);
+      return () => { window.removeEventListener("click", close); window.removeEventListener("contextmenu", close); };
+    }
+  }, [ctxMenu]);
+
+  const handleDesktopContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  const handleIconContextMenu = useCallback((e: React.MouseEvent, appId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ x: e.clientX, y: e.clientY, appId });
+  }, []);
+
   // Save icon positions
   useEffect(() => {
     try { localStorage.setItem(ICON_GRID_KEY, JSON.stringify(iconPositions)); } catch {}
@@ -568,7 +591,7 @@ export default function ChromeDesktop() {
   const allAppsForLauncher = getAllApps();
 
   return (
-    <div className="min-h-screen relative overflow-hidden select-none">
+    <div className="min-h-screen relative overflow-hidden select-none" onContextMenu={handleDesktopContextMenu}>
       {/* Desktop wallpaper background */}
       <div className="absolute inset-0 bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e] z-0" />
       <div className="absolute inset-0 bg-stars z-0" />
@@ -608,6 +631,7 @@ export default function ChromeDesktop() {
               <button
                 onPointerDown={(e) => handleIconDragStart(app.id, e)}
                 onClick={() => { if (!draggingIcon) openApp(`installed-${app.id}`); }}
+                onContextMenu={(e) => handleIconContextMenu(e, app.id)}
                 className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
                   isRecent ? "animate-install-bounce" : ""
                 }`}
@@ -757,6 +781,65 @@ export default function ChromeDesktop() {
 
       {/* Toast notification */}
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <div
+          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          style={{
+            left: Math.min(ctxMenu.x, window.innerWidth - 220),
+            top: Math.min(ctxMenu.y, window.innerHeight - 300),
+          }}
+          onClick={() => setCtxMenu(null)}
+        >
+          {ctxMenu.appId ? (
+            <>
+              <button onClick={() => openApp(`installed-${ctxMenu.appId}`)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">▶️</span> Open
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => {
+                if (ctxMenu.appId) handleUninstallApp(ctxMenu.appId);
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
+                <span className="text-base">🗑️</span> Uninstall
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => {
+                if (ctxMenu.appId) setIconPositions(prev => {
+                  const next = { ...prev };
+                  delete next[ctxMenu.appId!];
+                  return next;
+                });
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">📐</span> Reset Position
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">🛍️</span> App Store
+              </button>
+              <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">⚙️</span> Settings
+              </button>
+              <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">💻</span> Terminal
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => openApp("system")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">📊</span> System Monitor
+              </button>
+              <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">🦀</span> OpenClaw
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-white/40 cursor-default">
+                <span className="text-base">ℹ️</span> ClawBox v1.0
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
