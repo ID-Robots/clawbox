@@ -375,6 +375,7 @@ function ClawBoxMascot() {
     // Render
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
+      crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`
     }
 
@@ -432,12 +433,14 @@ function ClawBoxMascot() {
 
     const newX = ((e.clientX - dragOffsetRef.current.x) / vw) * 100
     xRef.current = Math.min(92, Math.max(2, newX))
-    dragYRef.current = Math.max(0, vh - e.clientY + dragOffsetRef.current.y - 100)
+    // posY = distance from bottom of screen to crab's feet
+    // crab image is 150px, the visual center is roughly at clientY
+    dragYRef.current = Math.max(0, vh - e.clientY - 30)
 
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
+      crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`
-      crabElRef.current.style.bottom = '-47px'
     }
   }, [])
 
