@@ -508,9 +508,9 @@ function ClawBoxMascot() {
       }
     }
 
-    // Update facing based on velocity
-    if (p.velX > 30) setFacingDirect('right')
-    else if (p.velX < -30) setFacingDirect('left')
+    // Update facing based on velocity (ref only, no React re-render during physics)
+    if (p.velX > 30) facingRef.current = 'right'
+    else if (p.velX < -30) facingRef.current = 'left'
 
     // Render
     if (crabElRef.current) {
@@ -528,6 +528,16 @@ function ClawBoxMascot() {
     e.preventDefault()
     e.stopPropagation()
     draggingRef.current = true
+    // Capture current position BEFORE any React re-renders
+    const rect = crabElRef.current?.getBoundingClientRect()
+    if (rect) {
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      physicsPosRef.current = {
+        x: ((rect.left + rect.width / 2) / vw) * 100,
+        y: Math.max(0, vh - rect.bottom)
+      }
+    }
     setPhysicsActive(true)
     // Kill physics if running
     const p = physicsRef.current
@@ -539,7 +549,6 @@ function ClawBoxMascot() {
     onBoxRef.current = false
     setCrabOnBox(false)
     setBoxGlow(false)
-    const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) {
       dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     }
