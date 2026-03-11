@@ -1259,7 +1259,7 @@ function ClawBoxMascot() {
         {/* TAMAGOTCHI — Stats + Menu container (single hover zone) */}
         <div
           onPointerEnter={() => setShowTamaStats(true)}
-          onPointerLeave={() => { setShowTamaStats(false); setShowTamaMenu(false) }}
+          onPointerLeave={() => { if (!showTamaMenu) { setShowTamaStats(false) } }}
           onClick={(e) => {
             if (!draggingRef.current) {
               e.stopPropagation()
