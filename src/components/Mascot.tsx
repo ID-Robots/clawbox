@@ -167,6 +167,97 @@ function ClawBoxMascot() {
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
+  // ─── Tamagotchi stats ───
+  const TAMA_KEY = 'clawbox-tamagotchi'
+  const [tamaStats, setTamaStats] = useState(() => {
+    if (typeof window === 'undefined') return { hunger: 80, happiness: 80, energy: 80, health: 100, lastUpdate: Date.now() }
+    try {
+      const saved = localStorage.getItem('clawbox-tamagotchi')
+      if (saved) {
+        const s = JSON.parse(saved)
+        // Apply decay since last visit
+        const elapsed = (Date.now() - (s.lastUpdate || Date.now())) / 1000
+        const decayMult = elapsed / 30 // 1 point per 30s
+        return {
+          hunger: Math.max(0, (s.hunger ?? 80) - decayMult * 1.2),
+          happiness: Math.max(0, (s.happiness ?? 80) - decayMult * 0.8),
+          energy: Math.max(0, (s.energy ?? 80) - decayMult * 0.6),
+          health: Math.max(0, (s.health ?? 100) - (Math.min(s.hunger ?? 80, s.happiness ?? 80, s.energy ?? 80) < 20 ? decayMult * 0.5 : 0)),
+          lastUpdate: Date.now(),
+        }
+      }
+    } catch {}
+    return { hunger: 80, happiness: 80, energy: 80, health: 100, lastUpdate: Date.now() }
+  })
+  const [showTamaMenu, setShowTamaMenu] = useState(false)
+  const [showTamaStats, setShowTamaStats] = useState(false)
+  const [tamaAction, setTamaAction] = useState<string | null>(null)
+  const [isDead, setIsDead] = useState(false)
+  const tamaStatsRef = useRef(tamaStats)
+  tamaStatsRef.current = tamaStats
+
+  // Save stats to localStorage
+  useEffect(() => {
+    localStorage.setItem(TAMA_KEY, JSON.stringify({ ...tamaStats, lastUpdate: Date.now() }))
+    // Check death
+    if (tamaStats.health <= 0 && !isDead) setIsDead(true)
+  }, [tamaStats, isDead])
+
+  // Stat decay timer
+  useEffect(() => {
+    const decay = setInterval(() => {
+      if (isDead) return
+      setTamaStats(prev => {
+        const minStat = Math.min(prev.hunger, prev.happiness, prev.energy)
+        return {
+          hunger: Math.max(0, prev.hunger - 1.2),
+          happiness: Math.max(0, prev.happiness - 0.8),
+          energy: Math.max(0, prev.energy - 0.6),
+          health: Math.max(0, prev.health - (minStat < 20 ? 0.5 : 0)),
+          lastUpdate: Date.now(),
+        }
+      })
+    }, 30000) // every 30 seconds
+    return () => clearInterval(decay)
+  }, [isDead])
+
+  // Tamagotchi actions
+  const tamaFeed = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, hunger: Math.min(100, prev.hunger + 30), lastUpdate: Date.now() }))
+    setTamaAction('feed'); setTimeout(() => setTamaAction(null), 2000)
+    setShowTamaMenu(false)
+    say('Om nom nom! 🍕', 2000)
+  }, [])
+  const tamaPlay = useCallback(() => {
+    setTamaStats(prev => ({
+      ...prev, happiness: Math.min(100, prev.happiness + 25), energy: Math.max(0, prev.energy - 10), lastUpdate: Date.now()
+    }))
+    setTamaAction('play'); setTimeout(() => setTamaAction(null), 2000)
+    setShowTamaMenu(false)
+    say('Weee! 🎮', 2000)
+    setState('dance')
+  }, [])
+  const tamaSleep = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, energy: Math.min(100, prev.energy + 40), lastUpdate: Date.now() }))
+    setTamaAction('sleep'); setTimeout(() => setTamaAction(null), 4000)
+    setShowTamaMenu(false)
+    say('Zzzzz... 💤', 3000)
+    setState('sleep')
+  }, [])
+  const tamaClean = useCallback(() => {
+    setTamaStats(prev => ({
+      ...prev, health: Math.min(100, prev.health + 15), happiness: Math.min(100, prev.happiness + 10), lastUpdate: Date.now()
+    }))
+    setTamaAction('clean'); setTimeout(() => setTamaAction(null), 2000)
+    setShowTamaMenu(false)
+    say('Sparkly! ✨', 2000)
+  }, [])
+  const tamaRevive = useCallback(() => {
+    setTamaStats({ hunger: 50, happiness: 50, energy: 50, health: 50, lastUpdate: Date.now() })
+    setIsDead(false)
+    say('I live again! 🦀💀→🦀', 3000)
+  }, [])
+
   // ─── DOM refs for direct manipulation (no React re-renders during animation) ───
   const crabElRef = useRef<HTMLDivElement>(null)
   const boxElRef = useRef<HTMLDivElement>(null)
@@ -661,8 +752,24 @@ function ClawBoxMascot() {
       ]
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
-      const line = getSpeech('idle')
-      if (line) say(line, Math.min(duration - 500, 3000))
+      // Tamagotchi-aware speech
+      const s = tamaStatsRef.current
+      if (s.hunger < 25) {
+        const hungerLines = ['I\'m starving... 🍕', 'Feed me please!', 'Гладен съм...', 'So... hungry... 😩']
+        say(hungerLines[Math.floor(Math.random() * hungerLines.length)], 2500)
+      } else if (s.energy < 20) {
+        const tiredLines = ['So tired... 😴', 'Can\'t... keep... eyes... open...', 'Нуждая се от сън...', '*yawn*']
+        say(tiredLines[Math.floor(Math.random() * tiredLines.length)], 2500)
+      } else if (s.happiness < 25) {
+        const sadLines = ['Nobody plays with me... 😢', 'Тъжен съм...', 'Life is meaningless.', 'I miss fun...']
+        say(sadLines[Math.floor(Math.random() * sadLines.length)], 2500)
+      } else if (s.health < 30) {
+        const sickLines = ['I don\'t feel so good... 🤢', 'Need a bath...', 'Зле ми е...', '*cough*']
+        say(sickLines[Math.floor(Math.random() * sickLines.length)], 2500)
+      } else {
+        const line = getSpeech('idle')
+        if (line) say(line, Math.min(duration - 500, 3000))
+      }
     }
 
     if (action.state === 'waddle') {
@@ -1013,6 +1120,11 @@ function ClawBoxMascot() {
           60% { transform: scale(1.08); }
           100% { transform: scale(1); opacity: 1; }
         }
+        @keyframes tama-btn-pop {
+          0% { transform: scale(0) translateY(20px); opacity: 0; }
+          70% { transform: scale(1.1) translateY(-2px); }
+          100% { transform: scale(1) translateY(0); opacity: 1; }
+        }
       `}</style>
       <div ref={crabElRef}
         onPointerDown={handlePointerDown}
@@ -1032,7 +1144,12 @@ function ClawBoxMascot() {
       }}>
         {/* Body */}
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 150, height: 150, objectFit: 'contain' }} />
+          <img src="/clawbox-crab.png" alt="" style={{
+            width: 150, height: 150, objectFit: 'contain',
+            filter: isDead ? 'grayscale(1) brightness(0.5)' : tamaStats.health < 30 ? 'hue-rotate(80deg) saturate(0.7)' : 'none',
+            transform: isDead ? 'rotate(180deg)' : 'none',
+            transition: 'filter 1s, transform 0.5s',
+          }} />
           {/* FRENZY MODE — money rain + shockwaves */}
           {frenzy && (
             <>
@@ -1115,6 +1232,105 @@ function ClawBoxMascot() {
           opacity: state === 'jump' ? 0.2 : state === 'sleep' ? 0.4 : 0.5,
           transition: 'opacity 0.5s ease',
         }} />
+
+        {/* TAMAGOTCHI — Stat bars (show on hover or tap) */}
+        <div
+          onPointerEnter={() => setShowTamaStats(true)}
+          onPointerLeave={() => setShowTamaStats(false)}
+          onClick={(e) => {
+            if (!draggingRef.current) {
+              e.stopPropagation()
+              if (isDead) { tamaRevive(); return }
+              setShowTamaMenu(prev => !prev)
+              setShowTamaStats(true)
+            }
+          }}
+          style={{
+            position: 'absolute', top: -8, left: '50%', transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
+            opacity: showTamaStats || showTamaMenu ? 1 : 0,
+            transition: 'opacity 0.3s',
+            pointerEvents: 'auto',
+          }}
+        >
+          {/* Mini stat bars */}
+          <div style={{
+            display: 'flex', gap: 3, background: 'rgba(0,0,0,0.7)', padding: '4px 8px',
+            borderRadius: 8, backdropFilter: 'blur(4px)',
+          }}>
+            {[
+              { val: tamaStats.hunger, color: '#f97316', icon: '🍕' },
+              { val: tamaStats.happiness, color: '#fbbf24', icon: '😊' },
+              { val: tamaStats.energy, color: '#22c55e', icon: '⚡' },
+              { val: tamaStats.health, color: '#ef4444', icon: '❤️' },
+            ].map((s, i) => (
+              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                <span style={{ fontSize: 10 }}>{s.icon}</span>
+                <div style={{ width: 24, height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.15)' }}>
+                  <div style={{
+                    width: `${s.val}%`, height: '100%', borderRadius: 2,
+                    background: s.val < 30 ? '#ef4444' : s.color,
+                    transition: 'width 0.5s',
+                  }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* TAMAGOTCHI — Radial action menu */}
+        {showTamaMenu && !isDead && (
+          <div style={{
+            position: 'absolute', top: -100, left: '50%',
+            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
+            display: 'flex', gap: 8, pointerEvents: 'auto',
+          }}>
+            {[
+              { icon: '🍕', label: 'Feed', action: tamaFeed, color: '#f97316' },
+              { icon: '🎮', label: 'Play', action: tamaPlay, color: '#fbbf24' },
+              { icon: '💤', label: 'Sleep', action: tamaSleep, color: '#22c55e' },
+              { icon: '✨', label: 'Clean', action: tamaClean, color: '#3b82f6' },
+            ].map((btn, i) => (
+              <button key={i} onClick={(e) => { e.stopPropagation(); btn.action() }}
+                style={{
+                  width: 40, height: 40, borderRadius: '50%', border: 'none',
+                  background: btn.color, fontSize: 18, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+                  animation: `tama-btn-pop 0.3s ease-out ${i * 0.05}s both`,
+                  transition: 'transform 0.15s',
+                }}
+                onPointerEnter={(e) => (e.currentTarget.style.transform = 'scale(1.2)')}
+                onPointerLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+                title={btn.label}
+              >{btn.icon}</button>
+            ))}
+          </div>
+        )}
+
+        {/* TAMAGOTCHI — Death overlay */}
+        {isDead && (
+          <div style={{
+            position: 'absolute', top: 40, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(0,0,0,0.8)', color: '#ef4444', padding: '8px 16px',
+            borderRadius: 8, fontSize: 14, fontWeight: 700, textAlign: 'center' as const,
+            whiteSpace: 'nowrap', pointerEvents: 'auto', cursor: 'pointer',
+            animation: 'speech-pop 0.3s ease-out forwards',
+          }} onClick={(e) => { e.stopPropagation(); tamaRevive() }}>
+            💀 Click to revive!
+          </div>
+        )}
+
+        {/* TAMAGOTCHI — Action effect */}
+        {tamaAction === 'feed' && (
+          <div style={{ position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', fontSize: 32, animation: 'money-rain 1.5s ease-out forwards', pointerEvents: 'none' }}>🍕</div>
+        )}
+        {tamaAction === 'clean' && (
+          <>
+            {[0, 1, 2].map(i => (
+              <div key={i} style={{ position: 'absolute', top: 30 + i * 20, left: 40 + i * 30, fontSize: 20, animation: `power-particles 1s ease-out ${i * 0.2}s forwards`, pointerEvents: 'none' }}>✨</div>
+            ))}
+          </>
+        )}
       </div>
 
       {/* The ClawBox — crab's prop */}
