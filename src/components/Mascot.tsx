@@ -317,6 +317,9 @@ function ClawBoxMascot() {
     if (!crabElRef.current) return
     const posX = onBoxRef.current ? boxXRef.current : xRef.current
     const scaleX = facingRef.current === 'left' ? -1 : 1
+    // Remove !important so React can control again
+    crabElRef.current.style.removeProperty('bottom')
+    crabElRef.current.style.removeProperty('transform')
     crabElRef.current.style.bottom = '-48px'
     crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${jumpYRef.current}px) scaleX(${scaleX})`
   }, [])
@@ -486,8 +489,8 @@ function ClawBoxMascot() {
     // Render
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
-      crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`
+      crabElRef.current.style.setProperty('bottom', '0px', 'important')
+      crabElRef.current.style.setProperty("transform", `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`, "important")
     }
 
     physicsRAF.current = requestAnimationFrame(physicsLoop)
@@ -506,8 +509,11 @@ function ClawBoxMascot() {
     // Pause autonomous behavior
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-    setState('idle')
     onBoxRef.current = false
+    // Set DOM position immediately before any React re-render
+    if (crabElRef.current) {
+      crabElRef.current.style.setProperty('bottom', '0px', 'important')
+    }
     setCrabOnBox(false)
     setBoxGlow(false)
     // Calculate offset
@@ -551,8 +557,8 @@ function ClawBoxMascot() {
 
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
-      crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`
+      crabElRef.current.style.setProperty('bottom', '0px', 'important')
+      crabElRef.current.style.setProperty("transform", `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`, "important")
     }
   }, [])
 
@@ -1129,7 +1135,7 @@ function ClawBoxMascot() {
         onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
-        bottom: physicsActive ? 0 : -48,
+        bottom: -48,
         transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
