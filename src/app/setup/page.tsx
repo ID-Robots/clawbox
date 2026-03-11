@@ -508,8 +508,8 @@ export default function ChromeDesktop() {
       case "store":
         return (
           <AppStore
-            installedApps={installedApps}
-            onInstall={handleInstallApp}
+            installedAppIds={installedApps}
+            onInstall={(app: StoreApp) => handleInstallApp(app.id)}
             onUninstall={handleUninstallApp}
           />
         );
