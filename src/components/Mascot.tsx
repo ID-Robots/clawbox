@@ -855,7 +855,7 @@ function ClawBoxMascot() {
       }}>
         {/* Body */}
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 150, height: 150, objectFit: 'contain' }} />
+          <img src="/clawbox-crab.png" alt="" style={{ width: 75, height: 75, objectFit: 'contain' }} />
           {/* FRENZY MODE — money rain + shockwaves */}
           {frenzy && (
             <>
@@ -955,7 +955,7 @@ function ClawBoxMascot() {
           animation: boxKick ? `box-bump-${boxKick} 0.7s ease-out forwards` : 'box-idle 4s ease-in-out infinite',
           width: 40, height: 40,
         }}>
-          <img src="/clawbox-box.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
+          <img src="/clawbox-box.png" alt="" style={{ width: 20, height: 20, objectFit: 'contain' }} />
         </div>
       </div>
     </>
