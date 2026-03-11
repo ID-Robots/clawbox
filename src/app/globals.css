@@ -201,3 +201,66 @@ html {
 .animate-page-out {
   animation: page-out 0.2s ease-in forwards;
 }
+
+/* Window animations */
+@keyframes window-open {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes window-close {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+@keyframes window-minimize {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+}
+
+@keyframes window-restore {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.window-opening {
+  animation: window-open 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.window-closing {
+  animation: window-close 0.15s ease-in forwards;
+  pointer-events: none;
+}
+
+.window-minimizing {
+  animation: window-minimize 0.25s ease-in forwards;
+  pointer-events: none;
+}
+
+.window-restoring {
+  animation: window-restore 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}

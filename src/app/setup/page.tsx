@@ -1,55 +1,15 @@
 "use client";
 
-import Link from "next/link";
 import Image from "next/image";
-
-interface DesktopIconProps {
-  href: string;
-  label: string;
-  icon: React.ReactNode;
-  external?: boolean;
-}
-
-function DesktopIcon({ href, label, icon, external }: DesktopIconProps) {
-  const className =
-    "group flex flex-col items-center gap-2 p-3 rounded-xl transition-all duration-200 hover:bg-white/5 hover:scale-110 cursor-pointer";
-
-  const content = (
-    <>
-      <div className="w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center rounded-2xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] group-hover:border-[var(--coral-bright)] group-hover:shadow-[0_0_20px_var(--shadow-coral-mid)] transition-all duration-200">
-        {icon}
-      </div>
-      <span className="text-xs sm:text-sm text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors text-center max-w-20 truncate">
-        {label}
-      </span>
-    </>
-  );
-
-  if (external) {
-    return (
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={className}
-      >
-        {content}
-      </a>
-    );
-  }
-
-  return (
-    <Link href={href} className={className}>
-      {content}
-    </Link>
-  );
-}
+import { useWindows, type WindowConfig } from "@/hooks/useWindows";
+import Window from "@/components/Window";
+import Taskbar from "@/components/Taskbar";
 
 // Inline SVG Icons
-const SettingsIcon = () => (
+const SettingsIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--coral-bright)"
@@ -63,10 +23,10 @@ const SettingsIcon = () => (
   </svg>
 );
 
-const OpenClawIcon = () => (
+const OpenClawIcon = ({ size = 36 }: { size?: number }) => (
   <svg
-    width="36"
-    height="36"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--cyan-bright)"
@@ -80,10 +40,10 @@ const OpenClawIcon = () => (
   </svg>
 );
 
-const TerminalIcon = () => (
+const TerminalIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -97,10 +57,10 @@ const TerminalIcon = () => (
   </svg>
 );
 
-const SystemMonitorIcon = () => (
+const SystemMonitorIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -116,10 +76,10 @@ const SystemMonitorIcon = () => (
   </svg>
 );
 
-const OllamaIcon = () => (
+const OllamaIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -137,10 +97,10 @@ const OllamaIcon = () => (
   </svg>
 );
 
-const FilesIcon = () => (
+const FilesIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -153,10 +113,10 @@ const FilesIcon = () => (
   </svg>
 );
 
-const NetworkIcon = () => (
+const NetworkIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -172,10 +132,10 @@ const NetworkIcon = () => (
   </svg>
 );
 
-const HelpIcon = () => (
+const HelpIcon = ({ size = 32 }: { size?: number }) => (
   <svg
-    width="32"
-    height="32"
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="var(--text-secondary)"
@@ -190,18 +150,193 @@ const HelpIcon = () => (
   </svg>
 );
 
-const desktopApps = [
-  { href: "/setup/settings", label: "Settings", icon: <SettingsIcon /> },
-  { href: "/", label: "OpenClaw", icon: <OpenClawIcon /> },
-  { href: "/setup/terminal", label: "Terminal", icon: <TerminalIcon /> },
-  { href: "/setup/system", label: "System Monitor", icon: <SystemMonitorIcon /> },
-  { href: "/setup/models", label: "Ollama Models", icon: <OllamaIcon /> },
-  { href: "/setup/files", label: "Files", icon: <FilesIcon /> },
-  { href: "/setup/network", label: "Network", icon: <NetworkIcon /> },
-  { href: "https://docs.openclaw.ai", label: "Help", icon: <HelpIcon />, external: true },
+// Desktop app definitions
+interface DesktopApp {
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+  iconSmall: React.ReactNode;
+  action: "window" | "external";
+  windowConfig?: Omit<WindowConfig, "icon">;
+  externalUrl?: string;
+}
+
+const desktopApps: DesktopApp[] = [
+  {
+    id: "settings",
+    label: "Settings",
+    icon: <SettingsIcon />,
+    iconSmall: <SettingsIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "settings",
+      title: "Settings",
+      defaultWidth: 800,
+      defaultHeight: 600,
+      minWidth: 400,
+      minHeight: 400,
+      content: "settings",
+    },
+  },
+  {
+    id: "openclaw",
+    label: "OpenClaw",
+    icon: <OpenClawIcon />,
+    iconSmall: <OpenClawIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "openclaw",
+      title: "OpenClaw Control",
+      defaultWidth: 900,
+      defaultHeight: 700,
+      minWidth: 500,
+      minHeight: 400,
+      content: "openclaw",
+    },
+  },
+  {
+    id: "terminal",
+    label: "Terminal",
+    icon: <TerminalIcon />,
+    iconSmall: <TerminalIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "terminal",
+      title: "Terminal",
+      defaultWidth: 700,
+      defaultHeight: 500,
+      content: "placeholder",
+    },
+  },
+  {
+    id: "system",
+    label: "System Monitor",
+    icon: <SystemMonitorIcon />,
+    iconSmall: <SystemMonitorIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "system",
+      title: "System Monitor",
+      defaultWidth: 600,
+      defaultHeight: 450,
+      content: "placeholder",
+    },
+  },
+  {
+    id: "models",
+    label: "Ollama Models",
+    icon: <OllamaIcon />,
+    iconSmall: <OllamaIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "models",
+      title: "Ollama Models",
+      defaultWidth: 700,
+      defaultHeight: 500,
+      content: "placeholder",
+    },
+  },
+  {
+    id: "files",
+    label: "Files",
+    icon: <FilesIcon />,
+    iconSmall: <FilesIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "files",
+      title: "Files",
+      defaultWidth: 800,
+      defaultHeight: 550,
+      content: "placeholder",
+    },
+  },
+  {
+    id: "network",
+    label: "Network",
+    icon: <NetworkIcon />,
+    iconSmall: <NetworkIcon size={16} />,
+    action: "window",
+    windowConfig: {
+      appId: "network",
+      title: "Network",
+      defaultWidth: 600,
+      defaultHeight: 450,
+      content: "placeholder",
+    },
+  },
+  {
+    id: "help",
+    label: "Help",
+    icon: <HelpIcon />,
+    iconSmall: <HelpIcon size={16} />,
+    action: "external",
+    externalUrl: "https://docs.openclaw.ai",
+  },
 ];
 
+interface DesktopIconProps {
+  app: DesktopApp;
+  onClick: () => void;
+}
+
+function DesktopIcon({ app, onClick }: DesktopIconProps) {
+  return (
+    <button
+      onClick={onClick}
+      className="group flex flex-col items-center gap-2 p-3 rounded-xl transition-all duration-200 hover:bg-white/5 hover:scale-110 cursor-pointer"
+    >
+      <div className="w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center rounded-2xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] group-hover:border-[var(--coral-bright)] group-hover:shadow-[0_0_20px_var(--shadow-coral-mid)] transition-all duration-200">
+        {app.icon}
+      </div>
+      <span className="text-xs sm:text-sm text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors text-center max-w-20 truncate">
+        {app.label}
+      </span>
+    </button>
+  );
+}
+
 export default function DesktopPage() {
+  const {
+    windows,
+    openWindow,
+    closeWindow,
+    finishClosing,
+    finishOpening,
+    minimizeWindow,
+    maximizeWindow,
+    restoreWindow,
+    focusWindow,
+    moveWindow,
+    resizeWindow,
+  } = useWindows();
+
+  const handleAppClick = (app: DesktopApp) => {
+    if (app.action === "external" && app.externalUrl) {
+      window.open(app.externalUrl, "_blank", "noopener,noreferrer");
+    } else if (app.action === "window" && app.windowConfig) {
+      openWindow({
+        ...app.windowConfig,
+        icon: app.iconSmall,
+      });
+    }
+  };
+
+  const handleTaskbarWindowClick = (id: string) => {
+    const win = windows.find((w) => w.id === id);
+    if (win?.isMinimized) {
+      restoreWindow(id);
+    } else {
+      focusWindow(id);
+    }
+  };
+
+  const handleExternalLink = (url: string) => {
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  // Get app by appId for window content lookup
+  const getAppByAppId = (appId: string) => desktopApps.find((a) => a.id === appId);
+
   return (
     <div className="min-h-screen flex flex-col bg-desktop relative overflow-hidden">
       {/* Wallpaper gradient background */}
@@ -211,7 +346,7 @@ export default function DesktopPage() {
 
       {/* Header */}
       <header className="relative z-10 px-4 py-3 sm:px-6 sm:py-4 flex items-center justify-between gap-3">
-        <Link href="/" className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <Image
             src="/clawbox-icon.png"
             alt="ClawBox"
@@ -221,16 +356,18 @@ export default function DesktopPage() {
             priority
           />
           <div className="flex flex-col leading-tight">
-            <span className="text-xl font-bold font-display title-gradient">
-              ClawBox
-            </span>
+            <span className="text-xl font-bold font-display title-gradient">ClawBox</span>
             <span className="text-[10px] text-green-400 -mt-1">
               {process.env.NEXT_PUBLIC_APP_VERSION}
             </span>
           </div>
-        </Link>
+        </div>
         <div className="text-xs text-[var(--text-muted)]">
-          {new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+          {new Date().toLocaleDateString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+          })}
         </div>
       </header>
 
@@ -238,108 +375,40 @@ export default function DesktopPage() {
       <main className="relative z-10 flex-1 flex items-start sm:items-center justify-center px-4 py-6 sm:py-8">
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-4 gap-4 sm:gap-6 md:gap-8 max-w-2xl">
           {desktopApps.map((app) => (
-            <DesktopIcon
-              key={app.href}
-              href={app.href}
-              label={app.label}
-              icon={app.icon}
-              external={app.external}
-            />
+            <DesktopIcon key={app.id} app={app} onClick={() => handleAppClick(app)} />
           ))}
         </div>
       </main>
 
+      {/* Windows Layer */}
+      <div className="fixed inset-0 pointer-events-none z-50">
+        {windows.map((win) => {
+          const app = getAppByAppId(win.appId);
+          return (
+            <div key={win.id} className="pointer-events-auto">
+              <Window
+                window={win}
+                content={app?.windowConfig?.content ?? "placeholder"}
+                onClose={closeWindow}
+                onMinimize={minimizeWindow}
+                onMaximize={maximizeWindow}
+                onFocus={focusWindow}
+                onMove={moveWindow}
+                onResize={resizeWindow}
+                onFinishClosing={finishClosing}
+                onFinishOpening={finishOpening}
+              />
+            </div>
+          );
+        })}
+      </div>
+
       {/* Taskbar / Dock */}
-      <footer className="relative z-10 px-4 py-3 sm:py-4">
-        <div className="mx-auto max-w-md">
-          <div className="flex items-center justify-center gap-2 px-4 py-2 rounded-2xl bg-[var(--surface-card-strong)] border border-[var(--border-subtle)] backdrop-blur-xl">
-            <Link
-              href="/"
-              className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110 hover:border-[var(--cyan-bright)] hover:shadow-[0_0_12px_rgba(0,229,204,0.3)]"
-              title="OpenClaw Control"
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--cyan-bright)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <circle cx="12" cy="12" r="2" fill="var(--cyan-bright)" />
-              </svg>
-            </Link>
-            <Link
-              href="/setup/settings"
-              className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110 hover:border-[var(--coral-bright)] hover:shadow-[0_0_12px_var(--shadow-coral-mid)]"
-              title="Settings"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--coral-bright)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </Link>
-            <div className="w-px h-6 bg-[var(--border-subtle)]" />
-            <a
-              href="https://openclawhardware.dev/"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="ClawBox website"
-              className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110"
-              title="ClawBox Website"
-            >
-              <Image src="/clawbox-logo.png" alt="ClawBox" width={24} height={24} className="w-6 h-6 object-contain" />
-            </a>
-            <a
-              href="https://discord.gg/FbKmnxYnpq"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="Join our Discord"
-              className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[#5865F2] transition transform hover:scale-110"
-              title="Discord"
-            >
-              <svg width="18" height="14" viewBox="0 0 71 55" fill="currentColor" aria-hidden="true">
-                <path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A37.4 37.4 0 0 0 25.4.3a.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.6 4.9a.2.2 0 0 0-.1.1C1.5 18.7-.9 32.2.3 45.5v.2a58.9 58.9 0 0 0 17.7 9a.2.2 0 0 0 .3-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.8 38.8 0 0 1-5.5-2.6.2.2 0 0 1 0-.4l1.1-.9a.2.2 0 0 1 .2 0 42 42 0 0 0 35.8 0 .2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4 36.4 36.4 0 0 1-5.5 2.6.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.6 5.9.2.2 0 0 0 .3.1 58.7 58.7 0 0 0 17.7-9 .2.2 0 0 0 .1-.2c1.4-15-2.3-28-9.8-39.6a.2.2 0 0 0-.1 0ZM23.7 37.3c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Zm23.3 0c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Z"/>
-              </svg>
-            </a>
-            <a
-              href="https://docs.openclaw.ai"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="Documentation"
-              className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110"
-              title="Help & Docs"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--text-secondary)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-            </a>
-          </div>
-        </div>
-      </footer>
+      <Taskbar
+        windows={windows}
+        onWindowClick={handleTaskbarWindowClick}
+        onExternalLink={handleExternalLink}
+      />
     </div>
   );
 }
