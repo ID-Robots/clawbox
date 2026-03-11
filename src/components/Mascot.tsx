@@ -123,7 +123,9 @@ const SASS_LINES = [
   'Series A кога? КОГА?!',
   'Burn rate? По-скоро earn rate!',
   'Тоя pitch deck е шедьовър.',
-  // 日本語 — Japanese hieroglyphs
+]
+
+const SASS_LINES_JP = [
   '何これ？バグじゃないよ、機能だ！',
   'お前はもう...deployed 💀',
   '私はカニです。問題ある？🦀',
@@ -155,8 +157,8 @@ const IDLE_LINES = [
   '*тъпо щъкане*', '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
   '*pretends to work*', '...zzz... wait I\'m awake',
   '*counts pixels*', '🧊', '*loads personality*',
-  'ぼーっとしてる...', '何見てんの？👀', 'はぁ...', '暇だなぁ...',
 ]
+const IDLE_LINES_JP = ['ぼーっとしてる...', '何見てんの？👀', 'はぁ...', '暇だなぁ...']
 const SLEEP_LINES = [
   '💤', '😴 zzz...', '💤 5 more minutes...', '*snore* ...equity... *snore*',
   '💤 ...Series A... zzz...', '*snore* ...€549... *snore*',
@@ -164,9 +166,8 @@ const SLEEP_LINES = [
   '*snore* ...не искам на работа... *snore*',
   '💤 ...deploy... no... *snore*',
   '😴 ...DHL... tracking... zzz...',
-  '💤 おやすみ...zzz...', '😴 ...寿司... *snore*',
-  '💤 五分だけ...', '*snore* ...日本... zzz...',
 ]
+const SLEEP_LINES_JP = ['💤 おやすみ...zzz...', '😴 ...寿司... *snore*', '💤 五分だけ...', '*snore* ...日本... zzz...']
 const JUMP_LINES = [
   'YEEET!', '🦘', 'Parkour!', 'To infinity!',
   'БЪДИ СВОБОДЕН!', '🚀 WEEEE!', 'I believe I can fly!',
@@ -718,11 +719,18 @@ function ClawBoxMascot() {
   }
 
   const getSpeech = (st: MascotState): string | null => {
+    const isJP = Math.random() < 0.3 // 30% Japanese
     const lines: Record<string, string[]> = {
-      sass: SASS_LINES, idle: IDLE_LINES, sleep: SLEEP_LINES,
+      sass: isJP ? SASS_LINES_JP : SASS_LINES,
+      idle: isJP ? IDLE_LINES_JP : IDLE_LINES,
+      sleep: isJP ? SLEEP_LINES_JP : SLEEP_LINES,
       jump: JUMP_LINES, dance: DANCE_LINES, facepalm: FACEPALM_LINES,
-      celebrate: ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!', 'Opa! Нова поръчка!'],
-      look: ['👀', '🔍 Hmm...', 'What\'s over there?', 'Нещо мирише...'],
+      celebrate: isJP
+        ? ['注文キター！💰', 'やったー！🎉', 'お金お金お金！💸', 'すごい！新しい注文！']
+        : ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!', 'Opa! Нова поръчка!'],
+      look: isJP
+        ? ['👀 何？', '🔍 あれは...', 'あっちに何かある？', 'くんくん... 🐽']
+        : ['👀', '🔍 Hmm...', 'What\'s over there?', 'Нещо мирише...'],
     }
     const opts = lines[st]
     if (!opts) return null
