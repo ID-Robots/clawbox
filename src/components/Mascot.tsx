@@ -471,8 +471,8 @@ function ClawBoxMascot() {
     }
 
     // ─── Collision: floor ───
-    // Floor (crab rests on shelf, 56px from bottom)
-    const crabFloor = 56
+    // Floor (crab feet on shelf — crab image hangs below anchor point)
+    const crabFloor = 8
     if (p.posY <= crabFloor) {
       p.posY = crabFloor
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
@@ -1134,7 +1134,7 @@ function ClawBoxMascot() {
         onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
-        bottom: physicsActive ? 0 : 53,
+        bottom: physicsActive ? 0 : 8,
         transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
