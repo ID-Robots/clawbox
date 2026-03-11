@@ -191,8 +191,15 @@ const FACEPALM_LINES = [
 
 function ClawBoxMascot() {
   // ─── All mutable state in refs to avoid stale closures ───
-  const xRef = useRef(50) // will randomize on mount
-  const boxXRef = useRef(42) // will randomize on mount
+  const savedPos = useRef<{ x: number; bx: number } | null>(null)
+  if (savedPos.current === null) {
+    try {
+      const s = typeof window !== 'undefined' ? localStorage.getItem('clawbox-crab-pos') : null
+      savedPos.current = s ? JSON.parse(s) : { x: 32 + Math.random() * 20, bx: 35 + Math.random() * 15 }
+    } catch { savedPos.current = { x: 50, bx: 42 } }
+  }
+  const xRef = useRef(savedPos.current.x)
+  const boxXRef = useRef(savedPos.current.bx)
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
@@ -343,12 +350,17 @@ function ClawBoxMascot() {
   const [boxPhysicsActive, setBoxPhysicsActive] = useState(false)
 
   // ─── Direct DOM update for position (bypasses React render cycle) ───
+  const saveCrabPos = useCallback(() => {
+    try { localStorage.setItem('clawbox-crab-pos', JSON.stringify({ x: xRef.current, bx: boxXRef.current })) } catch {}
+  }, [])
+
   const updateCrabPos = useCallback(() => {
     if (!crabElRef.current) return
     const posX = onBoxRef.current ? boxXRef.current : xRef.current
     const scaleX = facingRef.current === 'left' ? -1 : 1
     crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) scaleX(${scaleX})`
-  }, [])
+    saveCrabPos()
+  }, [saveCrabPos])
 
   const updateBoxPos = useCallback(() => {
     if (!boxElRef.current) return
@@ -365,7 +377,8 @@ function ClawBoxMascot() {
   const setBoxX = useCallback((v: number) => {
     boxXRef.current = v
     updateBoxPos()
-  }, [updateBoxPos])
+    saveCrabPos()
+  }, [updateBoxPos, saveCrabPos])
 
   const setJumpY = useCallback((v: number) => {
     jumpYRef.current = v
@@ -827,8 +840,7 @@ function ClawBoxMascot() {
   // Listen for new order events — FRENZY MODE
   // Randomize positions on mount to avoid hydration mismatch
   useEffect(() => {
-    xRef.current = 32 + Math.random() * 20
-    boxXRef.current = 35 + Math.random() * 15
+    // Positions already loaded from localStorage in ref init
     updateCrabPos()
     updateBoxPos()
     setMounted(true)
