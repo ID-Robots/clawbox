@@ -708,7 +708,7 @@ function ClawBoxMascot() {
         style={{
         position: 'fixed', left: 0, bottom: crabOnBox ? 20 : -48,
         transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(0px) scaleX(${facing === 'left' ? -1 : 1})`,
-        zIndex: 9990, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
+        zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
           ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
@@ -809,7 +809,7 @@ function ClawBoxMascot() {
         left: 0,
         bottom: -3,
         transform: `translateX(calc(${boxXRef.current}vw - 50%))`,
-        zIndex: crabOnBox ? 9989 : 9991,
+        zIndex: crabOnBox ? 10000 : 10002,
         pointerEvents: 'none',
         willChange: 'transform, filter',
         filter: boxGlow ? 'drop-shadow(0 0 10px rgba(249,115,22,0.5))' : 'none',
