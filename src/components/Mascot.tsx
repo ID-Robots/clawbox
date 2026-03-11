@@ -557,7 +557,8 @@ function ClawBoxMascot() {
     p.lastPointerTime = performance.now()
     p.velX = 0
     p.velY = 0
-    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    // Capture on the crab container (not e.target which may be the img child)
+    crabElRef.current?.setPointerCapture?.(e.pointerId)
     say('Whoa! Put me down! 😳', 2000)
   }, [])
 
@@ -1174,6 +1175,8 @@ function ClawBoxMascot() {
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onLostPointerCapture={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : -3,
