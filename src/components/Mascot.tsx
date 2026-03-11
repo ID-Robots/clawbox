@@ -416,21 +416,19 @@ function ClawBoxMascot() {
     const platforms = document.querySelectorAll('[data-crab-platform]')
     platforms.forEach((el) => {
       const rect = (el as HTMLElement).getBoundingClientRect()
-      // Check horizontal overlap
+      // Check horizontal overlap (use crab center ± half size)
       const crabLeft = crabPxX - crabSize / 2
       const crabRight = crabPxX + crabSize / 2
       if (crabRight > rect.left && crabLeft < rect.right) {
-        // Check if crab is falling onto this platform (from above)
         const platformTop = rect.top
-        const prevCrabBottom = vh - (p.posY + p.velY * dt) // where crab was last frame
-        if (p.velY > 0 && prevCrabBottom <= platformTop && crabBottom >= platformTop) {
-          // Land on platform
+        // Falling and crab bottom is at or below platform top
+        if (p.velY > 0 && crabBottom >= platformTop - 10 && crabBottom <= platformTop + rect.height) {
           p.posY = vh - platformTop
           landedOnPlatform = true
         }
-        // Already standing on platform
-        if (Math.abs(crabBottom - rect.top) < 3 && p.velY >= 0) {
-          p.posY = vh - rect.top
+        // Already standing on platform (generous threshold)
+        if (Math.abs(crabBottom - platformTop) < 10 && p.velY >= 0) {
+          p.posY = vh - platformTop
           landedOnPlatform = true
         }
       }
