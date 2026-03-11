@@ -524,113 +524,51 @@ function ClawBoxMascot() {
   }, [updateCrabPos])
 
   // ─── Drag handlers (mirrors box exactly) ───
+  // ─── Crab drag: EXACT COPY of box drag pattern ───
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    draggingRef.current = true
-    // Capture current position BEFORE any React re-renders
-    const rect = crabElRef.current?.getBoundingClientRect()
-    if (rect) {
-      const vw = window.innerWidth
-      const vh = window.innerHeight
-      physicsPosRef.current = {
-        x: ((rect.left + rect.width / 2) / vw) * 100,
-        y: Math.max(0, vh - rect.bottom)
-      }
-    }
-    setPhysicsActive(true)
-    // Kill physics if running
+    e.preventDefault(); e.stopPropagation()
+    draggingRef.current = true; setPhysicsActive(true)
     const p = physicsRef.current
     p.active = false
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
-    // Pause autonomous behavior
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-    onBoxRef.current = false
-    setCrabOnBox(false)
-    setBoxGlow(false)
-    if (rect) {
-      dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
-    }
-    p.lastPointerX = e.clientX
-    p.lastPointerY = e.clientY
-    p.lastPointerTime = performance.now()
-    p.velX = 0
-    p.velY = 0
-    // Use window-level listeners for move/up (bulletproof, no capture issues)
-    window.addEventListener('pointermove', windowPointerMove)
-    window.addEventListener('pointerup', windowPointerUp)
-    window.addEventListener('pointercancel', windowPointerUp)
-    say('Whoa! Put me down! 😳', 2000)
+    onBoxRef.current = false; setCrabOnBox(false); setBoxGlow(false)
+    const rect = crabElRef.current?.getBoundingClientRect()
+    if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
+    p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
+    p.velX = 0; p.velY = 0
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
   }, [])
 
-  const windowPointerMove = useCallback((e: PointerEvent) => {
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
     e.preventDefault()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const now = performance.now()
-
-    // Track velocity from pointer movement (ImpactJS-style: pixels/second)
+    const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
     const p = physicsRef.current
     const dt = (now - p.lastPointerTime) / 1000
-    if (dt > 0.005) { // debounce
+    if (dt > 0.005) {
       p.velX = (e.clientX - p.lastPointerX) / dt
       p.velY = (e.clientY - p.lastPointerY) / dt
-      p.lastPointerX = e.clientX
-      p.lastPointerY = e.clientY
-      p.lastPointerTime = now
+      p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
     }
-
-    const newX = ((e.clientX - dragOffsetRef.current.x) / vw) * 100
-    xRef.current = Math.min(92, Math.max(2, newX))
-    // posY = distance from bottom of screen to crab's feet
-    // crab image is 150px, the visual center is roughly at clientY
-    dragYRef.current = Math.max(0, vh - e.clientY - 20)
-
+    xRef.current = Math.min(92, Math.max(2, ((e.clientX - dragOffsetRef.current.x) / vw) * 100))
+    const posY = Math.max(0, vh - e.clientY - 20)
     if (crabElRef.current) {
-      physicsPosRef.current = { x: xRef.current, y: dragYRef.current }
       crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px)`
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-posY}px)`
     }
+    physicsRef.current.posY = posY
   }, [])
 
-  const windowPointerUp = useCallback(() => {
-    // Clean up window listeners
-    window.removeEventListener('pointermove', windowPointerMove)
-    window.removeEventListener('pointerup', windowPointerUp)
-    window.removeEventListener('pointercancel', windowPointerUp)
-
+  const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
     draggingRef.current = false
-
     const p = physicsRef.current
     p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
     p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-    p.posY = dragYRef.current
     p.lastTime = performance.now()
     p.active = true
-
-    const dropLines = [
-      'Freedom! ...wait, same desktop.',
-      'AAAAAAAAA! 🫠',
-      'Rude. 😤',
-      'I believe I can fly! ...nope.',
-      'Ugh, humans.',
-      'PTSD от drag & drop.',
-      '🤢 Motion sickness!',
-      'Пуснахте ме най-после!',
-      'Аз не съм widget!',
-      'Newton sends his regards. 🍎',
-      'GRAVITY IS A SOCIAL CONSTRUCT!',
-      '*splat*',
-      'やめてー！😱',
-      '痛い！痛い！痛い！',
-      '人間ひどい... 😤',
-      'カニ虐待だ！🦀💢',
-    ]
-    say(dropLines[Math.floor(Math.random() * dropLines.length)], 3000)
-
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [physicsLoop])
 
@@ -1033,9 +971,6 @@ function ClawBoxMascot() {
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
-      window.removeEventListener('pointermove', windowPointerMove)
-      window.removeEventListener('pointerup', windowPointerUp)
-      window.removeEventListener('pointercancel', windowPointerUp)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1179,12 +1114,12 @@ function ClawBoxMascot() {
       `}</style>
       <div ref={crabElRef}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : -3,
-        transform: physicsActive
-          ? `translateX(calc(${physicsPosRef.current.x}vw - 50%)) translateY(${-physicsPosRef.current.y}px)`
-          : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
+        transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
@@ -1299,7 +1234,7 @@ function ClawBoxMascot() {
           style={{
             position: 'absolute', top: -110, left: '50%',
             transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
-            pointerEvents: 'auto',
+            pointerEvents: physicsActive ? 'none' : 'auto',
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
             paddingBottom: 120, // extends hover zone down to crab body
           }}
