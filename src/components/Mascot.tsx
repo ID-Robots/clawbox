@@ -1230,10 +1230,10 @@ function ClawBoxMascot() {
           transition: 'opacity 0.5s ease',
         }} />
 
-        {/* TAMAGOTCHI — Stat bars (show on hover or tap) */}
+        {/* TAMAGOTCHI — Stats + Menu container (single hover zone) */}
         <div
           onPointerEnter={() => setShowTamaStats(true)}
-          onPointerLeave={() => setShowTamaStats(false)}
+          onPointerLeave={() => { setShowTamaStats(false); setShowTamaMenu(false) }}
           onClick={(e) => {
             if (!draggingRef.current) {
               e.stopPropagation()
@@ -1243,16 +1243,45 @@ function ClawBoxMascot() {
             }
           }}
           style={{
-            position: 'absolute', top: -8, left: '50%', transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
-            opacity: showTamaStats || showTamaMenu ? 1 : 0,
-            transition: 'opacity 0.3s',
+            position: 'absolute', top: -110, left: '50%',
+            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
             pointerEvents: 'auto',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+            paddingBottom: 120, // extends hover zone down to crab body
           }}
         >
+          {/* Radial action menu */}
+          {showTamaMenu && !isDead && (
+            <div style={{ display: 'flex', gap: 8 }}>
+              {[
+                { icon: '🍕', label: 'Feed', action: tamaFeed, color: '#f97316' },
+                { icon: '🎮', label: 'Play', action: tamaPlay, color: '#fbbf24' },
+                { icon: '💤', label: 'Sleep', action: tamaSleep, color: '#22c55e' },
+                { icon: '✨', label: 'Clean', action: tamaClean, color: '#3b82f6' },
+              ].map((btn, i) => (
+                <button key={i} onClick={(e) => { e.stopPropagation(); btn.action() }}
+                  style={{
+                    width: 44, height: 44, borderRadius: '50%', border: 'none',
+                    background: btn.color, fontSize: 20, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+                    animation: `tama-btn-pop 0.3s ease-out ${i * 0.05}s both`,
+                    transition: 'transform 0.15s',
+                  }}
+                  onPointerEnter={(e) => (e.currentTarget.style.transform = 'scale(1.2)')}
+                  onPointerLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+                  title={btn.label}
+                >{btn.icon}</button>
+              ))}
+            </div>
+          )}
+
           {/* Mini stat bars */}
           <div style={{
             display: 'flex', gap: 3, background: 'rgba(0,0,0,0.7)', padding: '4px 8px',
             borderRadius: 8, backdropFilter: 'blur(4px)',
+            opacity: showTamaStats || showTamaMenu ? 1 : 0,
+            transition: 'opacity 0.3s',
           }}>
             {[
               { val: tamaStats.hunger, color: '#f97316', icon: '🍕' },
@@ -1273,36 +1302,6 @@ function ClawBoxMascot() {
             ))}
           </div>
         </div>
-
-        {/* TAMAGOTCHI — Radial action menu */}
-        {showTamaMenu && !isDead && (
-          <div style={{
-            position: 'absolute', top: -100, left: '50%',
-            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
-            display: 'flex', gap: 8, pointerEvents: 'auto',
-          }}>
-            {[
-              { icon: '🍕', label: 'Feed', action: tamaFeed, color: '#f97316' },
-              { icon: '🎮', label: 'Play', action: tamaPlay, color: '#fbbf24' },
-              { icon: '💤', label: 'Sleep', action: tamaSleep, color: '#22c55e' },
-              { icon: '✨', label: 'Clean', action: tamaClean, color: '#3b82f6' },
-            ].map((btn, i) => (
-              <button key={i} onClick={(e) => { e.stopPropagation(); btn.action() }}
-                style={{
-                  width: 40, height: 40, borderRadius: '50%', border: 'none',
-                  background: btn.color, fontSize: 18, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-                  animation: `tama-btn-pop 0.3s ease-out ${i * 0.05}s both`,
-                  transition: 'transform 0.15s',
-                }}
-                onPointerEnter={(e) => (e.currentTarget.style.transform = 'scale(1.2)')}
-                onPointerLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-                title={btn.label}
-              >{btn.icon}</button>
-            ))}
-          </div>
-        )}
 
         {/* TAMAGOTCHI — Death overlay */}
         {isDead && (
