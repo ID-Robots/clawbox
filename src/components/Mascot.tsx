@@ -403,6 +403,7 @@ function ClawBoxMascot() {
 
     // Move
     const vw = window.innerWidth
+    const vh = window.innerHeight
     xRef.current += (p.velX * dt / vw) * 100
     p.posY -= p.velY * dt // posY = height from ground, velY positive = falling
 
