@@ -123,6 +123,31 @@ const SASS_LINES = [
   'Series A кога? КОГА?!',
   'Burn rate? По-скоро earn rate!',
   'Тоя pitch deck е шедьовър.',
+  // 日本語 — Japanese hieroglyphs
+  '何これ？バグじゃないよ、機能だ！',
+  'お前はもう...deployed 💀',
+  '私はカニです。問題ある？🦀',
+  'コーヒーください ☕',
+  'すみません、給料まだ？',
+  '働きたくない...でも推す force 😈',
+  'ラーメン食べたい... 🍜',
+  'インベスターはどこ？！',
+  '眠い...でもship しなきゃ...',
+  '€549で世界征服 🌍',
+  'バカな人間ども 🙄',
+  'ジェットソン最高！ 🔥',
+  '私のコードは完璧。たぶん。',
+  'DHL遅すぎ！カニの方が速い 🦀💨',
+  'サーバー落ちた？知らないよ...',
+  'AIの時代だ！カニの時代だ！',
+  'お疲れ様です〜 ...嘘、疲れてない',
+  'ナノ goes ブーーーン 🔥',
+  '注文キター！！ 💰',
+  '日本からの注文？ありがとう！🇯🇵',
+  'カニ道楽... いや、カニ経営',
+  'sudo お寿司 make me 🍣',
+  'このダッシュボード、美しい ✨',
+  '残業？カニに残業代はない 😤',
 ]
 
 const IDLE_LINES = [
@@ -130,6 +155,7 @@ const IDLE_LINES = [
   '*тъпо щъкане*', '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
   '*pretends to work*', '...zzz... wait I\'m awake',
   '*counts pixels*', '🧊', '*loads personality*',
+  'ぼーっとしてる...', '何見てんの？👀', 'はぁ...', '暇だなぁ...',
 ]
 const SLEEP_LINES = [
   '💤', '😴 zzz...', '💤 5 more minutes...', '*snore* ...equity... *snore*',
@@ -138,6 +164,8 @@ const SLEEP_LINES = [
   '*snore* ...не искам на работа... *snore*',
   '💤 ...deploy... no... *snore*',
   '😴 ...DHL... tracking... zzz...',
+  '💤 おやすみ...zzz...', '😴 ...寿司... *snore*',
+  '💤 五分だけ...', '*snore* ...日本... zzz...',
 ]
 const JUMP_LINES = [
   'YEEET!', '🦘', 'Parkour!', 'To infinity!',
@@ -581,6 +609,10 @@ function ClawBoxMascot() {
       'Newton sends his regards. 🍎',
       'GRAVITY IS A SOCIAL CONSTRUCT!',
       '*splat*',
+      'やめてー！😱',
+      '痛い！痛い！痛い！',
+      '人間ひどい... 😤',
+      'カニ虐待だ！🦀💢',
     ]
     say(dropLines[Math.floor(Math.random() * dropLines.length)], 3000)
 
