@@ -317,11 +317,7 @@ function ClawBoxMascot() {
     if (!crabElRef.current) return
     const posX = onBoxRef.current ? boxXRef.current : xRef.current
     const scaleX = facingRef.current === 'left' ? -1 : 1
-    // Remove !important so React can control again
-    crabElRef.current.style.removeProperty('bottom')
-    crabElRef.current.style.removeProperty('transform')
-    crabElRef.current.style.bottom = '-48px'
-    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${jumpYRef.current}px) scaleX(${scaleX})`
+    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) scaleX(${scaleX})`
   }, [])
 
   const updateBoxPos = useCallback(() => {
@@ -489,19 +485,19 @@ function ClawBoxMascot() {
     // Render
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
-      crabElRef.current.style.setProperty('bottom', '0px', 'important')
-      crabElRef.current.style.setProperty("transform", `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`, "important")
+      crabElRef.current.style.bottom = '0px'
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px)`
     }
 
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [updateCrabPos])
 
-  // ─── Drag handlers with velocity tracking ───
+  // ─── Drag handlers (mirrors box exactly) ───
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
     e.stopPropagation()
     draggingRef.current = true
-    setPhysicsActive(true); physicsActiveRef.current = true // prevent React from overriding position
+    setPhysicsActive(true)
     // Kill physics if running
     const p = physicsRef.current
     p.active = false
@@ -510,18 +506,12 @@ function ClawBoxMascot() {
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
     onBoxRef.current = false
-    // Set DOM position immediately before any React re-render
-    if (crabElRef.current) {
-      crabElRef.current.style.setProperty('bottom', '0px', 'important')
-    }
     setCrabOnBox(false)
     setBoxGlow(false)
-    // Calculate offset
     const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) {
       dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     }
-    // Track pointer for velocity calculation
     p.lastPointerX = e.clientX
     p.lastPointerY = e.clientY
     p.lastPointerTime = performance.now()
@@ -553,12 +543,11 @@ function ClawBoxMascot() {
     xRef.current = Math.min(92, Math.max(2, newX))
     // posY = distance from bottom of screen to crab's feet
     // crab image is 150px, the visual center is roughly at clientY
-    dragYRef.current = Math.max(0, vh - e.clientY - 30)
+    dragYRef.current = Math.max(0, vh - e.clientY - 20)
 
     if (crabElRef.current) {
-      const scaleX = facingRef.current === 'left' ? -1 : 1
-      crabElRef.current.style.setProperty('bottom', '0px', 'important')
-      crabElRef.current.style.setProperty("transform", `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`, "important")
+      crabElRef.current.style.bottom = '0px'
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px)`
     }
   }, [])
 
@@ -1135,8 +1124,8 @@ function ClawBoxMascot() {
         onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
-        bottom: -48,
-        transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
+        bottom: physicsActive ? 0 : -3,
+        transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
