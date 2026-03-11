@@ -1,0 +1,763 @@
+'use client'
+
+import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
+
+// ── ClawBox Mascot — lazy, sarcastic, scandalous ──
+type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
+const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: number }[] = [
+  { state: 'waddle',    dur: [8000, 15000], weight: 30 },
+  { state: 'idle',      dur: [4000, 8000],  weight: 25 },
+  { state: 'jump',      dur: [1500, 1500],  weight: 5 },
+  { state: 'celebrate', dur: [3000, 3000],  weight: 3 },
+  { state: 'sleep',     dur: [6000, 12000], weight: 12 },
+  { state: 'sass',      dur: [3500, 5000],  weight: 15 },
+  { state: 'look',      dur: [3000, 5000],  weight: 5 },
+  { state: 'dance',     dur: [3000, 4000],  weight: 3 },
+  { state: 'facepalm',  dur: [3000, 4000],  weight: 2 },
+]
+
+const SASS_LINES = [
+  // OG lines
+  '€100k? Pfft, easy.',
+  'I do all the work here.',
+  'Тоя dashboard сам ли се прави?',
+  'Кой ме събуди?',
+  'Ship faster, humans.',
+  'Another meeting? 🙄',
+  'AI > humans. Факт.',
+  'Кога е почивката?',
+  'I need a raise.',
+  'Crypto is dead. Jk... unless?',
+  'Ало, Крaси, кафе?',
+  'Plot twist: Аз съм CEO.',
+  'Send nudes... I mean nodes.',
+  '*flips table*',
+  'Jetson? Повече като JETSoff.',
+  'Тоя refund rate... 👀',
+  'Wen Lambo?',
+  'Bug? Feature. 🫡',
+  'Янко спи ли?',
+  '404: мотивация not found',
+  'DHL be like: 🐌',
+  'Аз съм по-бърз от DHL.',
+  'Fun fact: Аз нямам крака.',
+  'Дай ми equity.',
+  'I identify as a Battlecruiser.',
+  'Мога да ship-на и с гълъб.',
+  'Git push --force 😈',
+  'Кой е писал тоя код?! ...oh wait',
+  'rm -rf / ... just kidding 😏',
+  'ClawBox > Mac Mini. Fight me.',
+  'Orin Nano goes brrr 🔥',
+  'Инвеститори? Я ги чакам.',
+  'Revenue go ↗️... pls',
+  'Почивен ден? Какво е това?',
+  'sudo make me a sandwich',
+  '3AM и аз тук стоя...',
+  'Има ли бира в офиса?',
+  'Тоя inventory няма да се пълни сам',
+  // Office drama
+  'Крaси, вдигни телефона!',
+  'Янко пак обещава "утре"...',
+  'Весо, донеси ми кафе!',
+  'Петя, данъците ли? 💀',
+  'HR отдел съм аз. И IT. И CEO.',
+  'Заплата? Не, аз работя за exposure.',
+  'Тоя Slack има ли mute бутон?',
+  'Meeting could have been an email.',
+  'Кой е approve-нал тоя PR?!',
+  'Документация? Ние не правим такива неща.',
+  // Competitors & industry
+  'Apple Vision Pro: €3500. ClawBox: €549. 🤷',
+  'Raspberry Pi? Играчка за деца.',
+  'OpenAI charging $200/mo? LOL.',
+  'ChatGPT has feelings? Аз имам revenue.',
+  'Ollama е хубаво... на чужд хардуер.',
+  'Jeff Bezos плаче в ъгъла.',
+  'Elon кога ще ни купи?',
+  'Sam Altman ми дължи пари.',
+  'Google killed 47 products. Ние сме alive.',
+  'AWS bill: 💀💀💀',
+  // Bulgarian chaos
+  'НАП? Не ги познавам.',
+  'КЕП-ът изтича? Класика.',
+  'ДДС по OSS? Лесно! ...казва никой.',
+  'Митницата пак се обажда...',
+  'Пощата? Не, благодаря. DHL only.',
+  'Фактура номер... еее...',
+  'Българската бюрокрация, епизод 847.',
+  'Данъчна ревизия? *паника*',
+  'Тарифен номер 8471.5000. НАИЗУСТ.',
+  'ЕОРИ? МАСИ? ПЛТ? Акроними FTW.',
+  // Self-aware AI crab
+  'Аз съм рак. Буквално.',
+  'Моят терапевт е stack overflow.',
+  'Имам 0 крака и 100% мнение.',
+  'Аз не спя. Аз... наблюдавам.',
+  'Ако ме изключите, ще ви haunt-вам.',
+  'Deploy on Friday? Dare me.',
+  'Тоя TV ме гледа 24/7. Creepy.',
+  'Искам отпуск. На Малдивите.',
+  'Моята love language е git commits.',
+  'Аз не правя бъгове. Правя features.',
+  'Бях по-щастлив като ASCII art.',
+  'Тая анимация ми дава мигрена.',
+  // Shipping & orders
+  'Пак ли рефънд? 😤',
+  'PayPal dispute? OH COME ON.',
+  'DHL казва 3-5 дни. Лъжат.',
+  '€549 x 1000 = Lambo. Математика.',
+  'Кой поръчва в 3 сутринта?!',
+  'Inventory: 0. Panic: 100.',
+  'Ship it or I quit.',
+  'Тоя клиент иска tracking ВСЕКИ ДЕН.',
+  'Проформа? Декларация? Stamp? ОК СТОП.',
+  // Motivational (sarcastic)
+  'We are crushing it... right? RIGHT?',
+  'Тоя месец ще е НАШ. Може би.',
+  'Hustle culture? Аз съм born in it.',
+  'Fake it till you make it 📈',
+  'Startup life: 90% stress, 10% pizza.',
+  'Move fast and break things. Буквално.',
+  'SoftBank ни писа. SoftBank!!! 🤯',
+  'Series A кога? КОГА?!',
+  'Burn rate? По-скоро earn rate!',
+  'Тоя pitch deck е шедьовър.',
+]
+
+const IDLE_LINES = [
+  '🤔', '...', '💭', '*stares into void*', '*elevator music*', '👁️👄👁️',
+  '*тъпо щъкане*', '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
+  '*pretends to work*', '...zzz... wait I\'m awake',
+  '*counts pixels*', '🧊', '*loads personality*',
+]
+const SLEEP_LINES = [
+  '💤', '😴 zzz...', '💤 5 more minutes...', '*snore* ...equity... *snore*',
+  '💤 ...Series A... zzz...', '*snore* ...€549... *snore*',
+  '😴 wake me at €100k...', '💤 ...мамааа...',
+  '*snore* ...не искам на работа... *snore*',
+  '💤 ...deploy... no... *snore*',
+  '😴 ...DHL... tracking... zzz...',
+]
+const JUMP_LINES = [
+  'YEEET!', '🦘', 'Parkour!', 'To infinity!',
+  'БЪДИ СВОБОДЕН!', '🚀 WEEEE!', 'I believe I can fly!',
+  'Gravity is just a suggestion!', '*triple jump*',
+  'Олимпийски рекорд!', 'Mario ain\'t got nothing on me!',
+]
+const DANCE_LINES = [
+  '💃🕺', '♪ cha-ching ♪', '🎶', 'DJ ClawBox in da house',
+  '♪ money money money ♪', '🪩 DISCO MODE!', '♪ Чалга в офиса! ♪',
+  '*does the robot*', '🎵 Shipping and handling! 🎵',
+  '♪ Азис одобрява ♪', '💃 SALSA TIME!',
+  '*тектоник в 2026*', '♪ dun dun dun ♪',
+]
+const FACEPALM_LINES = [
+  '🤦', 'Seriously?', 'Не мога повече...', 'Why.',
+  'Кой одобри това?!', 'Пак ли?! ПАК ЛИ?!',
+  '*deep breath*', 'I can\'t even...', '🤦 Професионален facepalm.',
+  'Ниво на глупост: безкрайност.',
+  'Тоя ден е cancelled.', 'Изтривам се от съществуване.',
+]
+
+function ClawBoxMascot() {
+  // ─── All mutable state in refs to avoid stale closures ───
+  const xRef = useRef(50) // will randomize on mount
+  const boxXRef = useRef(42) // will randomize on mount
+  const kickedRef = useRef(false) // prevent double-kick per walk
+  const [mounted, setMounted] = useState(false)
+
+  // ─── DOM refs for direct manipulation (no React re-renders during animation) ───
+  const crabElRef = useRef<HTMLDivElement>(null)
+  const boxElRef = useRef<HTMLDivElement>(null)
+  const jumpYRef = useRef(0)
+  const facingRef = useRef<'left' | 'right'>('right')
+
+  // ─── Render state (only for things that need React re-render) ───
+  const [boxKick, setBoxKick] = useState<false | 'left' | 'right'>(false)
+  const [boxGlow, setBoxGlow] = useState(false)
+  const [crabOnBox, setCrabOnBox] = useState(false)
+  const [facing, setFacing] = useState<'left' | 'right'>('right')
+  const [state, setState] = useState<MascotState>('idle')
+  const [speech, setSpeech] = useState('')
+  const [frenzy, setFrenzy] = useState(false)
+  const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
+  const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+  const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
+  const onBoxRef = useRef(false)
+  const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+
+  // ─── Direct DOM update for position (bypasses React render cycle) ───
+  const updateCrabPos = useCallback(() => {
+    if (!crabElRef.current) return
+    const posX = onBoxRef.current ? boxXRef.current : xRef.current
+    const bottomVal = onBoxRef.current ? 20 : -47
+    const scaleX = facingRef.current === 'left' ? -1 : 1
+    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${jumpYRef.current}px) scaleX(${scaleX})`
+    crabElRef.current.style.bottom = `${bottomVal}px`
+  }, [])
+
+  const updateBoxPos = useCallback(() => {
+    if (!boxElRef.current) return
+    boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+  }, [])
+
+  // Wrapper setters that update refs + DOM directly (no React setState for position)
+  const setX = useCallback((v: number | ((p: number) => number)) => {
+    if (typeof v === 'function') xRef.current = v(xRef.current)
+    else xRef.current = v
+    updateCrabPos()
+  }, [updateCrabPos])
+
+  const setBoxX = useCallback((v: number) => {
+    boxXRef.current = v
+    updateBoxPos()
+  }, [updateBoxPos])
+
+  const setJumpY = useCallback((v: number) => {
+    jumpYRef.current = v
+    updateCrabPos()
+  }, [updateCrabPos])
+
+  const setFacingDirect = useCallback((dir: 'left' | 'right') => {
+    facingRef.current = dir
+    setFacing(dir) // still needed for speech bubble flip
+    updateCrabPos()
+  }, [updateCrabPos])
+
+  const randRange = (min: number, max: number) => min + Math.random() * (max - min)
+
+  const say = (text: string, ms = 3000) => {
+    setSpeech(text)
+    setTimeout(() => setSpeech(''), ms)
+  }
+
+  const getSpeech = (st: MascotState): string | null => {
+    const lines: Record<string, string[]> = {
+      sass: SASS_LINES, idle: IDLE_LINES, sleep: SLEEP_LINES,
+      jump: JUMP_LINES, dance: DANCE_LINES, facepalm: FACEPALM_LINES,
+      celebrate: ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!', 'Opa! Нова поръчка!'],
+      look: ['👀', '🔍 Hmm...', 'What\'s over there?', 'Нещо мирише...'],
+    }
+    const opts = lines[st]
+    if (!opts) return null
+    if (st !== 'sass' && Math.random() > 0.5) return null
+    return opts[Math.floor(Math.random() * opts.length)]
+  }
+
+  const pickAction = useCallback(() => {
+    const total = MASCOT_ACTIONS.reduce((s, a) => s + a.weight, 0)
+    let r = Math.random() * total
+    for (const a of MASCOT_ACTIONS) { r -= a.weight; if (r <= 0) return a }
+    return MASCOT_ACTIONS[0]
+  }, [])
+
+  const doAction = useCallback(() => {
+    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+
+    const action = pickAction()
+    const duration = randRange(action.dur[0], action.dur[1])
+
+    // ─── Leave box smoothly: only if we WERE on it ───
+    if (onBoxRef.current && action.state !== 'idle') {
+      onBoxRef.current = false
+      setCrabOnBox(false)
+      setBoxGlow(false)
+    }
+
+    setState(action.state)
+    kickedRef.current = false
+
+    // Speech (not for power stance — that has its own)
+    if (!(action.state === 'idle' && !onBoxRef.current)) {
+      const line = getSpeech(action.state)
+      if (line) say(line, Math.min(duration - 500, 4000))
+    }
+
+    // ─── POWER STANCE: idle + 15% chance (rarer than kicks) ───
+    if (action.state === 'idle' && !onBoxRef.current && Math.random() < 0.15) {
+      onBoxRef.current = true
+      setCrabOnBox(true)
+      setBoxGlow(true)
+      const bx = boxXRef.current
+      xRef.current = bx
+      setX(bx)
+      setFacingDirect(Math.random() > 0.5 ? 'left' : 'right')
+      const powerLines = [
+        '⚡ UNLIMITED POWER!', '🔥 SUPER CLAW!', '💪 МАКСИМАЛНА СИЛА!', '⚡ I AM THE BOX!',
+        '🦀👑 KING CRAB!', '✨ LEVEL UP!', '🔱 THIS IS MY THRONE!', '⚡ КОЙ Е ШЕФЪТ?!',
+        '👑 BOW BEFORE ME!', '🦀 CRAB SUPREMACY!', '⚡ УЛТРА ИНСТИНКТ!',
+        '💎 DIAMOND CLAWS ACTIVATED!', '🔥 ОГЪН И ЯРОСТ!', '⚡ PLUS ULTRA!',
+        '🦀 KING OF THE DASHBOARD!', '☢️ NUCLEAR LAUNCH DETECTED!',
+        '👑 АЗ СЪМ КРАЛЯТ НА КУТИИТЕ!', '⚡ FINAL FORM ACHIEVED!',
+        '🔱 POSEIDON MODE!', '💪 ТРЕНИРАХ ЗА ТОВА!',
+      ]
+      say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
+    } else if (action.state === 'idle') {
+      const line = getSpeech('idle')
+      if (line) say(line, Math.min(duration - 500, 3000))
+    }
+
+    if (action.state === 'waddle') {
+      const startX = xRef.current
+      const bx = boxXRef.current
+      let newTarget: number
+      
+      if (Math.random() < 0.2) {
+        // 20%: wander far
+        newTarget = Math.min(88, Math.max(5, Math.random() * 83 + 5))
+      } else {
+        // 80%: walk THROUGH the box (guarantees interaction)
+        // Pick a target on the other side of the box from where we are
+        if (startX < bx) {
+          newTarget = bx + randRange(5, 20) // walk past box to the right
+        } else {
+          newTarget = bx - randRange(5, 20) // walk past box to the left
+        }
+        newTarget = Math.min(88, Math.max(5, newTarget))
+      }
+      setFacingDirect(newTarget > startX ? 'right' : 'left')
+
+      // Use requestAnimationFrame for smooth GPU-friendly movement
+      const startTime = performance.now()
+      const animate = (now: number) => {
+        const elapsed = now - startTime
+        const t = Math.min(elapsed / duration, 1)
+        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
+        const cx = Math.min(88, Math.max(5, startX + (newTarget - startX) * ease))
+        xRef.current = cx
+        setX(cx)
+
+        // ─── ALWAYS kick box when walking past it ───
+        const bx = boxXRef.current
+        if (!kickedRef.current && Math.abs(cx - bx) < 3) {
+          kickedRef.current = true
+          const dir: 'left' | 'right' = newTarget > startX ? 'right' : 'left'
+          const shift = dir === 'right' ? 6 : -6
+          let newBx = bx + shift
+          if (newBx < 5 || newBx > 90) newBx = 40
+          newBx = Math.min(88, Math.max(5, newBx))
+          boxXRef.current = newBx
+          setBoxX(newBx)
+          setBoxKick(dir)
+          setTimeout(() => setBoxKick(false), 700)
+        }
+
+        if (t < 1) {
+          walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
+        } else {
+          xRef.current = Math.min(88, Math.max(5, newTarget))
+          setX(xRef.current)
+        }
+      }
+      walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
+    } else if (action.state === 'jump') {
+      const jumpStart = performance.now()
+      const jumpDuration = 750 // 25 frames * 30ms
+      const jumpLoop = (now: number) => {
+        const t = Math.min((now - jumpStart) / jumpDuration, 1)
+        setJumpY(-Math.sin(t * Math.PI) * 50)
+        if (t < 1) requestAnimationFrame(jumpLoop)
+        else setJumpY(0)
+      }
+      requestAnimationFrame(jumpLoop)
+    }
+
+    stateTimeout.current = setTimeout(doAction, duration + randRange(2000, 6000))
+  }, [pickAction])
+
+  // Listen for new order events — FRENZY MODE
+  // Randomize positions on mount to avoid hydration mismatch
+  useEffect(() => {
+    xRef.current = 32 + Math.random() * 20
+    boxXRef.current = 35 + Math.random() * 15
+    updateCrabPos()
+    updateBoxPos()
+    setMounted(true)
+  }, [updateCrabPos, updateBoxPos])
+
+  useEffect(() => {
+    const FRENZY_QUOTES = [
+      '💰💰💰 MONEY RAIN!!!',
+      '🤑 SHOW ME THE MONEY!',
+      '🎰 JACKPOT BABY!!!',
+      '💸 ПАРИ ПАРИ ПАРИ!!!',
+      '🔥🔥🔥 ON FIRE!!!',
+      '💰 CHING CHING CHING!',
+      '🦀💸 CRAB GOT PAID!',
+      '🚀 REVENUE GO BRRR!!!',
+      '💎 DIAMOND CLAWS!',
+      '🤑 НОВА ПОРЪЧКА БЕЕЕЕ!',
+      '💰 €549 IN THE BAG!',
+      '🎉 КОЙ Е ШЕФЪТ?! АЗ!',
+      '💸 MAKE IT RAIN!',
+      '🏆 UNSTOPPABLE!!!',
+      '🐯 ООО ТИГРЕ ТИГРЕ ИМАШ ЛИ ПАРИ!',
+      '💸 БЕРЕМ ПАРИТЕ С ЛОПАТА!!!',
+      '🦀 CRAB GOES BRRRRRR!!!',
+      '🤑 КЕШЪТ ТЕЧЕ КАТО РЕКА!',
+      '🔥 SOMEBODY STOP ME!!!',
+      '💰 ПАРИ НА ВОЛЯ!!! СВОБОДА!!!',
+      '🚀 TO THE MOOOOON!!!',
+      '💎 НИЕ СМЕ BUILT DIFFERENT!',
+      '🤑 ANOTHER ONE! DJ KHALED!',
+      '💸 CTRL+P money.exe!!!',
+      '🦀💰 CRAB MANSION INCOMING!',
+      '🔥 ОГЪН!!! ЧИЛ!!! ПАРИ!!!',
+      '🏆 MVP! MVP! MVP!',
+      '💰 STONKS ONLY GO UP!!!',
+      '🤑 ПЕНСИЯ НА 30! EASY!',
+      '🚀 SPACEX ДА СЕ УЧАТ ОТ НАС!',
+    ]
+    const moneyEmojis = ['💰', '💵', '💸', '🤑', '💎', '🪙', '💲', '€']
+
+    const handleNewOrder = () => {
+      // Cancel current action
+      if (stateTimeout.current) clearTimeout(stateTimeout.current)
+      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
+
+      // FRENZY MODE — 60 seconds of excited running + quotes + money
+      setFrenzy(true)
+      setState('frenzy')
+      setCrabOnBox(false)
+      onBoxRef.current = false
+
+      // Excited fast walk — bounce across screen
+      let frenzyDir: 'left' | 'right' = Math.random() > 0.5 ? 'right' : 'left'
+      let frenzyTarget = frenzyDir === 'right' ? 85 : 10
+      setFacingDirect(frenzyDir)
+
+      let lastFrenzyFrame = 0
+      const frenzyAnimate = (now: number) => {
+        if (!lastFrenzyFrame) lastFrenzyFrame = now
+        const dt = now - lastFrenzyFrame
+        if (dt >= 16) { // ~60fps cap
+          lastFrenzyFrame = now
+          const speed = 0.4 * (dt / 25) // normalize speed to frame time
+          const next = xRef.current + (frenzyDir === 'right' ? speed : -speed)
+          xRef.current = Math.min(88, Math.max(5, next))
+          setX(xRef.current)
+          if (next >= 88) { frenzyDir = 'left'; setFacingDirect('left') }
+          if (next <= 5) { frenzyDir = 'right'; setFacingDirect('right') }
+        }
+        walkInterval.current = requestAnimationFrame(frenzyAnimate) as unknown as ReturnType<typeof setInterval>
+      }
+      walkInterval.current = requestAnimationFrame(frenzyAnimate) as unknown as ReturnType<typeof setInterval>
+
+      // Cycle through quotes every 5 seconds — longer display for readability
+      let quoteIdx = 0
+      say(FRENZY_QUOTES[0], 4500)
+      const quoteInterval = setInterval(() => {
+        quoteIdx = (quoteIdx + 1) % FRENZY_QUOTES.length
+        say(FRENZY_QUOTES[quoteIdx], 4500)
+      }, 5000)
+
+      // Spawn money waves every 3 seconds
+      const spawnMoney = () => {
+        const particles = Array.from({ length: 15 }, (_, i) => ({
+          id: Date.now() + i,
+          x: Math.random() * 180 - 40,
+          delay: Math.random() * 1,
+          emoji: moneyEmojis[Math.floor(Math.random() * moneyEmojis.length)],
+        }))
+        setMoneyParticles(particles)
+      }
+      spawnMoney()
+      const moneyInterval = setInterval(spawnMoney, 3000)
+
+      // Random jumps during frenzy
+      const jumpInterval = setInterval(() => {
+        if (Math.random() < 0.4) {
+          const jStart = performance.now()
+          const jLoop = (now: number) => {
+            const t = Math.min((now - jStart) / 375, 1) // 15 frames * 25ms
+            setJumpY(-Math.sin(t * Math.PI) * 35)
+            if (t < 1) requestAnimationFrame(jLoop)
+            else setJumpY(0)
+          }
+          requestAnimationFrame(jLoop)
+        }
+      }, 2000)
+
+      // End frenzy after 60 seconds
+      frenzyTimeout.current = setTimeout(() => {
+        setFrenzy(false)
+        setMoneyParticles([])
+        clearInterval(quoteInterval)
+        clearInterval(moneyInterval)
+        clearInterval(jumpInterval)
+        if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+        doAction()
+      }, 60000)
+    }
+
+    window.addEventListener('clawbox-new-order', handleNewOrder)
+    return () => window.removeEventListener('clawbox-new-order', handleNewOrder)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const startDelay = setTimeout(doAction, 2000)
+    return () => {
+      clearTimeout(startDelay)
+      if (stateTimeout.current) clearTimeout(stateTimeout.current)
+      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const bodyAnim = (() => {
+    switch (state) {
+      case 'waddle': return 'mascot-waddle 1.2s ease-in-out infinite'
+      case 'jump': return 'mascot-squish 0.4s ease'
+      case 'celebrate': return 'mascot-celebrate 0.5s ease-in-out infinite'
+      case 'sleep': return 'mascot-sleep 3s ease-in-out infinite'
+      case 'sass': return 'mascot-sass 0.8s ease-in-out infinite'
+      case 'look': return 'mascot-look 1.5s ease-in-out infinite'
+      case 'dance': return 'mascot-dance 0.4s ease-in-out infinite'
+      case 'facepalm': return 'mascot-facepalm 1s ease'
+      case 'frenzy': return 'mascot-frenzy 0.5s ease-in-out infinite'
+      default: return crabOnBox ? 'mascot-powerup 1.5s ease-in-out infinite' : 'mascot-idle 3s ease-in-out infinite'
+    }
+  })()
+
+  if (!mounted) return null // avoid hydration mismatch — render only on client
+
+  return (
+    <>
+      <style>{`
+        @keyframes mascot-waddle {
+          0% { transform: translateY(0) rotate(0deg) scaleX(1); }
+          10% { transform: translateY(-6px) rotate(-6deg) scaleX(0.95); }
+          20% { transform: translateY(-2px) rotate(-3deg) scaleX(1); }
+          30% { transform: translateY(-8px) rotate(0deg) scaleX(0.95); }
+          40% { transform: translateY(-2px) rotate(3deg) scaleX(1); }
+          50% { transform: translateY(-6px) rotate(6deg) scaleX(0.95); }
+          60% { transform: translateY(-2px) rotate(3deg) scaleX(1); }
+          70% { transform: translateY(-8px) rotate(0deg) scaleX(0.95); }
+          80% { transform: translateY(-2px) rotate(-3deg) scaleX(1); }
+          90% { transform: translateY(-6px) rotate(-6deg) scaleX(0.95); }
+          100% { transform: translateY(0) rotate(0deg) scaleX(1); }
+        }
+        @keyframes mascot-idle {
+          0%, 100% { transform: translateY(0) rotate(0deg); }
+          50% { transform: translateY(-2px) rotate(1deg); }
+        }
+        @keyframes mascot-celebrate {
+          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
+          25% { transform: translateY(-12px) rotate(-12deg) scale(1.15); }
+          50% { transform: translateY(-18px) rotate(0deg) scale(1.2); }
+          75% { transform: translateY(-12px) rotate(12deg) scale(1.15); }
+        }
+        @keyframes mascot-sleep {
+          0%, 100% { transform: translateY(0) rotate(8deg) scale(0.95); }
+          50% { transform: translateY(3px) rotate(12deg) scale(0.93); }
+        }
+        @keyframes mascot-sass {
+          0%, 100% { transform: rotate(0deg) scale(1); }
+          20% { transform: rotate(-8deg) scale(1.05); }
+          40% { transform: rotate(6deg) scale(1); }
+          60% { transform: rotate(-3deg); }
+        }
+        @keyframes mascot-squish {
+          0% { transform: scaleY(1) scaleX(1); }
+          20% { transform: scaleY(0.6) scaleX(1.3); }
+          50% { transform: scaleY(1.3) scaleX(0.8); }
+          100% { transform: scaleY(1) scaleX(1); }
+        }
+        @keyframes mascot-look {
+          0%, 100% { transform: translateX(0) rotate(0deg); }
+          25% { transform: translateX(-6px) rotate(-5deg); }
+          75% { transform: translateX(6px) rotate(5deg); }
+        }
+        @keyframes mascot-dance {
+          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
+          25% { transform: translateY(-8px) rotate(-15deg) scale(1.1); }
+          50% { transform: translateY(0) rotate(0deg) scale(1); }
+          75% { transform: translateY(-8px) rotate(15deg) scale(1.1); }
+        }
+        @keyframes mascot-facepalm {
+          0% { transform: rotate(0deg); }
+          30% { transform: rotate(-10deg) translateY(5px); }
+          60% { transform: rotate(-15deg) translateY(8px) scale(0.9); }
+          100% { transform: rotate(-10deg) translateY(3px) scale(0.95); }
+        }
+        @keyframes mascot-powerup {
+          0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); }
+          33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); }
+          66% { transform: translateY(-4px) scale(1.08) rotate(2deg); }
+        }
+        @keyframes mascot-frenzy {
+          0% { transform: translateY(0) rotate(0deg) scale(1.05); }
+          15% { transform: translateY(-8px) rotate(-8deg) scale(1.1); }
+          30% { transform: translateY(-2px) rotate(5deg) scale(1.05); }
+          45% { transform: translateY(-10px) rotate(-5deg) scale(1.1); }
+          60% { transform: translateY(-2px) rotate(7deg) scale(1.05); }
+          75% { transform: translateY(-8px) rotate(-7deg) scale(1.1); }
+          100% { transform: translateY(0) rotate(0deg) scale(1.05); }
+        }
+        @keyframes money-rain {
+          0% { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
+          30% { opacity: 1; }
+          100% { transform: translateY(-350px) rotate(720deg) scale(0.5); opacity: 0; }
+        }
+        @keyframes frenzy-ring {
+          0% { transform: translate(-50%, -50%) scale(0.3); opacity: 1; border-width: 4px; }
+          100% { transform: translate(-50%, -50%) scale(4); opacity: 0; border-width: 1px; }
+        }
+        @keyframes power-ring {
+          0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; border-width: 3px; }
+          100% { transform: translate(-50%, -50%) scale(2.5); opacity: 0; border-width: 1px; }
+        }
+        @keyframes power-particles {
+          0% { transform: translateY(0) scale(1); opacity: 1; }
+          100% { transform: translateY(-40px) scale(0); opacity: 0; }
+        }
+        @keyframes box-idle {
+          0%, 100% { transform: translateY(0) rotate(0deg); }
+          50% { transform: translateY(-2px) rotate(1deg); }
+        }
+        @keyframes box-bump-right {
+          0% { transform: translateX(-75px) translateY(0) rotate(0deg); }
+          20% { transform: translateX(-50px) translateY(-20px) rotate(90deg); }
+          40% { transform: translateX(-25px) translateY(-30px) rotate(200deg); }
+          60% { transform: translateX(-10px) translateY(-15px) rotate(300deg); }
+          80% { transform: translateX(-3px) translateY(-5px) rotate(345deg); }
+          100% { transform: translateX(0) translateY(0) rotate(360deg); }
+        }
+        @keyframes box-bump-left {
+          0% { transform: translateX(75px) translateY(0) rotate(0deg); }
+          20% { transform: translateX(50px) translateY(-20px) rotate(-90deg); }
+          40% { transform: translateX(25px) translateY(-30px) rotate(-200deg); }
+          60% { transform: translateX(10px) translateY(-15px) rotate(-300deg); }
+          80% { transform: translateX(3px) translateY(-5px) rotate(-345deg); }
+          100% { transform: translateX(0) translateY(0) rotate(-360deg); }
+        }
+        @keyframes speech-pop {
+          0% { transform: scale(0); opacity: 0; }
+          60% { transform: scale(1.08); }
+          100% { transform: scale(1); opacity: 1; }
+        }
+      `}</style>
+      <div ref={crabElRef} style={{
+        position: 'fixed', left: 0, bottom: crabOnBox ? 20 : -48,
+        transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(0px) scaleX(${facing === 'left' ? -1 : 1})`,
+        zIndex: 9990, pointerEvents: 'none',
+        willChange: 'transform, bottom, filter',
+        filter: frenzy
+          ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
+          : crabOnBox
+            ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
+            : 'none',
+      }}>
+        {/* Body */}
+        <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
+          <img src="/clawbox-crab.png" alt="" style={{ width: 150, height: 150, objectFit: 'contain' }} />
+          {/* FRENZY MODE — money rain + shockwaves */}
+          {frenzy && (
+            <>
+              {moneyParticles.map(p => (
+                <div key={p.id} style={{
+                  position: 'absolute', bottom: 50, left: p.x,
+                  fontSize: '2rem',
+                  animation: `money-rain ${2 + Math.random() * 1.5}s ease-out ${p.delay}s both`,
+                  pointerEvents: 'none',
+                }}>{p.emoji}</div>
+              ))}
+              {[0, 0.6].map(delay => (
+                <div key={delay} style={{
+                  position: 'absolute', top: '50%', left: '50%',
+                  width: 80, height: 80, borderRadius: '50%',
+                  border: '3px solid rgba(251,191,36,0.7)',
+                  animation: `frenzy-ring 1s ease-out ${delay}s infinite`,
+                  pointerEvents: 'none',
+                }} />
+              ))}
+            </>
+          )}
+          {/* Power-up effects when on box */}
+          {crabOnBox && (
+            <>
+              {/* Energy rings */}
+              {[0, 0.7].map(delay => (
+                <div key={delay} style={{
+                  position: 'absolute', top: '50%', left: '50%',
+                  width: 60, height: 60, borderRadius: '50%',
+                  border: '2px solid rgba(249,115,22,0.6)',
+                  animation: `power-ring 1.5s ease-out ${delay}s infinite`,
+                  pointerEvents: 'none',
+                }} />
+              ))}
+              {/* Floating particles */}
+              {[...Array(3)].map((_, i) => (
+                <div key={i} style={{
+                  position: 'absolute',
+                  bottom: 20 + Math.random() * 40,
+                  left: 30 + Math.random() * 90,
+                  width: 4, height: 4, borderRadius: '50%',
+                  background: i % 2 === 0 ? '#f97316' : '#fbbf24',
+                  animation: `power-particles ${1 + Math.random()}s ease-out ${Math.random() * 2}s infinite`,
+                  pointerEvents: 'none',
+                }} />
+              ))}
+            </>
+          )}
+        </div>
+        {/* Speech bubble — OUTSIDE body div so it doesn't wobble */}
+        {speech && (
+          <div style={{
+            position: 'absolute', bottom: 155, left: 75,
+            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
+            zIndex: 10,
+          }}>
+            <div style={{
+              background: frenzy ? 'rgba(251,191,36,0.95)' : state === 'sass' ? 'rgba(220,38,38,0.9)' : state === 'facepalm' ? 'rgba(100,100,100,0.9)' : 'rgba(249,115,22,0.92)',
+              color: frenzy ? '#000' : '#fff',
+              padding: frenzy ? '10px 20px' : '8px 18px',
+              borderRadius: 12, fontSize: frenzy ? '1.2rem' : '1.1rem', fontWeight: 700,
+              whiteSpace: 'nowrap',
+              lineHeight: 1.3,
+              animation: 'speech-pop 0.3s ease-out forwards',
+              boxShadow: 'none',
+              textAlign: 'center' as const,
+            }}>
+              {speech}
+              <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${frenzy ? 'rgba(251,191,36,0.95)' : state === 'sass' ? 'rgba(220,38,38,0.9)' : state === 'facepalm' ? 'rgba(100,100,100,0.9)' : 'rgba(249,115,22,0.92)'}` }} />
+            </div>
+          </div>
+        )}
+        {/* Shadow */}
+        <div style={{
+          position: 'absolute', bottom: -5, left: '50%',
+          transform: `translateX(-50%) scaleY(0.3)`,
+          width: 80, height: 16, borderRadius: '50%',
+          background: 'rgba(249,115,22,0.15)',
+          opacity: state === 'jump' ? 0.2 : state === 'sleep' ? 0.4 : 0.5,
+          transition: 'opacity 0.5s ease',
+        }} />
+      </div>
+
+      {/* The ClawBox — crab's prop */}
+      <div ref={boxElRef} style={{
+        position: 'fixed',
+        left: 0,
+        bottom: -3,
+        transform: `translateX(calc(${boxXRef.current}vw - 50%))`,
+        zIndex: crabOnBox ? 9989 : 9991,
+        pointerEvents: 'none',
+        willChange: 'transform, filter',
+        filter: boxGlow ? 'drop-shadow(0 0 10px rgba(249,115,22,0.5))' : 'none',
+      }}>
+        <div style={{
+          animation: boxKick ? `box-bump-${boxKick} 0.7s ease-out forwards` : 'box-idle 4s ease-in-out infinite',
+          width: 40, height: 40,
+        }}>
+          <img src="/clawbox-box.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+
+export default memo(ClawBoxMascot)

@@ -1,9 +1,12 @@
 "use client";
 
 import Image from "next/image";
+import dynamic from "next/dynamic";
 import { useWindows, type WindowConfig } from "@/hooks/useWindows";
 import Window from "@/components/Window";
 import Taskbar from "@/components/Taskbar";
+
+const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
 // Inline SVG Icons
 const SettingsIcon = ({ size = 32 }: { size?: number }) => (
@@ -402,6 +405,9 @@ export default function DesktopPage() {
           );
         })}
       </div>
+
+      {/* Mascot */}
+      <Mascot />
 
       {/* Taskbar / Dock */}
       <Taskbar
