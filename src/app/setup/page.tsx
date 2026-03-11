@@ -508,6 +508,7 @@ export default function ChromeDesktop() {
               return (
                 <button
                   key={app.id}
+                  data-crab-platform="true"
                   onClick={() => openApp(`installed-${app.id}`)}
                   className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 ${
                     isRecent ? "animate-install-bounce" : ""

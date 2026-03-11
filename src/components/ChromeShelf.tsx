@@ -66,6 +66,7 @@ export default function ChromeShelf({
         {apps.map((app) => (
           <button
             key={app.id}
+            data-crab-platform="true"
             onClick={() => onAppClick(app.id)}
             className="relative w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
             title={app.name}

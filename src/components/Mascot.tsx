@@ -273,6 +273,57 @@ function ClawBoxMascot() {
     xRef.current += (p.velX * dt / vw) * 100
     p.posY -= p.velY * dt // posY = height from ground, velY positive = falling
 
+    // ─── Collision: platforms (desktop icons with data-crab-platform) ───
+    const crabPxX = (xRef.current / 100) * vw
+    const crabBottom = vh - p.posY  // crab bottom edge in screen coords (from top)
+    const crabSize = 75 // crab image size
+    let landedOnPlatform = false
+
+    const platforms = document.querySelectorAll('[data-crab-platform]')
+    platforms.forEach((el) => {
+      const rect = (el as HTMLElement).getBoundingClientRect()
+      // Check horizontal overlap
+      const crabLeft = crabPxX - crabSize / 2
+      const crabRight = crabPxX + crabSize / 2
+      if (crabRight > rect.left && crabLeft < rect.right) {
+        // Check if crab is falling onto this platform (from above)
+        const platformTop = rect.top
+        const prevCrabBottom = vh - (p.posY + p.velY * dt) // where crab was last frame
+        if (p.velY > 0 && prevCrabBottom <= platformTop && crabBottom >= platformTop) {
+          // Land on platform
+          p.posY = vh - platformTop
+          landedOnPlatform = true
+        }
+        // Already standing on platform
+        if (Math.abs(crabBottom - rect.top) < 3 && p.velY >= 0) {
+          p.posY = vh - rect.top
+          landedOnPlatform = true
+        }
+      }
+    })
+
+    if (landedOnPlatform) {
+      if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
+        p.velY *= -p.bounciness
+        if (crabElRef.current) {
+          const img = crabElRef.current.querySelector('img')
+          if (img) {
+            img.style.transition = 'transform 0.1s'
+            img.style.transform = 'scaleY(0.7) scaleX(1.3)'
+            setTimeout(() => { img.style.transform = ''; img.style.transition = '' }, 150)
+          }
+        }
+      } else {
+        p.velY = 0
+        if (Math.abs(p.velX) < 5) {
+          p.active = false
+          updateCrabPos()
+          setTimeout(() => doAction(), 2000)
+          return
+        }
+      }
+    }
+
     // ─── Collision: floor ───
     if (p.posY <= 0) {
       p.posY = 0
