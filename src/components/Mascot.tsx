@@ -557,12 +557,14 @@ function ClawBoxMascot() {
     p.lastPointerTime = performance.now()
     p.velX = 0
     p.velY = 0
-    // Capture on the crab container (not e.target which may be the img child)
-    crabElRef.current?.setPointerCapture?.(e.pointerId)
+    // Use window-level listeners for move/up (bulletproof, no capture issues)
+    window.addEventListener('pointermove', windowPointerMove)
+    window.addEventListener('pointerup', windowPointerUp)
+    window.addEventListener('pointercancel', windowPointerUp)
     say('Whoa! Put me down! 😳', 2000)
   }, [])
 
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+  const windowPointerMove = useCallback((e: PointerEvent) => {
     if (!draggingRef.current) return
     e.preventDefault()
     const vw = window.innerWidth
@@ -593,20 +595,22 @@ function ClawBoxMascot() {
     }
   }, [])
 
-  const handlePointerUp = useCallback(() => {
+  const windowPointerUp = useCallback(() => {
+    // Clean up window listeners
+    window.removeEventListener('pointermove', windowPointerMove)
+    window.removeEventListener('pointerup', windowPointerUp)
+    window.removeEventListener('pointercancel', windowPointerUp)
+
     if (!draggingRef.current) return
     draggingRef.current = false
 
     const p = physicsRef.current
-    // Convert tracked velocity: velX stays in px/s, velY in px/s (positive = downward)
-    // Clamp throw velocity for sanity
     p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
     p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
     p.posY = dragYRef.current
     p.lastTime = performance.now()
     p.active = true
 
-    // Sassy drop lines
     const dropLines = [
       'Freedom! ...wait, same desktop.',
       'AAAAAAAAA! 🫠',
@@ -627,7 +631,6 @@ function ClawBoxMascot() {
     ]
     say(dropLines[Math.floor(Math.random() * dropLines.length)], 3000)
 
-    // Start the physics loop
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [physicsLoop])
 
@@ -1030,6 +1033,9 @@ function ClawBoxMascot() {
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
+      window.removeEventListener('pointermove', windowPointerMove)
+      window.removeEventListener('pointerup', windowPointerUp)
+      window.removeEventListener('pointercancel', windowPointerUp)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1173,10 +1179,6 @@ function ClawBoxMascot() {
       `}</style>
       <div ref={crabElRef}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onLostPointerCapture={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : -3,
