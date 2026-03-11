@@ -4,6 +4,7 @@
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
+    "terminal-server": "npx ts-node --project tsconfig.json scripts/terminal-server.ts",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",

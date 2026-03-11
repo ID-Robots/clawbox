@@ -83,8 +83,6 @@ function TerminalInner() {
         scrollback: 5000,
         allowTransparency: true,
         macOptionIsMeta: true,
-        // Enable copy on selection
-        copyOnSelect: false,
       });
 
       const fitAddon = new FitAddon();

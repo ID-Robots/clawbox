@@ -8,6 +8,8 @@ import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
 import AppStore, { storeApps } from "@/components/AppStore";
+import FilesApp from "@/components/FilesApp";
+import SystemApp from "@/components/SystemApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
 
@@ -21,7 +23,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -33,9 +35,9 @@ const apps: AppDef[] = [
   { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
   { id: "openclaw", name: "OpenClaw", color: "#06b6d4", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
   { id: "terminal", name: "Terminal", color: "#22c55e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "files", name: "Files", color: "#f97316", type: "placeholder", pinned: true },
+  { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "system", name: "System Monitor", color: "#3b82f6", type: "placeholder", pinned: false },
+  { id: "system", name: "System Monitor", color: "#3b82f6", type: "system", pinned: false },
   { id: "ollama", name: "Ollama", color: "#a855f7", type: "placeholder", pinned: false },
   { id: "network", name: "Network", color: "#14b8a6", type: "placeholder", pinned: false },
   { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://docs.openclaw.ai", pinned: false },
@@ -506,6 +508,10 @@ export default function ChromeDesktop() {
             title="OpenClaw Control"
           />
         );
+      case "terminal":
+        return <TerminalApp />;
+      case "system":
+        return <SystemApp />;
       case "store":
         return (
           <AppStore
@@ -559,6 +565,8 @@ export default function ChromeDesktop() {
             </div>
           </div>
         );
+      case "files":
+        return <FilesApp />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">

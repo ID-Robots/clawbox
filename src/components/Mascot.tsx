@@ -198,8 +198,8 @@ function ClawBoxMascot() {
       savedPos.current = s ? JSON.parse(s) : { x: 32 + Math.random() * 20, bx: 35 + Math.random() * 15 }
     } catch { savedPos.current = { x: 50, bx: 42 } }
   }
-  const xRef = useRef(savedPos.current.x)
-  const boxXRef = useRef(savedPos.current.bx)
+  const xRef = useRef(savedPos.current?.x ?? 50)
+  const boxXRef = useRef(savedPos.current?.bx ?? 42)
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
