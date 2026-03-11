@@ -179,6 +179,8 @@ function ClawBoxMascot() {
   const [crabOnBox, setCrabOnBox] = useState(false)
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [state, setState] = useState<MascotState>('idle')
+  const [physicsActive, setPhysicsActive] = useState(false)
+  const physicsActiveRef = useRef(false)
   const [speech, setSpeech] = useState('')
   const [frenzy, setFrenzy] = useState(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
@@ -316,7 +318,7 @@ function ClawBoxMascot() {
       } else {
         p.velY = 0
         if (Math.abs(p.velX) < 5) {
-          p.active = false
+          p.active = false; physicsActiveRef.current = false; setPhysicsActive(false)
           updateCrabPos()
           setTimeout(() => doAction(), 2000)
           return
@@ -342,7 +344,7 @@ function ClawBoxMascot() {
         p.velY = 0
         // Landed — stop physics if X vel is also ~0
         if (Math.abs(p.velX) < 5) {
-          p.active = false
+          p.active = false; physicsActiveRef.current = false; setPhysicsActive(false)
           updateCrabPos()
           setTimeout(() => doAction(), 2000)
           return
@@ -387,6 +389,7 @@ function ClawBoxMascot() {
     e.preventDefault()
     e.stopPropagation()
     draggingRef.current = true
+    setPhysicsActive(true); physicsActiveRef.current = true // prevent React from overriding position
     // Kill physics if running
     const p = physicsRef.current
     p.active = false
@@ -897,8 +900,9 @@ function ClawBoxMascot() {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         style={{
-        position: 'fixed', left: 0, bottom: crabOnBox ? 20 : -48,
-        transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(0px) scaleX(${facing === 'left' ? -1 : 1})`,
+        position: 'fixed', left: 0,
+        bottom: physicsActive ? 0 : (crabOnBox ? 20 : -48),
+        transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(0px) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
