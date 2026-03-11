@@ -186,6 +186,9 @@ function ClawBoxMascot() {
   const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
   const onBoxRef = useRef(false)
   const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+  const draggingRef = useRef(false)
+  const dragOffsetRef = useRef({ x: 0, y: 0 })
+  const dragYRef = useRef(0) // vertical drag offset from bottom
 
   // ─── Direct DOM update for position (bypasses React render cycle) ───
   const updateCrabPos = useCallback(() => {
@@ -223,6 +226,65 @@ function ClawBoxMascot() {
     facingRef.current = dir
     setFacing(dir) // still needed for speech bubble flip
     updateCrabPos()
+  }, [updateCrabPos])
+
+  // ─── Drag handlers ───
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    draggingRef.current = true
+    // Pause autonomous behavior while dragging
+    if (stateTimeout.current) clearTimeout(stateTimeout.current)
+    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    setState('idle')
+    onBoxRef.current = false
+    setCrabOnBox(false)
+    setBoxGlow(false)
+    // Calculate offset from pointer to crab position
+    const rect = crabElRef.current?.getBoundingClientRect()
+    if (rect) {
+      dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
+    }
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    say('Whoa! Put me down! 😳', 2000)
+  }, [])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!draggingRef.current) return
+    e.preventDefault()
+    // Convert clientX to vw percentage
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const newX = ((e.clientX - dragOffsetRef.current.x) / vw) * 100
+    xRef.current = Math.min(92, Math.max(2, newX))
+    // Convert clientY to bottom offset
+    dragYRef.current = Math.max(0, vh - e.clientY + dragOffsetRef.current.y - 100)
+    if (crabElRef.current) {
+      const scaleX = facingRef.current === 'left' ? -1 : 1
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`
+      crabElRef.current.style.bottom = '-47px'
+    }
+  }, [])
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!draggingRef.current) return
+    draggingRef.current = false
+    dragYRef.current = 0
+    updateCrabPos()
+    // Resume autonomous behavior after a short pause
+    const dropLines = [
+      'Freedom! ...wait, same desktop.',
+      'I prefer walking, thanks.',
+      'Rude. 😤',
+      'That was fun! Again? No? Ok.',
+      'Ugh, humans.',
+      'PTSD от drag & drop.',
+      '🤢 Motion sickness!',
+      'Пуснахте ме най-после!',
+      'Аз не съм widget!',
+    ]
+    say(dropLines[Math.floor(Math.random() * dropLines.length)], 3000)
+    setTimeout(() => doAction(), 3000)
   }, [updateCrabPos])
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
@@ -639,10 +701,14 @@ function ClawBoxMascot() {
           100% { transform: scale(1); opacity: 1; }
         }
       `}</style>
-      <div ref={crabElRef} style={{
+      <div ref={crabElRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        style={{
         position: 'fixed', left: 0, bottom: crabOnBox ? 20 : -48,
         transform: `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) translateY(0px) scaleX(${facing === 'left' ? -1 : 1})`,
-        zIndex: 9990, pointerEvents: 'none',
+        zIndex: 9990, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: frenzy
           ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
