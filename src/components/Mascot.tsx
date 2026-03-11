@@ -471,8 +471,10 @@ function ClawBoxMascot() {
     }
 
     // ─── Collision: floor ───
-    if (p.posY <= 0) {
-      p.posY = 0
+    // Floor (crab rests on shelf, 56px from bottom)
+    const crabFloor = 56
+    if (p.posY <= crabFloor) {
+      p.posY = crabFloor
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
         // Squash effect on bounce
@@ -600,9 +602,10 @@ function ClawBoxMascot() {
     const vw = window.innerWidth
     boxXRef.current += (p.velX * dt / vw) * 100
     p.posY -= p.velY * dt
-    // Floor
-    if (p.posY <= 0) {
-      p.posY = 0
+    // Floor (box rests on shelf, 56px from bottom)
+    const boxFloor = 56
+    if (p.posY <= boxFloor) {
+      p.posY = boxFloor
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
       } else {
@@ -610,6 +613,7 @@ function ClawBoxMascot() {
         if (Math.abs(p.velX) < 5) {
           p.active = false; setBoxPhysicsActive(false)
           if (boxElRef.current) boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+          saveCrabPos()
           return
         }
       }
@@ -1130,7 +1134,7 @@ function ClawBoxMascot() {
         onPointerUp={handlePointerUp}
         style={{
         position: 'fixed', left: 0,
-        bottom: physicsActive ? 0 : -3,
+        bottom: physicsActive ? 0 : 53,
         transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, bottom, filter',
@@ -1338,9 +1342,9 @@ function ClawBoxMascot() {
         style={{
         position: 'fixed',
         left: 0,
-        bottom: boxPhysicsActive ? 0 : -3,
+        bottom: boxPhysicsActive ? 0 : 53,
         transform: boxPhysicsActive ? undefined : `translateX(calc(${boxXRef.current}vw - 50%))`,
-        zIndex: crabOnBox ? 10000 : 10002,
+        zIndex: 10003,
         pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, filter',
         filter: boxGlow ? 'drop-shadow(0 0 10px rgba(249,115,22,0.5))' : 'none',
