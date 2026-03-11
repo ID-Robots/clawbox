@@ -848,6 +848,16 @@ function ClawBoxMascot() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    // Teleport crab to random position on page load
+    xRef.current = 5 + Math.random() * 85
+    boxXRef.current = 5 + Math.random() * 85
+    updateCrabPos()
+    if (boxElRef.current) boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+    // Random facing
+    const dir = Math.random() > 0.5 ? 'right' : 'left'
+    facingRef.current = dir
+    setFacing(dir)
+
     const startDelay = setTimeout(doAction, 2000)
     return () => {
       clearTimeout(startDelay)
