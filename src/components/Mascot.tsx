@@ -276,7 +276,7 @@ function ClawBoxMascot() {
     // ─── Collision: platforms (desktop icons with data-crab-platform) ───
     const crabPxX = (xRef.current / 100) * vw
     const crabBottom = vh - p.posY  // crab bottom edge in screen coords (from top)
-    const crabSize = 75 // crab image size
+    const crabSize = 150 // crab image size
     let landedOnPlatform = false
 
     const platforms = document.querySelectorAll('[data-crab-platform]')
@@ -906,7 +906,7 @@ function ClawBoxMascot() {
       }}>
         {/* Body */}
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 75, height: 75, objectFit: 'contain' }} />
+          <img src="/clawbox-crab.png" alt="" style={{ width: 150, height: 150, objectFit: 'contain' }} />
           {/* FRENZY MODE — money rain + shockwaves */}
           {frenzy && (
             <>
@@ -1006,7 +1006,7 @@ function ClawBoxMascot() {
           animation: boxKick ? `box-bump-${boxKick} 0.7s ease-out forwards` : 'box-idle 4s ease-in-out infinite',
           width: 40, height: 40,
         }}>
-          <img src="/clawbox-box.png" alt="" style={{ width: 20, height: 20, objectFit: 'contain' }} />
+          <img src="/clawbox-box.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
         </div>
       </div>
     </>
