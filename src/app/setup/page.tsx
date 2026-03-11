@@ -7,7 +7,7 @@ import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
-import AppStore from "@/components/AppStore";
+import AppStore, { storeApps } from "@/components/AppStore";
 import type { StoreApp } from "@/components/AppStore";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
