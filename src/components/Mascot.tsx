@@ -364,6 +364,13 @@ function ClawBoxMascot() {
       }
     }
 
+    // ─── Collision: ceiling ───
+    const crabVh = window.innerHeight
+    if (p.posY >= crabVh - 150) { // 150 = crab size
+      p.posY = crabVh - 150
+      if (Math.abs(p.velY) > p.minBounceVel) p.velY = Math.abs(p.velY) * p.bounciness
+      else p.velY = 0
+    }
     // ─── Collision: walls ───
     if (xRef.current <= 2) {
       xRef.current = 2
@@ -521,6 +528,13 @@ function ClawBoxMascot() {
           return
         }
       }
+    }
+    // Ceiling
+    const vh = window.innerHeight
+    if (p.posY >= vh - 40) { // 40 = box size
+      p.posY = vh - 40
+      if (Math.abs(p.velY) > p.minBounceVel) p.velY = Math.abs(p.velY) * p.bounciness
+      else p.velY = 0
     }
     // Walls
     if (boxXRef.current <= 2) { boxXRef.current = 2; p.velX = Math.abs(p.velX) * p.bounciness }
