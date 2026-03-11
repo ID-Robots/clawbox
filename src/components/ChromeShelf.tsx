@@ -27,7 +27,7 @@ export default function ChromeShelf({
 }: ChromeShelfProps) {
   return (
     <div
-      className="fixed bottom-0 left-0 right-0 h-14 flex items-center justify-between px-2 z-[10000]"
+      className="fixed bottom-0 left-0 right-0 h-14 flex items-center justify-center px-2 z-[10000]"
       style={{
         background: "rgba(17, 24, 39, 0.85)",
         backdropFilter: "blur(20px)",
@@ -35,7 +35,7 @@ export default function ChromeShelf({
         borderTop: "1px solid rgba(255, 255, 255, 0.1)",
       }}
     >
-      {/* Left side: launcher + pinned apps */}
+      {/* Centered: launcher + pinned apps */}
       <div className="flex items-center gap-1">
         {/* Launcher button (circle icon) */}
         <button
@@ -89,10 +89,10 @@ export default function ChromeShelf({
         ))}
       </div>
 
-      {/* Right side: system tray */}
+      {/* Right side: system tray (absolute to keep apps centered) */}
       <button
         onClick={onTrayClick}
-        className="flex items-center gap-3 h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+        className="absolute right-2 flex items-center gap-3 h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
         title="System Settings"
       >
         {/* WiFi icon */}
