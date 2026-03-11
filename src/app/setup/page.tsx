@@ -402,7 +402,7 @@ export default function ChromeDesktop() {
       case "openclaw":
         return (
           <iframe
-            src="/"
+            src={`http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:${process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789'}`}
             className="w-full h-full border-0"
             title="OpenClaw Control"
           />
