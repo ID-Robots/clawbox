@@ -208,6 +208,18 @@ function ClawBoxMascot() {
     lastPointerTime: 0,
   })
   const physicsRAF = useRef<number>(0)
+  // Box physics (separate entity)
+  const boxDraggingRef = useRef(false)
+  const boxDragOffsetRef = useRef({ x: 0, y: 0 })
+  const boxPhysicsRef = useRef({
+    active: false,
+    velX: 0, velY: 0, posY: 0,
+    gravity: 900, friction: 300, bounciness: 0.4,
+    minBounceVel: 30, maxVel: 2000,
+    lastTime: 0, lastPointerX: 0, lastPointerY: 0, lastPointerTime: 0,
+  })
+  const boxPhysicsRAF = useRef<number>(0)
+  const [boxPhysicsActive, setBoxPhysicsActive] = useState(false)
 
   // ─── Direct DOM update for position (bypasses React render cycle) ───
   const updateCrabPos = useCallback(() => {
@@ -480,6 +492,89 @@ function ClawBoxMascot() {
     // Start the physics loop
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [physicsLoop])
+
+  // ─── Box physics loop ───
+  const boxPhysicsLoop = useCallback(() => {
+    const p = boxPhysicsRef.current
+    if (!p.active || boxDraggingRef.current) return
+    const now = performance.now()
+    const dt = Math.min((now - p.lastTime) / 1000, 0.05)
+    p.lastTime = now
+    p.velY += p.gravity * dt
+    if (p.velX > 0) p.velX = Math.max(0, p.velX - p.friction * dt)
+    else if (p.velX < 0) p.velX = Math.min(0, p.velX + p.friction * dt)
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+    const vw = window.innerWidth
+    boxXRef.current += (p.velX * dt / vw) * 100
+    p.posY -= p.velY * dt
+    // Floor
+    if (p.posY <= 0) {
+      p.posY = 0
+      if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
+        p.velY *= -p.bounciness
+      } else {
+        p.velY = 0
+        if (Math.abs(p.velX) < 5) {
+          p.active = false; setBoxPhysicsActive(false)
+          if (boxElRef.current) boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+          return
+        }
+      }
+    }
+    // Walls
+    if (boxXRef.current <= 2) { boxXRef.current = 2; p.velX = Math.abs(p.velX) * p.bounciness }
+    if (boxXRef.current >= 95) { boxXRef.current = 95; p.velX = -Math.abs(p.velX) * p.bounciness }
+    if (boxElRef.current) {
+      boxElRef.current.style.bottom = '0px'
+      boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-p.posY}px)`
+    }
+    boxPhysicsRAF.current = requestAnimationFrame(boxPhysicsLoop)
+  }, [])
+
+  const handleBoxPointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault(); e.stopPropagation()
+    boxDraggingRef.current = true; setBoxPhysicsActive(true)
+    const p = boxPhysicsRef.current
+    p.active = false
+    if (boxPhysicsRAF.current) cancelAnimationFrame(boxPhysicsRAF.current)
+    const rect = boxElRef.current?.getBoundingClientRect()
+    if (rect) boxDragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
+    p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
+    p.velX = 0; p.velY = 0
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+  }, [])
+
+  const handleBoxPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!boxDraggingRef.current) return
+    e.preventDefault()
+    const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
+    const p = boxPhysicsRef.current
+    const dt = (now - p.lastPointerTime) / 1000
+    if (dt > 0.005) {
+      p.velX = (e.clientX - p.lastPointerX) / dt
+      p.velY = (e.clientY - p.lastPointerY) / dt
+      p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
+    }
+    boxXRef.current = Math.min(95, Math.max(2, ((e.clientX - boxDragOffsetRef.current.x) / vw) * 100))
+    const posY = Math.max(0, vh - e.clientY - 20)
+    if (boxElRef.current) {
+      boxElRef.current.style.bottom = '0px'
+      boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-posY}px)`
+    }
+    boxPhysicsRef.current.posY = posY
+  }, [])
+
+  const handleBoxPointerUp = useCallback(() => {
+    if (!boxDraggingRef.current) return
+    boxDraggingRef.current = false
+    const p = boxPhysicsRef.current
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+    p.lastTime = performance.now()
+    p.active = true
+    boxPhysicsRAF.current = requestAnimationFrame(boxPhysicsLoop)
+  }, [boxPhysicsLoop])
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
@@ -999,13 +1094,17 @@ function ClawBoxMascot() {
       </div>
 
       {/* The ClawBox — crab's prop */}
-      <div ref={boxElRef} style={{
+      <div ref={boxElRef}
+        onPointerDown={handleBoxPointerDown}
+        onPointerMove={handleBoxPointerMove}
+        onPointerUp={handleBoxPointerUp}
+        style={{
         position: 'fixed',
         left: 0,
-        bottom: -3,
-        transform: `translateX(calc(${boxXRef.current}vw - 50%))`,
+        bottom: boxPhysicsActive ? 0 : -3,
+        transform: boxPhysicsActive ? undefined : `translateX(calc(${boxXRef.current}vw - 50%))`,
         zIndex: crabOnBox ? 10000 : 10002,
-        pointerEvents: 'none',
+        pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, filter',
         filter: boxGlow ? 'drop-shadow(0 0 10px rgba(249,115,22,0.5))' : 'none',
       }}>
