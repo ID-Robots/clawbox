@@ -5,8 +5,8 @@ import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
 const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: number }[] = [
-  { state: 'waddle',    dur: [8000, 15000], weight: 30 },
-  { state: 'idle',      dur: [4000, 8000],  weight: 25 },
+  { state: 'waddle',    dur: [6000, 12000], weight: 45 },
+  { state: 'idle',      dur: [3000, 5000],  weight: 15 },
   { state: 'jump',      dur: [1500, 1500],  weight: 5 },
   { state: 'celebrate', dur: [3000, 3000],  weight: 3 },
   { state: 'sleep',     dur: [6000, 12000], weight: 12 },
@@ -668,19 +668,17 @@ function ClawBoxMascot() {
       const bx = boxXRef.current
       let newTarget: number
       
-      if (Math.random() < 0.2) {
-        // 20%: wander far
-        newTarget = Math.min(88, Math.max(5, Math.random() * 83 + 5))
+      // Always chase the box — crab wants to be near it
+      const dist = Math.abs(startX - bx)
+      if (dist < 3) {
+        // Already close — small wander around box
+        newTarget = bx + randRange(-8, 8)
       } else {
-        // 80%: walk THROUGH the box (guarantees interaction)
-        // Pick a target on the other side of the box from where we are
-        if (startX < bx) {
-          newTarget = bx + randRange(5, 20) // walk past box to the right
-        } else {
-          newTarget = bx - randRange(5, 20) // walk past box to the left
-        }
-        newTarget = Math.min(88, Math.max(5, newTarget))
+        // Walk to the box (slight overshoot for natural feel)
+        const overshoot = randRange(-3, 5) * (startX < bx ? 1 : -1)
+        newTarget = bx + overshoot
       }
+      newTarget = Math.min(88, Math.max(5, newTarget))
       setFacingDirect(newTarget > startX ? 'right' : 'left')
 
       // Use requestAnimationFrame for smooth GPU-friendly movement
