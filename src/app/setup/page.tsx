@@ -9,6 +9,7 @@ import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
 import AppStore, { storeApps } from "@/components/AppStore";
 import type { StoreApp } from "@/components/AppStore";
+import TerminalApp from "@/components/TerminalApp";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -20,7 +21,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -31,7 +32,7 @@ interface AppDef {
 const apps: AppDef[] = [
   { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
   { id: "openclaw", name: "OpenClaw", color: "#06b6d4", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
-  { id: "terminal", name: "Terminal", color: "#22c55e", type: "placeholder", pinned: true },
+  { id: "terminal", name: "Terminal", color: "#22c55e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "placeholder", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "system", name: "System Monitor", color: "#3b82f6", type: "placeholder", pinned: false },
@@ -609,7 +610,7 @@ export default function ChromeDesktop() {
           return (
             <div
               key={app.id}
-              data-crab-platform="true"
+
               style={isBeingDragged && dragPos ? {
                 position: "fixed",
                 left: dragPos.x - 40,
