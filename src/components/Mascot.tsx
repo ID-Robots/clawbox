@@ -188,7 +188,24 @@ function ClawBoxMascot() {
   const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const draggingRef = useRef(false)
   const dragOffsetRef = useRef({ x: 0, y: 0 })
-  const dragYRef = useRef(0) // vertical drag offset from bottom
+  const dragYRef = useRef(0) // vertical position in pixels from bottom
+  // ImpactJS-style physics engine state
+  const physicsRef = useRef({
+    active: false,
+    velX: 0,        // px/s
+    velY: 0,        // px/s
+    posY: 0,        // px from bottom of screen
+    gravity: 1800,  // px/s² (ImpactJS default ~similar)
+    friction: 600,  // px/s decel
+    bounciness: 0.5,
+    minBounceVel: 60,
+    maxVel: 1200,
+    lastTime: 0,
+    lastPointerX: 0,
+    lastPointerY: 0,
+    lastPointerTime: 0,
+  })
+  const physicsRAF = useRef<number>(0)
 
   // ─── Direct DOM update for position (bypasses React render cycle) ───
   const updateCrabPos = useCallback(() => {
@@ -228,23 +245,118 @@ function ClawBoxMascot() {
     updateCrabPos()
   }, [updateCrabPos])
 
-  // ─── Drag handlers ───
+  // ─── ImpactJS-style physics tick (runs after drop) ───
+  const physicsLoop = useCallback(() => {
+    const p = physicsRef.current
+    if (!p.active || draggingRef.current) return
+
+    const now = performance.now()
+    const dt = Math.min((now - p.lastTime) / 1000, 0.05) // cap delta to avoid spiral
+    p.lastTime = now
+
+    // Apply gravity (ImpactJS: vel.y += gravity * tick * gravityFactor)
+    p.velY += p.gravity * dt
+
+    // Apply friction to X (ImpactJS getNewVelocity with friction)
+    if (p.velX > 0) {
+      p.velX = Math.max(0, p.velX - p.friction * dt)
+    } else if (p.velX < 0) {
+      p.velX = Math.min(0, p.velX + p.friction * dt)
+    }
+
+    // Clamp velocity
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+
+    // Move
+    const vw = window.innerWidth
+    xRef.current += (p.velX * dt / vw) * 100
+    p.posY -= p.velY * dt // posY = height from ground, velY positive = falling
+
+    // ─── Collision: floor ───
+    if (p.posY <= 0) {
+      p.posY = 0
+      if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
+        p.velY *= -p.bounciness
+        // Squash effect on bounce
+        if (crabElRef.current) {
+          const img = crabElRef.current.querySelector('img')
+          if (img) {
+            img.style.transition = 'transform 0.1s'
+            img.style.transform = 'scaleY(0.7) scaleX(1.3)'
+            setTimeout(() => { img.style.transform = ''; img.style.transition = '' }, 150)
+          }
+        }
+      } else {
+        p.velY = 0
+        // Landed — stop physics if X vel is also ~0
+        if (Math.abs(p.velX) < 5) {
+          p.active = false
+          updateCrabPos()
+          setTimeout(() => doAction(), 2000)
+          return
+        }
+      }
+    }
+
+    // ─── Collision: walls ───
+    if (xRef.current <= 2) {
+      xRef.current = 2
+      if (Math.abs(p.velX) > p.minBounceVel) {
+        p.velX *= -p.bounciness
+      } else {
+        p.velX = 0
+      }
+    }
+    if (xRef.current >= 92) {
+      xRef.current = 92
+      if (Math.abs(p.velX) > p.minBounceVel) {
+        p.velX *= -p.bounciness
+      } else {
+        p.velX = 0
+      }
+    }
+
+    // Update facing based on velocity
+    if (p.velX > 30) setFacingDirect('right')
+    else if (p.velX < -30) setFacingDirect('left')
+
+    // Render
+    if (crabElRef.current) {
+      const scaleX = facingRef.current === 'left' ? -1 : 1
+      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px) scaleX(${scaleX})`
+    }
+
+    physicsRAF.current = requestAnimationFrame(physicsLoop)
+  }, [updateCrabPos])
+
+  // ─── Drag handlers with velocity tracking ───
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
     e.stopPropagation()
     draggingRef.current = true
-    // Pause autonomous behavior while dragging
+    // Kill physics if running
+    const p = physicsRef.current
+    p.active = false
+    if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
+    // Pause autonomous behavior
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
     setState('idle')
     onBoxRef.current = false
     setCrabOnBox(false)
     setBoxGlow(false)
-    // Calculate offset from pointer to crab position
+    // Calculate offset
     const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) {
       dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     }
+    // Track pointer for velocity calculation
+    p.lastPointerX = e.clientX
+    p.lastPointerY = e.clientY
+    p.lastPointerTime = performance.now()
+    p.velX = 0
+    p.velY = 0
     ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
     say('Whoa! Put me down! 😳', 2000)
   }, [])
@@ -252,13 +364,25 @@ function ClawBoxMascot() {
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
     e.preventDefault()
-    // Convert clientX to vw percentage
     const vw = window.innerWidth
     const vh = window.innerHeight
+    const now = performance.now()
+
+    // Track velocity from pointer movement (ImpactJS-style: pixels/second)
+    const p = physicsRef.current
+    const dt = (now - p.lastPointerTime) / 1000
+    if (dt > 0.005) { // debounce
+      p.velX = (e.clientX - p.lastPointerX) / dt
+      p.velY = (e.clientY - p.lastPointerY) / dt
+      p.lastPointerX = e.clientX
+      p.lastPointerY = e.clientY
+      p.lastPointerTime = now
+    }
+
     const newX = ((e.clientX - dragOffsetRef.current.x) / vw) * 100
     xRef.current = Math.min(92, Math.max(2, newX))
-    // Convert clientY to bottom offset
     dragYRef.current = Math.max(0, vh - e.clientY + dragOffsetRef.current.y - 100)
+
     if (crabElRef.current) {
       const scaleX = facingRef.current === 'left' ? -1 : 1
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-dragYRef.current}px) scaleX(${scaleX})`
@@ -266,26 +390,39 @@ function ClawBoxMascot() {
     }
   }, [])
 
-  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+  const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
     draggingRef.current = false
-    dragYRef.current = 0
-    updateCrabPos()
-    // Resume autonomous behavior after a short pause
+
+    const p = physicsRef.current
+    // Convert tracked velocity: velX stays in px/s, velY in px/s (positive = downward)
+    // Clamp throw velocity for sanity
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+    p.posY = dragYRef.current
+    p.lastTime = performance.now()
+    p.active = true
+
+    // Sassy drop lines
     const dropLines = [
       'Freedom! ...wait, same desktop.',
-      'I prefer walking, thanks.',
+      'AAAAAAAAA! 🫠',
       'Rude. 😤',
-      'That was fun! Again? No? Ok.',
+      'I believe I can fly! ...nope.',
       'Ugh, humans.',
       'PTSD от drag & drop.',
       '🤢 Motion sickness!',
       'Пуснахте ме най-после!',
       'Аз не съм widget!',
+      'Newton sends his regards. 🍎',
+      'GRAVITY IS A SOCIAL CONSTRUCT!',
+      '*splat*',
     ]
     say(dropLines[Math.floor(Math.random() * dropLines.length)], 3000)
-    setTimeout(() => doAction(), 3000)
-  }, [updateCrabPos])
+
+    // Start the physics loop
+    physicsRAF.current = requestAnimationFrame(physicsLoop)
+  }, [physicsLoop])
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
