@@ -170,3 +170,34 @@ html {
 .claw-icon .eye-glow {
   animation: blink 3s ease-in-out infinite;
 }
+
+/* Page transition animations */
+@keyframes page-in {
+  0% {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes page-out {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+}
+
+.animate-page-in {
+  animation: page-in 0.25s ease-out forwards;
+}
+
+.animate-page-out {
+  animation: page-out 0.2s ease-in forwards;
+}
