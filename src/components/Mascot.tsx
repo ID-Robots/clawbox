@@ -538,11 +538,15 @@ function ClawBoxMascot() {
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [updateCrabPos])
 
-  // ─── Drag handlers (mirrors box exactly) ───
-  // ─── Crab drag: EXACT COPY of box drag pattern ───
+  // ─── Crab drag + tap detection ───
+  const dragStartPos = useRef({ x: 0, y: 0 })
+  const didDragRef = useRef(false)
+
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
     draggingRef.current = true; setPhysicsActive(true)
+    didDragRef.current = false
+    dragStartPos.current = { x: e.clientX, y: e.clientY }
     const p = physicsRef.current
     p.active = false
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
@@ -559,6 +563,9 @@ function ClawBoxMascot() {
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
     e.preventDefault()
+    // Detect actual drag vs tap
+    const dx = e.clientX - dragStartPos.current.x, dy = e.clientY - dragStartPos.current.y
+    if (dx * dx + dy * dy > 25) didDragRef.current = true
     const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
     const p = physicsRef.current
     const dt = (now - p.lastPointerTime) / 1000
@@ -579,13 +586,27 @@ function ClawBoxMascot() {
   const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
     draggingRef.current = false
+
+    // Tap detection — if pointer barely moved, toggle tamagotchi menu
+    if (!didDragRef.current) {
+      setPhysicsActive(false)
+      if (isDead) { tamaRevive() } else {
+        setShowTamaMenu(prev => !prev)
+        setShowTamaStats(true)
+      }
+      // Resume autonomous behavior after menu interaction
+      if (stateTimeout.current) clearTimeout(stateTimeout.current)
+      stateTimeout.current = setTimeout(() => { setShowTamaMenu(false); setShowTamaStats(false) }, 5000) as unknown as ReturnType<typeof setTimeout>
+      return
+    }
+
     const p = physicsRef.current
     p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
     p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
     p.lastTime = performance.now()
     p.active = true
     physicsRAF.current = requestAnimationFrame(physicsLoop)
-  }, [physicsLoop])
+  }, [physicsLoop, isDead, tamaRevive])
 
   // ─── Box physics loop ───
   const boxPhysicsLoop = useCallback(() => {
