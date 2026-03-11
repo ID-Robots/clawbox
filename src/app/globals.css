@@ -291,3 +291,66 @@ html {
 .animate-slide-down {
   animation: slide-down 0.25s ease-in forwards;
 }
+
+/* ChromeOS-style window animations */
+@keyframes chrome-window-open {
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes chrome-window-close {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+@keyframes chrome-window-minimize {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+}
+
+@keyframes chrome-window-restore {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.chrome-window-opening {
+  animation: chrome-window-open 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.chrome-window-closing {
+  animation: chrome-window-close 0.15s ease-in forwards;
+  pointer-events: none;
+}
+
+.chrome-window-minimizing {
+  animation: chrome-window-minimize 0.25s ease-in forwards;
+  pointer-events: none;
+}
+
+.chrome-window-restoring {
+  animation: chrome-window-restore 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

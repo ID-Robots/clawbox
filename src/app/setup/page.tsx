@@ -1,39 +1,43 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { AndroidStatusBar } from "@/components/AndroidStatusBar";
-import { AndroidNavBar } from "@/components/AndroidNavBar";
-import { FullScreenApp } from "@/components/FullScreenApp";
+import ChromeShelf from "@/components/ChromeShelf";
+import ChromeLauncher from "@/components/ChromeLauncher";
+import ChromeWindow from "@/components/ChromeWindow";
+import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
-// App icon definitions with inline SVGs
+// App definitions
 interface AppDef {
   id: string;
   name: string;
   color: string;
   type: "settings" | "openclaw" | "placeholder" | "external";
   url?: string;
+  pinned: boolean;
+  defaultWidth?: number;
+  defaultHeight?: number;
 }
 
 const apps: AppDef[] = [
-  { id: "settings", name: "Settings", color: "#6b7280", type: "settings" },
-  { id: "openclaw", name: "OpenClaw", color: "#06b6d4", type: "openclaw" },
-  { id: "terminal", name: "Terminal", color: "#22c55e", type: "placeholder" },
-  { id: "system", name: "System", color: "#3b82f6", type: "placeholder" },
-  { id: "ollama", name: "Ollama", color: "#a855f7", type: "placeholder" },
-  { id: "files", name: "Files", color: "#f97316", type: "placeholder" },
-  { id: "network", name: "Network", color: "#14b8a6", type: "placeholder" },
-  { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://docs.openclaw.ai" },
-  { id: "browser", name: "Browser", color: "#ef4444", type: "placeholder" },
-  { id: "camera", name: "Camera", color: "#eab308", type: "placeholder" },
+  { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
+  { id: "openclaw", name: "OpenClaw", color: "#06b6d4", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
+  { id: "terminal", name: "Terminal", color: "#22c55e", type: "placeholder", pinned: true },
+  { id: "files", name: "Files", color: "#f97316", type: "placeholder", pinned: true },
+  { id: "system", name: "System Monitor", color: "#3b82f6", type: "placeholder", pinned: false },
+  { id: "ollama", name: "Ollama", color: "#a855f7", type: "placeholder", pinned: false },
+  { id: "network", name: "Network", color: "#14b8a6", type: "placeholder", pinned: false },
+  { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://docs.openclaw.ai", pinned: false },
+  { id: "browser", name: "Browser", color: "#ef4444", type: "placeholder", pinned: false },
+  { id: "camera", name: "Camera", color: "#eab308", type: "placeholder", pinned: false },
 ];
 
 // Inline SVG icons for each app
-function AppIcon({ id }: { id: string }) {
-  const iconClass = "w-7 h-7 text-white";
+function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
+  const iconClass = `${size} text-white`;
 
   switch (id) {
     case "settings":
@@ -121,25 +125,131 @@ function AppIcon({ id }: { id: string }) {
   }
 }
 
-export default function AndroidHomePage() {
-  const [activeApp, setActiveApp] = useState<AppDef | null>(null);
+interface OpenWindow {
+  id: string;
+  appId: string;
+  zIndex: number;
+  minimized: boolean;
+}
 
-  const handleAppClick = (app: AppDef) => {
+export default function ChromeDesktop() {
+  const [launcherOpen, setLauncherOpen] = useState(false);
+  const [trayOpen, setTrayOpen] = useState(false);
+  const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
+  const [nextZIndex, setNextZIndex] = useState(100);
+  const [time, setTime] = useState("");
+  const [date, setDate] = useState("");
+
+  // Update clock
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      setTime(now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      setDate(now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }));
+    };
+    updateClock();
+    const interval = setInterval(updateClock, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const getActiveWindowId = useCallback(() => {
+    const visibleWindows = openWindows.filter((w) => !w.minimized);
+    if (visibleWindows.length === 0) return null;
+    return visibleWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b)).id;
+  }, [openWindows]);
+
+  const openApp = useCallback((appId: string) => {
+    const app = apps.find((a) => a.id === appId);
+    if (!app) return;
+
     if (app.type === "external" && app.url) {
       window.open(app.url, "_blank", "noopener,noreferrer");
-    } else {
-      setActiveApp(app);
+      return;
     }
-  };
 
-  const handleCloseApp = () => {
-    setActiveApp(null);
-  };
+    // Check if app is already open
+    const existingWindow = openWindows.find((w) => w.appId === appId);
+    if (existingWindow) {
+      // If minimized, restore it; otherwise bring to front
+      if (existingWindow.minimized) {
+        setOpenWindows((prev) =>
+          prev.map((w) =>
+            w.id === existingWindow.id
+              ? { ...w, minimized: false, zIndex: nextZIndex }
+              : w
+          )
+        );
+        setNextZIndex((z) => z + 1);
+      } else {
+        // Bring to front
+        setOpenWindows((prev) =>
+          prev.map((w) =>
+            w.id === existingWindow.id ? { ...w, zIndex: nextZIndex } : w
+          )
+        );
+        setNextZIndex((z) => z + 1);
+      }
+      return;
+    }
 
-  const renderAppContent = () => {
-    if (!activeApp) return null;
+    // Open new window
+    const windowId = `${appId}-${Date.now()}`;
+    setOpenWindows((prev) => [
+      ...prev,
+      { id: windowId, appId, zIndex: nextZIndex, minimized: false },
+    ]);
+    setNextZIndex((z) => z + 1);
+  }, [openWindows, nextZIndex]);
 
-    switch (activeApp.type) {
+  const closeWindow = useCallback((windowId: string) => {
+    setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
+  }, []);
+
+  const focusWindow = useCallback((windowId: string) => {
+    setOpenWindows((prev) =>
+      prev.map((w) => (w.id === windowId ? { ...w, zIndex: nextZIndex } : w))
+    );
+    setNextZIndex((z) => z + 1);
+  }, [nextZIndex]);
+
+  const minimizeWindow = useCallback((windowId: string) => {
+    setOpenWindows((prev) =>
+      prev.map((w) => (w.id === windowId ? { ...w, minimized: true } : w))
+    );
+  }, []);
+
+  const handleShelfAppClick = useCallback((appId: string) => {
+    const window = openWindows.find((w) => w.appId === appId);
+    if (window) {
+      if (window.minimized) {
+        // Restore
+        setOpenWindows((prev) =>
+          prev.map((w) =>
+            w.id === window.id
+              ? { ...w, minimized: false, zIndex: nextZIndex }
+              : w
+          )
+        );
+        setNextZIndex((z) => z + 1);
+      } else if (getActiveWindowId() === window.id) {
+        // Minimize if already focused
+        minimizeWindow(window.id);
+      } else {
+        // Bring to front
+        focusWindow(window.id);
+      }
+    } else {
+      openApp(appId);
+    }
+  }, [openWindows, openApp, minimizeWindow, focusWindow, getActiveWindowId, nextZIndex]);
+
+  const pinnedApps = apps.filter((a) => a.pinned);
+
+  const renderWindowContent = (appId: string) => {
+    const app = apps.find((a) => a.id === appId);
+    if (!app) return null;
+
+    switch (app.type) {
       case "settings":
         return (
           <div className="h-full overflow-y-auto">
@@ -158,14 +268,14 @@ export default function AndroidHomePage() {
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
             <div
-              className="w-20 h-20 rounded-[20px] flex items-center justify-center"
-              style={{ backgroundColor: activeApp.color }}
+              className="w-20 h-20 rounded-full flex items-center justify-center"
+              style={{ backgroundColor: app.color }}
             >
-              <AppIcon id={activeApp.id} />
+              <AppIcon id={app.id} size="w-10 h-10" />
             </div>
             <div className="text-center">
               <h2 className="text-xl font-medium text-white/80 mb-1">
-                {activeApp.name}
+                {app.name}
               </h2>
               <p className="text-sm">Coming Soon</p>
             </div>
@@ -176,80 +286,100 @@ export default function AndroidHomePage() {
     }
   };
 
+  const activeWindowId = getActiveWindowId();
+
   return (
-    <div className="min-h-screen flex flex-col relative overflow-hidden">
-      {/* Dark gradient wallpaper background */}
+    <div className="min-h-screen relative overflow-hidden select-none">
+      {/* Desktop wallpaper background */}
       <div className="absolute inset-0 bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e] z-0" />
       <div className="absolute inset-0 bg-stars z-0" />
       <div className="absolute inset-0 bg-nebula z-0" />
 
-      {/* Status bar */}
-      <AndroidStatusBar />
+      {/* Mascot - only show when no windows are maximized */}
+      <Mascot />
 
-      {/* Main content area */}
-      <main className="relative z-10 flex-1 flex flex-col pt-10 pb-12 px-4">
-        {/* Google-style search pill */}
-        <div className="mt-4 mb-8 mx-auto w-full max-w-md">
-          <div className="flex items-center gap-3 h-12 px-4 bg-white/10 backdrop-blur-sm rounded-full border border-white/10">
-            <svg
-              className="w-5 h-5 text-white/50"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="M21 21l-4.35-4.35" />
-            </svg>
-            <span className="text-white/40 text-sm">Search...</span>
-          </div>
-        </div>
+      {/* Windows */}
+      {openWindows.map((window) => {
+        const app = apps.find((a) => a.id === window.appId);
+        if (!app) return null;
 
-        {/* App grid - 4 cols mobile, 5 desktop */}
-        <div className="flex-1 flex items-start justify-center">
-          <div className="grid grid-cols-4 sm:grid-cols-5 gap-4 sm:gap-6 max-w-lg sm:max-w-xl">
-            {apps.map((app) => (
-              <button
-                key={app.id}
-                onClick={() => handleAppClick(app)}
-                className="flex flex-col items-center gap-2 p-2 rounded-2xl hover:bg-white/5 active:bg-white/10 transition-colors cursor-pointer"
+        return (
+          <ChromeWindow
+            key={window.id}
+            title={app.name}
+            icon={
+              <div
+                className="w-5 h-5 rounded flex items-center justify-center"
+                style={{ backgroundColor: app.color }}
               >
-                {/* 56px squircle icon */}
-                <div
-                  className="w-14 h-14 rounded-[16px] flex items-center justify-center shadow-lg"
-                  style={{ backgroundColor: app.color }}
-                >
-                  <AppIcon id={app.id} />
-                </div>
-                {/* Label */}
-                <span className="text-white text-xs text-center line-clamp-1 w-full">
-                  {app.name}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
+                <AppIcon id={app.id} size="w-3 h-3" />
+              </div>
+            }
+            defaultWidth={app.defaultWidth}
+            defaultHeight={app.defaultHeight}
+            isActive={window.id === activeWindowId}
+            zIndex={window.zIndex}
+            onClose={() => closeWindow(window.id)}
+            onFocus={() => focusWindow(window.id)}
+            onMinimize={() => minimizeWindow(window.id)}
+            minimized={window.minimized}
+          >
+            {renderWindowContent(window.appId)}
+          </ChromeWindow>
+        );
+      })}
 
-        {/* Page indicator dots */}
-        <div className="flex items-center justify-center gap-2 mt-4 mb-2">
-          <div className="w-2 h-2 rounded-full bg-white/80" />
-          <div className="w-2 h-2 rounded-full bg-white/30" />
-          <div className="w-2 h-2 rounded-full bg-white/30" />
-        </div>
-      </main>
+      {/* App Launcher */}
+      <ChromeLauncher
+        apps={apps.map((app) => ({
+          id: app.id,
+          name: app.name,
+          color: app.color,
+          icon: <AppIcon id={app.id} />,
+        }))}
+        isOpen={launcherOpen}
+        onClose={() => setLauncherOpen(false)}
+        onAppClick={openApp}
+      />
 
-      {/* Mascot - only show on home screen */}
-      {!activeApp && <Mascot />}
+      {/* System Tray */}
+      <SystemTray
+        isOpen={trayOpen}
+        onClose={() => setTrayOpen(false)}
+        date={date}
+        time={time}
+      />
 
-      {/* Navigation bar */}
-      <AndroidNavBar onHome={handleCloseApp} />
-
-      {/* Full screen app overlay */}
-      {activeApp && (
-        <FullScreenApp title={activeApp.name} onClose={handleCloseApp}>
-          {renderAppContent()}
-        </FullScreenApp>
-      )}
+      {/* Shelf (taskbar) */}
+      <ChromeShelf
+        apps={pinnedApps.map((app) => {
+          const window = openWindows.find((w) => w.appId === app.id);
+          return {
+            id: app.id,
+            name: app.name,
+            icon: (
+              <div
+                className="w-10 h-10 rounded-full flex items-center justify-center"
+                style={{ backgroundColor: app.color }}
+              >
+                <AppIcon id={app.id} />
+              </div>
+            ),
+            isOpen: !!window,
+            isActive: window?.id === activeWindowId && !window?.minimized,
+          };
+        })}
+        onAppClick={handleShelfAppClick}
+        onLauncherClick={() => {
+          setTrayOpen(false);
+          setLauncherOpen((prev) => !prev);
+        }}
+        onTrayClick={() => {
+          setLauncherOpen(false);
+          setTrayOpen((prev) => !prev);
+        }}
+        time={time}
+      />
     </div>
   );
 }
