@@ -225,9 +225,6 @@ function ClawBoxMascot() {
     } catch {}
     return { hunger: 80, happiness: 80, energy: 80, health: 100, lastUpdate: Date.now() }
   })
-  const [showTamaMenu, setShowTamaMenu] = useState(false)
-  const [showTamaStats, setShowTamaStats] = useState(false)
-  const [tamaAction, setTamaAction] = useState<string | null>(null)
   const [isDead, setIsDead] = useState(false)
   const tamaStatsRef = useRef(tamaStats)
   tamaStatsRef.current = tamaStats
@@ -257,42 +254,57 @@ function ClawBoxMascot() {
     return () => clearInterval(decay)
   }, [isDead])
 
+  // Speech (needed early for tama actions)
+  const [speech, setSpeech] = useState('')
+  const say = useCallback((text: string, ms = 3000) => {
+    setSpeech(text)
+    setTimeout(() => setSpeech(''), ms)
+  }, [])
+
   // Tamagotchi actions
-  const tamaFeed = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, hunger: Math.min(100, prev.hunger + 30), lastUpdate: Date.now() }))
-    setTamaAction('feed'); setTimeout(() => setTamaAction(null), 2000)
-    setShowTamaMenu(false)
-    say('Om nom nom! 🍕', 2000)
-  }, [])
-  const tamaPlay = useCallback(() => {
-    setTamaStats(prev => ({
-      ...prev, happiness: Math.min(100, prev.happiness + 25), energy: Math.max(0, prev.energy - 10), lastUpdate: Date.now()
-    }))
-    setTamaAction('play'); setTimeout(() => setTamaAction(null), 2000)
-    setShowTamaMenu(false)
-    say('Weee! 🎮', 2000)
-    setState('dance')
-  }, [])
-  const tamaSleep = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, energy: Math.min(100, prev.energy + 40), lastUpdate: Date.now() }))
-    setTamaAction('sleep'); setTimeout(() => setTamaAction(null), 4000)
-    setShowTamaMenu(false)
-    say('Zzzzz... 💤', 3000)
-    setState('sleep')
-  }, [])
-  const tamaClean = useCallback(() => {
-    setTamaStats(prev => ({
-      ...prev, health: Math.min(100, prev.health + 15), happiness: Math.min(100, prev.happiness + 10), lastUpdate: Date.now()
-    }))
-    setTamaAction('clean'); setTimeout(() => setTamaAction(null), 2000)
-    setShowTamaMenu(false)
-    say('Sparkly! ✨', 2000)
-  }, [])
   const tamaRevive = useCallback(() => {
     setTamaStats({ hunger: 50, happiness: 50, energy: 50, health: 50, lastUpdate: Date.now() })
     setIsDead(false)
     say('I live again! 🦀💀→🦀', 3000)
-  }, [])
+  }, [say])
+  const tamaFeed = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, hunger: Math.min(100, prev.hunger + 30), lastUpdate: Date.now() }))
+    say('Om nom nom! 🍕', 2000)
+  }, [say])
+  const tamaPlay = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, happiness: Math.min(100, prev.happiness + 25), energy: Math.max(0, prev.energy - 10), lastUpdate: Date.now() }))
+    say('Weee! 🎮', 2000)
+    setState('dance')
+  }, [say])
+  // tamaSleep defined later (needs stateTimeout/walkInterval refs)
+  const tamaClean = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, health: Math.min(100, prev.health + 15), happiness: Math.min(100, prev.happiness + 10), lastUpdate: Date.now() }))
+    say('Sparkly! ✨', 2000)
+  }, [say])
+
+  // Hidden state (persisted) + context menu
+  const [hidden, setHidden] = useState(() => {
+    if (typeof window === 'undefined') return false
+    try { return localStorage.getItem('clawbox-mascot-hidden') === '1' } catch { return false }
+  })
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
+  const ctxOpenedAt = useRef(0)
+
+  // Close context menu on click/right-click elsewhere
+  useEffect(() => {
+    if (!ctxMenu) return
+    const close = (e: Event) => {
+      if (Date.now() - ctxOpenedAt.current < 100) return
+      e.preventDefault()
+      setCtxMenu(null)
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('contextmenu', close)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('contextmenu', close)
+    }
+  }, [ctxMenu])
 
   // ─── DOM refs for direct manipulation (no React re-renders during animation) ───
   const crabElRef = useRef<HTMLDivElement>(null)
@@ -308,13 +320,14 @@ function ClawBoxMascot() {
   const [state, setState] = useState<MascotState>('idle')
   const [physicsActive, setPhysicsActive] = useState(false)
   const physicsActiveRef = useRef(false)
-  const [speech, setSpeech] = useState('')
   const [frenzy, setFrenzy] = useState(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+  const sleepZzzRef = useRef<ReturnType<typeof setInterval>>(null)
   const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
   const onBoxRef = useRef(false)
   const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+  const doActionRef = useRef<() => void>(() => {})
   const draggingRef = useRef(false)
   const dragOffsetRef = useRef({ x: 0, y: 0 })
   const dragYRef = useRef(0) // vertical position in pixels from bottom
@@ -552,6 +565,8 @@ function ClawBoxMascot() {
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    // Wake from sleep if dragged
+    if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null; setSpeech(''); setState('idle'); try { localStorage.removeItem('clawbox-mascot-sleep') } catch {} }
     onBoxRef.current = false; setCrabOnBox(false); setBoxGlow(false)
     const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
@@ -587,16 +602,13 @@ function ClawBoxMascot() {
     if (!draggingRef.current) return
     draggingRef.current = false
 
-    // Tap detection — if pointer barely moved, toggle tamagotchi menu
+    // Tap detection — if pointer barely moved, trigger sass or revive
     if (!didDragRef.current) {
       setPhysicsActive(false)
       if (isDead) { tamaRevive() } else {
-        setShowTamaMenu(prev => !prev)
-        setShowTamaStats(true)
+        // Just trigger a sass line on tap
+        say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
       }
-      // Resume autonomous behavior after menu interaction
-      if (stateTimeout.current) clearTimeout(stateTimeout.current)
-      stateTimeout.current = setTimeout(() => { setShowTamaMenu(false); setShowTamaStats(false) }, 5000) as unknown as ReturnType<typeof setTimeout>
       return
     }
 
@@ -702,11 +714,6 @@ function ClawBoxMascot() {
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
-  const say = (text: string, ms = 3000) => {
-    setSpeech(text)
-    setTimeout(() => setSpeech(''), ms)
-  }
-
   const getSpeech = (st: MascotState): string | null => {
     const isJP = Math.random() < 0.3 // 30% Japanese
     const lines: Record<string, string[]> = {
@@ -733,6 +740,39 @@ function ClawBoxMascot() {
     for (const a of MASCOT_ACTIONS) { r -= a.weight; if (r <= 0) return a }
     return MASCOT_ACTIONS[0]
   }, [])
+
+  const SLEEP_KEY = 'clawbox-mascot-sleep'
+
+  // Start or resume sleep for a given remaining duration (ms)
+  const startSleep = useCallback((remainingMs: number) => {
+    if (stateTimeout.current) clearTimeout(stateTimeout.current)
+    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
+    setState('sleep')
+    const zzzLines = ['💤 Zzzzz...', '😴 ...zzz...', '💤 *snore*', '😴 ...mumble...', '💤 Zzzzz...']
+    let zIdx = 0
+    say(zzzLines[0], 4000)
+    sleepZzzRef.current = setInterval(() => {
+      zIdx = (zIdx + 1) % zzzLines.length
+      say(zzzLines[zIdx], 4000)
+    }, 30000)
+    stateTimeout.current = setTimeout(() => {
+      if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
+      setSpeech('')
+      setState('idle')
+      try { localStorage.removeItem(SLEEP_KEY) } catch {}
+      setTimeout(() => doActionRef.current(), 1000)
+    }, remainingMs) as ReturnType<typeof setTimeout>
+  }, [say])
+
+  // tamaSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
+  const tamaSleep = useCallback(() => {
+    setTamaStats(prev => ({ ...prev, energy: Math.min(100, prev.energy + 40), lastUpdate: Date.now() }))
+    const sleepDuration = (10 + Math.random() * 5) * 60 * 1000
+    const wakeAt = Date.now() + sleepDuration
+    try { localStorage.setItem(SLEEP_KEY, JSON.stringify(wakeAt)) } catch {}
+    startSleep(sleepDuration)
+  }, [startSleep])
 
   const doAction = useCallback(() => {
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
@@ -861,6 +901,7 @@ function ClawBoxMascot() {
 
     stateTimeout.current = setTimeout(doAction, duration + randRange(2000, 6000))
   }, [pickAction])
+  doActionRef.current = doAction
 
   // Listen for new order events — FRENZY MODE
   // Randomize positions on mount to avoid hydration mismatch
@@ -992,9 +1033,7 @@ function ClawBoxMascot() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Teleport crab to random position on page load
-    xRef.current = 5 + Math.random() * 85
-    boxXRef.current = 5 + Math.random() * 85
+    // Restore saved position (from localStorage via savedPos ref), or randomize on first visit
     updateCrabPos()
     if (boxElRef.current) boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
     // Random facing
@@ -1002,11 +1041,20 @@ function ClawBoxMascot() {
     facingRef.current = dir
     setFacing(dir)
 
-    const startDelay = setTimeout(doAction, 2000)
+    // Resume sleep if mascot was sleeping before refresh
+    let savedSleep = 0
+    try { savedSleep = JSON.parse(localStorage.getItem('clawbox-mascot-sleep') || '0') } catch {}
+    const remaining = savedSleep - Date.now()
+    const startDelay = remaining > 1000
+      ? setTimeout(() => startSleep(remaining), 500)
+      : setTimeout(doAction, 2000)
+    // Clean up expired sleep key
+    if (savedSleep && remaining <= 1000) try { localStorage.removeItem('clawbox-mascot-sleep') } catch {}
     return () => {
       clearTimeout(startDelay)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1026,7 +1074,17 @@ function ClawBoxMascot() {
     }
   })()
 
+  // Listen for show/hide mascot events from desktop context menu
+  useEffect(() => {
+    const showHandler = () => { setHidden(prev => { if (!prev) return prev; try { localStorage.removeItem('clawbox-mascot-hidden') } catch {}; return false }) }
+    const hideHandler = () => { setHidden(prev => { if (prev) return prev; try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; return true }) }
+    window.addEventListener('clawbox-show-mascot', showHandler)
+    window.addEventListener('clawbox-hide-mascot', hideHandler)
+    return () => { window.removeEventListener('clawbox-show-mascot', showHandler); window.removeEventListener('clawbox-hide-mascot', hideHandler) }
+  }, [])
+
   if (!mounted) return null // avoid hydration mismatch — render only on client
+  if (hidden) return null
 
   return (
     <>
@@ -1153,6 +1211,12 @@ function ClawBoxMascot() {
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          ctxOpenedAt.current = Date.now()
+          setCtxMenu({ x: e.clientX, y: e.clientY })
+        }}
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : 8,
@@ -1256,78 +1320,22 @@ function ClawBoxMascot() {
           transition: 'opacity 0.5s ease',
         }} />
 
-        {/* TAMAGOTCHI — Stats + Menu container (single hover zone) */}
-        <div
-          onPointerEnter={() => setShowTamaStats(true)}
-          onPointerLeave={() => { if (!showTamaMenu) { setShowTamaStats(false) } }}
-          onClick={(e) => {
-            if (!draggingRef.current) {
-              e.stopPropagation()
-              if (isDead) { tamaRevive(); return }
-              setShowTamaMenu(prev => !prev)
-              setShowTamaStats(true)
-            }
-          }}
-          style={{
-            position: 'absolute', top: -110, left: '50%',
-            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
-            pointerEvents: physicsActive ? 'none' : 'auto',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-            paddingBottom: 120, // extends hover zone down to crab body
-          }}
-        >
-          {/* Radial action menu */}
-          {showTamaMenu && !isDead && (
-            <div style={{ display: 'flex', gap: 8 }}>
-              {[
-                { icon: '🍕', label: 'Feed', action: tamaFeed, color: '#f97316' },
-                { icon: '🎮', label: 'Play', action: tamaPlay, color: '#fbbf24' },
-                { icon: '💤', label: 'Sleep', action: tamaSleep, color: '#22c55e' },
-                { icon: '✨', label: 'Clean', action: tamaClean, color: '#3b82f6' },
-              ].map((btn, i) => (
-                <button key={i} onClick={(e) => { e.stopPropagation(); btn.action() }}
-                  style={{
-                    width: 44, height: 44, borderRadius: '50%', border: 'none',
-                    background: btn.color, fontSize: 20, cursor: 'pointer',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-                    animation: `tama-btn-pop 0.3s ease-out ${i * 0.05}s both`,
-                    transition: 'transform 0.15s',
-                  }}
-                  onPointerEnter={(e) => (e.currentTarget.style.transform = 'scale(1.2)')}
-                  onPointerLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-                  title={btn.label}
-                >{btn.icon}</button>
-              ))}
-            </div>
-          )}
-
-          {/* Mini stat bars */}
-          <div style={{
-            display: 'flex', gap: 3, background: 'rgba(0,0,0,0.7)', padding: '4px 8px',
-            borderRadius: 8, backdropFilter: 'blur(4px)',
-            opacity: showTamaStats || showTamaMenu ? 1 : 0,
-            transition: 'opacity 0.3s',
-          }}>
-            {[
-              { val: tamaStats.hunger, color: '#f97316', icon: '🍕' },
-              { val: tamaStats.happiness, color: '#fbbf24', icon: '😊' },
-              { val: tamaStats.energy, color: '#22c55e', icon: '⚡' },
-              { val: tamaStats.health, color: '#ef4444', icon: '❤️' },
-            ].map((s, i) => (
-              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                <span style={{ fontSize: 10 }}>{s.icon}</span>
-                <div style={{ width: 24, height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.15)' }}>
-                  <div style={{
-                    width: `${s.val}%`, height: '100%', borderRadius: 2,
-                    background: s.val < 30 ? '#ef4444' : s.color,
-                    transition: 'width 0.5s',
-                  }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+        {/* TAMAGOTCHI — tap to revive when dead */}
+        {isDead && (
+          <div
+            onClick={(e) => {
+              if (!draggingRef.current) {
+                e.stopPropagation()
+                tamaRevive()
+              }
+            }}
+            style={{
+              position: 'absolute', top: -60, left: '50%',
+              transform: 'translateX(-50%)',
+              pointerEvents: physicsActive ? 'none' : 'auto',
+            }}
+          />
+        )}
 
         {/* TAMAGOTCHI — Death overlay */}
         {isDead && (
@@ -1342,17 +1350,6 @@ function ClawBoxMascot() {
           </div>
         )}
 
-        {/* TAMAGOTCHI — Action effect */}
-        {tamaAction === 'feed' && (
-          <div style={{ position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', fontSize: 32, animation: 'money-rain 1.5s ease-out forwards', pointerEvents: 'none' }}>🍕</div>
-        )}
-        {tamaAction === 'clean' && (
-          <>
-            {[0, 1, 2].map(i => (
-              <div key={i} style={{ position: 'absolute', top: 30 + i * 20, left: 40 + i * 30, fontSize: 20, animation: `power-particles 1s ease-out ${i * 0.2}s forwards`, pointerEvents: 'none' }}>✨</div>
-            ))}
-          </>
-        )}
       </div>
 
       {/* The ClawBox — crab's prop */}
@@ -1377,6 +1374,89 @@ function ClawBoxMascot() {
           <img src="/clawbox-box.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
         </div>
       </div>
+
+      {/* Mascot right-click context menu */}
+      {ctxMenu && (
+        <div
+          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          style={{
+            left: Math.min(ctxMenu.x, window.innerWidth - 220),
+            top: ctxMenu.y - 8,
+            transform: 'translateY(-100%)',
+          }}
+          onClick={() => setCtxMenu(null)}
+        >
+          {/* Stats header */}
+          <div className="px-4 py-2">
+            <div className="text-xs text-white/40 font-medium mb-2">🦀 Mascot Stats</div>
+            <div className="flex flex-col gap-1.5">
+              {[
+                { label: '🍕 Hunger', val: tamaStats.hunger, color: '#f97316' },
+                { label: '😊 Happy', val: tamaStats.happiness, color: '#fbbf24' },
+                { label: '⚡ Energy', val: tamaStats.energy, color: '#22c55e' },
+                { label: '❤️ Health', val: tamaStats.health, color: '#ef4444' },
+              ].map((s) => (
+                <div key={s.label} className="flex items-center gap-2">
+                  <span className="text-xs text-white/60 w-16">{s.label}</span>
+                  <div className="flex-1 h-2 rounded-full bg-white/10">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{ width: `${s.val}%`, background: s.val < 30 ? '#ef4444' : s.color }}
+                    />
+                  </div>
+                  <span className="text-xs text-white/40 w-8 text-right">{Math.round(s.val)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="border-t border-white/10 my-0.5" />
+
+          {/* Actions */}
+          {isDead ? (
+            <button
+              onClick={() => { tamaRevive(); setCtxMenu(null) }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+            >
+              <span className="text-base">💀</span> Revive
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => { tamaFeed(); setCtxMenu(null) }}
+                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              >
+                <span className="text-base">🍕</span> Feed
+              </button>
+              <button
+                onClick={() => { tamaPlay(); setCtxMenu(null) }}
+                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              >
+                <span className="text-base">🎮</span> Play
+              </button>
+              <button
+                onClick={() => { tamaSleep(); setCtxMenu(null) }}
+                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              >
+                <span className="text-base">💤</span> Sleep
+              </button>
+              <button
+                onClick={() => { tamaClean(); setCtxMenu(null) }}
+                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              >
+                <span className="text-base">✨</span> Clean
+              </button>
+            </>
+          )}
+
+          <div className="border-t border-white/10 my-0.5" />
+          <button
+            onClick={() => { setHidden(true); try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; setCtxMenu(null) }}
+            className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
+          >
+            <span className="text-base">👁️‍🗨️</span> Hide mascot
+          </button>
+        </div>
+      )}
     </>
   )
 }

@@ -15,6 +15,8 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  allowedDevOrigins: ["http://10.69.0.9:3005"],
+  devIndicators: false,
   compress: true,
   poweredByHeader: false,
   env: {

@@ -7,6 +7,7 @@ interface LauncherApp {
   name: string;
   color: string;
   icon: ReactNode;
+  isPinned?: boolean;
 }
 
 interface ChromeLauncherProps {
@@ -14,6 +15,9 @@ interface ChromeLauncherProps {
   isOpen: boolean;
   onClose: () => void;
   onAppClick: (id: string) => void;
+  onPinApp?: (id: string) => void;
+  onUnpinApp?: (id: string) => void;
+  onAddToDesktop?: (id: string) => void;
 }
 
 export default function ChromeLauncher({
@@ -21,21 +25,26 @@ export default function ChromeLauncher({
   isOpen,
   onClose,
   onAppClick,
+  onAddToDesktop,
+  onPinApp,
+  onUnpinApp,
 }: ChromeLauncherProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [animationState, setAnimationState] = useState<"closed" | "opening" | "open" | "closing">("closed");
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: LauncherApp } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const prevOpenRef = useRef(isOpen);
+  const ctxOpenedAt = useRef(0);
 
   const filteredApps = apps.filter((app) =>
     app.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Handle open/close state transitions - synchronizing internal animation state with isOpen prop
+  // Handle open/close state transitions
   useEffect(() => {
     if (isOpen && !prevOpenRef.current) {
-      // Opening - reset search and start animation
       setSearchQuery("");
+      setCtxMenu(null);
       setAnimationState("opening");
       const timer = setTimeout(() => {
         setAnimationState("open");
@@ -43,11 +52,30 @@ export default function ChromeLauncher({
       }, 50);
       return () => clearTimeout(timer);
     } else if (!isOpen && prevOpenRef.current) {
-      // Parent initiated close - already handled by handleClose animation
       setAnimationState("closed");
+      setCtxMenu(null);
     }
     prevOpenRef.current = isOpen;
   }, [isOpen]);
+
+  // Close context menu on click/right-click elsewhere
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => {
+      setCtxMenu(null);
+    };
+    const closeCtx = (e: Event) => {
+      if (Date.now() - ctxOpenedAt.current < 100) return;
+      e.preventDefault();
+      setCtxMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", closeCtx);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", closeCtx);
+    };
+  }, [ctxMenu]);
 
   const handleClose = useCallback(() => {
     setAnimationState("closing");
@@ -77,16 +105,20 @@ export default function ChromeLauncher({
       {/* Backdrop */}
       <div
         className={`fixed inset-0 z-[9998] transition-opacity duration-200 ${
-          isClosing ? "opacity-0" : "opacity-100"
+          isClosing ? "opacity-0 pointer-events-none" : "opacity-100"
         }`}
         style={{ background: "rgba(0, 0, 0, 0.3)" }}
         onClick={handleClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          handleClose();
+        }}
       />
 
       {/* Launcher panel */}
       <div
         className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full max-w-xl z-[9999] transition-all duration-200 ${
-          isClosing ? "translate-y-full opacity-0" : "translate-y-0 opacity-100"
+          isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
         style={{
           maxHeight: "calc(100vh - 80px)",
@@ -142,6 +174,12 @@ export default function ChromeLauncher({
                 <button
                   key={app.id}
                   onClick={() => handleAppClick(app.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    ctxOpenedAt.current = Date.now();
+                    setCtxMenu({ x: e.clientX, y: e.clientY, app });
+                  }}
                   className="flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
                 >
                   {/* App icon */}
@@ -167,6 +205,55 @@ export default function ChromeLauncher({
           </div>
         </div>
       </div>
+
+      {/* Launcher context menu */}
+      {ctxMenu && (
+        <div
+          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          style={{
+            left: Math.min(ctxMenu.x, window.innerWidth - 200),
+            top: Math.min(ctxMenu.y, window.innerHeight - 150),
+          }}
+          onClick={() => setCtxMenu(null)}
+        >
+          <div className="px-4 py-1.5 text-xs text-white/40 font-medium truncate">
+            {ctxMenu.app.name}
+          </div>
+          <div className="border-t border-white/10 my-0.5" />
+
+          <button
+            onClick={() => handleAppClick(ctxMenu.app.id)}
+            className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+          >
+            <span className="text-base">▶️</span> Open
+          </button>
+
+          {ctxMenu.app.isPinned ? (
+            <button
+              onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+            >
+              <span className="text-base">📌</span> Unpin from shelf
+            </button>
+          ) : (
+            <button
+              onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+            >
+              <span className="text-base">📌</span> Pin to shelf
+            </button>
+          )}
+
+          {onAddToDesktop && (
+            <button
+              onClick={() => { onAddToDesktop(ctxMenu.app.id); }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+            >
+              <span className="text-base">🖥️</span> Add to desktop
+            </button>
+          )}
+        </div>
+      )}
     </>
   );
 }

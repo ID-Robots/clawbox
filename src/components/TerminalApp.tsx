@@ -2,13 +2,7 @@
 
 /**
  * TerminalApp — xterm.js terminal emulator connected to a WebSocket PTY backend.
- *
- * Requires the standalone terminal server to be running:
- *   npx ts-node scripts/terminal-server.ts
- *   (listens on ws://localhost:3006 by default)
- *
- * Environment variable (optional):
- *   NEXT_PUBLIC_TERMINAL_WS_PORT  — override the WebSocket port (default: 3006)
+ * Auto-started via instrumentation.ts (no manual server needed).
  */
 
 import React, {
@@ -18,37 +12,42 @@ import React, {
   useState,
 } from "react";
 import dynamic from "next/dynamic";
-
-// We must import xterm only on the client side (it touches the DOM).
-// Use a wrapper component loaded via next/dynamic with ssr:false.
+import "@xterm/xterm/css/xterm.css";
 
 function TerminalInner() {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const statusRef = useRef<"connecting" | "connected" | "disconnected" | "error">("connecting");
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected" | "error">("connecting");
-  const [errorMsg, setErrorMsg] = useState<string>("");
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const inputDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const connectLockRef = useRef(false);
 
-  const wsPort =
-    typeof window !== "undefined"
-      ? (process.env.NEXT_PUBLIC_TERMINAL_WS_PORT || "3006")
-      : "3006";
+  const wsPort = typeof window !== "undefined"
+    ? (process.env.NEXT_PUBLIC_TERMINAL_WS_PORT || "3006")
+    : "3006";
 
   const wsUrl = `ws://${typeof window !== "undefined" ? window.location.hostname : "localhost"}:${wsPort}`;
 
-  const connect = useCallback(async () => {
-    if (!mountedRef.current) return;
-    if (!containerRef.current) return;
+  const updateStatus = useCallback((s: typeof status) => {
+    statusRef.current = s;
+    setStatus(s);
+  }, []);
 
-    // Dynamically import xterm modules (client-only)
+  const connect = useCallback(async () => {
+    if (!mountedRef.current || !containerRef.current) return;
+    if (connectLockRef.current) return;
+    connectLockRef.current = true;
+
     const { Terminal } = await import("@xterm/xterm");
     const { FitAddon } = await import("@xterm/addon-fit");
     const { WebLinksAddon } = await import("@xterm/addon-web-links");
 
-    // Create or reuse terminal instance
+    // Create terminal instance once
     if (!termRef.current) {
       const term = new Terminal({
         theme: {
@@ -77,7 +76,6 @@ function TerminalInner() {
         fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Consolas", "Courier New", monospace',
         fontSize: 13,
         lineHeight: 1.4,
-        letterSpacing: 0,
         cursorBlink: true,
         cursorStyle: "block",
         scrollback: 5000,
@@ -86,10 +84,8 @@ function TerminalInner() {
       });
 
       const fitAddon = new FitAddon();
-      const webLinksAddon = new WebLinksAddon();
-
       term.loadAddon(fitAddon);
-      term.loadAddon(webLinksAddon);
+      term.loadAddon(new WebLinksAddon());
 
       termRef.current = term;
       fitAddonRef.current = fitAddon;
@@ -101,32 +97,44 @@ function TerminalInner() {
     const term = termRef.current!;
     const fitAddon = fitAddonRef.current!;
 
-    // Write status message
     term.writeln("\x1b[2m\x1b[36mConnecting to terminal server…\x1b[0m");
 
-    // Open WebSocket
+    // Clean up previous connection
+    inputDisposableRef.current?.dispose();
+    inputDisposableRef.current = null;
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onerror = null;
+      wsRef.current.close(1000);
+      wsRef.current = null;
+    }
+
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
-    setStatus("connecting");
+    updateStatus("connecting");
 
     ws.onopen = () => {
+      connectLockRef.current = false;
       if (!mountedRef.current) { ws.close(); return; }
-      setStatus("connected");
+      updateStatus("connected");
       term.clear();
+      term.focus();
 
       // Send initial size
-      const { cols, rows } = term;
-      ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
 
       // Forward terminal input → server
-      const inputDisposable = term.onData((data: string) => {
+      inputDisposableRef.current = term.onData((data: string) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "input", data }));
         }
       });
 
       // Handle resize
-      const resizeObserver = new ResizeObserver(() => {
+      const ro = new ResizeObserver(() => {
         try {
           fitAddon.fit();
           if (ws.readyState === WebSocket.OPEN) {
@@ -134,15 +142,8 @@ function TerminalInner() {
           }
         } catch {}
       });
-      if (containerRef.current) {
-        resizeObserver.observe(containerRef.current);
-      }
-
-      // Cleanup on WS close
-      ws.onclose = () => {
-        inputDisposable.dispose();
-        resizeObserver.disconnect();
-      };
+      if (containerRef.current) ro.observe(containerRef.current);
+      resizeObserverRef.current = ro;
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -152,35 +153,38 @@ function TerminalInner() {
           term.write(msg.data);
         } else if (msg.type === "exit") {
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
-          setStatus("disconnected");
+          updateStatus("disconnected");
         }
       } catch {}
     };
 
     ws.onerror = () => {
       if (!mountedRef.current) return;
-      setStatus("error");
-      setErrorMsg(`Cannot connect to terminal server at ${wsUrl}`);
+      updateStatus("error");
       term.writeln(`\r\n\x1b[31mError: Cannot connect to ${wsUrl}\x1b[0m`);
-      term.writeln("\x1b[2mMake sure the terminal server is running:\x1b[0m");
-      term.writeln("\x1b[2m  npx ts-node scripts/terminal-server.ts\x1b[0m");
+      term.writeln("\x1b[2mTerminal server may not be running.\x1b[0m");
     };
 
     ws.onclose = (ev) => {
+      connectLockRef.current = false;
+      // Clean up input/resize handlers
+      inputDisposableRef.current?.dispose();
+      inputDisposableRef.current = null;
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+
       if (!mountedRef.current) return;
-      if (status !== "error") {
-        setStatus("disconnected");
+      if (statusRef.current !== "error") {
+        updateStatus("disconnected");
         if (ev.code !== 1000) {
           term.writeln(`\r\n\x1b[33m[Disconnected — will retry in 3s…]\x1b[0m`);
           reconnectTimerRef.current = setTimeout(() => {
-            if (mountedRef.current) {
-              connect();
-            }
+            if (mountedRef.current) connect();
           }, 3000);
         }
       }
     };
-  }, [wsUrl, status]);
+  }, [wsUrl, updateStatus]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -189,8 +193,10 @@ function TerminalInner() {
     return () => {
       mountedRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      inputDisposableRef.current?.dispose();
+      resizeObserverRef.current?.disconnect();
       if (wsRef.current) {
-        wsRef.current.onclose = null; // Prevent reconnect on intentional unmount
+        wsRef.current.onclose = null;
         wsRef.current.close(1000, "component unmounted");
       }
       if (termRef.current) {
@@ -199,6 +205,11 @@ function TerminalInner() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Focus terminal on container click
+  const handleContainerClick = useCallback(() => {
+    termRef.current?.focus();
   }, []);
 
   // Keyboard shortcut: Ctrl+Shift+C to copy, Ctrl+Shift+V to paste
@@ -291,12 +302,12 @@ function TerminalInner() {
           padding: "6px 4px",
           background: "#0d0d1a",
         }}
+        onClick={handleContainerClick}
       />
     </div>
   );
 }
 
-// Export as dynamic (no SSR) to prevent xterm DOM errors during SSR
 const TerminalApp = dynamic(
   () => Promise.resolve(TerminalInner),
   {

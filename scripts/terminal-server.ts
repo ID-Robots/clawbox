@@ -34,18 +34,22 @@ wss.on("connection", (ws: WebSocket, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[terminal-server] New connection from ${remote}`);
 
-  // Spawn a PTY
+  // Spawn a PTY — clean env to avoid p10k warnings and nvm conflicts
   const shell = process.env.SHELL || "/bin/zsh";
+  const cleanEnv = { ...process.env } as Record<string, string>;
+  delete cleanEnv.npm_config_prefix; // nvm conflict with bun/node
+  delete cleanEnv.npm_config_local_prefix;
   const term = pty.spawn(shell, [], {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
     cwd: os.homedir(),
     env: {
-      ...process.env,
+      ...cleanEnv,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
-    } as { [key: string]: string },
+      POWERLEVEL9K_INSTANT_PROMPT: "quiet",
+    },
   });
 
   console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);

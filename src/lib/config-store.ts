@@ -16,7 +16,7 @@ async function readConfig(): Promise<Config> {
   try {
     raw = await fs.readFile(CONFIG_PATH, "utf-8");
   } catch (err: unknown) {
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
+    if (err && typeof err === "object" && "code" in err && (err.code === "ENOENT" || err.code === "EACCES")) {
       return {};
     }
     throw err;

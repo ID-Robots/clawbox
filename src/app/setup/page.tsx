@@ -33,16 +33,12 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "openclaw", name: "OpenClaw", color: "#06b6d4", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
-  { id: "terminal", name: "Terminal", color: "#22c55e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
+  { id: "openclaw", name: "OpenClaw", color: "#0a0f1a", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
+  { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "system", name: "System Monitor", color: "#3b82f6", type: "system", pinned: false },
-  { id: "ollama", name: "Ollama", color: "#a855f7", type: "placeholder", pinned: false },
-  { id: "network", name: "Network", color: "#14b8a6", type: "placeholder", pinned: false },
-  { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://docs.openclaw.ai", pinned: false },
-  { id: "browser", name: "Browser", color: "#ef4444", type: "placeholder", pinned: false },
-  { id: "camera", name: "Camera", color: "#eab308", type: "placeholder", pinned: false },
+  { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
 ];
 
 // Inline SVG icons for each app
@@ -59,10 +55,22 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
       );
     case "openclaw":
       return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="10" />
-          <path d="M12 6v6l4 2" />
-          <circle cx="12" cy="12" r="2" fill="currentColor" />
+        <svg className={iconClass} viewBox="0 0 120 120" fill="none">
+          <defs>
+            <linearGradient id="oc-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#ff4d4d"/>
+              <stop offset="100%" stopColor="#991b1b"/>
+            </linearGradient>
+          </defs>
+          <path d="M60 10C30 10 15 35 15 55C15 75 30 95 45 100L45 110L55 110L55 100C55 100 60 102 65 100L65 110L75 110L75 100C90 95 105 75 105 55C105 35 90 10 60 10Z" fill="url(#oc-grad)"/>
+          <path d="M20 45C5 40 0 50 5 60C10 70 20 65 25 55C28 48 25 45 20 45Z" fill="url(#oc-grad)"/>
+          <path d="M100 45C115 40 120 50 115 60C110 70 100 65 95 55C92 48 95 45 100 45Z" fill="url(#oc-grad)"/>
+          <path d="M45 15Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
+          <path d="M75 15Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
+          <circle cx="45" cy="35" r="6" fill="#050810"/>
+          <circle cx="75" cy="35" r="6" fill="#050810"/>
+          <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/>
+          <circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
         </svg>
       );
     case "terminal":
@@ -81,30 +89,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
           <polyline points="6 10 10 8 14 12 18 7" />
         </svg>
       );
-    case "ollama":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2a4 4 0 0 0-4 4v2a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4z" />
-          <path d="M6 10a6 6 0 0 0 12 0" />
-          <path d="M12 16v6" />
-          <path d="M8 22h8" />
-          <circle cx="10" cy="6" r="1" fill="currentColor" />
-          <circle cx="14" cy="6" r="1" fill="currentColor" />
-        </svg>
-      );
     case "files":
       return (
         <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-      );
-    case "network":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M5 12.55a11 11 0 0 1 14.08 0" />
-          <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-          <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-          <circle cx="12" cy="20" r="1" fill="currentColor" />
         </svg>
       );
     case "help":
@@ -196,26 +184,6 @@ function InstalledAppIcon({ iconType, size = "w-6 h-6" }: { iconType: StoreApp["
   }
 }
 
-// Toast notification component
-function Toast({ message, onClose }: { message: string; onClose: () => void }) {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  return (
-    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[10010] animate-toast-in">
-      <div className="flex items-center gap-3 px-4 py-3 bg-[#1e2939]/95 backdrop-blur-xl rounded-xl border border-white/10 shadow-lg">
-        <div className="w-6 h-6 rounded-full bg-green-500 flex items-center justify-center">
-          <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </div>
-        <span className="text-sm text-white font-medium">{message}</span>
-      </div>
-    </div>
-  );
-}
 
 export default function ChromeDesktop() {
   const [launcherOpen, setLauncherOpen] = useState(false);
@@ -234,12 +202,125 @@ export default function ChromeDesktop() {
       return [];
     }
   });
-  const [toast, setToast] = useState<string | null>(null);
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
 
+  // ─── Desktop shortcuts for built-in apps ───
+  const DESKTOP_APPS_KEY = "clawbox-desktop-apps";
+  const [desktopApps, setDesktopApps] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const saved = localStorage.getItem(DESKTOP_APPS_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(DESKTOP_APPS_KEY, JSON.stringify(desktopApps)); } catch {}
+  }, [desktopApps]);
+  const handleAddToDesktop = useCallback((appId: string) => {
+    setDesktopApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
+
+  }, []);
+
+  // ─── Dynamic pin state ───
+  const PINNED_KEY = "clawbox-pinned-apps";
+  const [pinnedOverrides, setPinnedOverrides] = useState<Record<string, boolean>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const saved = localStorage.getItem(PINNED_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedOverrides)); } catch {}
+  }, [pinnedOverrides]);
+  const isAppPinned = useCallback((appId: string) => {
+    if (appId in pinnedOverrides) return pinnedOverrides[appId];
+    const app = apps.find(a => a.id === appId);
+    return app?.pinned ?? false;
+  }, [pinnedOverrides]);
+  const handlePinApp = useCallback((appId: string) => {
+    setPinnedOverrides(prev => ({ ...prev, [appId]: true }));
+
+  }, []);
+  const handleUnpinApp = useCallback((appId: string) => {
+    setPinnedOverrides(prev => ({ ...prev, [appId]: false }));
+
+  }, []);
+
+  // ─── Wallpapers ───
+  const WALLPAPER_KEY = "clawbox-wallpaper";
+  const wallpapers = [
+    { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
+    { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
+  ] as const;
+  const [wallpaperId, setWallpaperId] = useState<string>(() => {
+    if (typeof window === "undefined") return "clawbox";
+    try { return localStorage.getItem(WALLPAPER_KEY) || "clawbox"; } catch { return "clawbox"; }
+  });
+  const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
+  const WP_FIT_KEY = "clawbox-wallpaper-fit";
+  type WpFit = "fill" | "fit" | "center";
+  const [wpFit, setWpFit] = useState<WpFit>(() => {
+    if (typeof window === "undefined") return "fill";
+    try { return (localStorage.getItem(WP_FIT_KEY) as WpFit) || "fill"; } catch { return "fill"; }
+  });
+  useEffect(() => { try { localStorage.setItem(WP_FIT_KEY, wpFit); } catch {} }, [wpFit]);
+  const wpFitStyle: React.CSSProperties = wpFit === "fill"
+    ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
+    : wpFit === "fit"
+    ? { backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
+    : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
+  const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
+  const [customWallpapers, setCustomWallpapers] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const saved = localStorage.getItem(CUSTOM_WPS_KEY);
+      if (saved) return JSON.parse(saved);
+      // Migrate old single custom wallpaper
+      const old = localStorage.getItem("clawbox-custom-wallpaper");
+      if (old) { const arr = [old]; localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(arr)); localStorage.removeItem("clawbox-custom-wallpaper"); return arr; }
+    } catch {}
+    return [];
+  });
+  const wallpaperInputRef = useRef<HTMLInputElement>(null);
+  const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      setCustomWallpapers(prev => {
+        const next = [...prev, dataUrl];
+        try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+        setWallpaperId(`custom-${next.length - 1}`);
+        return next;
+      });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(WALLPAPER_KEY, wallpaperId); } catch {}
+  }, [wallpaperId]);
+
+  // ─── Mascot visibility ───
+  const [mascotHidden, setMascotHidden] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try { return localStorage.getItem("clawbox-mascot-hidden") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    const onShow = () => setMascotHidden(false);
+    const onStorage = (e: StorageEvent) => { if (e.key === "clawbox-mascot-hidden") setMascotHidden(e.newValue === "1"); };
+    window.addEventListener("clawbox-show-mascot", onShow);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("clawbox-show-mascot", onShow); window.removeEventListener("storage", onStorage); };
+  }, []);
+
   // ─── Desktop icon grid positions ───
-  const GRID_COLS = 8;
-  const GRID_ROWS = 5;
+  const GRID_COLS = 4;
+  const GRID_ROWS = 8;
+  const CELL_W = 90; // px
+  const CELL_H = 110; // px
   const ICON_GRID_KEY = "clawbox-icon-grid";
   const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>(() => {
     if (typeof window === "undefined") return {};
@@ -253,28 +334,126 @@ export default function ChromeDesktop() {
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
+  // ─── Marquee selection ───
+  const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
+  const [marquee, setMarquee] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
+  const marqueeRef = useRef<{ active: boolean; startX: number; startY: number }>({ active: false, startX: 0, startY: 0 });
+
+  const getMarqueeRect = useCallback((m: { startX: number; startY: number; endX: number; endY: number }) => ({
+    left: Math.min(m.startX, m.endX),
+    top: Math.min(m.startY, m.endY),
+    right: Math.max(m.startX, m.endX),
+    bottom: Math.max(m.startY, m.endY),
+  }), []);
+
+  const getIconRect = useCallback((iconId: string, index: number) => {
+    if (!gridRef.current) return null;
+    const rect = gridRef.current.getBoundingClientRect();
+    const pos = iconPositions[iconId] || (() => {
+      const col = Math.floor(index / GRID_ROWS) % GRID_COLS;
+      const row = index % GRID_ROWS;
+      return { row, col };
+    })();
+    const padding = { top: 24, left: 16 };
+    return {
+      left: rect.left + padding.left + pos.col * CELL_W,
+      top: rect.top + padding.top + pos.row * CELL_H,
+      right: rect.left + padding.left + pos.col * CELL_W + CELL_W,
+      bottom: rect.top + padding.top + pos.row * CELL_H + CELL_H,
+    };
+  }, [iconPositions]);
+
+  const handleGridPointerDown = useCallback((e: React.PointerEvent) => {
+    // Only start marquee on left click directly on the grid (not on icons)
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button")) return;
+    setSelectedIcons(new Set());
+    marqueeRef.current = { active: true, startX: e.clientX, startY: e.clientY };
+    setMarquee(null);
+
+    const onMove = (ev: PointerEvent) => {
+      if (!marqueeRef.current.active) return;
+      const dx = ev.clientX - marqueeRef.current.startX;
+      const dy = ev.clientY - marqueeRef.current.startY;
+      // Only start drawing after small threshold
+      if (Math.abs(dx) + Math.abs(dy) < 5) return;
+      const m = {
+        startX: marqueeRef.current.startX,
+        startY: marqueeRef.current.startY,
+        endX: ev.clientX,
+        endY: ev.clientY,
+      };
+      setMarquee(m);
+      // Real-time selection during drag
+      const mRect = {
+        left: Math.min(m.startX, m.endX),
+        top: Math.min(m.startY, m.endY),
+        right: Math.max(m.startX, m.endX),
+        bottom: Math.max(m.startY, m.endY),
+      };
+      const selected = new Set<string>();
+      document.querySelectorAll("[data-desktop-icon-id]").forEach((el) => {
+        const iconId = el.getAttribute("data-desktop-icon-id");
+        if (!iconId) return;
+        const r = el.getBoundingClientRect();
+        if (r.left < mRect.right && r.right > mRect.left && r.top < mRect.bottom && r.bottom > mRect.top) {
+          selected.add(iconId);
+        }
+      });
+      setSelectedIcons(selected);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      marqueeRef.current.active = false;
+      setMarquee(null);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
   // ─── Context menu ───
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string; isGroup?: boolean } | null>(null);
+
+  const ctxMenuOpenedAt = useRef(0);
 
   useEffect(() => {
-    const close = () => setCtxMenu(null);
-    if (ctxMenu) {
-      window.addEventListener("click", close);
-      window.addEventListener("contextmenu", close);
-      return () => { window.removeEventListener("click", close); window.removeEventListener("contextmenu", close); };
-    }
+    if (!ctxMenu) return;
+    const close = (e: Event) => {
+      // Ignore events that happen within 100ms of opening (same interaction)
+      if (Date.now() - ctxMenuOpenedAt.current < 100) return;
+      e.preventDefault();
+      setCtxMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+    };
   }, [ctxMenu]);
 
   const handleDesktopContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    ctxMenuOpenedAt.current = Date.now();
     setCtxMenu({ x: e.clientX, y: e.clientY });
   }, []);
 
   const handleIconContextMenu = useCallback((e: React.MouseEvent, appId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setCtxMenu({ x: e.clientX, y: e.clientY, appId });
-  }, []);
+    ctxMenuOpenedAt.current = Date.now();
+    // If right-clicking a selected icon in a multi-selection, show group menu
+    if (selectedIcons.size > 1 && selectedIcons.has(appId)) {
+      setCtxMenu({ x: e.clientX, y: e.clientY, appId, isGroup: true });
+    } else {
+      setSelectedIcons(new Set());
+      setCtxMenu({ x: e.clientX, y: e.clientY, appId });
+    }
+  }, [selectedIcons]);
 
   // Save icon positions
   useEffect(() => {
@@ -299,23 +478,33 @@ export default function ChromeDesktop() {
   const snapToGrid = useCallback((clientX: number, clientY: number): { row: number; col: number } | null => {
     if (!gridRef.current) return null;
     const rect = gridRef.current.getBoundingClientRect();
-    const cellW = rect.width / GRID_COLS;
-    const cellH = rect.height / GRID_ROWS;
-    const col = Math.floor((clientX - rect.left) / cellW);
-    const row = Math.floor((clientY - rect.top) / cellH);
-    if (row < 0 || row >= GRID_ROWS || col < 0 || col >= GRID_COLS) return null;
+    const col = Math.floor((clientX - rect.left) / CELL_W);
+    const row = Math.floor((clientY - rect.top) / CELL_H);
+    const maxCols = Math.floor(rect.width / CELL_W);
+    const maxRows = Math.floor(rect.height / CELL_H);
+    if (row < 0 || row >= maxRows || col < 0 || col >= maxCols) return null;
     return { row, col };
   }, []);
 
   const handleIconDragStart = useCallback((appId: string, e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setDraggingIcon(appId);
-    setDragPos({ x: e.clientX, y: e.clientY });
-    const snap = snapToGrid(e.clientX, e.clientY);
-    if (snap) setDragGhost(snap);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let isDragging = false;
+    const DRAG_THRESHOLD = 8; // px before drag activates
+    // Check if this icon is part of a multi-selection
+    const isGroupDrag = selectedIcons.size > 1 && selectedIcons.has(appId);
+    const groupIds = isGroupDrag ? Array.from(selectedIcons) : [appId];
 
     const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!isDragging && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
+      if (!isDragging) {
+        isDragging = true;
+        setDraggingIcon(appId);
+      }
       setDragPos({ x: ev.clientX, y: ev.clientY });
       const s = snapToGrid(ev.clientX, ev.clientY);
       if (s) setDragGhost(s);
@@ -323,9 +512,44 @@ export default function ChromeDesktop() {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      const target = snapToGrid(ev.clientX, ev.clientY);
-      if (target && !isGridCellOccupied(target.row, target.col, appId)) {
-        setIconPositions(prev => ({ ...prev, [appId]: target }));
+      if (!isDragging) {
+        // It was a tap/click — open the app via the onClick handler
+        setDraggingIcon(null);
+        return;
+      } else {
+        const target = snapToGrid(ev.clientX, ev.clientY);
+        if (target) {
+          if (isGroupDrag) {
+            // Group drag: compute delta from the dragged icon's original position and apply to all
+            setIconPositions(prev => {
+              const next = { ...prev };
+              const originPos = prev[appId] || { row: 0, col: 0 };
+              const dRow = target.row - originPos.row;
+              const dCol = target.col - originPos.col;
+              // Calculate new positions for all group icons
+              const newPositions: Record<string, { row: number; col: number }> = {};
+              let valid = true;
+              for (const id of groupIds) {
+                const pos = prev[id] || { row: 0, col: 0 };
+                const newPos = { row: pos.row + dRow, col: pos.col + dCol };
+                // Bounds check
+                if (newPos.row < 0 || newPos.col < 0) { valid = false; break; }
+                // Check occupied by non-group icon
+                const occupied = Object.entries(prev).some(
+                  ([oid, opos]) => !groupIds.includes(oid) && opos.row === newPos.row && opos.col === newPos.col
+                );
+                if (occupied) { valid = false; break; }
+                newPositions[id] = newPos;
+              }
+              if (valid) {
+                return { ...next, ...newPositions };
+              }
+              return prev;
+            });
+          } else if (!isGridCellOccupied(target.row, target.col, appId)) {
+            setIconPositions(prev => ({ ...prev, [appId]: target }));
+          }
+        }
       }
       setDraggingIcon(null);
       setDragPos(null);
@@ -333,7 +557,7 @@ export default function ChromeDesktop() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  }, [snapToGrid, isGridCellOccupied]);
+  }, [snapToGrid, isGridCellOccupied, selectedIcons]);
 
   // Save installed apps to localStorage when they change
   useEffect(() => {
@@ -360,7 +584,7 @@ export default function ChromeDesktop() {
   const handleInstallApp = useCallback((appId: string) => {
     setInstalledApps((prev) => [...prev, appId]);
     setRecentlyInstalled(appId);
-    setToast("App installed!");
+
     // Clear recently installed animation after delay
     setTimeout(() => setRecentlyInstalled(null), 1000);
   }, []);
@@ -370,7 +594,7 @@ export default function ChromeDesktop() {
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
     // Close any windows of this app
     setOpenWindows((prev) => prev.filter((w) => w.appId !== `installed-${appId}`));
-    setToast("App uninstalled");
+
   }, []);
 
   // Get all apps including installed ones
@@ -400,7 +624,7 @@ export default function ChromeDesktop() {
     return visibleWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b)).id;
   }, [openWindows]);
 
-  const openApp = useCallback((appId: string) => {
+  const openApp = useCallback((appId: string, forceNew = false) => {
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return;
@@ -410,29 +634,31 @@ export default function ChromeDesktop() {
       return;
     }
 
-    // Check if app is already open
-    const existingWindow = openWindows.find((w) => w.appId === appId);
-    if (existingWindow) {
-      // If minimized, restore it; otherwise bring to front
-      if (existingWindow.minimized) {
-        setOpenWindows((prev) =>
-          prev.map((w) =>
-            w.id === existingWindow.id
-              ? { ...w, minimized: false, zIndex: nextZIndex }
-              : w
-          )
-        );
-        setNextZIndex((z) => z + 1);
-      } else {
-        // Bring to front
-        setOpenWindows((prev) =>
-          prev.map((w) =>
-            w.id === existingWindow.id ? { ...w, zIndex: nextZIndex } : w
-          )
-        );
-        setNextZIndex((z) => z + 1);
+    if (!forceNew) {
+      // Check if app is already open
+      const existingWindow = openWindows.find((w) => w.appId === appId);
+      if (existingWindow) {
+        // If minimized, restore it; otherwise bring to front
+        if (existingWindow.minimized) {
+          setOpenWindows((prev) =>
+            prev.map((w) =>
+              w.id === existingWindow.id
+                ? { ...w, minimized: false, zIndex: nextZIndex }
+                : w
+            )
+          );
+          setNextZIndex((z) => z + 1);
+        } else {
+          // Bring to front
+          setOpenWindows((prev) =>
+            prev.map((w) =>
+              w.id === existingWindow.id ? { ...w, zIndex: nextZIndex } : w
+            )
+          );
+          setNextZIndex((z) => z + 1);
+        }
+        return;
       }
-      return;
     }
 
     // Open new window
@@ -462,31 +688,44 @@ export default function ChromeDesktop() {
   }, []);
 
   const handleShelfAppClick = useCallback((appId: string) => {
-    const window = openWindows.find((w) => w.appId === appId);
-    if (window) {
-      if (window.minimized) {
-        // Restore
-        setOpenWindows((prev) =>
-          prev.map((w) =>
-            w.id === window.id
-              ? { ...w, minimized: false, zIndex: nextZIndex }
-              : w
-          )
-        );
-        setNextZIndex((z) => z + 1);
-      } else if (getActiveWindowId() === window.id) {
-        // Minimize if already focused
-        minimizeWindow(window.id);
-      } else {
-        // Bring to front
-        focusWindow(window.id);
-      }
-    } else {
+    const appWindows = openWindows.filter((w) => w.appId === appId);
+    if (appWindows.length === 0) {
       openApp(appId);
+      return;
     }
-  }, [openWindows, openApp, minimizeWindow, focusWindow, getActiveWindowId, nextZIndex]);
 
-  const pinnedApps = apps.filter((a) => a.pinned);
+    // Check if any are minimized — restore them all
+    const anyMinimized = appWindows.some(w => w.minimized);
+    if (anyMinimized) {
+      setOpenWindows((prev) =>
+        prev.map((w) =>
+          w.appId === appId && w.minimized
+            ? { ...w, minimized: false, zIndex: nextZIndex }
+            : w
+        )
+      );
+      setNextZIndex((z) => z + 1);
+      return;
+    }
+
+    // If the top window of this app is active, minimize all
+    const topWindow = appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
+    if (getActiveWindowId() === topWindow.id) {
+      appWindows.forEach(w => minimizeWindow(w.id));
+    } else {
+      // Bring all to front, top window on top
+      let z = nextZIndex;
+      setOpenWindows((prev) =>
+        prev.map((w) => {
+          if (w.appId !== appId) return w;
+          return { ...w, zIndex: w.id === topWindow.id ? z + appWindows.length : z++ };
+        })
+      );
+      setNextZIndex((z) => z + appWindows.length + 1);
+    }
+  }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex]);
+
+  const pinnedApps = apps.filter((a) => isAppPinned(a.id));
 
   const renderWindowContent = (appId: string) => {
     const allApps = getAllApps();
@@ -591,33 +830,51 @@ export default function ChromeDesktop() {
 
   const activeWindowId = getActiveWindowId();
 
-  // Get installed apps for desktop display
+  // Get installed store apps for desktop display
   const installedAppDefs = installedApps
     .map((appId) => storeApps.find((a) => a.id === appId))
     .filter((a): a is StoreApp => a !== null);
+
+  // Built-in apps with desktop shortcuts
+  const desktopBuiltinApps = desktopApps
+    .map((appId) => apps.find((a) => a.id === appId))
+    .filter((a): a is AppDef => a !== null);
 
   // Get all apps for launcher (including installed)
   const allAppsForLauncher = getAllApps();
 
   return (
-    <div className="min-h-screen relative overflow-hidden select-none" onContextMenu={handleDesktopContextMenu}>
+    <div className="min-h-screen relative overflow-hidden select-none">
       {/* Desktop wallpaper background */}
-      <div className="absolute inset-0 bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e] z-0" />
-      <div className="absolute inset-0 bg-stars z-0" />
-      <div className="absolute inset-0 bg-nebula z-0" />
-
-      {/* Desktop icon grid — draggable */}
-      <div ref={gridRef} className="absolute inset-0 z-[1] pointer-events-none" style={{ paddingBottom: 56 }}>
+      {(() => {
+        const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
+        const customWp = customIdx >= 0 ? customWallpapers[customIdx] : undefined;
+        return customWp ? (
+          <div className="absolute inset-0 z-0 pointer-events-none bg-black" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle }} />
+      ) : currentWallpaper.image ? (
+        <div className="absolute inset-0 z-0 pointer-events-none bg-black" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle }} />
+      ) : (
+        <>
+          <div className={`absolute inset-0 ${currentWallpaper.gradient} z-0 pointer-events-none`} />
+          {currentWallpaper.stars && <div className="absolute inset-0 bg-stars z-0 pointer-events-none" />}
+          {currentWallpaper.nebula && <div className="absolute inset-0 bg-nebula z-0 pointer-events-none" />}
+        </>
+      );
+      })()}
+      {/* Hidden file input for wallpaper upload */}
+      <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
+      {/* Desktop icon grid — draggable + right-click surface */}
+      <div ref={gridRef} className="absolute inset-0 z-[1]" style={{ paddingBottom: 56, paddingTop: 24, paddingLeft: 16, paddingRight: 16 }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
         {installedAppDefs.map((app, i) => {
           const pos = getIconPosition(app.id, i);
           const isBeingDragged = draggingIcon === app.id;
+          const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== app.id && selectedIcons.size > 1 && selectedIcons.has(app.id) && selectedIcons.has(draggingIcon);
           const isRecent = recentlyInstalled === app.id;
-          const cellW = 100 / GRID_COLS;
-          const cellH = 100 / GRID_ROWS;
-
+          const isSelected = selectedIcons.has(app.id);
           return (
             <div
               key={app.id}
+              data-desktop-icon-id={app.id}
 
               style={isBeingDragged && dragPos ? {
                 position: "fixed",
@@ -627,12 +884,21 @@ export default function ChromeDesktop() {
                 opacity: 0.85,
                 pointerEvents: "none",
                 transition: "none",
+              } : isGroupMemberDragged ? {
+                position: "absolute",
+                left: pos.col * CELL_W,
+                top: pos.row * CELL_H,
+                width: CELL_W,
+                height: CELL_H,
+                opacity: 0.4,
+                pointerEvents: "none",
+                transition: "opacity 0.15s",
               } : {
                 position: "absolute",
-                left: `${pos.col * cellW}%`,
-                top: `${pos.row * cellH}%`,
-                width: `${cellW}%`,
-                height: `${cellH}%`,
+                left: pos.col * CELL_W,
+                top: pos.row * CELL_H,
+                width: CELL_W,
+                height: CELL_H,
                 transition: "left 0.2s, top 0.2s",
               }}
               className="flex items-center justify-center pointer-events-auto"
@@ -643,7 +909,7 @@ export default function ChromeDesktop() {
                 onContextMenu={(e) => handleIconContextMenu(e, app.id)}
                 className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
                   isRecent ? "animate-install-bounce" : ""
-                }`}
+                } ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
                 <div
                   className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
@@ -659,20 +925,91 @@ export default function ChromeDesktop() {
           );
         })}
 
+        {/* Built-in app desktop shortcuts */}
+        {desktopBuiltinApps.map((app, i) => {
+          const iconId = `desktop-${app.id}`;
+          const pos = getIconPosition(iconId, installedAppDefs.length + i);
+          const isBeingDragged = draggingIcon === iconId;
+          const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== iconId && selectedIcons.size > 1 && selectedIcons.has(iconId) && selectedIcons.has(draggingIcon);
+          const isSelected = selectedIcons.has(iconId);
+          return (
+            <div
+              key={iconId}
+              data-desktop-icon-id={iconId}
+              style={isBeingDragged && dragPos ? {
+                position: "fixed",
+                left: dragPos.x - 40,
+                top: dragPos.y - 40,
+                zIndex: 9999,
+                opacity: 0.85,
+                pointerEvents: "none",
+                transition: "none",
+              } : isGroupMemberDragged ? {
+                position: "absolute",
+                left: pos.col * CELL_W,
+                top: pos.row * CELL_H,
+                width: CELL_W,
+                height: CELL_H,
+                opacity: 0.4,
+                pointerEvents: "none",
+                transition: "opacity 0.15s",
+              } : {
+                position: "absolute",
+                left: pos.col * CELL_W,
+                top: pos.row * CELL_H,
+                width: CELL_W,
+                height: CELL_H,
+                transition: "left 0.2s, top 0.2s",
+              }}
+              className="flex items-center justify-center pointer-events-auto"
+            >
+              <button
+                onPointerDown={(e) => handleIconDragStart(`desktop-${app.id}`, e)}
+                onClick={() => { if (!draggingIcon) openApp(app.id); }}
+                onContextMenu={(e) => handleIconContextMenu(e, `desktop-${app.id}`)}
+                className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
+              >
+                <div
+                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+                  style={{ backgroundColor: app.color }}
+                >
+                  <AppIcon id={app.id} size="w-7 h-7" />
+                </div>
+                <span className="text-xs text-white/80 font-medium text-center line-clamp-1 max-w-[80px]">
+                  {app.name}
+                </span>
+              </button>
+            </div>
+          );
+        })}
+
         {/* Ghost indicator for drop target */}
         {draggingIcon && dragGhost && (
           <div
             style={{
               position: "absolute",
-              left: `${dragGhost.col * (100 / GRID_COLS)}%`,
-              top: `${dragGhost.row * (100 / GRID_ROWS)}%`,
-              width: `${100 / GRID_COLS}%`,
-              height: `${100 / GRID_ROWS}%`,
+              left: dragGhost.col * CELL_W,
+              top: dragGhost.row * CELL_H,
+              width: CELL_W,
+              height: CELL_H,
             }}
             className="flex items-center justify-center pointer-events-none"
           >
             <div className="w-16 h-16 rounded-2xl border-2 border-dashed border-white/30 bg-white/5" />
           </div>
+        )}
+
+        {/* Marquee selection rectangle */}
+        {marquee && (
+          <div
+            className="fixed pointer-events-none border border-blue-400/60 bg-blue-400/15 z-[2]"
+            style={{
+              left: Math.min(marquee.startX, marquee.endX),
+              top: Math.min(marquee.startY, marquee.endY),
+              width: Math.abs(marquee.endX - marquee.startX),
+              height: Math.abs(marquee.endY - marquee.startY),
+            }}
+          />
         )}
       </div>
 
@@ -735,6 +1072,7 @@ export default function ChromeDesktop() {
               name: app.name,
               color: app.color,
               icon: <InstalledAppIcon iconType={app.storeApp.iconType} />,
+              isPinned: isAppPinned(app.id),
             };
           }
           return {
@@ -742,11 +1080,15 @@ export default function ChromeDesktop() {
             name: app.name,
             color: app.color,
             icon: <AppIcon id={app.id} />,
+            isPinned: isAppPinned(app.id),
           };
         })}
         isOpen={launcherOpen}
         onClose={() => setLauncherOpen(false)}
         onAppClick={openApp}
+        onPinApp={handlePinApp}
+        onUnpinApp={handleUnpinApp}
+        onAddToDesktop={handleAddToDesktop}
       />
 
       {/* System Tray */}
@@ -759,24 +1101,54 @@ export default function ChromeDesktop() {
 
       {/* Shelf (taskbar) */}
       <ChromeShelf
-        apps={pinnedApps.map((app) => {
-          const window = openWindows.find((w) => w.appId === app.id);
-          return {
-            id: app.id,
-            name: app.name,
-            icon: (
-              <div
-                className="w-10 h-10 rounded-full flex items-center justify-center"
-                style={{ backgroundColor: app.color }}
-              >
-                <AppIcon id={app.id} />
-              </div>
-            ),
-            isOpen: !!window,
-            isActive: window?.id === activeWindowId && !window?.minimized,
+        apps={(() => {
+          const allApps = getAllApps();
+          const pinnedIds = new Set(pinnedApps.map(a => a.id));
+          // Open apps that aren't pinned
+          const unpinnedOpenApps = openWindows
+            .filter(w => !pinnedIds.has(w.appId))
+            .map(w => allApps.find(a => a.id === w.appId))
+            .filter((a): a is AppDef => a !== null)
+            // Deduplicate
+            .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i);
+
+          const mapApp = (app: AppDef) => {
+            const appWindows = openWindows.filter((w) => w.appId === app.id);
+            const topWin = appWindows.length > 0
+              ? appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b))
+              : null;
+            const renderIcon = () => {
+              if (app.type === "installed" && app.storeApp) {
+                return (
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
+                    <InstalledAppIcon iconType={app.storeApp.iconType} />
+                  </div>
+                );
+              }
+              return (
+                <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
+                  <AppIcon id={app.id} />
+                </div>
+              );
+            };
+            return {
+              id: app.id,
+              name: app.name,
+              icon: renderIcon(),
+              isOpen: appWindows.length > 0,
+              isActive: topWin?.id === activeWindowId && !topWin?.minimized,
+              isPinned: pinnedIds.has(app.id),
+              windowCount: appWindows.length,
+            };
           };
-        })}
+
+          return [
+            ...pinnedApps.map(mapApp),
+            ...unpinnedOpenApps.map(mapApp),
+          ];
+        })()}
         onAppClick={handleShelfAppClick}
+        onNewWindow={(appId) => openApp(appId, true)}
         onLauncherClick={() => {
           setTrayOpen(false);
           setLauncherOpen((prev) => !prev);
@@ -785,11 +1157,14 @@ export default function ChromeDesktop() {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
         }}
+        onPinApp={handlePinApp}
+        onUnpinApp={handleUnpinApp}
+        onCloseApp={(appId) => {
+          setOpenWindows(prev => prev.filter(w => w.appId !== appId));
+        }}
         time={time}
       />
 
-      {/* Toast notification */}
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
       {/* Context menu */}
       {ctxMenu && (
@@ -801,11 +1176,65 @@ export default function ChromeDesktop() {
           }}
           onClick={() => setCtxMenu(null)}
         >
-          {ctxMenu.appId ? (
+          {ctxMenu.isGroup && ctxMenu.appId ? (
             <>
-              <button onClick={() => openApp(`installed-${ctxMenu.appId}`)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+              <div className="px-4 py-1.5 text-xs text-white/40 font-medium">
+                {selectedIcons.size} items selected
+              </div>
+              <div className="border-t border-white/10 my-0.5" />
+              <button onClick={() => {
+                selectedIcons.forEach(id => {
+                  if (id.startsWith("desktop-")) {
+                    openApp(id.replace("desktop-", ""));
+                  } else {
+                    openApp(`installed-${id}`);
+                  }
+                });
+                setSelectedIcons(new Set());
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">▶️</span> Open all
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => {
+                setIconPositions(prev => {
+                  const next = { ...prev };
+                  selectedIcons.forEach(id => { delete next[id]; });
+                  return next;
+                });
+                setSelectedIcons(new Set());
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">📐</span> Reset positions
+              </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => {
+                selectedIcons.forEach(id => {
+                  if (id.startsWith("desktop-")) {
+                    const appId = id.replace("desktop-", "");
+                    setDesktopApps(prev => prev.filter(a => a !== appId));
+                  } else {
+                    handleUninstallApp(id);
+                  }
+                });
+                setSelectedIcons(new Set());
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
+                <span className="text-base">👁️‍🗨️</span> Remove all from desktop
+              </button>
+            </>
+          ) : ctxMenu.appId ? (() => {
+            // Resolve the actual appId for opening
+            const resolvedAppId = ctxMenu.appId!.startsWith("desktop-")
+              ? ctxMenu.appId!.replace("desktop-", "")
+              : `installed-${ctxMenu.appId}`;
+            return (
+            <>
+              <button onClick={() => openApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="text-base">▶️</span> Open
               </button>
+              {openWindows.some(w => w.appId === resolvedAppId) && (
+                <button onClick={() => openApp(resolvedAppId, true)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="text-base">🪟</span> New Window
+                </button>
+              )}
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
                 if (ctxMenu.appId) handleUninstallApp(ctxMenu.appId);
@@ -822,8 +1251,23 @@ export default function ChromeDesktop() {
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="text-base">📐</span> Reset Position
               </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => {
+                if (!ctxMenu.appId) return;
+                const id = ctxMenu.appId;
+                if (id.startsWith("desktop-")) {
+                  // Remove built-in app desktop shortcut
+                  const appId = id.replace("desktop-", "");
+                  setDesktopApps(prev => prev.filter(a => a !== appId));
+                } else {
+                  // Uninstall store app (removes from desktop)
+                  handleUninstallApp(id);
+                }
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
+                <span className="text-base">👁️‍🗨️</span> Remove from desktop
+              </button>
             </>
-          ) : (
+            ); })() : (
             <>
               <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="text-base">🛍️</span> App Store
@@ -839,12 +1283,114 @@ export default function ChromeDesktop() {
                 <span className="text-base">📊</span> System Monitor
               </button>
               <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">🦀</span> OpenClaw
+                <span className="w-4 h-4 inline-block"><AppIcon id="openclaw" size="w-4 h-4" /></span> OpenClaw
+              </button>
+              <button onClick={() => {
+                // Collect all desktop icon IDs
+                const allIconIds = [
+                  ...installedAppDefs.map(a => a.id),
+                  ...desktopBuiltinApps.map(a => `desktop-${a.id}`),
+                ];
+                if (allIconIds.length === 0) return;
+                // Calculate grid to center icons
+                const rect = gridRef.current?.getBoundingClientRect();
+                const areaW = rect ? rect.width : window.innerWidth;
+                const areaH = rect ? rect.height - 56 : window.innerHeight - 56;
+                const cols = Math.min(allIconIds.length, Math.max(1, Math.floor(areaW / CELL_W)));
+                const rows = Math.ceil(allIconIds.length / cols);
+                const gridW = cols * CELL_W;
+                const gridH = rows * CELL_H;
+                const offsetCol = Math.floor((areaW - gridW) / 2 / CELL_W);
+                const offsetRow = Math.floor((areaH - gridH) / 2 / CELL_H);
+                const positions: Record<string, { row: number; col: number }> = {};
+                allIconIds.forEach((id, i) => {
+                  const col = i % cols;
+                  const row = Math.floor(i / cols);
+                  positions[id] = { row: row + offsetRow, col: col + offsetCol };
+                });
+                setIconPositions(positions);
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="text-base">📐</span> Arrange icons
               </button>
               <div className="border-t border-white/10 my-1" />
-              <button className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-white/40 cursor-default">
-                <span className="text-base">ℹ️</span> ClawBox v1.0
-              </button>
+              <div className="px-4 py-2">
+                <div className="flex items-center gap-3 mb-2 text-white/70">
+                  <span className="text-base">🎨</span> Wallpaper
+                </div>
+                <div className="grid grid-cols-4 gap-1.5" onClick={(e) => e.stopPropagation()}>
+                  {wallpapers.map((wp) => (
+                    <button
+                      key={wp.id}
+                      onClick={() => { setWallpaperId(wp.id); setCtxMenu(null); }}
+                      className={`h-8 rounded-md border-2 transition-all ${
+                        wallpaperId === wp.id ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
+                      } ${wp.gradient}`}
+                      style={wp.image ? { backgroundImage: `url(${wp.image})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
+                      title={wp.name}
+                    />
+                  ))}
+                  {customWallpapers.map((wp, i) => (
+                    <div key={`custom-${i}`} className="relative group">
+                      <button
+                        onClick={() => { setWallpaperId(`custom-${i}`); setCtxMenu(null); }}
+                        className={`w-full h-8 rounded-md border-2 transition-all ${
+                          wallpaperId === `custom-${i}` ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
+                        }`}
+                        style={{ backgroundImage: `url(${wp})`, backgroundSize: "cover", backgroundPosition: "center" }}
+                        title={`Custom ${i + 1}`}
+                      />
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCustomWallpapers(prev => {
+                            const next = prev.filter((_, j) => j !== i);
+                            try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+                            return next;
+                          });
+                          if (wallpaperId === `custom-${i}`) setWallpaperId(wallpapers[0].id);
+                        }}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/90 hover:bg-red-400 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Remove wallpaper"
+                      >
+                        <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="6" y1="18" x2="18" y2="6" /></svg>
+                      </button>
+                    </div>
+                  ))}
+                  <label
+                    className="h-8 rounded-md border-2 border-dashed border-white/20 hover:border-white/40 transition-all flex items-center justify-center text-white/40 hover:text-white/70 cursor-pointer"
+                    title="Upload wallpaper"
+                  >
+                    <input type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="12" y1="5" x2="12" y2="19" />
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                  </label>
+                </div>
+                <div className="flex gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
+                  {([["fill", "Fill"], ["fit", "Fit"], ["center", "Center"]] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      onClick={() => setWpFit(mode)}
+                      className={`flex-1 text-[10px] py-1 rounded transition-all ${
+                        wpFit === mode ? "bg-white/20 text-white" : "bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/60"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="border-t border-white/10 my-1" />
+              {mascotHidden ? (
+                <button onClick={() => { window.dispatchEvent(new Event('clawbox-show-mascot')); try { localStorage.removeItem('clawbox-mascot-hidden') } catch {}; setMascotHidden(false); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="text-base">🦀</span> Show Mascot
+                </button>
+              ) : (
+                <button onClick={() => { try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; setMascotHidden(true); window.dispatchEvent(new Event('clawbox-hide-mascot')); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="text-base">🦀</span> Hide Mascot
+                </button>
+              )}
             </>
           )}
         </div>
