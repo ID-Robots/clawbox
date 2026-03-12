@@ -203,6 +203,21 @@ function ClawBoxMascot() {
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
+  // ─── Mascot age (persisted birth timestamp) ───
+  const BORN_KEY = 'clawbox-mascot-born'
+  const bornAt = useRef<number>(0)
+  if (bornAt.current === 0) {
+    let val = Date.now()
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem(BORN_KEY)
+        if (saved) val = parseInt(saved, 10)
+        else localStorage.setItem(BORN_KEY, String(val))
+      } catch {}
+    }
+    bornAt.current = val
+  }
+
   // ─── Tamagotchi stats ───
   const TAMA_KEY = 'clawbox-tamagotchi'
   const [tamaStats, setTamaStats] = useState(() => {
@@ -265,6 +280,9 @@ function ClawBoxMascot() {
   const tamaRevive = useCallback(() => {
     setTamaStats({ hunger: 50, happiness: 50, energy: 50, health: 50, lastUpdate: Date.now() })
     setIsDead(false)
+    const now = Date.now()
+    bornAt.current = now
+    try { localStorage.setItem(BORN_KEY, String(now)) } catch {}
     say('I live again! 🦀💀→🦀', 3000)
   }, [say])
   const tamaFeed = useCallback(() => {
@@ -404,6 +422,23 @@ function ClawBoxMascot() {
     updateCrabPos()
   }, [updateCrabPos])
 
+  // ─── Impact damage: take health damage when hitting surfaces at high speed ───
+  const IMPACT_THRESHOLD = 600  // px/s — below this, no damage
+  const IMPACT_DAMAGE_SCALE = 0.025 // damage per px/s above threshold
+  const applyImpactDamage = useCallback((impactVel: number) => {
+    const speed = Math.abs(impactVel)
+    if (speed < IMPACT_THRESHOLD) return
+    const dmg = (speed - IMPACT_THRESHOLD) * IMPACT_DAMAGE_SCALE
+    setTamaStats(prev => ({
+      ...prev,
+      health: Math.max(0, prev.health - dmg),
+      happiness: Math.max(0, prev.happiness - dmg * 0.5),
+      lastUpdate: Date.now(),
+    }))
+    if (speed > 1200) say('OUCH! 💀', 1500)
+    else if (speed > 800) say('Ow! 🤕', 1200)
+  }, [say])
+
   // ─── ImpactJS-style physics tick (runs after drop) ───
   const physicsLoop = useCallback(() => {
     const p = physicsRef.current
@@ -462,6 +497,7 @@ function ClawBoxMascot() {
     })
 
     if (landedOnPlatform) {
+      applyImpactDamage(p.velY)
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
         if (crabElRef.current) {
@@ -488,6 +524,7 @@ function ClawBoxMascot() {
     const crabFloor = 8
     if (p.posY <= crabFloor) {
       p.posY = crabFloor
+      applyImpactDamage(p.velY)
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
         // Squash effect on bounce
@@ -515,12 +552,14 @@ function ClawBoxMascot() {
     const crabVh = window.innerHeight
     if (p.posY >= crabVh - 150) { // 150 = crab size
       p.posY = crabVh - 150
+      applyImpactDamage(p.velY)
       if (Math.abs(p.velY) > p.minBounceVel) p.velY = Math.abs(p.velY) * p.bounciness
       else p.velY = 0
     }
     // ─── Collision: walls ───
     if (xRef.current <= 2) {
       xRef.current = 2
+      applyImpactDamage(p.velX)
       if (Math.abs(p.velX) > p.minBounceVel) {
         p.velX *= -p.bounciness
       } else {
@@ -529,6 +568,7 @@ function ClawBoxMascot() {
     }
     if (xRef.current >= 92) {
       xRef.current = 92
+      applyImpactDamage(p.velX)
       if (Math.abs(p.velX) > p.minBounceVel) {
         p.velX *= -p.bounciness
       } else {
@@ -549,7 +589,7 @@ function ClawBoxMascot() {
     }
 
     physicsRAF.current = requestAnimationFrame(physicsLoop)
-  }, [updateCrabPos])
+  }, [updateCrabPos, applyImpactDamage])
 
   // ─── Crab drag + tap detection ───
   const dragStartPos = useRef({ x: 0, y: 0 })
@@ -1386,9 +1426,20 @@ function ClawBoxMascot() {
           }}
           onClick={() => setCtxMenu(null)}
         >
-          {/* Stats header */}
+          {/* Age + Stats header */}
           <div className="px-4 py-2">
-            <div className="text-xs text-white/40 font-medium mb-2">🦀 Mascot Stats</div>
+            <div className="text-xs text-white/40 font-medium mb-2 flex items-center justify-between">
+              <span>🦀 Mascot Stats</span>
+              <span>🎂 {(() => {
+                const ms = Date.now() - bornAt.current
+                const days = Math.floor(ms / 86400000)
+                const hours = Math.floor((ms % 86400000) / 3600000)
+                const mins = Math.floor((ms % 3600000) / 60000)
+                if (days > 0) return `${days}d ${hours}h`
+                if (hours > 0) return `${hours}h ${mins}m`
+                return `${mins}m`
+              })()}</span>
+            </div>
             <div className="flex flex-col gap-1.5">
               {[
                 { label: '🍕 Hunger', val: tamaStats.hunger, color: '#f97316' },

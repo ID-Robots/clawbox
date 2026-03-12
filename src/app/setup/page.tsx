@@ -23,7 +23,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files" | "iframe";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -37,7 +37,6 @@ const apps: AppDef[] = [
   { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "telegram", name: "Telegram", color: "#2AABEE", type: "external", url: "https://web.telegram.org/", pinned: true },
   { id: "system", name: "System Monitor", color: "#3b82f6", type: "system", pinned: false },
   { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
 ];
@@ -81,7 +80,6 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     browser: "language",
     camera: "photo_camera",
     store: "storefront",
-    telegram: "send",
   };
 
   const iconName = iconMap[id];
@@ -727,15 +725,6 @@ export default function ChromeDesktop() {
             </div>
           </div>
         );
-      case "iframe":
-        return app.url ? (
-          <iframe
-            src={app.url}
-            className="w-full h-full border-0"
-            title={app.name}
-            allow="clipboard-read; clipboard-write"
-          />
-        ) : null;
       case "files":
         return <FilesApp />;
       case "placeholder":
