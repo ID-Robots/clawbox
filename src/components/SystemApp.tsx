@@ -388,73 +388,16 @@ function ProcessesSection({ data }: { data: ProcessEntry[] }) {
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
-function OverviewIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <line x1="8" y1="21" x2="16" y2="21" />
-      <line x1="12" y1="17" x2="12" y2="21" />
-    </svg>
-  );
+function MIcon({ name }: { name: string }) {
+  return <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{ name }</span>;
 }
 
-function CpuIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="4" y="4" width="16" height="16" rx="2" />
-      <rect x="9" y="9" width="6" height="6" />
-      <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-      <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-      <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-      <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-    </svg>
-  );
-}
-
-function MemoryIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="6" width="20" height="12" rx="2" />
-      <line x1="6" y1="10" x2="6" y2="14" /><line x1="10" y1="10" x2="10" y2="14" />
-      <line x1="14" y1="10" x2="14" y2="14" /><line x1="18" y1="10" x2="18" y2="14" />
-    </svg>
-  );
-}
-
-function StorageIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-      <path d="M3 12a9 3 0 0 0 18 0" />
-    </svg>
-  );
-}
-
-function NetworkIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="16" y="16" width="6" height="6" rx="1" />
-      <rect x="2" y="16" width="6" height="6" rx="1" />
-      <rect x="9" y="2" width="6" height="6" rx="1" />
-      <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
-      <line x1="12" y1="12" x2="12" y2="8" />
-    </svg>
-  );
-}
-
-function ProcessIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="8" y1="6" x2="21" y2="6" />
-      <line x1="8" y1="12" x2="21" y2="12" />
-      <line x1="8" y1="18" x2="21" y2="18" />
-      <line x1="3" y1="6" x2="3.01" y2="6" />
-      <line x1="3" y1="12" x2="3.01" y2="12" />
-      <line x1="3" y1="18" x2="3.01" y2="18" />
-    </svg>
-  );
-}
+function OverviewIcon() { return <MIcon name="desktop_windows" />; }
+function CpuIcon() { return <MIcon name="memory" />; }
+function MemoryIcon() { return <MIcon name="memory_alt" />; }
+function StorageIcon() { return <MIcon name="hard_drive" />; }
+function NetworkIcon() { return <MIcon name="lan" />; }
+function ProcessIcon() { return <MIcon name="list" />; }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -512,11 +455,7 @@ export default function SystemApp() {
             className="p-1 rounded hover:bg-white/10 transition-colors"
             title="Refresh now"
           >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "#06b6d4" }}>
-              <polyline points="23 4 23 10 17 10" />
-              <polyline points="1 20 1 14 7 14" />
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-            </svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 14, color: "#06b6d4" }}>refresh</span>
           </button>
         </div>
       </div>
@@ -540,11 +479,7 @@ export default function SystemApp() {
             className="flex items-center gap-2 p-3 rounded-lg mb-4 border"
             style={{ backgroundColor: "#2d1a1a", borderColor: "#ef444440", color: "#ef4444" }}
           >
-            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
+            <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }}>error</span>
             <span className="text-xs">{error}</span>
           </div>
         )}

@@ -160,11 +160,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
         <div className="flex items-center gap-3 mb-3">
           <div className="w-8 h-8 rounded-lg bg-[#22c55e] flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z" />
-              <line x1="3" y1="6" x2="21" y2="6" />
-              <path d="M16 10a4 4 0 01-8 0" />
-            </svg>
+            <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }}>storefront</span>
           </div>
           <div>
             <h1 className="text-lg font-semibold">ClawBox App Store</h1>
@@ -174,16 +170,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
         {/* Search */}
         <div className="relative mb-3">
-          <svg
-            className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
+          <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
           <input
             type="text"
             placeholder="Search apps..."

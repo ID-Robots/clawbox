@@ -107,10 +107,10 @@ function thresholdColor(value: number, low: number, high: number): string {
 /* ── Shared SVG icons ── */
 
 const EyeOpen = (
-  <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">visibility</span>
 );
 const EyeClosed = (
-  <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">visibility_off</span>
 );
 
 const ButtonSpinner = (
@@ -148,20 +148,13 @@ function Sparkline({ data, color = "var(--coral-bright)", height = 32 }: { data:
 
 function Chevron({ open }: { open: boolean }) {
   return (
-    <svg
+    <span
+      className={`material-symbols-rounded transition-transform ${open ? "rotate-90" : ""}`}
+      style={{ fontSize: 16 }}
       aria-hidden="true"
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={`transition-transform ${open ? "rotate-90" : ""}`}
     >
-      <polyline points="9 18 15 12 9 6" />
-    </svg>
+      chevron_right
+    </span>
   );
 }
 
@@ -169,7 +162,7 @@ function SectionBadge({ done }: { done: boolean }) {
   if (done) {
     return (
       <span className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold text-[#00e5cc] uppercase tracking-wide">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check</span>
         Done
       </span>
     );
@@ -1216,7 +1209,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             disabled={isUpdateRunning}
             className="py-3 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-500 hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span>
             {isUpdateRunning ? "Updating..." : "System Update"}
           </button>
           <button
@@ -1224,7 +1217,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             onClick={() => setResetConfirm(true)}
             className="py-3 bg-red-500/10 text-red-400 rounded-xl text-sm font-semibold hover:bg-red-500/20 hover:scale-105 transition-all cursor-pointer flex items-center justify-center gap-2 border border-red-500/20"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
             Factory Reset
           </button>
       </div>
@@ -1358,7 +1351,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                   {RESET_STEPS.map((step, i) => (
                     <div key={i} className="flex items-center gap-2.5 text-sm">
                       {i < resetStep ? (
-                        <svg className="w-4 h-4 text-green-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>
+                        <span className="material-symbols-rounded w-4 h-4 text-green-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">check</span>
                       ) : i === resetStep ? (
                         <span className="w-4 h-4 shrink-0 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
                       ) : (
@@ -1649,7 +1642,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
               {selectedAiProvider?.tokenUrl && (
                 <a href={selectedAiProvider.tokenUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 transition-colors">
                   Get API Key
-                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">open_in_new</span>
                 </a>
               )}
               <label htmlFor="ai-key-dash" className={LABEL_CLASS}>{selectedAiProvider?.name} API Key</label>

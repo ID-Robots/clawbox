@@ -21,6 +21,7 @@ interface ChromeShelfProps {
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
+  onShelfSettings?: () => void;
   time: string;
 }
 
@@ -33,17 +34,20 @@ export default function ChromeShelf({
   onPinApp,
   onUnpinApp,
   onCloseApp,
+  onShelfSettings,
   time,
 }: ChromeShelfProps) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
+  const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
 
   useEffect(() => {
-    if (!ctxMenu) return;
+    if (!ctxMenu && !shelfMenu) return;
     const close = (e: Event) => {
       if (Date.now() - openedAt.current < 100) return;
       e.preventDefault();
       setCtxMenu(null);
+      setShelfMenu(null);
     };
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
@@ -51,7 +55,7 @@ export default function ChromeShelf({
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
     };
-  }, [ctxMenu]);
+  }, [ctxMenu, shelfMenu]);
 
   const pinnedApps = apps.filter(a => a.isPinned !== false);
   const unpinnedApps = apps.filter(a => a.isPinned === false);
@@ -113,6 +117,11 @@ export default function ChromeShelf({
           WebkitBackdropFilter: "blur(20px)",
           borderTop: "1px solid rgba(255, 255, 255, 0.1)",
         }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openedAt.current = Date.now();
+          setShelfMenu({ x: e.clientX, y: e.clientY });
+        }}
       >
         {/* Centered: launcher + pinned apps + open apps */}
         <div className="flex items-center gap-1">
@@ -123,18 +132,7 @@ export default function ChromeShelf({
             title="App Launcher"
           >
             <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
-              <svg
-                className="w-5 h-5 text-white/80"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <circle cx="12" cy="12" r="3" fill="currentColor" />
-              </svg>
+              <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
             </div>
           </button>
 
@@ -227,6 +225,27 @@ export default function ChromeShelf({
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Shelf context menu (right-click on empty shelf area) */}
+      {shelfMenu && (
+        <div
+          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          style={{
+            left: Math.min(shelfMenu.x, window.innerWidth - 200),
+            top: shelfMenu.y - 8,
+            transform: "translateY(-100%)",
+          }}
+          onClick={() => setShelfMenu(null)}
+        >
+          <button
+            onClick={() => { if (onShelfSettings) onShelfSettings(); }}
+            className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+          >
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>settings</span>
+            Shelf Settings
+          </button>
         </div>
       )}
     </>

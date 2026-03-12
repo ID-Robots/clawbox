@@ -17,7 +17,7 @@ export async function register() {
   const path = await import('path')
 
   const PORT = process.env.TERMINAL_WS_PORT || '3006'
-  const serverPath = path.join(process.cwd(), 'scripts', 'terminal-server.ts')
+  const serverPath = path.resolve('scripts', 'terminal-server.ts')
   terminalStopping = false
 
   // Kill any leftover child from previous hot-reload

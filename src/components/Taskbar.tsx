@@ -76,20 +76,7 @@ export default function Taskbar({ windows, onWindowClick, onExternalLink }: Task
             className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110"
             title="Help & Docs"
           >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="var(--text-secondary)"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 18, color: "var(--text-secondary)" }}>help</span>
           </button>
         </div>
       </div>

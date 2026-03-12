@@ -29,19 +29,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
             className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--surface-card-strong)] border border-[var(--border-subtle)] backdrop-blur-xl transition-all duration-200 hover:border-[var(--coral-bright)] hover:shadow-[0_0_12px_var(--shadow-coral-mid)] active:scale-95"
             aria-label="Go back to home"
           >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="var(--text-secondary)"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M19 12H5" />
-              <path d="M12 19l-7-7 7-7" />
-            </svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 18, color: "var(--text-secondary)" }}>arrow_back</span>
             <span className="text-sm text-[var(--text-secondary)]">{title}</span>
           </button>
         </div>
@@ -75,20 +63,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
           className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition-all duration-200 hover:border-[var(--coral-bright)] hover:shadow-[0_0_12px_var(--shadow-coral-mid)] active:scale-95"
           aria-label="Go back to home"
         >
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="var(--text-secondary)"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="transition-colors"
-          >
-            <path d="M19 12H5" />
-            <path d="M12 19l-7-7 7-7" />
-          </svg>
+          <span className="material-symbols-rounded transition-colors" style={{ fontSize: 20, color: "var(--text-secondary)" }}>arrow_back</span>
         </button>
         <h1 className="text-lg font-semibold text-[var(--text-primary)] font-display">
           {title}

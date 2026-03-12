@@ -90,16 +90,7 @@ export function AppDrawer({
         {/* Search bar */}
         <div className="px-4 pb-4">
           <div className="relative">
-            <svg
-              className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/50"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="M21 21l-4.35-4.35" />
-            </svg>
+            <span className="material-symbols-rounded absolute left-4 top-1/2 -translate-y-1/2 text-white/50" style={{ fontSize: 20 }}>search</span>
             <input
               type="text"
               placeholder="Search apps"

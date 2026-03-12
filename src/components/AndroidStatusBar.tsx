@@ -53,13 +53,7 @@ export function AndroidStatusBar() {
       {/* Right side - Status icons and time */}
       <div className="flex items-center gap-3">
         {/* WiFi icon */}
-        <svg
-          className="w-4 h-4 text-white/90"
-          viewBox="0 0 24 24"
-          fill="currentColor"
-        >
-          <path d="M12 18c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm-4.9-2.3l1.4 1.4c1.9-1.9 5.1-1.9 7 0l1.4-1.4c-2.7-2.7-7.1-2.7-9.8 0zm-2.8-2.8l1.4 1.4c3.6-3.6 9.4-3.6 13 0l1.4-1.4c-4.4-4.4-11.4-4.4-15.8 0zm-2.8-2.8l1.4 1.4c5.5-5.5 14.3-5.5 19.8 0l1.4-1.4c-6.2-6.3-16.4-6.3-22.6 0z" />
-        </svg>
+        <span className="material-symbols-rounded text-white/90" style={{ fontSize: 16 }}>wifi</span>
 
         {/* Battery icon */}
         <div className="flex items-center gap-1">
@@ -77,13 +71,7 @@ export function AndroidStatusBar() {
             <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-0.5 h-1.5 bg-white/70 rounded-r-sm" />
           </div>
           {isCharging && (
-            <svg
-              className="w-2.5 h-2.5 text-white/90"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-              <path d="M11 21h-1l1-7H7.5c-.88 0-.33-.75-.31-.78C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-6 10.49z" />
-            </svg>
+            <span className="material-symbols-rounded text-white/90" style={{ fontSize: 10 }}>bolt</span>
           )}
         </div>
 

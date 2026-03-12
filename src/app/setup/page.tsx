@@ -23,7 +23,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files" | "iframe";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -37,98 +37,56 @@ const apps: AppDef[] = [
   { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
+  { id: "telegram", name: "Telegram", color: "#2AABEE", type: "external", url: "https://web.telegram.org/", pinned: true },
   { id: "system", name: "System Monitor", color: "#3b82f6", type: "system", pinned: false },
   { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
 ];
 
 // Inline SVG icons for each app
-function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
-  const iconClass = `${size} text-white`;
+function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
+  return <span className={`material-symbols-rounded ${className}`} style={{ fontSize: size }}>{name}</span>;
+}
 
-  switch (id) {
-    case "settings":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
-      );
-    case "openclaw":
-      return (
-        <svg className={iconClass} viewBox="0 0 120 120" fill="none">
-          <defs>
-            <linearGradient id="oc-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#ff4d4d"/>
-              <stop offset="100%" stopColor="#991b1b"/>
-            </linearGradient>
-          </defs>
-          <path d="M60 10C30 10 15 35 15 55C15 75 30 95 45 100L45 110L55 110L55 100C55 100 60 102 65 100L65 110L75 110L75 100C90 95 105 75 105 55C105 35 90 10 60 10Z" fill="url(#oc-grad)"/>
-          <path d="M20 45C5 40 0 50 5 60C10 70 20 65 25 55C28 48 25 45 20 45Z" fill="url(#oc-grad)"/>
-          <path d="M100 45C115 40 120 50 115 60C110 70 100 65 95 55C92 48 95 45 100 45Z" fill="url(#oc-grad)"/>
-          <path d="M45 15Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
-          <path d="M75 15Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
-          <circle cx="45" cy="35" r="6" fill="#050810"/>
-          <circle cx="75" cy="35" r="6" fill="#050810"/>
-          <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/>
-          <circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
-        </svg>
-      );
-    case "terminal":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="4 17 10 11 4 5" />
-          <line x1="12" y1="19" x2="20" y2="19" />
-        </svg>
-      );
-    case "system":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-          <line x1="8" y1="21" x2="16" y2="21" />
-          <line x1="12" y1="17" x2="12" y2="21" />
-          <polyline points="6 10 10 8 14 12 18 7" />
-        </svg>
-      );
-    case "files":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-      );
-    case "help":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="10" />
-          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-          <line x1="12" y1="17" x2="12.01" y2="17" />
-        </svg>
-      );
-    case "browser":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="10" />
-          <line x1="2" y1="12" x2="22" y2="12" />
-          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-        </svg>
-      );
-    case "camera":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-          <circle cx="12" cy="13" r="4" />
-        </svg>
-      );
-    case "store":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z" />
-          <line x1="3" y1="6" x2="21" y2="6" />
-          <path d="M16 10a4 4 0 0 1-8 0" />
-        </svg>
-      );
-    default:
-      return null;
+function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
+  const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
+
+  if (id === "openclaw") {
+    return (
+      <svg className={`${size} text-white`} viewBox="0 0 120 120" fill="none">
+        <defs>
+          <linearGradient id="oc-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#ff4d4d"/>
+            <stop offset="100%" stopColor="#991b1b"/>
+          </linearGradient>
+        </defs>
+        <path d="M60 10C30 10 15 35 15 55C15 75 30 95 45 100L45 110L55 110L55 100C55 100 60 102 65 100L65 110L75 110L75 100C90 95 105 75 105 55C105 35 90 10 60 10Z" fill="url(#oc-grad)"/>
+        <path d="M20 45C5 40 0 50 5 60C10 70 20 65 25 55C28 48 25 45 20 45Z" fill="url(#oc-grad)"/>
+        <path d="M100 45C115 40 120 50 115 60C110 70 100 65 95 55C92 48 95 45 100 45Z" fill="url(#oc-grad)"/>
+        <path d="M45 15Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
+        <path d="M75 15Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round"/>
+        <circle cx="45" cy="35" r="6" fill="#050810"/>
+        <circle cx="75" cy="35" r="6" fill="#050810"/>
+        <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/>
+        <circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
+      </svg>
+    );
   }
+
+  const iconMap: Record<string, string> = {
+    settings: "settings",
+    terminal: "terminal",
+    system: "monitor_heart",
+    files: "folder",
+    help: "help",
+    browser: "language",
+    camera: "photo_camera",
+    store: "storefront",
+    telegram: "send",
+  };
+
+  const iconName = iconMap[id];
+  if (!iconName) return null;
+  return <MIcon name={iconName} className="text-white" size={px} />;
 }
 
 interface OpenWindow {
@@ -140,48 +98,19 @@ interface OpenWindow {
 
 // Icon component for installed store apps
 function InstalledAppIcon({ iconType, size = "w-6 h-6" }: { iconType: StoreApp["iconType"]; size?: string }) {
-  const iconClass = `${size} text-white`;
+  const px = size.includes("w-12") ? 48 : size.includes("w-6") ? 24 : 24;
 
-  switch (iconType) {
-    case "home":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          <polyline points="9 22 9 12 15 12 15 22" />
-        </svg>
-      );
-    case "chart":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="12" y1="20" x2="12" y2="10" />
-          <line x1="18" y1="20" x2="18" y2="4" />
-          <line x1="6" y1="20" x2="6" y2="16" />
-          <polyline points="3 10 8 5 13 10 21 2" />
-        </svg>
-      );
-    case "cloud":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
-        </svg>
-      );
-    case "code":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="16 18 22 12 16 6" />
-          <polyline points="8 6 2 12 8 18" />
-        </svg>
-      );
-    case "shield":
-      return (
-        <svg className={iconClass} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          <path d="M9 12l2 2 4-4" />
-        </svg>
-      );
-    default:
-      return null;
-  }
+  const iconMap: Record<string, string> = {
+    home: "home",
+    chart: "trending_up",
+    cloud: "cloud",
+    code: "code",
+    shield: "verified_user",
+  };
+
+  const iconName = iconMap[iconType];
+  if (!iconName) return null;
+  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>{iconName}</span>;
 }
 
 
@@ -778,9 +707,7 @@ export default function ChromeDesktop() {
                 </span>
                 {app.storeApp && (
                   <span className="flex items-center gap-1 text-xs text-white/50">
-                    <svg className="w-3 h-3 text-yellow-400 fill-current" viewBox="0 0 24 24">
-                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                    </svg>
+                    <span className="material-symbols-rounded text-yellow-400" style={{ fontSize: 12 }}>star</span>
                     {app.storeApp.rating.toFixed(1)}
                   </span>
                 )}
@@ -794,16 +721,21 @@ export default function ChromeDesktop() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 border border-white/10 rounded-lg text-sm text-white/70 hover:text-white transition-colors"
               >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span>
                 Configure in Store
               </a>
             </div>
           </div>
         );
+      case "iframe":
+        return app.url ? (
+          <iframe
+            src={app.url}
+            className="w-full h-full border-0"
+            title={app.name}
+            allow="clipboard-read; clipboard-write"
+          />
+        ) : null;
       case "files":
         return <FilesApp />;
       case "placeholder":
@@ -912,12 +844,12 @@ export default function ChromeDesktop() {
                 } ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
                 <div
-                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
                   style={{ backgroundColor: app.color }}
                 >
                   <InstalledAppIcon iconType={app.iconType} size="w-7 h-7" />
                 </div>
-                <span className="text-xs text-white/80 font-medium text-center line-clamp-1 max-w-[80px]">
+                <span className="text-xs text-white font-medium text-center line-clamp-1 max-w-[80px]" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.5)" }}>
                   {app.name}
                 </span>
               </button>
@@ -970,12 +902,12 @@ export default function ChromeDesktop() {
                 className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
                 <div
-                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
                   style={{ backgroundColor: app.color }}
                 >
                   <AppIcon id={app.id} size="w-7 h-7" />
                 </div>
-                <span className="text-xs text-white/80 font-medium text-center line-clamp-1 max-w-[80px]">
+                <span className="text-xs text-white font-medium text-center line-clamp-1 max-w-[80px]" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.5)" }}>
                   {app.name}
                 </span>
               </button>
@@ -1049,6 +981,7 @@ export default function ChromeDesktop() {
             key={window.id}
             title={app.name}
             icon={renderWindowIcon()}
+            appId={window.appId}
             defaultWidth={app.defaultWidth}
             defaultHeight={app.defaultHeight}
             isActive={window.id === activeWindowId}
@@ -1162,6 +1095,7 @@ export default function ChromeDesktop() {
         onCloseApp={(appId) => {
           setOpenWindows(prev => prev.filter(w => w.appId !== appId));
         }}
+        onShelfSettings={() => openApp("settings")}
         time={time}
       />
 
@@ -1192,7 +1126,7 @@ export default function ChromeDesktop() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">▶️</span> Open all
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open all
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -1203,7 +1137,7 @@ export default function ChromeDesktop() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">📐</span> Reset positions
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset positions
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -1217,7 +1151,7 @@ export default function ChromeDesktop() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="text-base">👁️‍🗨️</span> Remove all from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove all from desktop
               </button>
             </>
           ) : ctxMenu.appId ? (() => {
@@ -1228,18 +1162,18 @@ export default function ChromeDesktop() {
             return (
             <>
               <button onClick={() => openApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">▶️</span> Open
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open
               </button>
               {openWindows.some(w => w.appId === resolvedAppId) && (
                 <button onClick={() => openApp(resolvedAppId, true)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="text-base">🪟</span> New Window
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> New Window
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
                 if (ctxMenu.appId) handleUninstallApp(ctxMenu.appId);
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="text-base">🗑️</span> Uninstall
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -1249,7 +1183,7 @@ export default function ChromeDesktop() {
                   return next;
                 });
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">📐</span> Reset Position
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset Position
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -1264,24 +1198,18 @@ export default function ChromeDesktop() {
                   handleUninstallApp(id);
                 }
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="text-base">👁️‍🗨️</span> Remove from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove from desktop
               </button>
             </>
             ); })() : (
             <>
               <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">🛍️</span> App Store
-              </button>
-              <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">⚙️</span> Settings
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> App Store
               </button>
               <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">💻</span> Terminal
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> Terminal
               </button>
               <div className="border-t border-white/10 my-1" />
-              <button onClick={() => openApp("system")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">📊</span> System Monitor
-              </button>
               <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="w-4 h-4 inline-block"><AppIcon id="openclaw" size="w-4 h-4" /></span> OpenClaw
               </button>
@@ -1310,13 +1238,10 @@ export default function ChromeDesktop() {
                 });
                 setIconPositions(positions);
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="text-base">📐</span> Arrange icons
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
               </button>
               <div className="border-t border-white/10 my-1" />
               <div className="px-4 py-2">
-                <div className="flex items-center gap-3 mb-2 text-white/70">
-                  <span className="text-base">🎨</span> Wallpaper
-                </div>
                 <div className="grid grid-cols-4 gap-1.5" onClick={(e) => e.stopPropagation()}>
                   {wallpapers.map((wp) => (
                     <button
@@ -1352,7 +1277,7 @@ export default function ChromeDesktop() {
                         className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/90 hover:bg-red-400 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Remove wallpaper"
                       >
-                        <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="6" y1="18" x2="18" y2="6" /></svg>
+                        <span className="material-symbols-rounded" style={{ fontSize: 10 }}>close</span>
                       </button>
                     </div>
                   ))}
@@ -1361,10 +1286,7 @@ export default function ChromeDesktop() {
                     title="Upload wallpaper"
                   >
                     <input type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="12" y1="5" x2="12" y2="19" />
-                      <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>add</span>
                   </label>
                 </div>
                 <div className="flex gap-1 mt-2" onClick={(e) => e.stopPropagation()}>

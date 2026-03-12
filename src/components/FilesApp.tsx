@@ -261,9 +261,7 @@ export default function FilesApp() {
             className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm transition-colors"
             style={{ background: "rgba(249,115,22,0.2)", color: "#f97316", border: "1px solid rgba(249,115,22,0.3)" }}
           >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>upload</span>
             Upload
           </button>
         </div>
@@ -287,9 +285,7 @@ export default function FilesApp() {
             style={{ color: currentPath ? "rgba(224,224,224,0.8)" : "rgba(224,224,224,0.25)", background: "transparent" }}
             title="Go up"
           >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>chevron_left</span>
           </button>
 
           {/* Breadcrumb */}
@@ -317,9 +313,7 @@ export default function FilesApp() {
               style={{ background: "rgba(255,255,255,0.06)", color: "rgba(224,224,224,0.8)" }}
               title="New Folder"
             >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /><line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
-              </svg>
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>create_new_folder</span>
               <span className="hidden sm:inline">New Folder</span>
             </button>
 
@@ -330,10 +324,7 @@ export default function FilesApp() {
               style={{ color: "rgba(224,224,224,0.6)", background: "transparent" }}
               title="Refresh"
             >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span>
             </button>
 
             {/* View toggle */}
@@ -343,17 +334,9 @@ export default function FilesApp() {
               style={{ color: "rgba(224,224,224,0.6)", background: "transparent" }}
               title={viewMode === "grid" ? "Switch to list" : "Switch to grid"}
             >
-              {viewMode === "grid" ? (
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
-                  <line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
-                </svg>
-              ) : (
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
-                  <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
-                </svg>
-              )}
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>
+                {viewMode === "grid" ? "view_list" : "grid_view"}
+              </span>
             </button>
           </div>
         </div>
@@ -378,9 +361,7 @@ export default function FilesApp() {
 
           {loading ? (
             <div className="flex items-center justify-center h-full" style={{ color: "rgba(224,224,224,0.4)" }}>
-              <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <span className="material-symbols-rounded animate-spin mr-2" style={{ fontSize: 24 }}>progress_activity</span>
               Loading…
             </div>
           ) : error ? (

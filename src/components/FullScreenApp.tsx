@@ -58,19 +58,7 @@ export function FullScreenApp({ title, children, onClose }: FullScreenAppProps) 
           className="p-2 -ml-2 rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
           aria-label="Back"
         >
-          <svg
-            className="w-6 h-6 text-white/80"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path
-              d="M19 12H5M12 19l-7-7 7-7"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <span className="material-symbols-rounded text-white/80" style={{ fontSize: 24 }}>arrow_back</span>
         </button>
         <h1 className="text-lg font-medium text-white/90">{title}</h1>
       </div>

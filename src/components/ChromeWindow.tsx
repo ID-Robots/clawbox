@@ -7,6 +7,7 @@ interface ChromeWindowProps {
   title: string;
   icon: ReactNode;
   children: ReactNode;
+  appId?: string;
   defaultWidth?: number;
   defaultHeight?: number;
   isActive: boolean;
@@ -15,6 +16,18 @@ interface ChromeWindowProps {
   onFocus: () => void;
   onMinimize: () => void;
   minimized?: boolean;
+}
+
+function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
+  if (!appId || typeof window === "undefined") return { width: defaultWidth, height: defaultHeight };
+  try {
+    const saved = localStorage.getItem(`clawbox-winsize-${appId}`);
+    if (saved) {
+      const { width, height } = JSON.parse(saved);
+      if (width >= 300 && height >= 200) return { width, height };
+    }
+  } catch {}
+  return { width: defaultWidth, height: defaultHeight };
 }
 
 type SnapZone = "left" | "right" | "top" | "top-left" | "top-right" | "bottom-left" | "bottom-right" | null;
@@ -71,6 +84,7 @@ export default function ChromeWindow({
   title,
   icon,
   children,
+  appId,
   defaultWidth = 800,
   defaultHeight = 600,
   isActive,
@@ -80,8 +94,8 @@ export default function ChromeWindow({
   onMinimize,
   minimized = false,
 }: ChromeWindowProps) {
-  const [position, setPosition] = useState(() => getInitialPosition(defaultWidth, defaultHeight));
-  const [size, setSize] = useState({ width: defaultWidth, height: defaultHeight });
+  const [size, setSize] = useState(() => getSavedSize(appId, defaultWidth, defaultHeight));
+  const [position, setPosition] = useState(() => getInitialPosition(size.width, size.height));
   const [maximized, setMaximized] = useState(false);
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
@@ -91,10 +105,22 @@ export default function ChromeWindow({
   const [restoring, setRestoring] = useState(false);
   const windowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ isDragging: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
+  const resizeRef = useRef<{
+    isResizing: boolean;
+    edge: string;
+    startX: number;
+    startY: number;
+    startW: number;
+    startH: number;
+    startPosX: number;
+    startPosY: number;
+  }>({ isResizing: false, edge: "", startX: 0, startY: 0, startW: 0, startH: 0, startPosX: 0, startPosY: 0 });
   const prevSizeRef = useRef({ width: defaultWidth, height: defaultHeight, x: 0, y: 0 });
   const currentSizeRef = useRef({ width: defaultWidth, height: defaultHeight });
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
+  const MIN_WIDTH = 300;
+  const MIN_HEIGHT = 200;
 
   currentSizeRef.current = size;
   currentPosRef.current = position;
@@ -114,6 +140,8 @@ export default function ChromeWindow({
       // Starting minimize animation
       setMinimizing(true);
     } else if (!minimized && wasMinimized) {
+      // Clear any leftover minimizing state before restoring
+      setMinimizing(false);
       // Starting restore animation
       setRestoring(true);
       const timer = setTimeout(() => setRestoring(false), 250);
@@ -155,11 +183,59 @@ export default function ChromeWindow({
     onFocus();
   }, [maximized, snapped, position.x, position.y, onFocus]);
 
+  const handleResizeStart = useCallback((edge: string, e: React.MouseEvent | React.TouchEvent) => {
+    if (maximized) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
+    const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
+    resizeRef.current = {
+      isResizing: true,
+      edge,
+      startX: clientX,
+      startY: clientY,
+      startW: size.width,
+      startH: size.height,
+      startPosX: position.x,
+      startPosY: position.y,
+    };
+    if (snapped) setSnapped(null);
+    onFocus();
+  }, [maximized, snapped, size.width, size.height, position.x, position.y, onFocus]);
+
   useEffect(() => {
     const handleMove = (e: MouseEvent | TouchEvent) => {
-      if (!dragRef.current.isDragging) return;
       const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
       const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
+
+      if (resizeRef.current.isResizing) {
+        const r = resizeRef.current;
+        const dx = clientX - r.startX;
+        const dy = clientY - r.startY;
+        let newW = r.startW;
+        let newH = r.startH;
+        let newX = r.startPosX;
+        let newY = r.startPosY;
+
+        if (r.edge.includes("r")) newW = Math.max(MIN_WIDTH, r.startW + dx);
+        if (r.edge.includes("b")) newH = Math.max(MIN_HEIGHT, r.startH + dy);
+        if (r.edge.includes("l")) {
+          const dw = Math.min(dx, r.startW - MIN_WIDTH);
+          newW = r.startW - dw;
+          newX = r.startPosX + dw;
+        }
+        if (r.edge.includes("t")) {
+          const dh = Math.min(dy, r.startH - MIN_HEIGHT);
+          newH = r.startH - dh;
+          newY = Math.max(0, r.startPosY + dh);
+        }
+
+        setSize({ width: newW, height: newH });
+        setPosition({ x: newX, y: newY });
+        return;
+      }
+
+      if (!dragRef.current.isDragging) return;
       const dx = clientX - dragRef.current.startX;
       const dy = clientY - dragRef.current.startY;
       setPosition({
@@ -170,6 +246,16 @@ export default function ChromeWindow({
     };
 
     const handleEnd = (e: MouseEvent | TouchEvent) => {
+      if (resizeRef.current.isResizing) {
+        resizeRef.current.isResizing = false;
+        // Save resized size per app
+        if (appId) {
+          const cur = currentSizeRef.current;
+          try { localStorage.setItem(`clawbox-winsize-${appId}`, JSON.stringify({ width: cur.width, height: cur.height })); } catch {}
+        }
+        return;
+      }
+
       if (!dragRef.current.isDragging) return;
       dragRef.current.isDragging = false;
 
@@ -180,7 +266,6 @@ export default function ChromeWindow({
 
       if (zone) {
         const rect = getSnapRect(zone)!;
-        // Save pre-snap size for restore
         const cur = currentSizeRef.current;
         const pos = currentPosRef.current;
         prevSizeRef.current = { width: cur.width, height: cur.height, x: pos.x, y: pos.y };
@@ -204,9 +289,14 @@ export default function ChromeWindow({
   }, []);
 
   const handleClose = useCallback(() => {
+    // Save window size per app
+    if (appId) {
+      const cur = currentSizeRef.current;
+      try { localStorage.setItem(`clawbox-winsize-${appId}`, JSON.stringify({ width: cur.width, height: cur.height })); } catch {}
+    }
     setClosing(true);
     setTimeout(() => onClose(), 150);
-  }, [onClose]);
+  }, [onClose, appId]);
 
   const handleMaximize = useCallback(() => {
     if (maximized) {
@@ -287,9 +377,7 @@ export default function ChromeWindow({
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
             title="Minimize"
           >
-            <svg className="w-3 h-3 text-white/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="6" y1="12" x2="18" y2="12" />
-            </svg>
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
           </button>
 
           {/* Maximize */}
@@ -298,35 +386,7 @@ export default function ChromeWindow({
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
             title={maximized ? "Restore" : "Maximize"}
           >
-            {maximized ? (
-              <svg className="w-3 h-3 text-white/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <rect x="6" y="10" width="8" height="8" rx="1" />
-                <path d="M10 10V7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-3" />
-              </svg>
-            ) : (
-              <svg className="w-3 h-3 text-white/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <rect x="5" y="5" width="14" height="14" rx="1" />
-              </svg>
-            )}
-          </button>
-
-          {/* Fullscreen */}
-          <button
-            onClick={() => {
-              const el = document.documentElement;
-              if (document.fullscreenElement) {
-                document.exitFullscreen().catch(() => {});
-              } else {
-                el.requestFullscreen().catch(() => {});
-              }
-            }}
-            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
-            title="Fullscreen"
-          >
-            <svg className="w-3 h-3 text-white/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="15 3 21 3 21 9" />
-              <polyline points="9 21 3 21 3 15" />
-            </svg>
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
 
           {/* Close */}
@@ -335,16 +395,29 @@ export default function ChromeWindow({
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-red-500/80 active:bg-red-600 transition-colors cursor-pointer group"
             title="Close"
           >
-            <svg className="w-3 h-3 text-white/60 group-hover:text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="7" y1="7" x2="17" y2="17" />
-              <line x1="7" y1="17" x2="17" y2="7" />
-            </svg>
+            <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
           </button>
         </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
+
+      {/* Resize handles — hidden when maximized/snapped */}
+      {!maximized && !snapped && (
+        <>
+          {/* Edges */}
+          <div className="absolute top-0 left-2 right-2 h-1 cursor-n-resize" onMouseDown={(e) => handleResizeStart("t", e)} onTouchStart={(e) => handleResizeStart("t", e)} />
+          <div className="absolute bottom-0 left-2 right-2 h-1 cursor-s-resize" onMouseDown={(e) => handleResizeStart("b", e)} onTouchStart={(e) => handleResizeStart("b", e)} />
+          <div className="absolute left-0 top-2 bottom-2 w-1 cursor-w-resize" onMouseDown={(e) => handleResizeStart("l", e)} onTouchStart={(e) => handleResizeStart("l", e)} />
+          <div className="absolute right-0 top-2 bottom-2 w-1 cursor-e-resize" onMouseDown={(e) => handleResizeStart("r", e)} onTouchStart={(e) => handleResizeStart("r", e)} />
+          {/* Corners */}
+          <div className="absolute top-0 left-0 w-3 h-3 cursor-nw-resize" onMouseDown={(e) => handleResizeStart("tl", e)} onTouchStart={(e) => handleResizeStart("tl", e)} />
+          <div className="absolute top-0 right-0 w-3 h-3 cursor-ne-resize" onMouseDown={(e) => handleResizeStart("tr", e)} onTouchStart={(e) => handleResizeStart("tr", e)} />
+          <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={(e) => handleResizeStart("bl", e)} onTouchStart={(e) => handleResizeStart("bl", e)} />
+          <div className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize" onMouseDown={(e) => handleResizeStart("br", e)} onTouchStart={(e) => handleResizeStart("br", e)} />
+        </>
+      )}
 
       {/* Snap preview overlay */}
       {snapPreview && createPortal(

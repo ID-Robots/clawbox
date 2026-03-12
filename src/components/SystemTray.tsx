@@ -78,20 +78,7 @@ export default function SystemTray({
                     wifiEnabled ? "bg-blue-500" : "bg-white/10"
                   }`}
                 >
-                  <svg
-                    className="w-5 h-5 text-white"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M5 12.55a11 11 0 0 1 14.08 0" />
-                    <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-                    <circle cx="12" cy="20" r="1" fill="currentColor" />
-                  </svg>
+                  <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }}>wifi</span>
                 </div>
                 <div>
                   <div className="text-sm font-medium text-white">WiFi</div>
@@ -117,25 +104,7 @@ export default function SystemTray({
             {/* Brightness slider */}
             <div className="space-y-2">
               <div className="flex items-center gap-3">
-                <svg
-                  className="w-5 h-5 text-white/70"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <circle cx="12" cy="12" r="5" />
-                  <line x1="12" y1="1" x2="12" y2="3" />
-                  <line x1="12" y1="21" x2="12" y2="23" />
-                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-                  <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                  <line x1="1" y1="12" x2="3" y2="12" />
-                  <line x1="21" y1="12" x2="23" y2="12" />
-                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-                  <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-                </svg>
+                <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>light_mode</span>
                 <span className="text-sm text-white/70">Brightness</span>
               </div>
               <input
@@ -151,19 +120,7 @@ export default function SystemTray({
             {/* Volume slider */}
             <div className="space-y-2">
               <div className="flex items-center gap-3">
-                <svg
-                  className="w-5 h-5 text-white/70"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                </svg>
+                <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>volume_up</span>
                 <span className="text-sm text-white/70">Volume</span>
               </div>
               <input
@@ -180,29 +137,11 @@ export default function SystemTray({
           {/* Bottom actions */}
           <div className="p-4 pt-0 flex items-center gap-2">
             <button className="flex-1 flex items-center justify-center gap-2 h-10 rounded-lg bg-white/10 hover:bg-white/15 transition-colors cursor-pointer">
-              <svg
-                className="w-4 h-4 text-white/70"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
+              <span className="material-symbols-rounded text-white/70" style={{ fontSize: 16 }}>settings</span>
               <span className="text-sm text-white/80">Settings</span>
             </button>
             <button className="flex-1 flex items-center justify-center gap-2 h-10 rounded-lg bg-white/10 hover:bg-white/15 transition-colors cursor-pointer">
-              <svg
-                className="w-4 h-4 text-white/70"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-                <line x1="12" y1="2" x2="12" y2="12" />
-              </svg>
+              <span className="material-symbols-rounded text-white/70" style={{ fontSize: 16 }}>power_settings_new</span>
               <span className="text-sm text-white/80">Power</span>
             </button>
           </div>

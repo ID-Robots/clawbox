@@ -317,12 +317,8 @@ export default function Window({
                   <rect x="2" y="0" width="4" height="4" fill="none" stroke="#006500" strokeWidth="0.8" />
                 </>
               ) : (
-                // Maximize icon (diagonal arrows)
-                <>
-                  <path d="M0 6 L6 0" stroke="#006500" strokeWidth="1" />
-                  <path d="M4 0 L6 0 L6 2" fill="none" stroke="#006500" strokeWidth="1" />
-                  <path d="M0 4 L0 6 L2 6" fill="none" stroke="#006500" strokeWidth="1" />
-                </>
+                // Maximize icon (empty rectangle)
+                <rect x="0.5" y="0.5" width="5" height="5" fill="none" stroke="#006500" strokeWidth="1" />
               )}
             </svg>
           </button>
