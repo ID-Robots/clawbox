@@ -13,8 +13,12 @@
     "start": "PORT=80 HOSTNAME=0.0.0.0 bun run production-server.js",
     "lint": "eslint",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:components": "vitest run --project components",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
@@ -29,13 +33,18 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.0.0",
     "eslint-config-next": "16.1.6",
+    "jsdom": "^28.1.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.0.0",
     "vite-tsconfig-paths": "^6.1.1",
