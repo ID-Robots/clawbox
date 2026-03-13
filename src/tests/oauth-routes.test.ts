@@ -406,7 +406,7 @@ describe("OAuth exchange route", () => {
     await writeState({ provider: "openai" });
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockRejectedValueOnce(new DOMException("aborted", "AbortError"))
+      vi.fn().mockRejectedValueOnce(new DOMException("signal timed out", "TimeoutError"))
     );
 
     const res = await exchangePost(jsonRequest({ code: "code-123" }));
@@ -418,21 +418,15 @@ describe("OAuth exchange route", () => {
 
   it("fires internal token-timeout abort callback", async () => {
     await writeState({ provider: "openai" });
-    vi
-      .spyOn(global, "setTimeout")
-      .mockImplementation(((callback: (...args: unknown[]) => unknown) => {
-        callback();
-        return 1 as unknown as ReturnType<typeof setTimeout>;
-      }) as typeof setTimeout);
-    vi
-      .spyOn(global, "clearTimeout")
-      .mockImplementation((() => undefined) as typeof clearTimeout);
 
-    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
-      if ((init.signal as AbortSignal).aborted) {
-        return Promise.reject(new DOMException("aborted", "AbortError"));
-      }
-      return Promise.reject(new Error("Expected aborted signal"));
+    // Create an already-aborted signal to simulate timeout
+    const abortController = new AbortController();
+    abortController.abort(new DOMException("signal timed out", "TimeoutError"));
+
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(abortController.signal);
+
+    const fetchMock = vi.fn((_url: string, _init: RequestInit) => {
+      return Promise.reject(new DOMException("signal timed out", "TimeoutError"));
     });
     vi.stubGlobal("fetch", fetchMock);
 

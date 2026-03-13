@@ -1,5 +1,30 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Material Symbols Rounded";
+  font-style: normal;
+  font-weight: 400;
+  src: url("/fonts/material-symbols-rounded.ttf") format("truetype");
+  font-display: block;
+}
+
+.material-symbols-rounded {
+  font-family: "Material Symbols Rounded";
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+  font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24;
+}
+
 @theme {
   --font-display: "Clash Display", system-ui, sans-serif;
   --font-body: "Satoshi", system-ui, sans-serif;
@@ -169,4 +194,243 @@ html {
 
 .claw-icon .eye-glow {
   animation: blink 3s ease-in-out infinite;
+}
+
+/* Page transition animations */
+@keyframes page-in {
+  0% {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes page-out {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+}
+
+.animate-page-in {
+  animation: page-in 0.25s ease-out forwards;
+}
+
+.animate-page-out {
+  animation: page-out 0.2s ease-in forwards;
+}
+
+/* Window animations */
+@keyframes window-open {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes window-close {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+@keyframes window-minimize {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+}
+
+@keyframes window-restore {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.window-opening {
+  animation: window-open 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.window-closing {
+  animation: window-close 0.15s ease-in forwards;
+  pointer-events: none;
+}
+
+.window-minimizing {
+  animation: window-minimize 0.25s ease-in forwards;
+  pointer-events: none;
+}
+
+.window-restoring {
+  animation: window-restore 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Slide animations for full-screen apps */
+@keyframes slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-down {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out forwards;
+}
+
+.animate-slide-down {
+  animation: slide-down 0.25s ease-in forwards;
+}
+
+/* ChromeOS-style window animations */
+@keyframes chrome-window-open {
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes chrome-window-close {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+@keyframes chrome-window-minimize {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+}
+
+@keyframes chrome-window-restore {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) translateY(100px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.chrome-window-opening {
+  animation: chrome-window-open 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.chrome-window-closing {
+  animation: chrome-window-close 0.15s ease-in forwards;
+  pointer-events: none;
+}
+
+.chrome-window-minimizing {
+  animation: chrome-window-minimize 0.25s ease-in forwards;
+  pointer-events: none;
+}
+
+.chrome-window-restoring {
+  animation: chrome-window-restore 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Toast notification animation */
+@keyframes toast-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(20px) scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Install bounce animation */
+@keyframes install-bounce {
+  0%, 100% {
+    transform: scale(1);
+  }
+  25% {
+    transform: scale(1.15);
+  }
+  50% {
+    transform: scale(0.95);
+  }
+  75% {
+    transform: scale(1.05);
+  }
+}
+
+.animate-install-bounce {
+  animation: install-bounce 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Bounce once animation for checkmark badge */
+@keyframes bounce-once {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-bounce-once {
+  animation: bounce-once 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
