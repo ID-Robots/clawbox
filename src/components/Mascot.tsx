@@ -340,6 +340,7 @@ function ClawBoxMascot() {
   const physicsActiveRef = useRef(false)
   const [frenzy, setFrenzy] = useState(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
+  const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const sleepZzzRef = useRef<ReturnType<typeof setInterval>>(null)
   const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
@@ -435,6 +436,11 @@ function ClawBoxMascot() {
       happiness: Math.max(0, prev.happiness - dmg * 0.5),
       lastUpdate: Date.now(),
     }))
+    // Spawn floating damage number
+    const id = Date.now() + Math.random()
+    const x = -20 + Math.random() * 40
+    setDamageFloaters(prev => [...prev, { id, dmg: Math.round(dmg), x }])
+    setTimeout(() => setDamageFloaters(prev => prev.filter(f => f.id !== id)), 1200)
     if (speed > 1200) say('OUCH! 💀', 1500)
     else if (speed > 800) say('Ow! 🤕', 1200)
   }, [say])
@@ -597,6 +603,14 @@ function ClawBoxMascot() {
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
+    // When dead, only allow taps (revive), not dragging
+    if (isDead) {
+      didDragRef.current = false
+      dragStartPos.current = { x: e.clientX, y: e.clientY }
+      draggingRef.current = true
+      ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+      return
+    }
     draggingRef.current = true; setPhysicsActive(true)
     didDragRef.current = false
     dragStartPos.current = { x: e.clientX, y: e.clientY }
@@ -613,10 +627,11 @@ function ClawBoxMascot() {
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
     ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
-  }, [])
+  }, [isDead])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
+    if (isDead) return // Don't allow moving when dead
     e.preventDefault()
     // Detect actual drag vs tap
     const dx = e.clientX - dragStartPos.current.x, dy = e.clientY - dragStartPos.current.y
@@ -1236,6 +1251,11 @@ function ClawBoxMascot() {
           80% { transform: translateX(3px) translateY(-5px) rotate(-345deg); }
           100% { transform: translateX(0) translateY(0) rotate(-360deg); }
         }
+        @keyframes damage-float {
+          0% { transform: translateY(0) scale(0.5); opacity: 1; }
+          20% { transform: translateY(-20px) scale(1.2); opacity: 1; }
+          100% { transform: translateY(-80px) scale(0.8); opacity: 0; }
+        }
         @keyframes speech-pop {
           0% { transform: scale(0); opacity: 0; }
           60% { transform: scale(1.08); }
@@ -1327,6 +1347,21 @@ function ClawBoxMascot() {
             </>
           )}
         </div>
+        {/* Floating damage numbers */}
+        {damageFloaters.map(f => (
+          <div key={f.id} style={{
+            position: 'absolute', bottom: 120, left: 75 + f.x,
+            transform: 'translateX(-50%)',
+            pointerEvents: 'none', zIndex: 11,
+            animation: 'damage-float 1.2s ease-out forwards',
+          }}>
+            <span style={{
+              color: '#ef4444', fontSize: '1.4rem', fontWeight: 900,
+              textShadow: '0 0 8px rgba(239,68,68,0.8), 0 2px 4px rgba(0,0,0,0.5)',
+              whiteSpace: 'nowrap',
+            }}>-{f.dmg} HP</span>
+          </div>
+        ))}
         {/* Speech bubble — OUTSIDE body div so it doesn't wobble */}
         {speech && (
           <div style={{

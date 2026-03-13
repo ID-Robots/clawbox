@@ -180,7 +180,7 @@ export default function ChromeShelf({
 
           {/* Open / Focus */}
           <button
-            onClick={() => onAppClick(ctxMenu.app.id)}
+            onClick={() => { onAppClick(ctxMenu.app.id); setCtxMenu(null); }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
             <span className="text-base">▶️</span> {ctxMenu.app.isOpen ? "Focus" : "Open"}
@@ -189,7 +189,7 @@ export default function ChromeShelf({
           {/* New Window — only if app is already open */}
           {ctxMenu.app.isOpen && onNewWindow && (
             <button
-              onClick={() => onNewWindow(ctxMenu.app.id)}
+              onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
               <span className="text-base">🪟</span> New Window
@@ -199,14 +199,14 @@ export default function ChromeShelf({
           {/* Pin / Unpin */}
           {ctxMenu.app.isPinned ? (
             <button
-              onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); }}
+              onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
               <span className="text-base">📌</span> Unpin from shelf
             </button>
           ) : (
             <button
-              onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); }}
+              onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
               <span className="text-base">📌</span> Pin to shelf
@@ -218,7 +218,7 @@ export default function ChromeShelf({
             <>
               <div className="border-t border-white/10 my-0.5" />
               <button
-                onClick={() => { onCloseApp(ctxMenu.app.id); }}
+                onClick={() => { onCloseApp(ctxMenu.app.id); setCtxMenu(null); }}
                 className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
               >
                 <span className="text-base">✕</span> Close

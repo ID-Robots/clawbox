@@ -16,19 +16,33 @@ export default function SystemTray({
   time,
 }: SystemTrayProps) {
   const [closing, setClosing] = useState(false);
-  const [wifiEnabled, setWifiEnabled] = useState(true);
-  const [brightness, setBrightness] = useState(80);
-  const [volume, setVolume] = useState(50);
+  const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setClosing(false);
+      setConfirmAction(null);
     }
   }, [isOpen]);
 
   const handleClose = () => {
     setClosing(true);
     setTimeout(onClose, 150);
+  };
+
+  const handlePower = async (action: "shutdown" | "restart") => {
+    if (confirmAction !== action) {
+      setConfirmAction(action);
+      return;
+    }
+    try {
+      await fetch("/setup-api/system/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    } catch {}
+    handleClose();
   };
 
   if (!isOpen && !closing) return null;
@@ -68,81 +82,25 @@ export default function SystemTray({
             <div className="text-sm text-white/60">{date}</div>
           </div>
 
-          {/* Quick settings */}
-          <div className="p-4 space-y-4">
-            {/* WiFi toggle */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div
-                  className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
-                    wifiEnabled ? "bg-blue-500" : "bg-white/10"
-                  }`}
-                >
-                  <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }}>wifi</span>
-                </div>
-                <div>
-                  <div className="text-sm font-medium text-white">WiFi</div>
-                  <div className="text-xs text-white/50">
-                    {wifiEnabled ? "Connected" : "Off"}
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setWifiEnabled(!wifiEnabled)}
-                className={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
-                  wifiEnabled ? "bg-blue-500" : "bg-white/20"
-                }`}
-              >
-                <div
-                  className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${
-                    wifiEnabled ? "translate-x-5" : "translate-x-0.5"
-                  }`}
-                />
-              </button>
-            </div>
-
-            {/* Brightness slider */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>light_mode</span>
-                <span className="text-sm text-white/70">Brightness</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={brightness}
-                onChange={(e) => setBrightness(Number(e.target.value))}
-                className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
-              />
-            </div>
-
-            {/* Volume slider */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>volume_up</span>
-                <span className="text-sm text-white/70">Volume</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={volume}
-                onChange={(e) => setVolume(Number(e.target.value))}
-                className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
-              />
-            </div>
-          </div>
-
           {/* Bottom actions */}
-          <div className="p-4 pt-0 flex items-center gap-2">
-            <button className="flex-1 flex items-center justify-center gap-2 h-10 rounded-lg bg-white/10 hover:bg-white/15 transition-colors cursor-pointer">
-              <span className="material-symbols-rounded text-white/70" style={{ fontSize: 16 }}>settings</span>
-              <span className="text-sm text-white/80">Settings</span>
+          <div className="p-4 grid grid-cols-2 gap-2">
+            <button
+              onClick={() => handlePower("restart")}
+              className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
+                confirmAction === "restart" ? "bg-yellow-500/30 hover:bg-yellow-500/40" : "bg-white/10 hover:bg-white/15"
+              }`}
+            >
+              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>restart_alt</span>
+              <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "restart" ? "Confirm?" : "Restart"}</span>
             </button>
-            <button className="flex-1 flex items-center justify-center gap-2 h-10 rounded-lg bg-white/10 hover:bg-white/15 transition-colors cursor-pointer">
-              <span className="material-symbols-rounded text-white/70" style={{ fontSize: 16 }}>power_settings_new</span>
-              <span className="text-sm text-white/80">Power</span>
+            <button
+              onClick={() => handlePower("shutdown")}
+              className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
+                confirmAction === "shutdown" ? "bg-red-500/30 hover:bg-red-500/40" : "bg-white/10 hover:bg-white/15"
+              }`}
+            >
+              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>power_settings_new</span>
+              <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? "Confirm?" : "Shut Down"}</span>
             </button>
           </div>
         </div>

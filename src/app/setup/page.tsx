@@ -7,16 +7,17 @@ import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
-import AppStore, { storeApps } from "@/components/AppStore";
+import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
 import SystemApp from "@/components/SystemApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
+import InstalledAppSettings from "@/components/InstalledAppSettings";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
-// localStorage key for installed apps
-const INSTALLED_APPS_KEY = "clawbox-installed-apps";
+// Preference keys (stored in SQLite via /setup-api/preferences)
+const INSTALLED_APPS_KEY = "installed_apps";
 
 // App definitions
 interface AppDef {
@@ -94,21 +95,32 @@ interface OpenWindow {
   minimized: boolean;
 }
 
-// Icon component for installed store apps
-function InstalledAppIcon({ iconType, size = "w-6 h-6" }: { iconType: StoreApp["iconType"]; size?: string }) {
-  const px = size.includes("w-12") ? 48 : size.includes("w-6") ? 24 : 24;
+// Icon component for installed store apps — tries local cached icon first, then store URL
+function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?: string; appId?: string; name?: string; size?: string }) {
+  const px = size.includes("w-12") ? 48 : size.includes("w-7") ? 28 : size.includes("w-6") ? 24 : size.includes("w-3") ? 12 : 24;
+  const localSrc = appId ? `/setup-api/apps/icon/${appId}` : undefined;
+  const sources = [localSrc, iconUrl].filter(Boolean) as string[];
+  const [srcIdx, setSrcIdx] = useState(0);
+  const [failed, setFailed] = useState(false);
 
-  const iconMap: Record<string, string> = {
-    home: "home",
-    chart: "trending_up",
-    cloud: "cloud",
-    code: "code",
-    shield: "verified_user",
-  };
-
-  const iconName = iconMap[iconType];
-  if (!iconName) return null;
-  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>{iconName}</span>;
+  const src = sources[srcIdx];
+  if (src && !failed) {
+    return (
+      <img
+        src={src}
+        alt={name || ""}
+        className="w-full h-full object-cover rounded-[inherit]"
+        onError={() => {
+          if (srcIdx + 1 < sources.length) {
+            setSrcIdx(srcIdx + 1);
+          } else {
+            setFailed(true);
+          }
+        }}
+      />
+    );
+  }
+  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
 }
 
 
@@ -119,47 +131,26 @@ export default function ChromeDesktop() {
   const [nextZIndex, setNextZIndex] = useState(100);
   const [time, setTime] = useState("");
   const [date, setDate] = useState("");
-  const [installedApps, setInstalledApps] = useState<string[]>(() => {
-    // Lazy initializer - only runs once on mount
-    if (typeof window === "undefined") return [];
-    try {
-      const stored = localStorage.getItem(INSTALLED_APPS_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [installedApps, setInstalledApps] = useState<string[]>([]);
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
+  const INSTALLED_META_KEY = "installed_meta";
+  const [installedMeta, setInstalledMeta] = useState<Record<string, { name: string; color: string; iconUrl: string }>>({});
 
   // ─── Desktop shortcuts for built-in apps ───
-  const DESKTOP_APPS_KEY = "clawbox-desktop-apps";
-  const [desktopApps, setDesktopApps] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const saved = localStorage.getItem(DESKTOP_APPS_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(DESKTOP_APPS_KEY, JSON.stringify(desktopApps)); } catch {}
-  }, [desktopApps]);
+  const DESKTOP_APPS_KEY = "desktop_apps";
+  const [desktopApps, setDesktopApps] = useState<string[]>([]);
+  const HIDDEN_INSTALLED_KEY = "hidden_installed";
+  const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
   const handleAddToDesktop = useCallback((appId: string) => {
+    // Also unhide installed apps when adding to desktop
+    setHiddenInstalledApps(prev => prev.filter(id => id !== appId && id !== `installed-${appId}`));
     setDesktopApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
 
   }, []);
 
   // ─── Dynamic pin state ───
-  const PINNED_KEY = "clawbox-pinned-apps";
-  const [pinnedOverrides, setPinnedOverrides] = useState<Record<string, boolean>>(() => {
-    if (typeof window === "undefined") return {};
-    try {
-      const saved = localStorage.getItem(PINNED_KEY);
-      return saved ? JSON.parse(saved) : {};
-    } catch { return {}; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedOverrides)); } catch {}
-  }, [pinnedOverrides]);
+  const PINNED_KEY = "pinned_apps";
+  const [pinnedOverrides, setPinnedOverrides] = useState<Record<string, boolean>>({});
   const isAppPinned = useCallback((appId: string) => {
     if (appId in pinnedOverrides) return pinnedOverrides[appId];
     const app = apps.find(a => a.id === appId);
@@ -180,35 +171,57 @@ export default function ChromeDesktop() {
     { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
     { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
   ] as const;
-  const [wallpaperId, setWallpaperId] = useState<string>(() => {
-    if (typeof window === "undefined") return "clawbox";
-    try { return localStorage.getItem(WALLPAPER_KEY) || "clawbox"; } catch { return "clawbox"; }
-  });
+  const [wallpaperId, setWallpaperId] = useState("clawbox");
   const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
   const WP_FIT_KEY = "clawbox-wallpaper-fit";
   type WpFit = "fill" | "fit" | "center";
-  const [wpFit, setWpFit] = useState<WpFit>(() => {
-    if (typeof window === "undefined") return "fill";
-    try { return (localStorage.getItem(WP_FIT_KEY) as WpFit) || "fill"; } catch { return "fill"; }
-  });
-  useEffect(() => { try { localStorage.setItem(WP_FIT_KEY, wpFit); } catch {} }, [wpFit]);
+  const [wpFit, setWpFit] = useState<WpFit>("fill");
+  const WP_BG_COLOR_KEY = "clawbox-wallpaper-bg-color";
+  const [wpBgColor, setWpBgColor] = useState("#000000");
+  const WP_OPACITY_KEY = "clawbox-wallpaper-opacity";
+  const [wpOpacity, setWpOpacity] = useState(100);
+  // ─── Unified SQLite load on mount ───
+  const prefsLoaded = useRef(false);
+  useEffect(() => {
+    fetch("/setup-api/preferences?all=1")
+      .then(r => r.json())
+      .then((data: Record<string, unknown>) => {
+        prefsLoaded.current = true;
+        // Wallpaper
+        if (data.wp_id) setWallpaperId(String(data.wp_id));
+        if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
+        if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
+        if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
+        // Installed apps
+        if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
+        if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, { name: string; color: string; iconUrl: string }>);
+        // Desktop
+        if (Array.isArray(data.desktop_apps)) setDesktopApps(data.desktop_apps as string[]);
+        if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
+        if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
+        if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
+        // Mascot
+        if (data.ui_mascot_hidden) setMascotHidden(true);
+      })
+      .catch(() => { prefsLoaded.current = true; });
+  }, []);
+
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : wpFit === "fit"
     ? { backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
-  const [customWallpapers, setCustomWallpapers] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
+  const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
+  // Custom wallpapers are large base64 — keep in localStorage only
+  useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (saved) return JSON.parse(saved);
-      // Migrate old single custom wallpaper
+      if (saved) { setCustomWallpapers(JSON.parse(saved)); return; }
       const old = localStorage.getItem("clawbox-custom-wallpaper");
-      if (old) { const arr = [old]; localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(arr)); localStorage.removeItem("clawbox-custom-wallpaper"); return arr; }
+      if (old) { const arr = [old]; localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(arr)); localStorage.removeItem("clawbox-custom-wallpaper"); setCustomWallpapers(arr); }
     } catch {}
-    return [];
-  });
+  }, []);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -220,21 +233,16 @@ export default function ChromeDesktop() {
         const next = [...prev, dataUrl];
         try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
         setWallpaperId(`custom-${next.length - 1}`);
+        setWpOpacity(100);
         return next;
       });
     };
     reader.readAsDataURL(file);
     e.target.value = "";
   }, []);
-  useEffect(() => {
-    try { localStorage.setItem(WALLPAPER_KEY, wallpaperId); } catch {}
-  }, [wallpaperId]);
 
   // ─── Mascot visibility ───
-  const [mascotHidden, setMascotHidden] = useState(() => {
-    if (typeof window === "undefined") return false;
-    try { return localStorage.getItem("clawbox-mascot-hidden") === "1"; } catch { return false; }
-  });
+  const [mascotHidden, setMascotHidden] = useState(false);
   useEffect(() => {
     const onShow = () => setMascotHidden(false);
     const onStorage = (e: StorageEvent) => { if (e.key === "clawbox-mascot-hidden") setMascotHidden(e.newValue === "1"); };
@@ -244,22 +252,43 @@ export default function ChromeDesktop() {
   }, []);
 
   // ─── Desktop icon grid positions ───
-  const GRID_COLS = 4;
-  const GRID_ROWS = 8;
-  const CELL_W = 90; // px
+  const GRID_COLS = 10;
+  const GRID_ROWS = 6;
+  const CELL_W = 100; // px
   const CELL_H = 110; // px
-  const ICON_GRID_KEY = "clawbox-icon-grid";
-  const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>(() => {
-    if (typeof window === "undefined") return {};
-    try {
-      const saved = localStorage.getItem(ICON_GRID_KEY);
-      return saved ? JSON.parse(saved) : {};
-    } catch { return {}; }
-  });
+  const ICON_GRID_KEY = "icon_grid";
+  const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+
+  // ─── Unified SQLite save (debounced, after all state is declared) ───
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    if (!prefsLoaded.current) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wp_id: wallpaperId,
+          wp_fit: wpFit,
+          wp_bg_color: wpBgColor,
+          wp_opacity: wpOpacity,
+          installed_apps: installedApps,
+          installed_meta: installedMeta,
+          desktop_apps: desktopApps,
+          hidden_installed: hiddenInstalledApps,
+          pinned_apps: pinnedOverrides,
+          icon_grid: iconPositions,
+          ui_mascot_hidden: mascotHidden ? 1 : 0,
+        }),
+      }).catch(() => {});
+    }, 500);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, mascotHidden]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -277,16 +306,15 @@ export default function ChromeDesktop() {
     if (!gridRef.current) return null;
     const rect = gridRef.current.getBoundingClientRect();
     const pos = iconPositions[iconId] || (() => {
-      const col = Math.floor(index / GRID_ROWS) % GRID_COLS;
-      const row = index % GRID_ROWS;
+      const col = index % GRID_COLS;
+      const row = Math.floor(index / GRID_COLS) % GRID_ROWS;
       return { row, col };
     })();
-    const padding = { top: 24, left: 16 };
     return {
-      left: rect.left + padding.left + pos.col * CELL_W,
-      top: rect.top + padding.top + pos.row * CELL_H,
-      right: rect.left + padding.left + pos.col * CELL_W + CELL_W,
-      bottom: rect.top + padding.top + pos.row * CELL_H + CELL_H,
+      left: rect.left + pos.col * CELL_W,
+      top: rect.top + pos.row * CELL_H,
+      right: rect.left + pos.col * CELL_W + CELL_W,
+      bottom: rect.top + pos.row * CELL_H + CELL_H,
     };
   }, [iconPositions]);
 
@@ -382,18 +410,50 @@ export default function ChromeDesktop() {
     }
   }, [selectedIcons]);
 
-  // Save icon positions
-  useEffect(() => {
-    try { localStorage.setItem(ICON_GRID_KEY, JSON.stringify(iconPositions)); } catch {}
-  }, [iconPositions]);
 
-  // Assign default positions to new icons
-  const getIconPosition = useCallback((appId: string, index: number) => {
-    if (iconPositions[appId]) return iconPositions[appId];
-    // Auto-assign: fill columns top to bottom, left to right
-    const col = Math.floor(index / GRID_ROWS) % GRID_COLS;
-    const row = index % GRID_ROWS;
-    return { row, col };
+
+  // Arrange all desktop icons into a centered grid, preserving current visual order
+  const arrangeIcons = useCallback(() => {
+    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
+    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const allIconIds = [...visibleInstalled, ...builtinIds];
+    if (allIconIds.length === 0) return;
+    // Sort by current position to preserve visual order
+    allIconIds.sort((a, b) => {
+      const pa = iconPositions[a] || { row: 999, col: 999 };
+      const pb = iconPositions[b] || { row: 999, col: 999 };
+      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
+    });
+    // Compute centered grid
+    const areaW = GRID_COLS * CELL_W;
+    const rect = gridRef.current?.getBoundingClientRect();
+    const areaH = rect ? rect.height : (typeof window !== "undefined" ? window.innerHeight - 80 : GRID_ROWS * CELL_H);
+    const cols = Math.min(allIconIds.length, GRID_COLS);
+    const rows = Math.ceil(allIconIds.length / cols);
+    const gridW = cols * CELL_W;
+    const gridH = rows * CELL_H;
+    const offsetCol = Math.floor((areaW - gridW) / 2 / CELL_W);
+    const offsetRow = Math.max(0, Math.floor((areaH - gridH) / 2 / CELL_H));
+    const positions: Record<string, { row: number; col: number }> = {};
+    allIconIds.forEach((id, i) => {
+      positions[id] = { row: Math.floor(i / cols) + offsetRow, col: (i % cols) + offsetCol };
+    });
+    setIconPositions(positions);
+  }, [installedApps, hiddenInstalledApps, desktopApps, iconPositions]);
+
+  // Auto-arrange when icons are added or removed
+  useEffect(() => {
+    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
+    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const allIconIds = [...visibleInstalled, ...builtinIds];
+    const missing = allIconIds.filter((id) => !iconPositions[id]);
+    if (missing.length === 0) return;
+    arrangeIcons();
+  }, [installedApps, hiddenInstalledApps, desktopApps]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Get icon position (should always be in iconPositions after effect runs)
+  const getIconPosition = useCallback((appId: string, _index: number) => {
+    return iconPositions[appId] || { row: 0, col: 0 };
   }, [iconPositions]);
 
   const isGridCellOccupied = useCallback((row: number, col: number, excludeId?: string) => {
@@ -473,8 +533,47 @@ export default function ChromeDesktop() {
               }
               return prev;
             });
-          } else if (!isGridCellOccupied(target.row, target.col, appId)) {
-            setIconPositions(prev => ({ ...prev, [appId]: target }));
+          } else {
+            // Single icon drop: insert at target and shift others right if occupied
+            setIconPositions(prev => {
+              const next = { ...prev };
+              // If target cell is empty, just move there
+              const occupantId = Object.entries(next).find(
+                ([id, pos]) => id !== appId && pos.row === target.row && pos.col === target.col
+              )?.[0];
+              if (!occupantId) {
+                return { ...next, [appId]: target };
+              }
+              // Sort all icons by position (row-major) to get current linear order
+              const allIds = Object.keys(next).filter(id => id !== appId);
+              allIds.sort((a, b) => {
+                const pa = next[a], pb = next[b];
+                return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
+              });
+              // Find where to insert based on target position
+              const targetLinear = target.row * GRID_COLS + target.col;
+              let insertIdx = allIds.findIndex(id => {
+                const p = next[id];
+                return p.row * GRID_COLS + p.col >= targetLinear;
+              });
+              if (insertIdx === -1) insertIdx = allIds.length;
+              // Insert the dragged icon into the sequence
+              allIds.splice(insertIdx, 0, appId);
+              // Find the grid bounds from current layout (use the centering offsets)
+              const minRow = Math.min(...Object.values(next).map(p => p.row));
+              const minCol = Math.min(...Object.values(next).map(p => p.col));
+              // Determine cols used in current layout
+              const maxCol = Math.max(...Object.values(next).map(p => p.col));
+              const layoutCols = maxCol - minCol + 1;
+              // Re-assign positions sequentially from the same starting offset
+              const positions: Record<string, { row: number; col: number }> = {};
+              allIds.forEach((id, i) => {
+                const col = i % layoutCols;
+                const row = Math.floor(i / layoutCols);
+                positions[id] = { row: row + minRow, col: col + minCol };
+              });
+              return positions;
+            });
           }
         }
       }
@@ -486,14 +585,6 @@ export default function ChromeDesktop() {
     window.addEventListener("pointerup", onUp);
   }, [snapToGrid, isGridCellOccupied, selectedIcons]);
 
-  // Save installed apps to localStorage when they change
-  useEffect(() => {
-    try {
-      localStorage.setItem(INSTALLED_APPS_KEY, JSON.stringify(installedApps));
-    } catch (e) {
-      console.error("Failed to save installed apps:", e);
-    }
-  }, [installedApps]);
 
   // Update clock
   useEffect(() => {
@@ -507,33 +598,53 @@ export default function ChromeDesktop() {
     return () => clearInterval(interval);
   }, []);
 
-  // Install app handler
-  const handleInstallApp = useCallback((appId: string) => {
-    setInstalledApps((prev) => [...prev, appId]);
-    setRecentlyInstalled(appId);
-
-    // Clear recently installed animation after delay
+  // Install app handler — downloads icon + runs clawhub install on server
+  const handleInstallApp = useCallback((app: StoreApp) => {
+    setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
+    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl } }));
+    setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
+    setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);
+
+    // Server-side: download icon + clawhub install (fire and forget)
+    fetch("/setup-api/apps/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ appId: app.id }),
+    }).catch(() => {});
   }, []);
 
-  // Uninstall app handler
-  const handleUninstallApp = useCallback((appId: string) => {
+  // Uninstall confirmation
+  const [uninstallConfirm, setUninstallConfirm] = useState<string | null>(null);
+
+  const requestUninstallApp = useCallback((appId: string) => {
+    setUninstallConfirm(appId);
+  }, []);
+
+  const confirmUninstallApp = useCallback(() => {
+    if (!uninstallConfirm) return;
+    const appId = uninstallConfirm;
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
-    // Close any windows of this app
     setOpenWindows((prev) => prev.filter((w) => w.appId !== `installed-${appId}`));
-
-  }, []);
+    setIconPositions((prev) => {
+      const next = { ...prev };
+      delete next[appId];
+      return next;
+    });
+    setUninstallConfirm(null);
+  }, [uninstallConfirm]);
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
-      const storeApp = storeApps.find((a) => a.id === appId);
-      if (storeApp) {
+      const meta = installedMeta[appId];
+      if (meta) {
+        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
         installedAppDefs.push({
           id: `installed-${appId}`,
-          name: storeApp.name,
-          color: storeApp.color,
+          name: meta.name,
+          color: meta.color,
           type: "installed",
           pinned: false,
           defaultWidth: 600,
@@ -543,7 +654,7 @@ export default function ChromeDesktop() {
       }
     }
     return [...apps, ...installedAppDefs];
-  }, [installedApps]);
+  }, [installedApps, installedMeta]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -652,7 +763,7 @@ export default function ChromeDesktop() {
     }
   }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex]);
 
-  const pinnedApps = apps.filter((a) => isAppPinned(a.id));
+  const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
 
   const renderWindowContent = (appId: string) => {
     const allApps = getAllApps();
@@ -682,49 +793,18 @@ export default function ChromeDesktop() {
         return (
           <AppStore
             installedAppIds={installedApps}
-            onInstall={(app: StoreApp) => handleInstallApp(app.id)}
-            onUninstall={handleUninstallApp}
+            onInstall={(app: StoreApp) => handleInstallApp(app)}
+            onUninstall={requestUninstallApp}
           />
         );
       case "installed":
-        return (
-          <div className="h-full flex flex-col items-center justify-center gap-6 text-white/60 p-8">
-            <div
-              className="w-24 h-24 rounded-2xl flex items-center justify-center shadow-lg"
-              style={{ backgroundColor: app.color }}
-            >
-              {app.storeApp && <InstalledAppIcon iconType={app.storeApp.iconType} size="w-12 h-12" />}
-            </div>
-            <div className="text-center max-w-md">
-              <h2 className="text-2xl font-semibold text-white mb-2">
-                {app.name}
-              </h2>
-              <div className="flex items-center justify-center gap-2 mb-4">
-                <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs font-medium rounded-full">
-                  Installed
-                </span>
-                {app.storeApp && (
-                  <span className="flex items-center gap-1 text-xs text-white/50">
-                    <span className="material-symbols-rounded text-yellow-400" style={{ fontSize: 12 }}>star</span>
-                    {app.storeApp.rating.toFixed(1)}
-                  </span>
-                )}
-              </div>
-              <p className="text-sm text-white/50 mb-6">
-                {app.storeApp?.description}
-              </p>
-              <a
-                href="https://openclawhardware.dev/store"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 border border-white/10 rounded-lg text-sm text-white/70 hover:text-white transition-colors"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span>
-                Configure in Store
-              </a>
-            </div>
-          </div>
-        );
+        return app.storeApp ? (
+          <InstalledAppSettings
+            appId={app.storeApp.id}
+            storeApp={app.storeApp}
+            icon={<InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-12 h-12" />}
+          />
+        ) : null;
       case "files":
         return <FilesApp />;
       case "placeholder":
@@ -751,9 +831,14 @@ export default function ChromeDesktop() {
 
   const activeWindowId = getActiveWindowId();
 
-  // Get installed store apps for desktop display
+  // Get installed store apps for desktop display (exclude hidden ones)
   const installedAppDefs = installedApps
-    .map((appId) => storeApps.find((a) => a.id === appId))
+    .filter((appId) => !hiddenInstalledApps.includes(appId))
+    .map((appId) => {
+      const meta = installedMeta[appId];
+      if (!meta) return null;
+      return { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl } as StoreApp;
+    })
     .filter((a): a is StoreApp => a !== null);
 
   // Built-in apps with desktop shortcuts
@@ -771,9 +856,15 @@ export default function ChromeDesktop() {
         const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
         const customWp = customIdx >= 0 ? customWallpapers[customIdx] : undefined;
         return customWp ? (
-          <div className="absolute inset-0 z-0 pointer-events-none bg-black" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle }} />
+          <>
+            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
+            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+          </>
       ) : currentWallpaper.image ? (
-        <div className="absolute inset-0 z-0 pointer-events-none bg-black" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle }} />
+        <>
+          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
+          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+        </>
       ) : (
         <>
           <div className={`absolute inset-0 ${currentWallpaper.gradient} z-0 pointer-events-none`} />
@@ -785,7 +876,8 @@ export default function ChromeDesktop() {
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div ref={gridRef} className="absolute inset-0 z-[1]" style={{ paddingBottom: 56, paddingTop: 24, paddingLeft: 16, paddingRight: 16 }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%" }}>
         {installedAppDefs.map((app, i) => {
           const pos = getIconPosition(app.id, i);
           const isBeingDragged = draggingIcon === app.id;
@@ -828,7 +920,7 @@ export default function ChromeDesktop() {
                 onPointerDown={(e) => handleIconDragStart(app.id, e)}
                 onClick={() => { if (!draggingIcon) openApp(`installed-${app.id}`); }}
                 onContextMenu={(e) => handleIconContextMenu(e, app.id)}
-                className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
+                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
                   isRecent ? "animate-install-bounce" : ""
                 } ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
@@ -836,9 +928,9 @@ export default function ChromeDesktop() {
                   className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
                   style={{ backgroundColor: app.color }}
                 >
-                  <InstalledAppIcon iconType={app.iconType} size="w-7 h-7" />
+                  <InstalledAppIcon appId={app.id} iconUrl={app.iconUrl} name={app.name} size="w-7 h-7" />
                 </div>
-                <span className="text-xs text-white font-medium text-center line-clamp-1 max-w-[80px]" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.5)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
                 </span>
               </button>
@@ -888,7 +980,7 @@ export default function ChromeDesktop() {
                 onPointerDown={(e) => handleIconDragStart(`desktop-${app.id}`, e)}
                 onClick={() => { if (!draggingIcon) openApp(app.id); }}
                 onContextMenu={(e) => handleIconContextMenu(e, `desktop-${app.id}`)}
-                className={`group flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
+                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
                 <div
                   className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
@@ -896,7 +988,7 @@ export default function ChromeDesktop() {
                 >
                   <AppIcon id={app.id} size="w-7 h-7" />
                 </div>
-                <span className="text-xs text-white font-medium text-center line-clamp-1 max-w-[80px]" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.5)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
                 </span>
               </button>
@@ -905,20 +997,42 @@ export default function ChromeDesktop() {
         })}
 
         {/* Ghost indicator for drop target */}
-        {draggingIcon && dragGhost && (
-          <div
-            style={{
-              position: "absolute",
-              left: dragGhost.col * CELL_W,
-              top: dragGhost.row * CELL_H,
-              width: CELL_W,
-              height: CELL_H,
-            }}
-            className="flex items-center justify-center pointer-events-none"
-          >
-            <div className="w-16 h-16 rounded-2xl border-2 border-dashed border-white/30 bg-white/5" />
-          </div>
-        )}
+        {draggingIcon && dragGhost && (() => {
+          const isOccupied = Object.entries(iconPositions).some(
+            ([id, pos]) => id !== draggingIcon && pos.row === dragGhost.row && pos.col === dragGhost.col
+          );
+          if (isOccupied) {
+            // Show insertion line on the left edge of the occupied cell
+            return (
+              <div
+                style={{
+                  position: "absolute",
+                  left: dragGhost.col * CELL_W - 2,
+                  top: dragGhost.row * CELL_H + 8,
+                  width: 4,
+                  height: CELL_H - 16,
+                }}
+                className="rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.6)] pointer-events-none"
+              />
+            );
+          }
+          return (
+            <div
+              style={{
+                position: "absolute",
+                left: dragGhost.col * CELL_W,
+                top: dragGhost.row * CELL_H,
+                width: CELL_W,
+                height: CELL_H,
+              }}
+              className="flex items-center justify-center pointer-events-none"
+            >
+              <div className="w-16 h-16 rounded-2xl border-2 border-dashed border-white/30 bg-white/5" />
+            </div>
+          );
+        })()}
+
+        </div>{/* end centering wrapper */}
 
         {/* Marquee selection rectangle */}
         {marquee && (
@@ -951,7 +1065,7 @@ export default function ChromeDesktop() {
                 className="w-5 h-5 rounded flex items-center justify-center"
                 style={{ backgroundColor: app.color }}
               >
-                <InstalledAppIcon iconType={app.storeApp.iconType} size="w-3 h-3" />
+                <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
               </div>
             );
           }
@@ -993,7 +1107,7 @@ export default function ChromeDesktop() {
               id: app.id,
               name: app.name,
               color: app.color,
-              icon: <InstalledAppIcon iconType={app.storeApp.iconType} />,
+              icon: <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />,
               isPinned: isAppPinned(app.id),
             };
           }
@@ -1043,7 +1157,7 @@ export default function ChromeDesktop() {
               if (app.type === "installed" && app.storeApp) {
                 return (
                   <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
-                    <InstalledAppIcon iconType={app.storeApp.iconType} />
+                    <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
                   </div>
                 );
               }
@@ -1092,10 +1206,11 @@ export default function ChromeDesktop() {
       {/* Context menu */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 220),
-            top: Math.min(ctxMenu.y, window.innerHeight - 300),
+            top: Math.min(ctxMenu.y, window.innerHeight - 400),
+            maxHeight: "calc(100vh - 80px)",
           }}
           onClick={() => setCtxMenu(null)}
         >
@@ -1135,7 +1250,7 @@ export default function ChromeDesktop() {
                     const appId = id.replace("desktop-", "");
                     setDesktopApps(prev => prev.filter(a => a !== appId));
                   } else {
-                    handleUninstallApp(id);
+                    setHiddenInstalledApps(prev => prev.includes(id) ? prev : [...prev, id]);
                   }
                 });
                 setSelectedIcons(new Set());
@@ -1159,8 +1274,18 @@ export default function ChromeDesktop() {
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
+              {isAppPinned(resolvedAppId) ? (
+                <button onClick={() => handleUnpinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep_off</span> Unpin from shelf
+                </button>
+              ) : (
+                <button onClick={() => handlePinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep</span> Pin to shelf
+                </button>
+              )}
+              <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
-                if (ctxMenu.appId) handleUninstallApp(ctxMenu.appId);
+                if (ctxMenu.appId) requestUninstallApp(ctxMenu.appId);
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
               </button>
@@ -1183,8 +1308,8 @@ export default function ChromeDesktop() {
                   const appId = id.replace("desktop-", "");
                   setDesktopApps(prev => prev.filter(a => a !== appId));
                 } else {
-                  // Uninstall store app (removes from desktop)
-                  handleUninstallApp(id);
+                  // Hide installed app from desktop (not uninstall)
+                  setHiddenInstalledApps(prev => prev.includes(id) ? prev : [...prev, id]);
                 }
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove from desktop
@@ -1202,31 +1327,7 @@ export default function ChromeDesktop() {
               <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="w-4 h-4 inline-block"><AppIcon id="openclaw" size="w-4 h-4" /></span> OpenClaw
               </button>
-              <button onClick={() => {
-                // Collect all desktop icon IDs
-                const allIconIds = [
-                  ...installedAppDefs.map(a => a.id),
-                  ...desktopBuiltinApps.map(a => `desktop-${a.id}`),
-                ];
-                if (allIconIds.length === 0) return;
-                // Calculate grid to center icons
-                const rect = gridRef.current?.getBoundingClientRect();
-                const areaW = rect ? rect.width : window.innerWidth;
-                const areaH = rect ? rect.height - 56 : window.innerHeight - 56;
-                const cols = Math.min(allIconIds.length, Math.max(1, Math.floor(areaW / CELL_W)));
-                const rows = Math.ceil(allIconIds.length / cols);
-                const gridW = cols * CELL_W;
-                const gridH = rows * CELL_H;
-                const offsetCol = Math.floor((areaW - gridW) / 2 / CELL_W);
-                const offsetRow = Math.floor((areaH - gridH) / 2 / CELL_H);
-                const positions: Record<string, { row: number; col: number }> = {};
-                allIconIds.forEach((id, i) => {
-                  const col = i % cols;
-                  const row = Math.floor(i / cols);
-                  positions[id] = { row: row + offsetRow, col: col + offsetCol };
-                });
-                setIconPositions(positions);
-              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+              <button onClick={() => arrangeIcons()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
               </button>
               <div className="border-t border-white/10 my-1" />
@@ -1235,7 +1336,7 @@ export default function ChromeDesktop() {
                   {wallpapers.map((wp) => (
                     <button
                       key={wp.id}
-                      onClick={() => { setWallpaperId(wp.id); setCtxMenu(null); }}
+                      onClick={() => { setWallpaperId(wp.id); setWpOpacity(100); setCtxMenu(null); }}
                       className={`h-8 rounded-md border-2 transition-all ${
                         wallpaperId === wp.id ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
                       } ${wp.gradient}`}
@@ -1246,7 +1347,7 @@ export default function ChromeDesktop() {
                   {customWallpapers.map((wp, i) => (
                     <div key={`custom-${i}`} className="relative group">
                       <button
-                        onClick={() => { setWallpaperId(`custom-${i}`); setCtxMenu(null); }}
+                        onClick={() => { setWallpaperId(`custom-${i}`); setWpOpacity(100); setCtxMenu(null); }}
                         className={`w-full h-8 rounded-md border-2 transition-all ${
                           wallpaperId === `custom-${i}` ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
                         }`}
@@ -1291,14 +1392,33 @@ export default function ChromeDesktop() {
                     </button>
                   ))}
                 </div>
+                <div className="flex items-center gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                  <span className="text-[10px] text-white/50 shrink-0">BG</span>
+                  <input
+                    type="color"
+                    value={wpBgColor}
+                    onChange={(e) => setWpBgColor(e.target.value)}
+                    className="w-5 h-5 rounded cursor-pointer border border-white/20 bg-transparent p-0 [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded [&::-webkit-color-swatch]:border-none"
+                  />
+                  <span className="text-[10px] text-white/50 shrink-0">Opacity</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={wpOpacity}
+                    onChange={(e) => setWpOpacity(parseInt(e.target.value, 10))}
+                    className="flex-1 h-1 accent-orange-400 cursor-pointer"
+                  />
+                  <span className="text-[10px] text-white/40 w-6 text-right">{wpOpacity}%</span>
+                </div>
               </div>
               <div className="border-t border-white/10 my-1" />
               {mascotHidden ? (
-                <button onClick={() => { window.dispatchEvent(new Event('clawbox-show-mascot')); try { localStorage.removeItem('clawbox-mascot-hidden') } catch {}; setMascotHidden(false); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <button onClick={() => { window.dispatchEvent(new Event('clawbox-show-mascot')); setMascotHidden(false); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                   <span className="text-base">🦀</span> Show Mascot
                 </button>
               ) : (
-                <button onClick={() => { try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; setMascotHidden(true); window.dispatchEvent(new Event('clawbox-hide-mascot')); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <button onClick={() => { setMascotHidden(true); window.dispatchEvent(new Event('clawbox-hide-mascot')); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                   <span className="text-base">🦀</span> Hide Mascot
                 </button>
               )}
@@ -1306,6 +1426,39 @@ export default function ChromeDesktop() {
           )}
         </div>
       )}
+
+      {/* Uninstall confirmation modal */}
+      {uninstallConfirm && (() => {
+        const meta = installedMeta[uninstallConfirm];
+        const appName = meta?.name || uninstallConfirm;
+        return (
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setUninstallConfirm(null)}>
+            <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
+              <div className="flex flex-col items-center text-center">
+                <div className="w-14 h-14 rounded-xl flex items-center justify-center mb-4" style={{ backgroundColor: meta?.color || "#6b7280" }}>
+                  <InstalledAppIcon appId={uninstallConfirm} iconUrl={meta?.iconUrl} name={appName} size="w-7 h-7" />
+                </div>
+                <h3 className="text-lg font-semibold text-white mb-1">Uninstall {appName}?</h3>
+                <p className="text-sm text-white/50 mb-6">This will remove the app from your desktop and launcher. You can reinstall it from the App Store.</p>
+                <div className="flex gap-3 w-full">
+                  <button
+                    onClick={() => setUninstallConfirm(null)}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-white/10 hover:bg-white/15 text-white transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmUninstallApp}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-red-500/20 hover:bg-red-500/30 text-red-400 transition-colors cursor-pointer"
+                  >
+                    Uninstall
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

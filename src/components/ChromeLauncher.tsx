@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
+import { useState, useEffect, useRef, ReactNode, useCallback, useMemo } from "react";
 
 interface LauncherApp {
   id: string;
@@ -20,6 +20,24 @@ interface ChromeLauncherProps {
   onAddToDesktop?: (id: string) => void;
 }
 
+// Responsive grid: more cols/rows on bigger screens
+function useLauncherGrid() {
+  const [grid, setGrid] = useState({ cols: 5, rows: 2 });
+  useEffect(() => {
+    const update = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const cols = w >= 1600 ? 8 : w >= 1200 ? 7 : w >= 900 ? 6 : 5;
+      const rows = h >= 900 ? 4 : h >= 700 ? 3 : 2;
+      setGrid({ cols, rows });
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return grid;
+}
+
 export default function ChromeLauncher({
   apps,
   isOpen,
@@ -29,22 +47,41 @@ export default function ChromeLauncher({
   onPinApp,
   onUnpinApp,
 }: ChromeLauncherProps) {
+  const { cols: gridCols, rows: gridRows } = useLauncherGrid();
+  const APPS_PER_PAGE = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(0);
   const [animationState, setAnimationState] = useState<"closed" | "opening" | "open" | "closing">("closed");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: LauncherApp } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const prevOpenRef = useRef(isOpen);
   const ctxOpenedAt = useRef(0);
+  // Swipe tracking
+  const swipeStartX = useRef(0);
+  const swipeStartY = useRef(0);
+  const swiping = useRef(false);
 
   const filteredApps = apps.filter((app) =>
     app.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const totalPages = Math.max(1, Math.ceil(filteredApps.length / APPS_PER_PAGE));
+  const pageApps = useMemo(() => {
+    const start = currentPage * APPS_PER_PAGE;
+    return filteredApps.slice(start, start + APPS_PER_PAGE);
+  }, [filteredApps, currentPage]);
+
+  // Reset page when search changes or launcher opens
+  useEffect(() => {
+    setCurrentPage(0);
+  }, [searchQuery]);
 
   // Handle open/close state transitions
   useEffect(() => {
     if (isOpen && !prevOpenRef.current) {
       setSearchQuery("");
       setCtxMenu(null);
+      setCurrentPage(0);
       setAnimationState("opening");
       const timer = setTimeout(() => {
         setAnimationState("open");
@@ -92,8 +129,44 @@ export default function ChromeLauncher({
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       handleClose();
+    } else if (e.key === "ArrowLeft") {
+      setCurrentPage(p => Math.max(0, p - 1));
+    } else if (e.key === "ArrowRight") {
+      setCurrentPage(p => Math.min(totalPages - 1, p + 1));
     }
-  }, [handleClose]);
+  }, [handleClose, totalPages]);
+
+  // Swipe handlers
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    swipeStartX.current = e.touches[0].clientX;
+    swipeStartY.current = e.touches[0].clientY;
+    swiping.current = true;
+  }, []);
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (!swiping.current) return;
+    swiping.current = false;
+    const dx = e.changedTouches[0].clientX - swipeStartX.current;
+    const dy = e.changedTouches[0].clientY - swipeStartY.current;
+    // Only horizontal swipe (more X than Y movement, min 50px)
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < 0) {
+        setCurrentPage(p => Math.min(totalPages - 1, p + 1));
+      } else {
+        setCurrentPage(p => Math.max(0, p - 1));
+      }
+    }
+  }, [totalPages]);
+
+  // Mouse wheel to change pages
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (totalPages <= 1) return;
+    if (e.deltaY > 0) {
+      setCurrentPage(p => Math.min(totalPages - 1, p + 1));
+    } else if (e.deltaY < 0) {
+      setCurrentPage(p => Math.max(0, p - 1));
+    }
+  }, [totalPages]);
 
   // Don't render if closed
   if (animationState === "closed" && !isOpen) return null;
@@ -117,12 +190,10 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full max-w-xl z-[9999] transition-all duration-200 ${
+        style={{ maxWidth: gridCols * 110 + 32 }}
+        className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
-        style={{
-          maxHeight: "calc(100vh - 80px)",
-        }}
         onKeyDown={handleKeyDown}
       >
         <div
@@ -155,13 +226,15 @@ export default function ChromeLauncher({
             </div>
           </div>
 
-          {/* App grid */}
+          {/* App grid — paginated */}
           <div
-            className="px-4 pb-6 overflow-y-auto"
-            style={{ maxHeight: "calc(100vh - 200px)" }}
+            className="px-4 pb-2"
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+            onWheel={handleWheel}
           >
-            <div className="grid grid-cols-5 gap-4">
-              {filteredApps.map((app) => (
+            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, minHeight: gridRows * 100 }}>
+              {pageApps.map((app) => (
                 <button
                   key={app.id}
                   onClick={() => handleAppClick(app.id)}
@@ -194,6 +267,23 @@ export default function ChromeLauncher({
               </div>
             )}
           </div>
+
+          {/* Page dots */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-1.5 pb-4 pt-1">
+              {Array.from({ length: totalPages }, (_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setCurrentPage(i)}
+                  className={`rounded-full transition-all duration-200 ${
+                    i === currentPage
+                      ? "w-5 h-2 bg-white/70"
+                      : "w-2 h-2 bg-white/25 hover:bg-white/40"
+                  }`}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
