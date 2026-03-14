@@ -45,6 +45,7 @@ interface StatsSnapshot {
 
 interface DoneStepProps {
   setupComplete?: boolean;
+  onComplete?: () => void;
 }
 
 interface SectionStatusMessage {
@@ -335,7 +336,7 @@ function UpdateProgressHeading({ phase }: { phase: UpdateState["phase"] | undefi
 
 /* ── Main component ── */
 
-export default function DoneStep({ setupComplete = false }: DoneStepProps) {
+export default function DoneStep({ setupComplete = false, onComplete }: DoneStepProps) {
   /* ── System info ── */
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -660,7 +661,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     try {
       const res = await fetch("/setup-api/setup/complete", { method: "POST" });
       if (res.ok) {
-        window.location.href = "/";
+        if (onComplete) {
+          onComplete();
+        } else {
+          window.location.href = "/";
+        }
         return;
       }
       const data = await res.json().catch(() => ({}));

@@ -242,7 +242,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
           .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
           .catch(() => null)
       ),
-    execShell("npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
+    execShell("bun pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
       .then(({ stdout }) => stdout.trim() || null)
       .catch(() => null),
   ]);

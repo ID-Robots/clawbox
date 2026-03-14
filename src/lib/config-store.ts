@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
-export const CONFIG_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+export const CONFIG_ROOT = process.env.CLAWBOX_ROOT || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 export const DATA_DIR = path.join(CONFIG_ROOT, "data");
 const DB_PATH = path.join(DATA_DIR, "clawbox.db");
 

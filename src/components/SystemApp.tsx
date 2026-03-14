@@ -324,28 +324,39 @@ type SortKey = "cpu" | "mem" | "pid";
 
 function ProcessesSection({ data }: { data: ProcessEntry[] }) {
   const [sortBy, setSortBy] = useState<SortKey>("cpu");
+  const [expanded, setExpanded] = useState(false);
 
   const sorted = [...data].sort((a, b) => (b[sortBy] as number) - (a[sortBy] as number));
+  const topProcs = expanded ? sorted : sorted.slice(0, 5);
 
   return (
     <Card title="Processes" icon={<ProcessIcon />}>
-      <div className="flex gap-1 mb-2">
-        {(["cpu", "mem", "pid"] as SortKey[]).map((key) => (
-          <button
-            key={key}
-            onClick={() => setSortBy(key)}
-            className="text-[10px] px-2 py-0.5 rounded transition-colors"
-            style={{
-              backgroundColor: sortBy === key ? "#06b6d4" : "#1e1e2e",
-              color: sortBy === key ? "#000" : "#a0a0b0",
-              fontWeight: sortBy === key ? 700 : 400,
-            }}
-          >
-            {key.toUpperCase()}
-          </button>
-        ))}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex gap-1">
+          {(["cpu", "mem", "pid"] as SortKey[]).map((key) => (
+            <button
+              key={key}
+              onClick={() => setSortBy(key)}
+              className="text-[10px] px-2 py-0.5 rounded transition-colors"
+              style={{
+                backgroundColor: sortBy === key ? "#06b6d4" : "#1e1e2e",
+                color: sortBy === key ? "#000" : "#a0a0b0",
+                fontWeight: sortBy === key ? 700 : 400,
+              }}
+            >
+              {key.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-[10px] px-2 py-0.5 rounded transition-colors hover:bg-white/10"
+          style={{ color: "#06b6d4" }}
+        >
+          {expanded ? "Show less" : `All (${sorted.length})`}
+        </button>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" style={{ maxHeight: expanded ? 300 : undefined, overflowY: expanded ? "auto" : undefined }}>
         <table className="w-full text-[10px]">
           <thead>
             <tr style={{ color: "#a0a0b0" }}>
@@ -357,7 +368,7 @@ function ProcessesSection({ data }: { data: ProcessEntry[] }) {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((proc, i) => (
+            {topProcs.map((proc, i) => (
               <tr
                 key={`${proc.pid}-${i}`}
                 className="border-t border-white/5"
@@ -491,9 +502,7 @@ export default function SystemApp() {
             <MemorySection data={stats.memory} />
             <StorageSection data={stats.storage} />
             <NetworkSection data={stats.network} />
-            <div style={{ gridColumn: "1 / -1" }}>
-              <ProcessesSection data={stats.processes} />
-            </div>
+            <ProcessesSection data={stats.processes} />
           </div>
         )}
       </div>

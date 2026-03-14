@@ -24,7 +24,11 @@ function applyStatusData(
   }
 }
 
-export default function SetupWizard() {
+interface SetupWizardProps {
+  onComplete?: () => void;
+}
+
+export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
   const [currentStep, setCurrentStep] = useState(1);
   const [setupComplete, setSetupComplete] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -114,7 +118,7 @@ export default function SetupWizard() {
         {currentStep === 3 && (
           <AIModelsStep onNext={() => setCurrentStep(4)} />
         )}
-        {currentStep === 4 && <DoneStep setupComplete={setupComplete} />}
+        {currentStep === 4 && <DoneStep setupComplete={setupComplete} onComplete={onComplete} />}
       </main>
 
       <footer className="px-4 py-3 flex items-center justify-center gap-3">

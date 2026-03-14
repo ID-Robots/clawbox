@@ -3,7 +3,6 @@ import { execSync } from "child_process";
 
 const isDev = process.env.NODE_ENV === "development";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
-
 // Git-based version: "v2.0.0" on tag, "v2.0.0-3-gca62836" after commits
 const APP_VERSION = (() => {
   try {
@@ -76,13 +75,13 @@ const nextConfig: NextConfig = {
             key: "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              // TODO: Migrate inline scripts to nonce/hash to remove 'unsafe-inline'
-              // 'unsafe-inline' is required for Next.js hydration and proxied gateway UI
               `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "font-src 'self'",
               "connect-src 'self' ws: wss:",
+              // Allow code-server iframe (same hostname, different port)
+              `frame-src 'self' http://*:${process.env.CODE_SERVER_PORT || "8080"}`,
               "frame-ancestors 'self'",
             ].join("; "),
           },

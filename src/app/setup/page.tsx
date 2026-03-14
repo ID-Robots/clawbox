@@ -7,12 +7,16 @@ import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SetupWizard from "@/components/SetupWizard";
+import SettingsApp from "@/components/SettingsApp";
+import type { UISettings } from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
-import SystemApp from "@/components/SystemApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
+import BrowserApp from "@/components/BrowserApp";
+import VNCApp from "@/components/VNCApp";
+import VSCodeApp from "@/components/VSCodeApp";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -24,7 +28,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "system" | "files";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -38,7 +42,9 @@ const apps: AppDef[] = [
   { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "system", name: "System Monitor", color: "#3b82f6", type: "system", pinned: false },
+  { id: "browser", name: "Browser", color: "#4285f4", type: "browser", pinned: true, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vnc", name: "Remote Desktop", color: "#7c3aed", type: "vnc", pinned: true, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vscode", name: "VS Code", color: "#007acc", type: "vscode", pinned: true, defaultWidth: 1100, defaultHeight: 750 },
   { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
 ];
 
@@ -49,6 +55,14 @@ function MIcon({ name, className = "", size = 24 }: { name: string; className?: 
 
 function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
+
+  if (id === "vscode") {
+    return (
+      <svg className={`${size}`} viewBox="0 0 100 100" fill="none">
+        <path d="M74.5 3.5L37.8 35.2 18.3 20.5c-1.8-1.3-4.3-1.1-5.9.4l-5 5c-1.8 1.8-1.8 4.7 0 6.5L21.5 50 7.4 67.6c-1.8 1.8-1.8 4.7 0 6.5l5 5c1.6 1.5 4.1 1.7 5.9.4l19.5-14.7L74.5 96.5c1.7 1.7 4.1 2.5 6.5 2.1l.8-.2c2-.4 3.6-1.7 4.4-3.5L97 50V7.2l-12-4.3c-2.7-1-5.5-.5-7.6 1.6L74.5 3.5zM79 73L53 50l26-23v46z" fill="white"/>
+      </svg>
+    );
+  }
 
   if (id === "openclaw") {
     return (
@@ -75,10 +89,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const iconMap: Record<string, string> = {
     settings: "settings",
     terminal: "terminal",
-    system: "monitor_heart",
     files: "folder",
     help: "help",
-    browser: "language",
+    browser: "public",
+    vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
   };
@@ -125,6 +139,15 @@ function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?
 
 
 export default function ChromeDesktop() {
+  // ─── Setup completion gate ───
+  const [setupDone, setSetupDone] = useState<boolean | null>(null); // null = loading
+  useEffect(() => {
+    fetch("/setup-api/setup/status")
+      .then(r => r.json())
+      .then(data => setSetupDone(!!data.setup_complete))
+      .catch(() => setSetupDone(false));
+  }, []);
+
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
@@ -774,21 +797,41 @@ export default function ChromeDesktop() {
       case "settings":
         return (
           <div className="h-full overflow-y-auto">
-            <SetupWizard />
+            <SettingsApp ui={{
+              wallpaperId,
+              wpFit,
+              wpBgColor,
+              wpOpacity,
+              mascotHidden,
+              wallpapers: wallpapers.map(w => ({ id: w.id, name: w.name, image: w.image || undefined })),
+              customWallpapers,
+              onWallpaperChange: setWallpaperId,
+              onWpFitChange: setWpFit,
+              onWpBgColorChange: setWpBgColor,
+              onWpOpacityChange: setWpOpacity,
+              onMascotToggle: setMascotHidden,
+              onWallpaperUpload: () => wallpaperInputRef.current?.click(),
+              onCustomWallpaperDelete: (idx: number) => {
+                setCustomWallpapers(prev => {
+                  const next = prev.filter((_, i) => i !== idx);
+                  try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
+                  if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
+                  return next;
+                });
+              },
+            }} />
           </div>
         );
       case "openclaw":
         return (
           <iframe
-            src={`http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:${process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789'}`}
+            src="/setup-api/gateway"
             className="w-full h-full border-0"
             title="OpenClaw Control"
           />
         );
       case "terminal":
         return <TerminalApp />;
-      case "system":
-        return <SystemApp />;
       case "store":
         return (
           <AppStore
@@ -807,6 +850,12 @@ export default function ChromeDesktop() {
         ) : null;
       case "files":
         return <FilesApp />;
+      case "browser":
+        return <BrowserApp />;
+      case "vnc":
+        return <VNCApp />;
+      case "vscode":
+        return <VSCodeApp />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -848,6 +897,23 @@ export default function ChromeDesktop() {
 
   // Get all apps for launcher (including installed)
   const allAppsForLauncher = getAllApps();
+
+  // ─── Setup gate: show wizard until setup is complete ───
+  if (setupDone === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0a0f1a]">
+        <div className="spinner" role="status" aria-label="Loading" />
+      </div>
+    );
+  }
+
+  if (!setupDone) {
+    return (
+      <div className="min-h-screen bg-[#0a0f1a]">
+        <SetupWizard onComplete={() => setSetupDone(true)} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen relative overflow-hidden select-none">
@@ -1331,97 +1397,9 @@ export default function ChromeDesktop() {
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
               </button>
               <div className="border-t border-white/10 my-1" />
-              <div className="px-4 py-2">
-                <div className="grid grid-cols-4 gap-1.5" onClick={(e) => e.stopPropagation()}>
-                  {wallpapers.map((wp) => (
-                    <button
-                      key={wp.id}
-                      onClick={() => { setWallpaperId(wp.id); setWpOpacity(100); setCtxMenu(null); }}
-                      className={`h-8 rounded-md border-2 transition-all ${
-                        wallpaperId === wp.id ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
-                      } ${wp.gradient}`}
-                      style={wp.image ? { backgroundImage: `url(${wp.image})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
-                      title={wp.name}
-                    />
-                  ))}
-                  {customWallpapers.map((wp, i) => (
-                    <div key={`custom-${i}`} className="relative group">
-                      <button
-                        onClick={() => { setWallpaperId(`custom-${i}`); setWpOpacity(100); setCtxMenu(null); }}
-                        className={`w-full h-8 rounded-md border-2 transition-all ${
-                          wallpaperId === `custom-${i}` ? "border-orange-400 scale-105" : "border-transparent hover:border-white/30"
-                        }`}
-                        style={{ backgroundImage: `url(${wp})`, backgroundSize: "cover", backgroundPosition: "center" }}
-                        title={`Custom ${i + 1}`}
-                      />
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setCustomWallpapers(prev => {
-                            const next = prev.filter((_, j) => j !== i);
-                            try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-                            return next;
-                          });
-                          if (wallpaperId === `custom-${i}`) setWallpaperId(wallpapers[0].id);
-                        }}
-                        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/90 hover:bg-red-400 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Remove wallpaper"
-                      >
-                        <span className="material-symbols-rounded" style={{ fontSize: 10 }}>close</span>
-                      </button>
-                    </div>
-                  ))}
-                  <label
-                    className="h-8 rounded-md border-2 border-dashed border-white/20 hover:border-white/40 transition-all flex items-center justify-center text-white/40 hover:text-white/70 cursor-pointer"
-                    title="Upload wallpaper"
-                  >
-                    <input type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>add</span>
-                  </label>
-                </div>
-                <div className="flex gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
-                  {([["fill", "Fill"], ["fit", "Fit"], ["center", "Center"]] as const).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      onClick={() => setWpFit(mode)}
-                      className={`flex-1 text-[10px] py-1 rounded transition-all ${
-                        wpFit === mode ? "bg-white/20 text-white" : "bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/60"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-center gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
-                  <span className="text-[10px] text-white/50 shrink-0">BG</span>
-                  <input
-                    type="color"
-                    value={wpBgColor}
-                    onChange={(e) => setWpBgColor(e.target.value)}
-                    className="w-5 h-5 rounded cursor-pointer border border-white/20 bg-transparent p-0 [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded [&::-webkit-color-swatch]:border-none"
-                  />
-                  <span className="text-[10px] text-white/50 shrink-0">Opacity</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={wpOpacity}
-                    onChange={(e) => setWpOpacity(parseInt(e.target.value, 10))}
-                    className="flex-1 h-1 accent-orange-400 cursor-pointer"
-                  />
-                  <span className="text-[10px] text-white/40 w-6 text-right">{wpOpacity}%</span>
-                </div>
-              </div>
-              <div className="border-t border-white/10 my-1" />
-              {mascotHidden ? (
-                <button onClick={() => { window.dispatchEvent(new Event('clawbox-show-mascot')); setMascotHidden(false); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="text-base">🦀</span> Show Mascot
-                </button>
-              ) : (
-                <button onClick={() => { setMascotHidden(true); window.dispatchEvent(new Event('clawbox-hide-mascot')); setCtxMenu(null); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="text-base">🦀</span> Hide Mascot
-                </button>
-              )}
+              <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> Settings
+              </button>
             </>
           )}
         </div>

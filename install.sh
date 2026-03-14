@@ -78,7 +78,7 @@ step_ensure_user() {
 step_apt_update() {
   apt-get update -qq
   apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
-  # Node.js 22 (required for production server — bun doesn't fire upgrade events)
+  # Node.js 22 (required for terminal server — node-pty is incompatible with bun)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
   else
@@ -175,7 +175,7 @@ step_build() {
 
 step_openclaw_install() {
   local LATEST
-  LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
+  LATEST=$("$BUN" pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
   local TARGET="${LATEST:-$OPENCLAW_VERSION}"
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED
@@ -189,7 +189,7 @@ step_openclaw_install() {
   mkdir -p "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-  as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
+  as_clawbox -H "$BUN" install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX" 2>/dev/null || as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
   if [ ! -x "$OPENCLAW_BIN" ]; then
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
@@ -282,7 +282,7 @@ step_openclaw_config() {
   # in a single node invocation to avoid reading/writing the config file twice
   if [ -f "$OPENCLAW_CONFIG" ]; then
     CLAWBOX_CONFIG="$CLAWBOX_CONFIG" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" \
-      CLAWBOX_HOME="$CLAWBOX_HOME" node <<'NODE'
+      CLAWBOX_HOME="$CLAWBOX_HOME" "$BUN" -e "$(cat <<'NODE'
 const fs=require('fs');
 const cfgPath=process.env.OPENCLAW_CONFIG;
 const home=process.env.CLAWBOX_HOME;
@@ -314,6 +314,7 @@ c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
+)"
     echo "  OpenClaw config updated"
   fi
 
@@ -446,6 +447,34 @@ step_chrome_install() {
   apt-get install -y chromium-browser
 }
 
+step_code_server_install() {
+  local CS_PORT="${CODE_SERVER_PORT:-8080}"
+  if command -v code-server &>/dev/null; then
+    echo "  code-server already installed: $(code-server --version 2>/dev/null | head -1)"
+  else
+    echo "  Installing code-server..."
+    as_clawbox bash -o pipefail -c 'curl -fsSL https://code-server.dev/install.sh | sh'
+    echo "  code-server installed"
+  fi
+  # Configure for local use (no auth)
+  local CS_CONFIG="$CLAWBOX_HOME/.config/code-server/config.yaml"
+  mkdir -p "$(dirname "$CS_CONFIG")"
+  cat > "$CS_CONFIG" <<CSEOF
+bind-addr: 0.0.0.0:${CS_PORT}
+auth: none
+cert: false
+CSEOF
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.config/code-server"
+  echo "  Configured for port $CS_PORT (no auth)"
+  # Install systemd service
+  if [ -f /usr/lib/systemd/system/code-server@.service ] || [ -f /lib/systemd/system/code-server@.service ]; then
+    systemctl enable --now "code-server@$CLAWBOX_USER"
+    echo "  code-server service enabled"
+  else
+    echo "  Warning: code-server systemd service not found, start manually"
+  fi
+}
+
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   if [ ! -f "$INPUT_FILE" ]; then
@@ -516,6 +545,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
+  code_server_install
   openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -543,7 +573,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
 step=0
 log() {
   step=$((step + 1))
@@ -604,6 +634,9 @@ step_jtop_install
 
 log "Installing Chromium..."
 step_chrome_install
+
+log "Installing code-server (VS Code in browser)..."
+step_code_server_install
 
 log "Starting services..."
 step_start_services

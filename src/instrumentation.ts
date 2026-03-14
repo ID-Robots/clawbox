@@ -37,10 +37,24 @@ export async function register() {
     // Not running — start it
   }
 
+  // Find npx binary (node-pty requires Node.js, not bun)
+  function findNpx(): string {
+    const fs = require('fs')
+    const candidates = [
+      '/usr/local/bin/npx',
+      '/usr/bin/npx',
+    ]
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p
+    }
+    return 'npx' // fallback to PATH
+  }
+
   function startServer() {
     if (terminalStopping) return
 
-    const child = spawn('npx', ['tsx', serverPath], {
+    const npxPath = findNpx()
+    const child = spawn(npxPath, ['tsx', serverPath], {
       env: { ...process.env, TERMINAL_WS_PORT: PORT },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
@@ -77,7 +91,6 @@ export async function register() {
       terminalChild = null
     }
   }
-  process.removeAllListeners('exit')
   process.on('exit', cleanup)
   process.on('SIGTERM', cleanup)
   process.on('SIGINT', cleanup)

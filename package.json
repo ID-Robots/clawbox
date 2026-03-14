@@ -4,7 +4,7 @@
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
-    "terminal-server": "npx ts-node --project tsconfig.json scripts/terminal-server.ts",
+    "terminal-server": "bun run scripts/terminal-server.ts",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
@@ -21,6 +21,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@novnc/novnc": "^1.6.0",
     "@types/ws": "^8.18.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -28,6 +29,7 @@
     "better-sqlite3": "^12.6.2",
     "next": "16.1.6",
     "node-pty": "^1.1.0",
+    "playwright": "^1.58.2",
     "qrcode.react": "^4.2.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
@@ -48,7 +50,7 @@
     "eslint-config-next": "16.1.6",
     "jsdom": "^28.1.0",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.0.0",
+    "typescript": "5.9.3",
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.0.18"
   }

@@ -27,8 +27,8 @@ function useLauncherGrid() {
     const update = () => {
       const w = window.innerWidth;
       const h = window.innerHeight;
-      const cols = w >= 1600 ? 8 : w >= 1200 ? 7 : w >= 900 ? 6 : 5;
-      const rows = h >= 900 ? 4 : h >= 700 ? 3 : 2;
+      const cols = w >= 1600 ? 7 : w >= 1200 ? 6 : w >= 900 ? 5 : 4;
+      const rows = h >= 900 ? 3 : h >= 700 ? 2 : 2;
       setGrid({ cols, rows });
     };
     update();
@@ -190,7 +190,7 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 110 + 32 }}
+        style={{ maxWidth: gridCols * 100 + 32 }}
         className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
@@ -233,7 +233,7 @@ export default function ChromeLauncher({
             onTouchEnd={handleTouchEnd}
             onWheel={handleWheel}
           >
-            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, minHeight: gridRows * 100 }}>
+            <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, minHeight: gridRows * 88 }}>
               {pageApps.map((app) => (
                 <button
                   key={app.id}

@@ -5,6 +5,7 @@
     "": {
       "name": "clawbox-setup",
       "dependencies": {
+        "@novnc/novnc": "^1.6.0",
         "@types/ws": "^8.18.1",
         "@xterm/addon-fit": "^0.11.0",
         "@xterm/addon-web-links": "^0.12.0",
@@ -12,6 +13,7 @@
         "better-sqlite3": "^12.6.2",
         "next": "16.1.6",
         "node-pty": "^1.1.0",
+        "playwright": "^1.58.2",
         "qrcode.react": "^4.2.0",
         "react": "19.2.4",
         "react-dom": "19.2.4",
@@ -32,7 +34,7 @@
         "eslint-config-next": "16.1.6",
         "jsdom": "^28.1.0",
         "tailwindcss": "^4.0.0",
-        "typescript": "^5.0.0",
+        "typescript": "5.9.3",
         "vite-tsconfig-paths": "^6.1.1",
         "vitest": "^4.0.18",
       },
@@ -276,6 +278,8 @@
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
     "@nolyfill/is-core-module": ["@nolyfill/is-core-module@1.0.39", "", {}, "sha512-nn5ozdjYQpUCZlWGuxcJY/KpxkWQs4DcbMCmKojjyrYDEAGy4Ce19NN4v5MduafTwJlbKc99UA8YhSVqq9yPZA=="],
+
+    "@novnc/novnc": ["@novnc/novnc@1.6.0", "", {}, "sha512-CJrmdSe9Yt2ZbLsJpVFoVkEu0KICEvnr3njW25Nz0jodaiFJtg8AYLGZogRYy0/N5HUWkGUsCmegKXYBSqwygw=="],
 
     "@playwright/test": ["@playwright/test@1.58.2", "", { "dependencies": { "playwright": "1.58.2" }, "bin": { "playwright": "cli.js" } }, "sha512-akea+6bHYBBfA9uQqSYmlJXn61cTa+jbO87xVLCWbTqbWadRVmhxlXATaOjOgcBaWU4ePo0wB41KMFv3o35IXA=="],
 

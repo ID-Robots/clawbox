@@ -7,12 +7,13 @@ Wants=network-online.target
 Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox/clawbox
-ExecStart=/usr/bin/node production-server.js
+ExecStart=/home/clawbox/.bun/bin/bun run production-server.js
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 EnvironmentFile=-/home/clawbox/clawbox/.env
 Environment=NODE_ENV=production
+Environment=BUN_ENV=production
 Environment=PORT=80
 Environment=HOSTNAME=0.0.0.0
 AmbientCapabilities=CAP_NET_BIND_SERVICE

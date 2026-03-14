@@ -1,6 +1,6 @@
 // production-server.js
-// Entry point for production. Wraps the Next.js standalone server and adds
-// WebSocket upgrade proxy so the OpenClaw gateway UI works through port 80.
+// Entry point for production (run via bun). Wraps the Next.js standalone server
+// and adds WebSocket upgrade proxy so the OpenClaw gateway UI works through port 80.
 /* eslint-disable @typescript-eslint/no-require-imports */
 const net = require("net");
 const http = require("http");

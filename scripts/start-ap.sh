@@ -19,8 +19,8 @@ CON_NAME="ClawBox-Setup"
 
 # Check if setup is complete (phone should get internet, not captive portal)
 setup_complete=false
-if [ -f "$CONFIG_FILE" ] && command -v node &>/dev/null; then
-  if node -e "process.exit(JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf8')).setup_complete?0:1)" 2>/dev/null; then
+if [ -f "$CONFIG_FILE" ]; then
+  if grep -q '"setup_complete":\s*true' "$CONFIG_FILE" 2>/dev/null; then
     setup_complete=true
   fi
 fi

@@ -1,11 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 /**
  * Standalone WebSocket Terminal Server
  * Runs on port 3006, spawns a PTY (zsh) per connection and bridges it over WebSocket.
  *
  * Usage:
- *   npx ts-node scripts/terminal-server.ts
- *   # or compile and run with node
+ *   bun run scripts/terminal-server.ts
  *
  * Protocol:
  *   Client → Server:
