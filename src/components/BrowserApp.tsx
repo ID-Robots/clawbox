@@ -1,342 +1,295 @@
 "use client";
 
 /**
- * BrowserApp — Remote browser automation via Playwright.
- * Full input mapping: clicks, double-clicks, scroll, keyboard, mouse move.
- * Streams screenshots from a headless Chromium instance.
+ * BrowserApp — Real desktop browser integration for OpenClaw.
+ * Installs Chromium if needed, configures OpenClaw computer-use,
+ * and provides open/close controls for the real desktop browser.
  */
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
-interface BrowserState {
-  url: string;
-  title: string;
-  loading: boolean;
-  canGoBack: boolean;
-  canGoForward: boolean;
+const BRAND_ORANGE = "#fe6e00";
+const BRAND_ORANGE_LIGHT = "#ff8b1a";
+
+interface BrowserStatus {
+  chromium: { installed: boolean; path?: string; version?: string };
+  browser: { running: boolean; pid?: number };
+  enabled: boolean;
 }
 
 export default function BrowserApp() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [browserState, setBrowserState] = useState<BrowserState>({
-    url: "https://www.google.com",
-    title: "New Tab",
-    loading: false,
-    canGoBack: false,
-    canGoForward: false,
-  });
-  const [screenshot, setScreenshot] = useState<string | null>(null);
-  const [urlInput, setUrlInput] = useState("https://www.google.com");
+  const [status, setStatus] = useState<BrowserStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [starting, setStarting] = useState(true);
-  const viewportRef = useRef<HTMLDivElement>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastScreenshotRef = useRef<string | null>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const pendingRef = useRef(false);
-  const urlBarRef = useRef<HTMLInputElement>(null);
 
-  const api = useCallback(async (action: string, params: Record<string, unknown> = {}) => {
-    const res = await fetch("/setup-api/browser", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, sessionId, ...params }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(data.error || res.statusText);
-    }
-    return res.json();
-  }, [sessionId]);
-
-  const updateFromResponse = useCallback((data: Record<string, unknown>) => {
-    if (data.screenshot && data.screenshot !== lastScreenshotRef.current) {
-      lastScreenshotRef.current = data.screenshot as string;
-      setScreenshot(data.screenshot as string);
-    }
-    if (data.url) {
-      setBrowserState((s) => ({
-        ...s,
-        url: data.url as string,
-        title: (data.title as string) || s.title,
-        loading: false,
-        canGoBack: (data.canGoBack as boolean) ?? s.canGoBack,
-        canGoForward: (data.canGoForward as boolean) ?? s.canGoForward,
-      }));
-      setUrlInput(data.url as string);
-    }
-  }, []);
-
-  // Map viewport pixel coords to browser coords (1280x720)
-  const mapCoords = useCallback((e: React.MouseEvent | MouseEvent): { x: number; y: number } | null => {
-    if (!imgRef.current) return null;
-    const rect = imgRef.current.getBoundingClientRect();
-    // Account for object-contain: image may have letterboxing
-    const imgAspect = 1280 / 720;
-    const boxAspect = rect.width / rect.height;
-    let imgLeft = rect.left, imgTop = rect.top, imgW = rect.width, imgH = rect.height;
-    if (boxAspect > imgAspect) {
-      // Letterboxed horizontally
-      imgW = rect.height * imgAspect;
-      imgLeft = rect.left + (rect.width - imgW) / 2;
-    } else {
-      // Letterboxed vertically
-      imgH = rect.width / imgAspect;
-      imgTop = rect.top + (rect.height - imgH) / 2;
-    }
-    const x = Math.round(((e.clientX - imgLeft) / imgW) * 1280);
-    const y = Math.round(((e.clientY - imgTop) / imgH) * 720);
-    if (x < 0 || x > 1280 || y < 0 || y > 720) return null;
-    return { x, y };
-  }, []);
-
-  // Start browser session
-  useEffect(() => {
-    let cancelled = false;
-    setStarting(true);
-    setError(null);
-
-    fetch("/setup-api/browser", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "launch" }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        if (data.error) { setError(data.error); setStarting(false); return; }
-        setSessionId(data.sessionId);
-        if (data.screenshot) setScreenshot(data.screenshot);
-        setStarting(false);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err.message);
-        setStarting(false);
-      });
-
-    return () => { cancelled = true; };
-  }, []);
-
-  // Poll for screenshots
-  useEffect(() => {
-    if (!sessionId) return;
-
-    const poll = async () => {
-      if (pendingRef.current) return; // Skip if user interaction in progress
-      try {
-        const data = await api("screenshot");
-        updateFromResponse(data);
-      } catch { /* ignore */ }
-    };
-
-    poll();
-    pollRef.current = setInterval(poll, 800);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [sessionId, api, updateFromResponse]);
-
-  // Cleanup session on unmount
-  useEffect(() => {
-    const sid = sessionId;
-    return () => {
-      if (sid) {
-        fetch("/setup-api/browser", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "close", sessionId: sid }),
-        }).catch(() => {});
-      }
-    };
-  }, [sessionId]);
-
-  const navigate = useCallback(async (url: string) => {
-    if (!sessionId) return;
-    let target = url.trim();
-    if (!target.startsWith("http://") && !target.startsWith("https://")) {
-      target = "https://" + target;
-    }
-    setBrowserState((s) => ({ ...s, loading: true }));
+  const fetchStatus = useCallback(async () => {
     try {
-      const data = await api("navigate", { url: target });
-      updateFromResponse(data);
+      const res = await fetch("/setup-api/browser/manage");
+      if (!res.ok) throw new Error("Failed to fetch status");
+      const data: BrowserStatus = await res.json();
+      setStatus(data);
+      setError(null);
     } catch (err) {
-      setBrowserState((s) => ({ ...s, loading: false }));
-      setError(err instanceof Error ? err.message : "Navigation failed");
+      setError(err instanceof Error ? err.message : "Failed to connect");
+    } finally {
+      setLoading(false);
     }
-  }, [sessionId, api, updateFromResponse]);
+  }, []);
 
-  // Click handler
-  const handleClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!sessionId) return;
-    const coords = mapCoords(e);
-    if (!coords) return;
-    pendingRef.current = true;
+  useEffect(() => {
+    fetchStatus();
+    pollRef.current = setInterval(fetchStatus, 5000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [fetchStatus]);
+
+  const doAction = useCallback(async (action: string, loadingLabel: string, successLabel?: string) => {
+    setActionLoading(loadingLabel);
+    setError(null);
+    setSuccessMsg(null);
     try {
-      const data = await api("click", coords);
-      updateFromResponse(data);
-    } catch { /* ignore */ }
-    pendingRef.current = false;
-  }, [sessionId, api, mapCoords, updateFromResponse]);
+      const res = await fetch("/setup-api/browser/manage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (successLabel) {
+        setSuccessMsg(successLabel);
+        setTimeout(() => setSuccessMsg(null), 3000);
+      }
+      await fetchStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    } finally {
+      setActionLoading(null);
+    }
+  }, [fetchStatus]);
 
-  // Double click
-  const handleDoubleClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!sessionId) return;
-    const coords = mapCoords(e);
-    if (!coords) return;
-    pendingRef.current = true;
-    try {
-      const data = await api("dblclick", coords);
-      updateFromResponse(data);
-    } catch { /* ignore */ }
-    pendingRef.current = false;
-  }, [sessionId, api, mapCoords, updateFromResponse]);
-
-  // Scroll handler
-  const handleWheel = useCallback(async (e: React.WheelEvent<HTMLDivElement>) => {
-    if (!sessionId) return;
-    e.preventDefault();
-    const coords = mapCoords(e);
-    if (!coords) return;
-    pendingRef.current = true;
-    try {
-      const data = await api("scroll", { ...coords, deltaX: e.deltaX, deltaY: e.deltaY });
-      updateFromResponse(data);
-    } catch { /* ignore */ }
-    pendingRef.current = false;
-  }, [sessionId, api, mapCoords, updateFromResponse]);
-
-  // Keyboard handler — capture keys when viewport is focused
-  const handleKeyDown = useCallback(async (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!sessionId) return;
-    // Don't capture when URL bar is focused
-    if (document.activeElement === urlBarRef.current) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    pendingRef.current = true;
-    try {
-      const data = await api("keydown", { key: e.key, code: e.code });
-      updateFromResponse(data);
-    } catch { /* ignore */ }
-    pendingRef.current = false;
-  }, [sessionId, api, updateFromResponse]);
-
-  // Mouse move (hover) — throttled
-  const lastMoveRef = useRef(0);
-  const handleMouseMove = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!sessionId) return;
-    const now = Date.now();
-    if (now - lastMoveRef.current < 200) return; // Throttle to 5/sec
-    lastMoveRef.current = now;
-    const coords = mapCoords(e);
-    if (!coords) return;
-    // Fire and forget — don't wait for response
-    api("hover", coords).catch(() => {});
-  }, [sessionId, api, mapCoords]);
-
-  const handleNavAction = useCallback(async (action: "back" | "forward" | "refresh") => {
-    if (!sessionId) return;
-    try {
-      const data = await api(action);
-      updateFromResponse(data);
-    } catch { /* ignore */ }
-  }, [sessionId, api, updateFromResponse]);
-
-  if (starting) {
+  if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-[#202124] text-white/70 gap-4">
-        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 48 }}>progress_activity</span>
-        <p className="text-sm">Launching browser...</p>
+      <div className="flex flex-col items-center justify-center h-full bg-[#0f1219] text-white/70 gap-4">
+        <div className="w-8 h-8 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+        <p className="text-sm">Checking browser status...</p>
       </div>
     );
   }
 
-  if (error && !sessionId) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full bg-[#202124] text-white/70 gap-4 p-8">
-        <span className="material-symbols-rounded text-red-400" style={{ fontSize: 48 }}>error</span>
-        <p className="text-sm text-center max-w-md">{error}</p>
-        <p className="text-xs text-white/40 text-center">
-          Make sure Playwright is installed: <code className="bg-white/10 px-1.5 py-0.5 rounded">bunx playwright install chromium</code>
-        </p>
-      </div>
-    );
-  }
+  const chromiumInstalled = status?.chromium?.installed ?? false;
+  const browserRunning = status?.browser?.running ?? false;
+  const isEnabled = status?.enabled ?? false;
 
   return (
-    <div className="flex flex-col h-full bg-[#202124]">
-      {/* Browser toolbar */}
-      <div className="flex items-center gap-1.5 px-2 py-1.5 bg-[#35363a] border-b border-white/5">
-        <button
-          onClick={() => handleNavAction("back")}
-          disabled={!browserState.canGoBack}
-          className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-white/70"
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 18 }}>arrow_back</span>
-        </button>
-        <button
-          onClick={() => handleNavAction("forward")}
-          disabled={!browserState.canGoForward}
-          className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-white/70"
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 18 }}>arrow_forward</span>
-        </button>
-        <button
-          onClick={() => handleNavAction("refresh")}
-          className="p-1 rounded hover:bg-white/10 text-white/70"
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
-            {browserState.loading ? "close" : "refresh"}
-          </span>
-        </button>
-
-        <form className="flex-1 flex" onSubmit={(e) => { e.preventDefault(); navigate(urlInput); }}>
-          <input
-            ref={urlBarRef}
-            type="text"
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            className="w-full px-3 py-1 text-sm bg-[#202124] text-white/90 rounded-full border border-white/10 focus:border-blue-500 focus:outline-none"
-            placeholder="Enter URL..."
-          />
-        </form>
+    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto">
+      {/* Header */}
+      <div className="shrink-0 px-6 pt-6 pb-4 border-b border-white/10">
+        <div className="flex items-center gap-3 mb-1">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
+            <span className="material-symbols-rounded text-white" style={{ fontSize: 24 }}>web_asset</span>
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold">Browser Integration</h1>
+            <p className="text-xs text-white/50">Real Chromium browser for OpenClaw AI</p>
+          </div>
+        </div>
       </div>
 
-      {/* Page title */}
-      <div className="px-3 py-1 bg-[#292a2d] text-xs text-white/50 truncate border-b border-white/5">
-        {browserState.title}
-      </div>
-
-      {/* Viewport — captures all input */}
-      <div
-        ref={viewportRef}
-        className="flex-1 relative overflow-hidden bg-black outline-none"
-        tabIndex={0}
-        onClick={handleClick}
-        onDoubleClick={handleDoubleClick}
-        onWheel={handleWheel}
-        onKeyDown={handleKeyDown}
-        onMouseMove={handleMouseMove}
-        onContextMenu={(e) => e.preventDefault()}
-      >
-        {screenshot ? (
-          <img
-            ref={imgRef}
-            src={`data:image/png;base64,${screenshot}`}
-            alt="Browser viewport"
-            className="w-full h-full object-contain"
-            draggable={false}
-            style={{ pointerEvents: "none" }}
-          />
-        ) : (
-          <div className="flex items-center justify-center h-full text-white/30">
-            <span className="material-symbols-rounded animate-pulse" style={{ fontSize: 64 }}>language</span>
+      <div className="flex-1 p-6 space-y-6">
+        {/* Status messages */}
+        {error && (
+          <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+            <span className="material-symbols-rounded text-red-400" style={{ fontSize: 18 }}>error</span>
+            <span className="text-sm text-red-400">{error}</span>
           </div>
         )}
-        {browserState.loading && (
-          <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-500 animate-pulse" />
+        {successMsg && (
+          <div className="flex items-center gap-2 p-3 rounded-lg border" style={{ backgroundColor: `${BRAND_ORANGE}0d`, borderColor: `${BRAND_ORANGE}33` }}>
+            <span className="material-symbols-rounded" style={{ fontSize: 18, color: BRAND_ORANGE_LIGHT }}>check_circle</span>
+            <span className="text-sm" style={{ color: BRAND_ORANGE_LIGHT }}>{successMsg}</span>
+          </div>
         )}
+
+        {/* Step 1: Chromium Installation */}
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+          <div className="p-4 flex items-start gap-4">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${chromiumInstalled ? "text-white" : "bg-white/10 text-white/40"}`}
+              style={chromiumInstalled ? { backgroundColor: BRAND_ORANGE } : undefined}>
+              {chromiumInstalled ? (
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
+              ) : "1"}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="font-medium text-sm">Chromium Browser</h3>
+              {chromiumInstalled ? (
+                <div className="mt-1">
+                  <p className="text-xs text-white/50">
+                    {status?.chromium?.version || "Installed"}
+                  </p>
+                  {status?.chromium?.path && (
+                    <p className="text-xs text-white/30 mt-0.5 font-mono truncate">{status.chromium.path}</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-white/50 mt-1">
+                  Chromium is required for browser integration. Click install to set it up.
+                </p>
+              )}
+            </div>
+            {!chromiumInstalled && (
+              <button
+                onClick={() => doAction("install-chromium", "Installing Chromium...", "Chromium installed")}
+                disabled={!!actionLoading}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
+                style={{ backgroundColor: BRAND_ORANGE }}
+              >
+                {actionLoading === "Installing Chromium..." ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                    Installing...
+                  </span>
+                ) : "Install Chromium"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Step 2: OpenClaw Integration */}
+        <div className={`rounded-xl border overflow-hidden ${chromiumInstalled ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
+          <div className="p-4 flex items-start gap-4">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${isEnabled ? "text-white" : "bg-white/10 text-white/40"}`}
+              style={isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}>
+              {isEnabled ? (
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
+              ) : "2"}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="font-medium text-sm">OpenClaw Integration</h3>
+              <p className="text-xs text-white/50 mt-1">
+                {isEnabled
+                  ? "Browser is connected to OpenClaw. Your AI can browse the web, fill forms, and interact with pages using a persistent profile."
+                  : "Connect the browser to OpenClaw so your AI assistant can use it for web browsing, research, and automation."}
+              </p>
+              {isEnabled && (
+                <div className="mt-2 flex items-center gap-4">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
+                    <span className="text-xs text-white/40">computer_use tool enabled</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>folder</span>
+                    <span className="text-xs text-white/30 font-mono">~/.config/clawbox-browser/</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => isEnabled
+                ? doAction("disable", "Disabling...", "Browser disconnected from OpenClaw")
+                : doAction("enable", "Enabling...", "Browser connected to OpenClaw")
+              }
+              disabled={!!actionLoading}
+              className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+                isEnabled ? "bg-white/10 text-white/60 hover:bg-white/15" : "text-white"
+              }`}
+              style={!isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}
+            >
+              {actionLoading === "Enabling..." || actionLoading === "Disabling..." ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                  {actionLoading}
+                </span>
+              ) : isEnabled ? "Disable" : "Enable"}
+            </button>
+          </div>
+        </div>
+
+        {/* Step 3: Browser Controls */}
+        <div className={`rounded-xl border overflow-hidden ${isEnabled ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
+          <div className="p-4 flex items-start gap-4">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${browserRunning ? "text-white" : "bg-white/10 text-white/40"}`}
+              style={browserRunning ? { backgroundColor: BRAND_ORANGE } : undefined}>
+              {browserRunning ? (
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
+              ) : "3"}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="font-medium text-sm">Desktop Browser</h3>
+              <p className="text-xs text-white/50 mt-1">
+                {browserRunning
+                  ? "Chromium is running on the desktop. OpenClaw can interact with it in real time."
+                  : "Launch a real Chromium window on the desktop that OpenClaw can control."}
+              </p>
+              {browserRunning && status?.browser?.pid && (
+                <div className="mt-2 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                  <span className="text-xs text-white/40">Running (PID {status.browser.pid})</span>
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {browserRunning ? (
+                <button
+                  onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
+                  disabled={!!actionLoading}
+                  className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {actionLoading === "Closing..." ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                      Closing...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+                      Close Browser
+                    </span>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={() => doAction("open-browser", "Opening...", "Browser launched")}
+                  disabled={!!actionLoading}
+                  className="px-4 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
+                  style={{ backgroundColor: BRAND_ORANGE }}
+                >
+                  {actionLoading === "Opening..." ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                      Opening...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
+                      Open Browser
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Info card */}
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+          <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">How it works</h3>
+          <div className="space-y-3">
+            <div className="flex gap-3">
+              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>download</span>
+              <p className="text-xs text-white/50"><span className="text-white/70">Install</span> — Sets up Chromium with a dedicated ClawBox profile for persistent sessions and logins.</p>
+            </div>
+            <div className="flex gap-3">
+              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>link</span>
+              <p className="text-xs text-white/50"><span className="text-white/70">Enable</span> — Configures OpenClaw&apos;s computer_use tool to control the browser. Your AI can navigate, click, type, and read pages.</p>
+            </div>
+            <div className="flex gap-3">
+              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>desktop_windows</span>
+              <p className="text-xs text-white/50"><span className="text-white/70">Open/Close</span> — Launches or stops the real Chromium window on your desktop. The browser keeps its profile between sessions.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

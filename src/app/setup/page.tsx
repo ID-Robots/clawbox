@@ -65,6 +65,19 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     );
   }
 
+  if (id === "browser") {
+    return (
+      <svg className={`${size}`} viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="24" r="22" fill="#4285F4"/>
+        <circle cx="24" cy="24" r="8" fill="white"/>
+        <circle cx="24" cy="24" r="5" fill="#4285F4"/>
+        <path d="M24 16h18.5c-1.5-4-4.2-7.3-7.8-9.5L28.3 16z" fill="#EA4335"/>
+        <path d="M10.3 33.5L17 22.5l-1-6.5H24l0-1C15.7 14.5 9 19 7 25.5c-.8 2.5-.5 5.2.3 7.5l3 .5z" fill="#34A853"/>
+        <path d="M24 40c4.5 0 8.5-1.7 11.5-4.5L28.2 28l-4.2 4-7.8-1L10.3 33.5C13 37.5 18 40 24 40z" fill="#FBBC05"/>
+      </svg>
+    );
+  }
+
   if (id === "openclaw") {
     return (
       <svg className={`${size} text-white`} viewBox="0 0 120 120" fill="none">
@@ -92,7 +105,6 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     terminal: "terminal",
     files: "folder",
     help: "help",
-    browser: "public",
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",

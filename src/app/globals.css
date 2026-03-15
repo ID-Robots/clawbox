@@ -440,3 +440,41 @@ html {
 .animate-bounce-once {
   animation: bounce-once 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
+
+/* Custom range slider thumb — orange brand */
+input[type="range"].appearance-none::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fe6e00;
+  cursor: pointer;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0 2px rgba(254, 110, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: box-shadow 0.15s;
+}
+
+input[type="range"].appearance-none::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(254, 110, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+input[type="range"].appearance-none::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fe6e00;
+  cursor: pointer;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0 2px rgba(254, 110, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+input[type="range"].appearance-none::-webkit-slider-runnable-track {
+  border-radius: 999px;
+}
+
+input[type="range"].appearance-none::-moz-range-track {
+  border-radius: 999px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}

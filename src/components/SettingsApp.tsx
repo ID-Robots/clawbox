@@ -96,8 +96,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   /* ── System stats (only poll when visible) ── */
   const [stats, setStats] = useState<SystemStats | null>(null);
-  const [procSort, setProcSort] = useState<"cpu" | "mem" | "pid">("cpu");
-  const [procsExpanded, setProcsExpanded] = useState(false);
   useEffect(() => {
     if (section !== "system") return;
     const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
@@ -208,100 +206,152 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       <div className="flex-1 overflow-y-auto p-6">
         {/* ─── Appearance ─── */}
         {section === "appearance" && (
-          <div className="max-w-2xl space-y-6">
-            <h2 className="text-lg font-semibold text-white/90 mb-4">Appearance</h2>
+          <div className="max-w-2xl space-y-5">
+            <h2 className="text-lg font-semibold text-white/90">Appearance</h2>
 
-            {/* Wallpaper grid */}
-            <div>
-              <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Wallpaper</label>
-              <div className="grid grid-cols-4 gap-3">
-                {ui.wallpapers.map(wp => (
-                  <button
-                    key={wp.id}
-                    onClick={() => ui.onWallpaperChange(wp.id)}
-                    className={`relative rounded-xl overflow-hidden aspect-video border-2 transition-all cursor-pointer ${
-                      ui.wallpaperId === wp.id ? "border-orange-400 ring-2 ring-orange-400/30" : "border-white/5 hover:border-white/20"
-                    }`}
-                  >
-                    {wp.image ? (
-                      <img src={wp.image} alt={wp.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full bg-gradient-to-br from-gray-800 to-gray-950" />
-                    )}
-                    <span className="absolute bottom-0 inset-x-0 text-[9px] text-white/80 bg-black/50 backdrop-blur-sm py-1 text-center">{wp.name}</span>
-                  </button>
-                ))}
-                {ui.customWallpapers.map((dataUrl, i) => (
-                  <button
-                    key={`custom-${i}`}
-                    onClick={() => ui.onWallpaperChange(`custom-${i}`)}
-                    className={`relative rounded-xl overflow-hidden aspect-video border-2 transition-all cursor-pointer group ${
-                      ui.wallpaperId === `custom-${i}` ? "border-orange-400 ring-2 ring-orange-400/30" : "border-white/5 hover:border-white/20"
-                    }`}
-                  >
-                    <img src={dataUrl} alt={`Custom ${i + 1}`} className="w-full h-full object-cover" />
+            {/* Wallpaper card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>wallpaper</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Wallpaper</label>
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                {ui.wallpapers.map(wp => {
+                  const selected = ui.wallpaperId === wp.id;
+                  return (
                     <button
-                      onClick={e => { e.stopPropagation(); ui.onCustomWallpaperDelete(i); }}
-                      className="absolute top-1 right-1 w-5 h-5 bg-red-500/80 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none"
+                      key={wp.id}
+                      onClick={() => ui.onWallpaperChange(wp.id)}
+                      className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
+                        selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02] hover:ring-1 hover:ring-white/20 hover:ring-offset-1 hover:ring-offset-[#0d1117]"
+                      }`}
                     >
-                      <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
+                      {wp.image ? (
+                        <img src={wp.image} alt={wp.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-br from-gray-800 to-gray-950" />
+                      )}
+                      <div className={`absolute inset-0 transition-colors ${selected ? "bg-orange-400/10" : "bg-black/0 group-hover:bg-white/5"}`} />
+                      <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
+                        selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
+                      }`}>{wp.name}</span>
+                      {selected && (
+                        <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
+                          <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
+                        </span>
+                      )}
                     </button>
-                  </button>
-                ))}
+                  );
+                })}
+                {ui.customWallpapers.map((dataUrl, i) => {
+                  const selected = ui.wallpaperId === `custom-${i}`;
+                  return (
+                    <button
+                      key={`custom-${i}`}
+                      onClick={() => ui.onWallpaperChange(`custom-${i}`)}
+                      className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
+                        selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
+                      }`}
+                    >
+                      <img src={dataUrl} alt={`Custom ${i + 1}`} className="w-full h-full object-cover" />
+                      {selected && (
+                        <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
+                          <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
+                        </span>
+                      )}
+                      <button
+                        onClick={e => { e.stopPropagation(); ui.onCustomWallpaperDelete(i); }}
+                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
+                      </button>
+                      <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
+                        selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
+                      }`}>Custom {i + 1}</span>
+                    </button>
+                  );
+                })}
                 <button
                   onClick={() => ui.onWallpaperUpload()}
-                  className="rounded-xl aspect-video border-2 border-dashed border-white/10 hover:border-white/30 flex flex-col items-center justify-center gap-1.5 text-white/30 hover:text-white/60 transition-colors cursor-pointer"
+                  className="rounded-xl aspect-video border-2 border-dashed border-white/10 hover:border-orange-400/40 hover:bg-orange-500/5 flex flex-col items-center justify-center gap-1.5 text-white/30 hover:text-orange-400/70 transition-all cursor-pointer"
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
-                  <span className="text-[10px]">Upload</span>
+                  <span className="text-[10px] font-medium">Upload</span>
                 </button>
               </div>
             </div>
 
-            {/* Fit mode */}
-            <div>
-              <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Fit Mode</label>
-              <div className="flex gap-1 bg-white/5 rounded-xl p-1">
-                {(["fill", "fit", "center"] as const).map(mode => (
-                  <button
-                    key={mode}
-                    onClick={() => ui.onWpFitChange(mode)}
-                    className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer border-none capitalize ${
-                      ui.wpFit === mode ? "bg-orange-500/20 text-orange-400" : "text-white/40 hover:text-white/70"
-                    }`}
-                  >
-                    {mode}
-                  </button>
-                ))}
+            {/* Display Settings card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5 space-y-5">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>tune</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Display</label>
+              </div>
+
+              {/* Fit mode */}
+              <div>
+                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Fit Mode</label>
+                <div className="flex gap-1 bg-white/[0.04] rounded-xl p-1">
+                  {(["fill", "fit", "center"] as const).map(mode => {
+                    const icons = { fill: "zoom_out_map", fit: "fit_screen", center: "center_focus_strong" };
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => ui.onWpFitChange(mode)}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer border-none capitalize ${
+                          ui.wpFit === mode ? "bg-orange-500/15 text-orange-400 shadow-sm" : "text-white/35 hover:text-white/60 hover:bg-white/[0.04]"
+                        }`}
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{icons[mode]}</span>
+                        {mode}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Opacity */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[11px] font-medium text-white/35 uppercase tracking-wider">Opacity</label>
+                  <span className="text-xs font-mono text-orange-400/80 bg-orange-500/10 px-2 py-0.5 rounded-md">{ui.wpOpacity}%</span>
+                </div>
+                <div className="relative h-6 flex items-center">
+                  <input
+                    type="range" min={0} max={100} value={ui.wpOpacity}
+                    onChange={e => ui.onWpOpacityChange(parseInt(e.target.value, 10))}
+                    className="w-full h-1.5 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#fe6e00] [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-[#0d1117] [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_rgba(254,110,0,0.3),0_2px_6px_rgba(0,0,0,0.3)] [&::-webkit-slider-thumb]:cursor-pointer"
+                    style={{
+                      background: `linear-gradient(to right, #fe6e00 0%, #fe6e00 ${ui.wpOpacity}%, rgba(255,255,255,0.08) ${ui.wpOpacity}%, rgba(255,255,255,0.08) 100%)`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Background color */}
+              <div>
+                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Background Color</label>
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <input
+                      type="color" value={ui.wpBgColor}
+                      onChange={e => ui.onWpBgColorChange(e.target.value)}
+                      className="w-10 h-10 rounded-xl cursor-pointer border-2 border-white/10 hover:border-white/20 transition-colors"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 bg-white/[0.04] rounded-lg px-3 py-2">
+                    <span className="text-xs text-white/40 font-mono tracking-wide">{ui.wpBgColor}</span>
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* Opacity */}
-            <div>
-              <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">
-                Opacity — {ui.wpOpacity}%
-              </label>
-              <input
-                type="range" min={0} max={100} value={ui.wpOpacity}
-                onChange={e => ui.onWpOpacityChange(parseInt(e.target.value, 10))}
-                className="w-full h-2 accent-orange-400 cursor-pointer"
-              />
-            </div>
-
-            {/* Background color */}
-            <div>
-              <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Background Color</label>
-              <div className="flex items-center gap-3">
-                <input
-                  type="color" value={ui.wpBgColor}
-                  onChange={e => ui.onWpBgColorChange(e.target.value)}
-                  className="w-10 h-10 rounded-lg cursor-pointer border border-white/10"
-                />
-                <span className="text-sm text-white/40 font-mono">{ui.wpBgColor}</span>
+            {/* Extras card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>auto_awesome</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Extras</label>
               </div>
-            </div>
-
-            <div className="border-t border-white/5 pt-5">
               <Toggle on={!ui.mascotHidden} onToggle={v => {
                 const hidden = !v;
                 ui.onMascotToggle(hidden);
@@ -313,55 +363,120 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── Network ─── */}
         {section === "wifi" && (
-          <div className="max-w-md space-y-6">
-            <h2 className="text-lg font-semibold text-white/90 mb-4">Network</h2>
+          <div className="max-w-lg space-y-5">
+            <h2 className="text-lg font-semibold text-white/90">Network</h2>
 
-            {connectedSSID && (
-              <div className="flex items-center gap-3 bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-3">
-                <span className="material-symbols-rounded text-green-400" style={{ fontSize: 20 }}>wifi</span>
-                <div>
-                  <div className="text-sm text-white/90 font-medium">{connectedSSID}</div>
-                  <div className="text-xs text-green-400">Connected</div>
+            {/* Connection status card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>wifi</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Status</label>
+              </div>
+              {connectedSSID ? (
+                <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>wifi</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-white/90 font-medium truncate">{connectedSSID}</div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                      <span className="text-xs text-green-400/80">Connected</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Network Name (SSID)</label>
-                <input
-                  type="text" value={ssid} onChange={e => setSsid(e.target.value)}
-                  placeholder="Enter WiFi network name"
-                  className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white/90 outline-none focus:border-orange-400 transition-colors placeholder-white/20"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Password</label>
-                <input
-                  type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
-                  placeholder="Enter WiFi password"
-                  className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white/90 outline-none focus:border-orange-400 transition-colors placeholder-white/20"
-                  onKeyDown={e => e.key === "Enter" && connectWifi()}
-                />
-              </div>
-              <button
-                onClick={connectWifi}
-                disabled={wifiConnecting || !ssid.trim()}
-                className="w-full py-2.5 bg-orange-500 hover:bg-orange-400 disabled:opacity-40 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-colors"
-              >
-                {wifiConnecting ? "Connecting..." : "Connect"}
-              </button>
-              {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-white/25" style={{ fontSize: 22 }}>wifi_off</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-white/50">No WiFi connection</div>
+                    <div className="text-xs text-white/25 mt-0.5">Connect to a network below</div>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {stats && stats.network.length > 0 && (
-              <div className="border-t border-white/5 pt-5 space-y-2">
-                {stats.network.map(iface => (
-                  <div key={iface.name} className="flex justify-between text-sm">
-                    <span className="text-white/40 font-mono">{iface.name}</span>
-                    <span className="text-white/80 font-mono">{iface.ip || "no IP"}</span>
+            {/* Connect to network card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>add_circle</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Connect to Network</label>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Network Name (SSID)</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/20" style={{ fontSize: 18 }}>router</span>
+                    <input
+                      type="text" value={ssid} onChange={e => setSsid(e.target.value)}
+                      placeholder="Enter WiFi network name"
+                      className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-white/90 outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                    />
                   </div>
-                ))}
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Password</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/20" style={{ fontSize: 18 }}>lock</span>
+                    <input
+                      type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
+                      placeholder="Enter WiFi password"
+                      className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-white/90 outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      onKeyDown={e => e.key === "Enter" && connectWifi()}
+                    />
+                  </div>
+                </div>
+                {/* Hotspot warning */}
+                <div className="flex items-start gap-2.5 bg-amber-500/[0.07] border border-amber-500/15 rounded-xl px-3.5 py-3">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0 mt-0.5" style={{ fontSize: 16 }}>warning</span>
+                  <p className="text-xs text-amber-300/70 leading-relaxed">
+                    Connecting to a WiFi network will <span className="text-amber-300 font-medium">stop the ClawBox-Setup hotspot</span>. Make sure you can reach the device on the new network before connecting.
+                  </p>
+                </div>
+
+                <button
+                  onClick={connectWifi}
+                  disabled={wifiConnecting || !ssid.trim()}
+                  className="w-full py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                >
+                  {wifiConnecting ? (
+                    <>
+                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                      Connect
+                    </>
+                  )}
+                </button>
+                {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+              </div>
+            </div>
+
+            {/* Interfaces card */}
+            {stats && stats.network.length > 0 && (
+              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>lan</span>
+                  <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Interfaces</label>
+                </div>
+                <div className="space-y-2">
+                  {stats.network.map(iface => (
+                    <div key={iface.name} className="flex items-center justify-between bg-white/[0.03] rounded-lg px-3.5 py-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <span className="material-symbols-rounded text-white/20" style={{ fontSize: 16 }}>
+                          {iface.name.startsWith("wl") ? "wifi" : iface.name.startsWith("lo") ? "sync" : "settings_ethernet"}
+                        </span>
+                        <span className="text-xs font-mono text-white/60 font-medium">{iface.name}</span>
+                      </div>
+                      <span className={`text-xs font-mono ${iface.ip ? "text-white/70" : "text-white/20"}`}>{iface.ip || "no IP"}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -376,160 +491,150 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── System ─── */}
         {section === "system" && (
-          <div className="max-w-3xl space-y-6">
-            <h2 className="text-lg font-semibold text-white/90 mb-4">System Monitor</h2>
+          <div className="max-w-2xl space-y-5">
+            <h2 className="text-lg font-semibold text-white/90">System</h2>
 
-            {stats ? (() => {
-              const sortedProcs = [...stats.processes].sort((a, b) => (b[procSort] as number) - (a[procSort] as number));
-              const visibleProcs = procsExpanded ? sortedProcs : sortedProcs.slice(0, 5);
-              return (
-                <>
-                  {/* Overview */}
-                  <div className="bg-white/5 rounded-xl p-4 grid grid-cols-3 gap-x-6 gap-y-2 text-sm">
-                    <div><span className="text-white/40">Hostname</span><div className="text-white/90 font-mono">{stats.overview.hostname}</div></div>
-                    <div><span className="text-white/40">OS</span><div className="text-white/90 font-mono text-xs">{stats.overview.os}</div></div>
-                    <div><span className="text-white/40">Uptime</span><div className="text-cyan-400 font-semibold">{stats.overview.uptime}</div></div>
-                    <div><span className="text-white/40">Kernel</span><div className="text-white/90 font-mono text-xs">{stats.overview.kernel}</div></div>
-                    <div><span className="text-white/40">Arch</span><div className="text-white/90">{stats.overview.arch}</div></div>
-                    <div><span className="text-white/40">Platform</span><div className="text-white/90">{stats.overview.platform}</div></div>
+            {stats ? (
+              <>
+                {/* Device info card */}
+                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>computer</span>
+                    <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Device</label>
+                    <span className="ml-auto text-xs font-mono text-orange-400/70 bg-orange-500/10 px-2 py-0.5 rounded-md">{stats.overview.uptime}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                    <div className="flex justify-between"><span className="text-white/35">Hostname</span><span className="text-white/80 font-mono text-xs">{stats.overview.hostname}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">OS</span><span className="text-white/80 font-mono text-xs truncate ml-2">{stats.overview.os}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">Kernel</span><span className="text-white/80 font-mono text-xs truncate ml-2">{stats.overview.kernel}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">Arch</span><span className="text-white/80">{stats.overview.arch}</span></div>
+                  </div>
+                </div>
+
+                {/* CPU + Memory card */}
+                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>speed</span>
+                    <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Resources</label>
                   </div>
 
-                  {/* CPU + Memory row */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-white/5 rounded-xl p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">CPU</span>
-                        <span className="text-2xl font-bold font-mono" style={{ color: barColor(stats.cpu.usage) }}>{stats.cpu.usage}%</span>
-                      </div>
-                      <div className="w-full h-1.5 rounded-full bg-white/5 mb-3 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.cpu.usage}%`, backgroundColor: barColor(stats.cpu.usage), boxShadow: `0 0 6px ${barColor(stats.cpu.usage)}80` }} />
-                      </div>
-                      <div className="space-y-1 text-xs">
-                        <div className="flex justify-between"><span className="text-white/40">Model</span><span className="text-white/70 font-mono text-[10px] text-right max-w-[200px] truncate">{stats.cpu.model}</span></div>
-                        <div className="flex justify-between"><span className="text-white/40">Cores</span><span className="text-white/80">{stats.cpu.cores}</span></div>
-                        <div className="flex justify-between"><span className="text-white/40">Speed</span><span className="text-white/80">{stats.cpu.speed} MHz</span></div>
-                      </div>
-                      <div className="mt-3 pt-2 border-t border-white/5 flex gap-3">
-                        {["1m","5m","15m"].map((label, i) => (
-                          <div key={label} className="flex-1 text-center">
-                            <div className="text-xs font-mono font-semibold text-white/80">{stats.cpu.loadAvg[i]}</div>
-                            <div className="text-[10px] text-white/30">{label}</div>
-                          </div>
-                        ))}
-                      </div>
+                  {/* CPU bar */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs text-white/50">CPU</span>
+                      <span className="text-xs font-mono font-semibold" style={{ color: barColor(stats.cpu.usage) }}>{stats.cpu.usage}%</span>
                     </div>
-
-                    <div className="bg-white/5 rounded-xl p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Memory</span>
-                        <span className="text-xs font-mono text-white/60">{formatBytes(stats.memory.used)} / {formatBytes(stats.memory.total)}</span>
-                      </div>
-                      <div className="w-full h-1.5 rounded-full bg-white/5 mb-1 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.usedPercent}%`, backgroundColor: barColor(stats.memory.usedPercent), boxShadow: `0 0 6px ${barColor(stats.memory.usedPercent)}80` }} />
-                      </div>
-                      <div className="text-right text-[10px] text-white/30 mb-3">{stats.memory.usedPercent}% used &middot; {formatBytes(stats.memory.free)} free</div>
-                      {stats.memory.swap.total > 0 && (
-                        <>
-                          <div className="flex justify-between text-xs mb-1"><span className="text-white/40">Swap</span><span className="text-white/60 font-mono">{formatBytes(stats.memory.swap.used)} / {formatBytes(stats.memory.swap.total)}</span></div>
-                          <div className="w-full h-1.5 rounded-full bg-white/5 overflow-hidden">
-                            <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.swap.percent}%`, backgroundColor: "#a855f7" }} />
-                          </div>
-                          <div className="text-right text-[10px] text-white/30 mt-1">{stats.memory.swap.percent}% used</div>
-                        </>
-                      )}
+                    <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.cpu.usage}%`, backgroundColor: barColor(stats.cpu.usage) }} />
+                    </div>
+                    <div className="flex items-center justify-between mt-1.5">
+                      <span className="text-[10px] text-white/25 font-mono truncate max-w-[60%]">{stats.cpu.model}</span>
+                      <span className="text-[10px] text-white/25">{stats.cpu.cores} cores &middot; Load {stats.cpu.loadAvg[0]}</span>
                     </div>
                   </div>
 
-                  {/* Storage + Network row */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-white/5 rounded-xl p-4">
-                      <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider block mb-3">Storage</span>
-                      <div className="space-y-3">
-                        {stats.storage.map(m => (
-                          <div key={m.mountpoint}>
-                            <div className="flex justify-between text-xs mb-1">
-                              <span className="text-white/80 font-mono">{m.mountpoint}</span>
-                              <span className="text-white/40 font-mono text-[10px]">{m.used} / {m.size}</span>
-                            </div>
-                            <div className="w-full h-1.5 rounded-full bg-white/5 overflow-hidden">
-                              <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
-                            </div>
-                            <div className="flex justify-between text-[10px] text-white/30 mt-0.5">
-                              <span>{m.filesystem}</span>
-                              <span>{m.usePercent}% &middot; {m.avail} free</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                  {/* Memory bar */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs text-white/50">Memory</span>
+                      <span className="text-xs font-mono text-white/50">{formatBytes(stats.memory.used)} / {formatBytes(stats.memory.total)}</span>
                     </div>
-
-                    <div className="bg-white/5 rounded-xl p-4">
-                      <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider block mb-3">Network</span>
-                      <div className="space-y-2">
-                        {stats.network.map(iface => (
-                          <div key={iface.name} className="bg-white/5 rounded-lg px-3 py-2">
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="text-xs font-semibold font-mono text-cyan-400">{iface.name}</span>
-                              <span className="text-[10px] font-mono text-white/60">{iface.ip || "no IP"}</span>
-                            </div>
-                            <div className="flex gap-4 text-[10px] text-white/40">
-                              <span>&darr; <span className="font-mono text-green-400">{formatBytes(iface.rx)}</span></span>
-                              <span>&uarr; <span className="font-mono text-orange-400">{formatBytes(iface.tx)}</span></span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                    <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.usedPercent}%`, backgroundColor: barColor(stats.memory.usedPercent) }} />
                     </div>
+                    <div className="text-right text-[10px] text-white/25 mt-1">{stats.memory.usedPercent}% &middot; {formatBytes(stats.memory.free)} free</div>
                   </div>
 
-                  {/* Processes */}
-                  <div className="bg-white/5 rounded-xl p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Processes</span>
-                      <div className="flex items-center gap-2">
-                        <div className="flex gap-1">
-                          {(["cpu","mem","pid"] as const).map(key => (
-                            <button key={key} onClick={() => setProcSort(key)}
-                              className="text-[10px] px-2 py-0.5 rounded transition-colors border-none cursor-pointer"
-                              style={{ backgroundColor: procSort === key ? "#06b6d4" : "rgba(255,255,255,0.05)", color: procSort === key ? "#000" : "#a0a0b0", fontWeight: procSort === key ? 700 : 400 }}
-                            >{key.toUpperCase()}</button>
-                          ))}
+                  {/* Swap bar (if any) */}
+                  {stats.memory.swap.total > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs text-white/50">Swap</span>
+                        <span className="text-xs font-mono text-white/50">{formatBytes(stats.memory.swap.used)} / {formatBytes(stats.memory.swap.total)}</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.swap.percent}%`, backgroundColor: "#a855f7" }} />
+                      </div>
+                      <div className="text-right text-[10px] text-white/25 mt-1">{stats.memory.swap.percent}% used</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Storage card */}
+                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>hard_drive</span>
+                    <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Storage</label>
+                  </div>
+                  <div className="space-y-3">
+                    {stats.storage.map(m => (
+                      <div key={m.mountpoint}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs text-white/60 font-mono">{m.mountpoint}</span>
+                          <span className="text-xs text-white/35 font-mono">{m.used} / {m.size}</span>
                         </div>
-                        <button onClick={() => setProcsExpanded(!procsExpanded)}
-                          className="text-[10px] px-2 py-0.5 rounded transition-colors border-none cursor-pointer hover:bg-white/10"
-                          style={{ color: "#06b6d4" }}
-                        >{procsExpanded ? "Show less" : `All (${stats.processes.length})`}</button>
+                        <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
+                        </div>
+                        <div className="text-right text-[10px] text-white/25 mt-1">{m.usePercent}% &middot; {m.avail} free</div>
                       </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Network interfaces card */}
+                {stats.network.length > 0 && (
+                  <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>lan</span>
+                      <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Network</label>
                     </div>
-                    <div className="overflow-x-auto" style={{ maxHeight: procsExpanded ? 240 : undefined, overflowY: procsExpanded ? "auto" : undefined }}>
-                      <table className="w-full text-[10px]">
-                        <thead><tr className="text-white/30">
-                          <th className="text-left pb-1 pr-2 font-medium">PID</th>
-                          <th className="text-left pb-1 pr-2 font-medium">USER</th>
-                          <th className="text-right pb-1 pr-2 font-medium">CPU%</th>
-                          <th className="text-right pb-1 pr-2 font-medium">MEM%</th>
-                          <th className="text-left pb-1 font-medium">COMMAND</th>
-                        </tr></thead>
-                        <tbody>
-                          {visibleProcs.map((proc, i) => (
-                            <tr key={`${proc.pid}-${i}`} className="border-t border-white/5">
-                              <td className="py-0.5 pr-2 font-mono text-white/60">{proc.pid}</td>
-                              <td className="py-0.5 pr-2 font-mono text-white/60 truncate max-w-[60px]">{proc.user}</td>
-                              <td className="py-0.5 pr-2 text-right font-mono font-semibold" style={{ color: proc.cpu > 50 ? "#ef4444" : proc.cpu > 20 ? "#f97316" : "#06b6d4" }}>{proc.cpu.toFixed(1)}</td>
-                              <td className="py-0.5 pr-2 text-right font-mono" style={{ color: "#a855f7" }}>{proc.mem.toFixed(1)}</td>
-                              <td className="py-0.5 font-mono text-white/60 truncate max-w-[200px]" title={proc.command}>{proc.command}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <div className="space-y-2">
+                      {stats.network.filter(i => i.ip).map(iface => (
+                        <div key={iface.name} className="flex items-center justify-between bg-white/[0.03] rounded-lg px-3.5 py-2.5">
+                          <div className="flex items-center gap-2.5">
+                            <span className="material-symbols-rounded text-white/20" style={{ fontSize: 16 }}>
+                              {iface.name.startsWith("wl") ? "wifi" : "settings_ethernet"}
+                            </span>
+                            <span className="text-xs font-mono text-white/60 font-medium">{iface.name}</span>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="flex gap-3 text-[10px] text-white/30">
+                              <span>&#8595; <span className="font-mono text-green-400/70">{formatBytes(iface.rx)}</span></span>
+                              <span>&#8593; <span className="font-mono text-orange-400/70">{formatBytes(iface.tx)}</span></span>
+                            </div>
+                            <span className="text-xs font-mono text-white/60">{iface.ip}</span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                </>
-              );
-            })() : (
+                )}
+
+                {/* Top processes — compact */}
+                {stats.processes.length > 0 && (
+                  <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>memory</span>
+                      <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Top Processes</label>
+                    </div>
+                    <div className="space-y-1.5">
+                      {[...stats.processes].sort((a, b) => b.cpu - a.cpu).slice(0, 5).map((proc, i) => (
+                        <div key={`${proc.pid}-${i}`} className="flex items-center gap-3 bg-white/[0.03] rounded-lg px-3 py-2">
+                          <span className="text-[10px] font-mono text-white/25 w-5 text-right">{proc.pid}</span>
+                          <span className="text-xs font-mono text-white/60 flex-1 truncate" title={proc.command}>{proc.command}</span>
+                          <span className="text-[11px] font-mono font-semibold tabular-nums w-12 text-right" style={{ color: proc.cpu > 50 ? "#ef4444" : proc.cpu > 20 ? "#f97316" : "rgba(255,255,255,0.4)" }}>{proc.cpu.toFixed(1)}%</span>
+                          <span className="text-[11px] font-mono tabular-nums w-12 text-right text-purple-400/60">{proc.mem.toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
               <div className="flex items-center justify-center py-12 text-white/30">
-                <span className="material-symbols-rounded animate-spin mr-2" style={{ fontSize: 20 }}>progress_activity</span>
-                Loading system stats...
+                <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
+                <span className="text-sm">Loading system stats...</span>
               </div>
             )}
           </div>
