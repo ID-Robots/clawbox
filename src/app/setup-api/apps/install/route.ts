@@ -3,13 +3,51 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR } from "@/lib/config-store";
+import { DATA_DIR, CONFIG_ROOT } from "@/lib/config-store";
 
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 const ICONS_DIR = path.join(DATA_DIR, "icons");
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+
+// Find clawhub binary — check common locations including nvm
+function findClawhub(): string {
+  const existsSync = require("fs").existsSync;
+  const nodeDir = path.dirname(process.execPath);
+  const home = process.env.HOME || "/home/clawbox";
+  const candidates = [
+    path.join(nodeDir, "clawhub"),
+    path.join(home, ".npm-global", "bin", "clawhub"),
+    "/usr/local/bin/clawhub",
+    "/usr/bin/clawhub",
+  ];
+  // Also check all nvm node versions
+  const nvmDir = path.join(home, ".nvm", "versions", "node");
+  try {
+    const versions = require("fs").readdirSync(nvmDir) as string[];
+    for (const v of versions.sort().reverse()) {
+      candidates.push(path.join(nvmDir, v, "bin", "clawhub"));
+    }
+  } catch {}
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return "clawhub"; // fallback to PATH
+}
+
+// Skills directory — same as OpenClaw workspace
+function getSkillsDir(): string {
+  const home = process.env.HOME || "/home/clawbox";
+  // Check OpenClaw workspace config
+  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+  try {
+    const config = JSON.parse(require("fs").readFileSync(openclawConfig, "utf-8"));
+    const workspace = config?.agents?.defaults?.workspace;
+    if (workspace) return workspace;
+  } catch {}
+  return path.join(home, "clawd");
+}
 
 export async function POST(req: Request) {
   try {
@@ -38,10 +76,20 @@ export async function POST(req: Request) {
     }
 
     // Run clawhub install
+    const clawhubBin = findClawhub();
+    const skillsDir = getSkillsDir();
+    await fs.mkdir(path.join(skillsDir, "skills"), { recursive: true });
+
     let clawhubResult: { success: boolean; output?: string; error?: string } = { success: false };
     try {
-      const { stdout, stderr } = await execFileAsync("clawhub", ["install", appId], {
-        timeout: 30_000,
+      const { stdout, stderr } = await execFileAsync(clawhubBin, [
+        "install", appId,
+        "--workdir", skillsDir,
+        "--no-input",
+        "--force",
+      ], {
+        timeout: 60_000,
+        env: { ...process.env, PATH: `${path.dirname(clawhubBin)}:${process.env.PATH}` },
       });
       clawhubResult = { success: true, output: stdout || stderr };
     } catch (err: unknown) {

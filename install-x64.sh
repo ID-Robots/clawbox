@@ -134,6 +134,19 @@ if [ -x "$OPENCLAW_BIN" ]; then
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
   echo "  OpenClaw configured for local access ✓"
+
+  # Install ClawHub CLI (skill installer)
+  CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
+  if [ ! -x "$CLAWHUB_BIN" ]; then
+    as_user npm install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null || true
+    if [ -x "$CLAWHUB_BIN" ]; then
+      echo "  ClawHub CLI installed ✓"
+    else
+      echo "  Warning: ClawHub CLI install failed — app store installs won't work"
+    fi
+  else
+    echo "  ClawHub CLI already installed ✓"
+  fi
 fi
 
 # 6. Setup directories & env

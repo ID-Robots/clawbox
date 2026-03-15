@@ -10,11 +10,14 @@ interface ChromeWindowProps {
   appId?: string;
   defaultWidth?: number;
   defaultHeight?: number;
+  initialPosition?: { x: number; y: number };
+  initialSize?: { width: number; height: number };
   isActive: boolean;
   zIndex: number;
   onClose: () => void;
   onFocus: () => void;
   onMinimize: () => void;
+  onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
 }
 
@@ -87,15 +90,18 @@ export default function ChromeWindow({
   appId,
   defaultWidth = 800,
   defaultHeight = 600,
+  initialPosition,
+  initialSize,
   isActive,
   zIndex,
   onClose,
   onFocus,
   onMinimize,
+  onGeometryChange,
   minimized = false,
 }: ChromeWindowProps) {
-  const [size, setSize] = useState(() => getSavedSize(appId, defaultWidth, defaultHeight));
-  const [position, setPosition] = useState(() => getInitialPosition(size.width, size.height));
+  const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
+  const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height));
   const [maximized, setMaximized] = useState(false);
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
@@ -245,6 +251,14 @@ export default function ChromeWindow({
       setSnapPreview(getSnapZone(clientX, clientY));
     };
 
+    const notifyGeometry = () => {
+      if (onGeometryChange) {
+        const s = currentSizeRef.current;
+        const p = currentPosRef.current;
+        onGeometryChange({ x: p.x, y: p.y, width: s.width, height: s.height });
+      }
+    };
+
     const handleEnd = (e: MouseEvent | TouchEvent) => {
       if (resizeRef.current.isResizing) {
         resizeRef.current.isResizing = false;
@@ -253,6 +267,7 @@ export default function ChromeWindow({
           const cur = currentSizeRef.current;
           try { localStorage.setItem(`clawbox-winsize-${appId}`, JSON.stringify({ width: cur.width, height: cur.height })); } catch {}
         }
+        notifyGeometry();
         return;
       }
 
@@ -273,6 +288,7 @@ export default function ChromeWindow({
         setSize({ width: rect.width, height: rect.height });
         setSnapped(zone);
       }
+      notifyGeometry();
     };
 
     window.addEventListener("mousemove", handleMove);

@@ -219,6 +219,12 @@ html {
   }
 }
 
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); width: 40%; }
+  50% { transform: translateX(60%); width: 60%; }
+  100% { transform: translateX(200%); width: 40%; }
+}
+
 .animate-page-in {
   animation: page-in 0.25s ease-out forwards;
 }

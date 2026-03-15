@@ -17,6 +17,7 @@ import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import VSCodeApp from "@/components/VSCodeApp";
+import OpenClawApp from "@/components/OpenClawApp";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -107,6 +108,10 @@ interface OpenWindow {
   appId: string;
   zIndex: number;
   minimized: boolean;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
 }
 
 // Icon component for installed store apps — tries local cached icon first, then store URL
@@ -223,6 +228,15 @@ export default function ChromeDesktop() {
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
         if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
+        // Open windows
+        if (Array.isArray(data.desktop_open_windows)) {
+          const restored = (data.desktop_open_windows as Array<{ appId: string; minimized: boolean; x?: number; y?: number; width?: number; height?: number }>)
+            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height }));
+          if (restored.length > 0) {
+            setOpenWindows(restored);
+            setNextZIndex(100 + restored.length);
+          }
+        }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
       })
@@ -306,12 +320,13 @@ export default function ChromeDesktop() {
           hidden_installed: hiddenInstalledApps,
           pinned_apps: pinnedOverrides,
           icon_grid: iconPositions,
+          desktop_open_windows: openWindows.map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
           ui_mascot_hidden: mascotHidden ? 1 : 0,
         }),
       }).catch(() => {});
     }, 500);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, mascotHidden]);
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -621,20 +636,13 @@ export default function ChromeDesktop() {
     return () => clearInterval(interval);
   }, []);
 
-  // Install app handler — downloads icon + runs clawhub install on server
+  // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
     setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
     setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl } }));
     setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
     setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);
-
-    // Server-side: download icon + clawhub install (fire and forget)
-    fetch("/setup-api/apps/install", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ appId: app.id }),
-    }).catch(() => {});
   }, []);
 
   // Uninstall confirmation
@@ -733,6 +741,12 @@ export default function ChromeDesktop() {
 
   const closeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
+  }, []);
+
+  const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
+    setOpenWindows((prev) =>
+      prev.map((w) => w.id === windowId ? { ...w, x: geo.x, y: geo.y, width: geo.width, height: geo.height } : w)
+    );
   }, []);
 
   const focusWindow = useCallback((windowId: string) => {
@@ -1153,11 +1167,14 @@ export default function ChromeDesktop() {
             appId={window.appId}
             defaultWidth={app.defaultWidth}
             defaultHeight={app.defaultHeight}
+            initialPosition={window.x !== undefined && window.y !== undefined ? { x: window.x, y: window.y } : undefined}
+            initialSize={window.width !== undefined && window.height !== undefined ? { width: window.width, height: window.height } : undefined}
             isActive={window.id === activeWindowId}
             zIndex={window.zIndex}
             onClose={() => closeWindow(window.id)}
             onFocus={() => focusWindow(window.id)}
             onMinimize={() => minimizeWindow(window.id)}
+            onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
             minimized={window.minimized}
           >
             {renderWindowContent(window.appId)}

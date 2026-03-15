@@ -195,6 +195,19 @@ step_openclaw_install() {
     exit 1
   fi
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
+
+  # Install ClawHub CLI (skill installer for app store)
+  CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
+  if [ ! -x "$CLAWHUB_BIN" ]; then
+    as_clawbox -H npm install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null || true
+    if [ -x "$CLAWHUB_BIN" ]; then
+      echo "  ClawHub CLI installed ✓"
+    else
+      echo "  Warning: ClawHub CLI install failed — app store installs won't work"
+    fi
+  else
+    echo "  ClawHub CLI already installed ✓"
+  fi
 }
 
 step_openclaw_patch() {

@@ -14,15 +14,34 @@ export async function GET() {
       return gatewayOfflineResponse();
     }
     let html = await res.text();
-    // Inject <base href="/"> so relative asset paths resolve against root
-    html = html.replace(/<head\b[^>]*>/i, '$&<base href="/">');
+    // Rewrite relative asset paths (./assets/... → /assets/...) so they
+    // resolve through Next.js rewrites which proxy to the gateway.
+    // Also inject script to auto-fill the correct gateway WebSocket URL.
+    const wsUrl = `ws://127.0.0.1:${GATEWAY_PORT}`;
+    html = html.replace(/\.\//g, '/');
+    const autoConnect = `<script>
+      window.__OPENCLAW_WS_URL__ = "${wsUrl}";
+      window.addEventListener("DOMContentLoaded", function() {
+        setTimeout(function() {
+          var input = document.querySelector('input[placeholder*="WebSocket"], input[value*="ws://"]');
+          if (input) {
+            var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            nativeSet.call(input, "${wsUrl}");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          var btn = document.querySelector('button');
+          if (btn && /connect/i.test(btn.textContent)) btn.click();
+        }, 500);
+      });
+    </script>`;
+    html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect);
     return new NextResponse(html, {
       status: 200,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",
         "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http://127.0.0.1:*",
       },
     });
   } catch {

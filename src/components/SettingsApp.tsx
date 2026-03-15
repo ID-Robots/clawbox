@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import StatusMessage from "./StatusMessage";
+import AIModelsStep from "./AIModelsStep";
 
 /* ── Types ── */
 
@@ -40,21 +41,6 @@ interface SystemStats {
   timestamp: number;
 }
 
-interface AIProvider {
-  id: string;
-  name: string;
-  placeholder: string;
-  hint: string;
-  isLocal?: boolean;
-}
-
-const AI_PROVIDERS: AIProvider[] = [
-  { id: "anthropic", name: "Anthropic Claude", placeholder: "sk-ant-api03-...", hint: "console.anthropic.com/settings/keys" },
-  { id: "openai", name: "OpenAI GPT", placeholder: "sk-...", hint: "platform.openai.com/api-keys" },
-  { id: "google", name: "Google Gemini", placeholder: "AIza...", hint: "aistudio.google.com/apikey" },
-  { id: "openrouter", name: "OpenRouter", placeholder: "sk-or-v1-...", hint: "openrouter.ai/keys" },
-  { id: "ollama", name: "Ollama (Local)", placeholder: "", hint: "Run AI models locally", isLocal: true },
-];
 
 const RESET_STEPS = [
   "Clearing configuration...",
@@ -156,47 +142,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState("anthropic");
-  const [aiKey, setAiKey] = useState("");
-  const [aiShowKey, setAiShowKey] = useState(false);
-  const [aiSaving, setAiSaving] = useState(false);
-  const [aiStatus, setAiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const [configuredProvider, setConfiguredProvider] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch("/setup-api/setup/status").then(r => r.json()).then(d => {
-      if (d.ai_model_provider) setConfiguredProvider(d.ai_model_provider);
-    }).catch(() => {});
-  }, []);
-
-  const saveAiProvider = async () => {
-    const prov = AI_PROVIDERS.find(p => p.id === aiProvider);
-    if (!prov) return;
-    if (!prov.isLocal && !aiKey.trim()) {
-      setAiStatus({ type: "error", message: "API key required" });
-      return;
-    }
-    setAiSaving(true);
-    setAiStatus(null);
-    try {
-      const res = await fetch("/setup-api/ai-models/configure", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: aiProvider,
-          ...(prov.isLocal ? {} : { token: aiKey.trim() }),
-        }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setAiStatus({ type: "success", message: `${prov.name} configured` });
-      setConfiguredProvider(aiProvider);
-      setAiKey("");
-    } catch (err) {
-      setAiStatus({ type: "error", message: err instanceof Error ? err.message : "Failed to save" });
-    } finally {
-      setAiSaving(false);
-    }
-  };
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -230,8 +175,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     clearInterval(iv);
     setResetting(false);
   };
-
-  const selectedProv = AI_PROVIDERS.find(p => p.id === aiProvider);
 
   return (
     <div className="flex h-full bg-[#0d1117]">
@@ -426,75 +369,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── AI Provider ─── */}
         {section === "ai" && (
-          <div className="max-w-md space-y-6">
-            <h2 className="text-lg font-semibold text-white/90 mb-4">AI Provider</h2>
-
-            {configuredProvider && (
-              <div className="flex items-center gap-3 bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-3">
-                <span className="material-symbols-rounded text-green-400" style={{ fontSize: 20 }}>check_circle</span>
-                <div>
-                  <div className="text-sm text-white/90 font-medium">{AI_PROVIDERS.find(p => p.id === configuredProvider)?.name || configuredProvider}</div>
-                  <div className="text-xs text-green-400">Configured</div>
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Provider</label>
-              <div className="grid grid-cols-1 gap-2">
-                {AI_PROVIDERS.map(prov => (
-                  <button
-                    key={prov.id}
-                    onClick={() => { setAiProvider(prov.id); setAiKey(""); setAiStatus(null); }}
-                    className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors cursor-pointer text-left ${
-                      aiProvider === prov.id
-                        ? "bg-orange-500/10 border-orange-400/40 text-white/90"
-                        : "bg-white/[0.02] border-white/5 text-white/50 hover:text-white/70 hover:border-white/10"
-                    }`}
-                  >
-                    <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
-                      {prov.isLocal ? "computer" : "key"}
-                    </span>
-                    <div>
-                      <div className="text-sm font-medium">{prov.name}</div>
-                      <div className="text-[10px] text-white/30">{prov.hint}</div>
-                    </div>
-                    {configuredProvider === prov.id && (
-                      <span className="ml-auto material-symbols-rounded text-green-400" style={{ fontSize: 16 }}>check</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {selectedProv && !selectedProv.isLocal && (
-              <div>
-                <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">API Key</label>
-                <input
-                  type={aiShowKey ? "text" : "password"}
-                  value={aiKey}
-                  onChange={e => setAiKey(e.target.value)}
-                  placeholder={selectedProv.placeholder}
-                  className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white/90 outline-none focus:border-orange-400 transition-colors placeholder-white/20 font-mono"
-                  onKeyDown={e => e.key === "Enter" && saveAiProvider()}
-                />
-                <button
-                  onClick={() => setAiShowKey(!aiShowKey)}
-                  className="mt-1 text-[10px] text-white/30 hover:text-white/50 bg-transparent border-none cursor-pointer"
-                >
-                  {aiShowKey ? "Hide" : "Show"} key
-                </button>
-              </div>
-            )}
-
-            <button
-              onClick={saveAiProvider}
-              disabled={aiSaving || (!selectedProv?.isLocal && !aiKey.trim())}
-              className="w-full py-2.5 bg-orange-500 hover:bg-orange-400 disabled:opacity-40 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-colors"
-            >
-              {aiSaving ? "Saving..." : "Save Provider"}
-            </button>
-            {aiStatus && <StatusMessage type={aiStatus.type} message={aiStatus.message} />}
+          <div className="max-w-lg">
+            <AIModelsStep embedded />
           </div>
         )}
 

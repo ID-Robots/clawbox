@@ -40,7 +40,10 @@ export async function register() {
   // Find npx binary (node-pty requires Node.js, not bun)
   function findNpx(): string {
     const fs = require('fs')
+    // Check process.execPath directory first (same Node that runs Next.js)
+    const nodeDir = path.dirname(process.execPath)
     const candidates = [
+      path.join(nodeDir, 'npx'),
       '/usr/local/bin/npx',
       '/usr/bin/npx',
     ]

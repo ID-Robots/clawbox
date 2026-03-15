@@ -8,7 +8,8 @@ import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
 interface AIModelsStepProps {
-  onNext: () => void;
+  onNext?: () => void;
+  embedded?: boolean;
 }
 
 type AuthMode = "token" | "subscription" | "local";
@@ -142,7 +143,7 @@ const DEVICE_AUTH_LABELS: Record<string, {
   },
 };
 
-export default function AIModelsStep({ onNext }: AIModelsStepProps) {
+export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
   const [authMode, setAuthMode] = useState<AuthMode>("subscription");
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
@@ -206,9 +207,12 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
 
   const showSuccessAndContinue = (message: string) => {
     const { tabClosed, closeHint } = tryCloseOAuthWindow(oauthWindowRef);
-    setStatus({ type: "success", message: message + closeHint });
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => onNext(), tabClosed ? 1500 : 3000);
+    const displayMsg = embedded ? message.replace(/\s*Continuing\.\.\.$/i, "") : message;
+    setStatus({ type: "success", message: displayMsg + closeHint });
+    if (!embedded && onNext) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => onNext(), tabClosed ? 1500 : 3000);
+    }
   };
 
   const extractError = async (res: Response, fallback: string) => {
@@ -889,7 +893,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                   className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2"
                 >
                   {exchanging && ButtonSpinner}
-                  {exchanging ? "Connecting..." : "Save & Continue"}
+                  {exchanging ? "Connecting..." : embedded ? "Save" : "Save & Continue"}
                 </button>
               )
             )
@@ -900,9 +904,10 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               disabled={saving || !selectedProvider}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
-              {saving ? "Saving..." : "Save & Continue"}
+              {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
             </button>
           )}
+          {!embedded && (
           <button
             type="button"
             onClick={onNext}
@@ -910,6 +915,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           >
             Skip for now
           </button>
+          )}
         </div>
       </div>
     </div>
