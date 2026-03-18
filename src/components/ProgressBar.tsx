@@ -2,7 +2,7 @@ interface ProgressBarProps {
   currentStep: number;
 }
 
-const STEP_LABELS = ["WiFi", "Update", "Security", "AI Model", "Telegram", "Done"];
+const STEP_LABELS = ["WiFi", "Update", "Security", "AI Model", "Telegram"];
 
 function stepColors(isDone: boolean, isActive: boolean): string {
   if (isDone) return "text-[#00e5cc] bg-[rgba(0,229,204,0.1)]";

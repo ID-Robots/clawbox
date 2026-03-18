@@ -9,19 +9,30 @@ import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
 import TelegramStep from "./TelegramStep";
-import DoneStep from "./DoneStep";
+
+async function completeSetup(onComplete?: () => void) {
+  try {
+    await fetch("/setup-api/setup/complete", { method: "POST" });
+  } catch {}
+  if (onComplete) onComplete();
+  else window.location.href = "/";
+}
 
 function applyStatusData(
   data: Record<string, unknown>,
-  setSetupComplete: (v: boolean) => void,
-  setCurrentStep: (v: number) => void
+  setCurrentStep: (v: number) => void,
+  onComplete?: () => void
 ) {
   if (data.setup_complete) {
-    setSetupComplete(true);
-    setCurrentStep(6);
-  } else if (data.telegram_configured) {
-    setCurrentStep(6);
-  } else if (data.ai_model_configured) {
+    if (onComplete) onComplete();
+    else window.location.href = "/";
+    return;
+  }
+  if (data.telegram_configured) {
+    completeSetup(onComplete);
+    return;
+  }
+  if (data.ai_model_configured) {
     setCurrentStep(5);
   } else if (data.password_configured) {
     setCurrentStep(4);
@@ -36,7 +47,6 @@ interface SetupWizardProps {
 
 export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
   const [currentStep, setCurrentStep] = useState(1);
-  const [setupComplete, setSetupComplete] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -50,7 +60,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
         return r.json();
       })
       .then((data) => {
-        if (!cancelled) applyStatusData(data, setSetupComplete, setCurrentStep);
+        if (!cancelled) applyStatusData(data, setCurrentStep, onComplete);
       })
       .catch((err) => {
         if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -109,7 +119,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
             </span>
           </div>
         </Link>
-        {currentStep < 6 && <ProgressBar currentStep={currentStep} />}
+        <ProgressBar currentStep={currentStep} />
       </header>
 
       <main
@@ -128,9 +138,8 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
           <AIModelsStep onNext={() => setCurrentStep(5)} />
         )}
         {currentStep === 5 && (
-          <TelegramStep onNext={() => setCurrentStep(6)} />
+          <TelegramStep onNext={() => completeSetup(onComplete)} />
         )}
-        {currentStep === 6 && <DoneStep setupComplete={setupComplete} onComplete={onComplete} />}
       </main>
 
       <footer className="px-4 py-3 flex items-center justify-center gap-3">
