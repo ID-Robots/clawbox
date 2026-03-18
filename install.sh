@@ -659,6 +659,53 @@ CSEOF
   fi
 }
 
+step_gh_install() {
+  if command -v gh &>/dev/null; then
+    echo "  GitHub CLI already installed: $(gh --version | head -1)"
+    return
+  fi
+  echo "  Installing GitHub CLI..."
+  (type -p wget >/dev/null || apt-get install -y wget) \
+    && mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update -qq \
+    && apt-get install -y -qq gh
+  echo "  GitHub CLI installed: $(gh --version | head -1)"
+}
+
+step_ai_tools_install() {
+  # Claude Code
+  if as_clawbox bash -c 'command -v claude' &>/dev/null; then
+    echo "  Claude Code already installed"
+  else
+    echo "  Installing Claude Code..."
+    as_clawbox bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+    echo "  Claude Code installed"
+  fi
+
+  # Gemini CLI
+  if as_clawbox bash -c 'command -v gemini' &>/dev/null; then
+    echo "  Gemini CLI already installed"
+  else
+    echo "  Installing Gemini CLI..."
+    as_clawbox npm install -g @google/gemini-cli 2>/dev/null \
+      || echo "  Warning: Gemini CLI install failed (manual install may be needed)"
+  fi
+
+  # Codex (OpenAI)
+  if as_clawbox bash -c 'command -v codex' &>/dev/null; then
+    echo "  Codex already installed"
+  else
+    echo "  Installing Codex..."
+    as_clawbox npm install -g @openai/codex 2>/dev/null \
+      || echo "  Warning: Codex install failed (manual install may be needed)"
+  fi
+}
+
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   if [ ! -f "$INPUT_FILE" ]; then
@@ -729,7 +776,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
-  desktop_customize vnc_install code_server_install
+  desktop_customize vnc_install code_server_install gh_install ai_tools_install
   openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -757,7 +804,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=20
+TOTAL_STEPS=22
 step=0
 log() {
   step=$((step + 1))
@@ -827,6 +874,12 @@ step_vnc_install
 
 log "Installing code-server (VS Code in browser)..."
 step_code_server_install
+
+log "Installing GitHub CLI..."
+step_gh_install
+
+log "Installing AI coding tools (Claude, Gemini, Codex)..."
+step_ai_tools_install
 
 log "Starting services..."
 step_start_services
