@@ -6,9 +6,7 @@ reviews:
     enabled: true
     drafts: false
     base_branches:
-      - develop
-      - main
-      - master
+      - "**"
   path_instructions:
     - path: "src/app/**/*.ts*"
       instructions: |
