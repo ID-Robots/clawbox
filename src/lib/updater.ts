@@ -265,7 +265,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     },
     openclaw: {
       current: openclawCurrent,
-      target: openclawTarget && openclawTarget === openclawCurrent ? null : openclawTarget,
+      target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
     },
   };
   versionInfoCacheTime = Date.now();

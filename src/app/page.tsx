@@ -224,7 +224,7 @@ export default function ChromeDesktop() {
   const WP_BG_COLOR_KEY = "clawbox-wallpaper-bg-color";
   const [wpBgColor, setWpBgColor] = useState("#000000");
   const WP_OPACITY_KEY = "clawbox-wallpaper-opacity";
-  const [wpOpacity, setWpOpacity] = useState(100);
+  const [wpOpacity, setWpOpacity] = useState(50);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
   useEffect(() => {

@@ -39,12 +39,13 @@ function StepIcon({ status }: { status: StepStatus }) {
 
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
-  const [targetVersion, setTargetVersion] = useState<string | null>(null);
+  const [, setTargetVersion] = useState<string | null>(null);
   const [versions, setVersions] = useState<{
     clawbox: { current: string; target: string | null };
     openclaw: { current: string | null; target: string | null };
   } | null>(null);
   const [fetchError, setFetchError] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -118,6 +119,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         setFetchError(true);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
     init();
@@ -161,6 +164,18 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     ? state.steps[state.currentStepIndex]
     : null;
 
+  if (loading) {
+    return (
+      <div className="w-full max-w-[520px]">
+        <div className="card-surface rounded-2xl p-8">
+          <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
+            <div className="spinner" /> Checking for updates...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (fetchError) {
     return (
       <div className="w-full max-w-[520px]">
@@ -192,22 +207,30 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  // Idle state — show trigger button
+  // Idle state — show trigger button or "up to date"
+  const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
+
   if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]">
         <div className="card-surface rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
-            System Update
+            {isUpToDate ? (
+              <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
+                System Up to Date
+              </span>
+            ) : "System Update"}
           </h1>
           <p className="text-[var(--text-secondary)] mb-4 leading-relaxed">
-            Update your ClawBox with the latest software, drivers, and AI models.
+            {isUpToDate
+              ? "Your ClawBox is running the latest version."
+              : "Update your ClawBox with the latest software, drivers, and AI models."}
           </p>
           {versions && (
             <div className="mb-6 space-y-1.5 text-sm">
               <div className="flex items-center gap-2">
                 <span className="text-[var(--text-muted)] w-20">ClawBox</span>
-                <span className="text-[var(--text-muted)]">{versions.clawbox.current}</span>
+                <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{versions.clawbox.current}</span>
                 {versions.clawbox.target && (
                   <>
                     <span className="text-[var(--text-muted)]">&rarr;</span>
@@ -218,8 +241,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               {versions.openclaw.current && (
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--text-muted)] w-20">OpenClaw</span>
-                  <span className="text-[var(--text-muted)]">{versions.openclaw.current}</span>
-                  {versions.openclaw.target && versions.openclaw.target !== versions.openclaw.current && (
+                  <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{versions.openclaw.current}</span>
+                  {versions.openclaw.target && (
                     <>
                       <span className="text-[var(--text-muted)]">&rarr;</span>
                       <span className="text-green-400 font-semibold">{versions.openclaw.target}</span>
@@ -230,20 +253,32 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             </div>
           )}
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={triggerUpdate}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-            >
-              Start Update
-            </button>
-            <button
-              type="button"
-              onClick={onNext}
-              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-            >
-              Skip
-            </button>
+            {isUpToDate ? (
+              <button
+                type="button"
+                onClick={onNext}
+                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+              >
+                Continue
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={triggerUpdate}
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                >
+                  Start Update
+                </button>
+                <button
+                  type="button"
+                  onClick={onNext}
+                  className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
+                >
+                  Skip
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
