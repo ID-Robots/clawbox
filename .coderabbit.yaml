@@ -6,7 +6,10 @@ reviews:
     enabled: true
     drafts: false
     base_branches:
-      - "**"
+      - main
+      - master
+      - develop
+      - "clawbox-*"
   path_instructions:
     - path: "src/app/**/*.ts*"
       instructions: |
