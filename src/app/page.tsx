@@ -154,6 +154,22 @@ function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?
 
 
 export default function ChromeDesktop() {
+  const [setupChecked, setSetupChecked] = useState(false);
+
+  // Check if setup is complete — redirect to /setup if not
+  useEffect(() => {
+    fetch("/setup-api/setup/status")
+      .then(r => r.json())
+      .then(data => {
+        if (!data.setup_complete) {
+          window.location.href = "/setup";
+        } else {
+          setSetupChecked(true);
+        }
+      })
+      .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
+  }, []);
+
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
@@ -912,6 +928,10 @@ export default function ChromeDesktop() {
 
   // Get all apps for launcher (including installed)
   const allAppsForLauncher = getAllApps();
+
+  if (!setupChecked) {
+    return <div className="min-h-screen bg-[#0a0f1a]" />;
+  }
 
   return (
     <div className="min-h-screen relative overflow-hidden select-none">
