@@ -22,6 +22,7 @@ interface ChromeShelfProps {
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
   onShelfSettings?: () => void;
+  onPowerClick?: () => void;
   time: string;
 }
 
@@ -35,6 +36,7 @@ export default function ChromeShelf({
   onUnpinApp,
   onCloseApp,
   onShelfSettings,
+  onPowerClick,
   time,
 }: ChromeShelfProps) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -152,13 +154,22 @@ export default function ChromeShelf({
         </div>
 
         {/* Right side: system tray */}
-        <button
-          onClick={onTrayClick}
-          className="absolute right-2 flex items-center gap-3 h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-          title="System Settings"
-        >
-          <span className="text-sm text-white/80 font-medium">{time}</span>
-        </button>
+        <div className="absolute right-2 flex items-center gap-1">
+          <button
+            onClick={onTrayClick}
+            className="flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+            title="System Settings"
+          >
+            <span className="text-sm text-white/80 font-medium">{time}</span>
+          </button>
+          <button
+            onClick={onPowerClick}
+            className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+            title="Power"
+          >
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>power_settings_new</span>
+          </button>
+        </div>
       </div>
 
       {/* Shelf context menu */}

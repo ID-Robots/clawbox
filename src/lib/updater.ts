@@ -171,6 +171,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
   {
+    id: "vnc_install",
+    label: "Installing VNC (Remote Desktop)",
+    timeoutMs: 300_000,
+    requiresRoot: true,
+  },
+  {
     id: "openclaw_install",
     label: "Updating OpenClaw",
     timeoutMs: 120_000,

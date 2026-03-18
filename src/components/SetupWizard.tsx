@@ -6,7 +6,9 @@ import Image from "next/image";
 import ProgressBar from "./ProgressBar";
 import WifiStep from "./WifiStep";
 import UpdateStep from "./UpdateStep";
+import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
+import TelegramStep from "./TelegramStep";
 import DoneStep from "./DoneStep";
 
 function applyStatusData(
@@ -16,8 +18,12 @@ function applyStatusData(
 ) {
   if (data.setup_complete) {
     setSetupComplete(true);
-    setCurrentStep(4);
+    setCurrentStep(6);
+  } else if (data.telegram_configured) {
+    setCurrentStep(6);
   } else if (data.ai_model_configured) {
+    setCurrentStep(5);
+  } else if (data.password_configured) {
     setCurrentStep(4);
   } else if (data.update_completed || data.wifi_configured) {
     setCurrentStep(2);
@@ -103,7 +109,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
             </span>
           </div>
         </Link>
-        {currentStep < 4 && <ProgressBar currentStep={currentStep} />}
+        {currentStep < 6 && <ProgressBar currentStep={currentStep} />}
       </header>
 
       <main
@@ -116,9 +122,15 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
           <UpdateStep onNext={() => setCurrentStep(3)} />
         )}
         {currentStep === 3 && (
-          <AIModelsStep onNext={() => setCurrentStep(4)} />
+          <CredentialsStep onNext={() => setCurrentStep(4)} />
         )}
-        {currentStep === 4 && <DoneStep setupComplete={setupComplete} onComplete={onComplete} />}
+        {currentStep === 4 && (
+          <AIModelsStep onNext={() => setCurrentStep(5)} />
+        )}
+        {currentStep === 5 && (
+          <TelegramStep onNext={() => setCurrentStep(6)} />
+        )}
+        {currentStep === 6 && <DoneStep setupComplete={setupComplete} onComplete={onComplete} />}
       </main>
 
       <footer className="px-4 py-3 flex items-center justify-center gap-3">

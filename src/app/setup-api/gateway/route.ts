@@ -1,38 +1,54 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getGatewayToken } from "@/lib/gateway-proxy";
 
 export const dynamic = "force-dynamic";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const res = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(3000),
-    });
+    const [res, gatewayToken] = await Promise.all([
+      fetch(`http://127.0.0.1:${GATEWAY_PORT}/`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(3000),
+      }),
+      getGatewayToken(),
+    ]);
     if (!res.ok) {
       return gatewayOfflineResponse();
     }
     let html = await res.text();
+    // Use the request hostname so WebSocket connects to the right address
+    const host = request.headers.get("host")?.replace(/:\d+$/, "") || "clawbox.local";
+    const wsUrl = `ws://${host}:${GATEWAY_PORT}`;
     // Rewrite relative asset paths (./assets/... → /assets/...) so they
     // resolve through Next.js rewrites which proxy to the gateway.
-    // Also inject script to auto-fill the correct gateway WebSocket URL.
-    const wsUrl = `ws://127.0.0.1:${GATEWAY_PORT}`;
     html = html.replace(/\.\//g, '/');
+    const safeToken = gatewayToken ? JSON.stringify(gatewayToken) : '""';
     const autoConnect = `<script>
-      window.__OPENCLAW_WS_URL__ = "${wsUrl}";
-      window.addEventListener("DOMContentLoaded", function() {
-        setTimeout(function() {
-          var input = document.querySelector('input[placeholder*="WebSocket"], input[value*="ws://"]');
-          if (input) {
-            var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-            nativeSet.call(input, "${wsUrl}");
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-          var btn = document.querySelector('button');
-          if (btn && /connect/i.test(btn.textContent)) btn.click();
-        }, 500);
-      });
+      (function(){
+        var KEY="openclaw.control.settings.v1";
+        var wsUrl="${wsUrl}";
+        try{
+          var s=JSON.parse(localStorage.getItem(KEY)||"{}");
+          s.url=wsUrl;
+          s.token=${safeToken};
+          localStorage.setItem(KEY,JSON.stringify(s));
+        }catch(e){}
+        window.__OPENCLAW_WS_URL__=wsUrl;
+        window.addEventListener("DOMContentLoaded",function(){
+          setTimeout(function(){
+            var input=document.querySelector('input[placeholder*="WebSocket"],input[value*="ws://"]');
+            if(input){
+              var nativeSet=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set;
+              nativeSet.call(input,wsUrl);
+              input.dispatchEvent(new Event("input",{bubbles:true}));
+            }
+            var btn=document.querySelector('button');
+            if(btn&&/connect/i.test(btn.textContent))btn.click();
+          },500);
+        });
+      })();
     </script>`;
     html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect);
     return new NextResponse(html, {
@@ -41,7 +57,7 @@ export async function GET() {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",
         "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http://127.0.0.1:*",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http: https:; frame-ancestors 'self'",
       },
     });
   } catch {

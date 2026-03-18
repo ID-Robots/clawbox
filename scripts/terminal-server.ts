@@ -33,22 +33,32 @@ wss.on("connection", (ws: WebSocket, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[terminal-server] New connection from ${remote}`);
 
-  // Spawn a PTY — clean env to avoid p10k warnings and nvm conflicts
-  const shell = process.env.SHELL || "/bin/zsh";
-  const cleanEnv = { ...process.env } as Record<string, string>;
-  delete cleanEnv.npm_config_prefix; // nvm conflict with bun/node
-  delete cleanEnv.npm_config_local_prefix;
-  const term = pty.spawn(shell, [], {
+  // Spawn a PTY as the clawbox user (not root)
+  const targetUser = "clawbox";
+  const targetHome = `/home/${targetUser}`;
+  const shell = "/bin/bash";
+  const cleanEnv: Record<string, string> = {
+    HOME: targetHome,
+    USER: targetUser,
+    LOGNAME: targetUser,
+    SHELL: shell,
+    TERM: "xterm-256color",
+    COLORTERM: "truecolor",
+    PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    LANG: process.env.LANG || "en_US.UTF-8",
+    POWERLEVEL9K_INSTANT_PROMPT: "quiet",
+  };
+
+  // If running as root, use sudo to spawn as clawbox user
+  const isRoot = process.getuid?.() === 0;
+  const cmd = isRoot ? "sudo" : shell;
+  const args = isRoot ? ["-u", targetUser, "-i", shell, "-l"] : ["-l"];
+  const term = pty.spawn(cmd, args, {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
-    cwd: os.homedir(),
-    env: {
-      ...cleanEnv,
-      TERM: "xterm-256color",
-      COLORTERM: "truecolor",
-      POWERLEVEL9K_INSTANT_PROMPT: "quiet",
-    },
+    cwd: targetHome,
+    env: cleanEnv,
   });
 
   console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);

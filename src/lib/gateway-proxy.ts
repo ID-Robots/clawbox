@@ -38,7 +38,7 @@ const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;
 <a href="/setup" onclick="event.preventDefault();window.location.href='/setup'" style="color:#f97316;text-decoration:none;font-weight:600">ClawBox</a>
 </div>`;
 
-async function getGatewayToken(): Promise<string> {
+export async function getGatewayToken(): Promise<string> {
   try {
     const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf-8");
     const config = JSON.parse(raw);
@@ -74,19 +74,21 @@ export async function serveGatewayHTML(
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : "";
-    const tokenScript = safeToken
-      ? `<script id="clawbox-token" type="application/json">${safeToken}</script>
-<script>
+    // Script to set WebSocket URL + token so the OpenClaw UI connects directly to the gateway
+    const wsScript = `<script>
 (function(){
   var KEY="openclaw.control.settings.v1";
   try{
-    var t=JSON.parse(document.getElementById("clawbox-token").textContent);
     var s=JSON.parse(localStorage.getItem(KEY)||"{}");
-    if(s.token!==t){s.token=t;localStorage.setItem(KEY,JSON.stringify(s))}
+    var wsUrl="ws://"+location.hostname+":${GATEWAY_PORT}";
+    var changed=false;
+    if(s.url!==wsUrl){s.url=wsUrl;changed=true}
+    ${safeToken ? `var t=${safeToken};if(s.token!==t){s.token=t;changed=true}` : ""}
+    if(changed)localStorage.setItem(KEY,JSON.stringify(s));
   }catch(e){}
 })();
-</script>`
-      : "";
+</script>`;
+    const tokenScript = wsScript;
 
     html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${tokenScript}`);
     return new NextResponse(html, {

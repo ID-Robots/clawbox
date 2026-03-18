@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import type { StepStatus, UpdateState } from "@/lib/updater";
 import StatusMessage from "./StatusMessage";
 
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
@@ -11,37 +10,6 @@ import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 
 /* ── Types ── */
-
-interface SystemInfo {
-  cpus: number;
-  memoryTotal: string;
-  memoryFree: string;
-  memoryUsedPercent: number;
-  cpuLoadPercent: number;
-  temperature: string;
-  temperatureValue: number | null;
-  uptime: string;
-  diskUsed: string;
-  diskFree: string;
-  diskTotal: string;
-  diskUsedPercent: number;
-  gpuLoadPercent: number;
-  networkIp: string;
-  networkInterface: string;
-  networkRxBytes: number;
-  networkTxBytes: number;
-}
-
-interface StatsSnapshot {
-  cpu: number;
-  gpu: number;
-  memory: number;
-  temp: number | null;
-  rxBytes: number;
-  txBytes: number;
-  time: number;
-}
-
 
 interface DoneStepProps {
   setupComplete?: boolean;
@@ -54,8 +22,6 @@ interface SectionStatusMessage {
 }
 
 /* ── Constants ── */
-
-const MAX_HISTORY = 30;
 
 const RESET_STEPS = [
   "Clearing configuration...",
@@ -86,9 +52,6 @@ const SECTION_BODY_CLASS =
 const LABEL_CLASS =
   "block text-xs font-semibold text-[var(--text-secondary)] mb-1.5";
 
-const WIDGET_LABEL_CLASS =
-  "text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wider";
-
 const AI_PROVIDERS = [
   { id: "anthropic", name: "Anthropic Claude", hasSubscription: true, placeholder: "sk-ant-api03-...", hint: "Get your API key from console.anthropic.com", tokenUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI GPT", hasSubscription: true, placeholder: "sk-...", hint: "Get your API key from platform.openai.com", tokenUrl: "https://platform.openai.com/api-keys" },
@@ -98,12 +61,6 @@ const AI_PROVIDERS = [
 ] as const;
 
 /* ── Helper functions ── */
-
-function thresholdColor(value: number, low: number, high: number): string {
-  if (value > high) return "#ef4444";
-  if (value > low) return "#f59e0b";
-  return "#00e5cc";
-}
 
 /* ── Shared SVG icons ── */
 
@@ -119,33 +76,6 @@ const ButtonSpinner = (
 );
 
 /* ── Reusable components ── */
-
-function UsageBar({ percent, color = "var(--coral-bright)" }: { percent: number; color?: string }) {
-  return (
-    <div className="w-full h-1.5 rounded-full bg-[var(--bg-deep)] mt-2 overflow-hidden">
-      <div
-        className="h-full rounded-full transition-all duration-700 ease-out"
-        style={{ width: `${Math.min(100, Math.max(0, percent))}%`, backgroundColor: color }}
-      />
-    </div>
-  );
-}
-
-function Sparkline({ data, color = "var(--coral-bright)", height = 32 }: { data: number[]; color?: string; height?: number }) {
-  if (data.length < 2) return null;
-  const max = Math.max(...data, 1);
-  const w = 120;
-  const h = height;
-  const step = w / (data.length - 1);
-  const points = data.map((v, i) => `${i * step},${h - (v / max) * (h - 4) - 2}`).join(" ");
-  const fillPoints = `0,${h} ${points} ${(data.length - 1) * step},${h}`;
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
-      <polygon points={fillPoints} fill={color} opacity="0.1" />
-      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 function Chevron({ open }: { open: boolean }) {
   return (
@@ -244,115 +174,14 @@ function CollapsibleSection({
   );
 }
 
-function SystemInfoWidget({
-  label,
-  detail,
-  value,
-  unit,
-  bar,
-  className,
-}: {
-  label: string;
-  detail?: string;
-  value: string;
-  unit?: string;
-  bar?: { percent: number; color: string };
-  className?: string;
-}) {
-  return (
-    <div className={`card-surface rounded-xl p-3.5 ${className ?? ""}`}>
-      <div className="flex items-center justify-between mb-1">
-        <p className={WIDGET_LABEL_CLASS}>{label}</p>
-        {detail && <p className="text-[10px] font-semibold text-[var(--text-muted)]">{detail}</p>}
-      </div>
-      <p className="text-lg font-bold text-gray-100">
-        {value}
-        {unit && <span className="text-xs font-normal text-[var(--text-muted)]">{unit}</span>}
-      </p>
-      {bar && <UsageBar percent={bar.percent} color={bar.color} />}
-    </div>
-  );
-}
-
-function SparklineWidget({
-  label,
-  currentValue,
-  data,
-  color,
-}: {
-  label: string;
-  currentValue: string;
-  data: number[];
-  color: string;
-}) {
-  return (
-    <div className="card-surface rounded-xl p-3.5">
-      <div className="flex items-center justify-between mb-2">
-        <p className={WIDGET_LABEL_CLASS}>{label}</p>
-        <p className="text-[10px] font-bold text-gray-300">{currentValue}</p>
-      </div>
-      <Sparkline data={data} color={color} height={36} />
-    </div>
-  );
-}
-
-/* ── Update step helpers ── */
-
-function updateStepTextClass(status: StepStatus): string {
-  switch (status) {
-    case "running": return "text-[var(--coral-bright)] font-medium";
-    case "completed": return "text-[var(--text-secondary)]";
-    case "failed": return "text-red-400";
-    default: return "text-[var(--text-muted)]";
-  }
-}
-
-function UpdateStepIcon({ status }: { status: StepStatus }) {
-  if (status === "running") {
-    return <div className="spinner !w-4 !h-4 !border-2" />;
-  }
-  if (status === "completed") {
-    return (
-      <div className="w-4 h-4 rounded-full bg-[#00e5cc] flex items-center justify-center text-white text-[10px] font-bold">
-        &#10003;
-      </div>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <div className="w-4 h-4 rounded-full bg-red-500 flex items-center justify-center text-white text-[10px] font-bold">
-        &#10005;
-      </div>
-    );
-  }
-  return <div className="w-4 h-4 rounded-full bg-gray-600" />;
-}
-
-function UpdateProgressHeading({ phase }: { phase: UpdateState["phase"] | undefined }) {
-  if (phase === "completed") return <span className="text-[#00e5cc]">Update Complete</span>;
-  if (phase === "failed") return <span className="text-red-400">Update Failed</span>;
-  return <>System Update</>;
-}
-
 /* ── Main component ── */
 
 export default function DoneStep({ setupComplete = false, onComplete }: DoneStepProps) {
-  /* ── System info ── */
-  const [info, setInfo] = useState<SystemInfo | null>(null);
-  const [loadError, setLoadError] = useState(false);
-  const [statsHistory, setStatsHistory] = useState<StatsSnapshot[]>([]);
-  const statsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /* ── Finish ── */
   const [finishing, setFinishing] = useState(false);
   const [completeError, setCompleteError] = useState<string | null>(null);
 
-  /* ── System update ── */
-  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
-  const [updateStarted, setUpdateStarted] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const updatePollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
   const aiSaveControllerRef = useRef<AbortController | null>(null);
   const aiExchangeControllerRef = useRef<AbortController | null>(null);
@@ -397,13 +226,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
   const [secStatus, setSecStatus] = useState<SectionStatusMessage | null>(null);
 
   /* ── Confirmations ── */
-  const [updateConfirm, setUpdateConfirm] = useState(false);
-  const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
-  const [versionLoading, setVersionLoading] = useState(false);
-  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
-  const [branchInput, setBranchInput] = useState("");
-  const [branchSaving, setBranchSaving] = useState(false);
-  const [branchError, setBranchError] = useState<string | null>(null);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -464,8 +286,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     },
   };
   const currentAiOAuth = aiOauthLabels[aiProvider] ?? aiOauthLabels.anthropic;
-  const isUpdateRunning = updateStarted && updateState?.phase === "running";
-
   /* ── Fetch section status on mount ── */
   useEffect(() => {
     const controller = new AbortController();
@@ -484,32 +304,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     return () => controller.abort();
   }, []);
 
-  /* ── Fetch system info on mount + poll every 5s ── */
-  useEffect(() => {
-    let alive = true;
-    const fetchInfo = async () => {
-      try {
-        const r = await fetch("/setup-api/system/info");
-        if (!r.ok) throw new Error("Failed to load");
-        const data: SystemInfo = await r.json();
-        if (!alive) return;
-        setInfo(data);
-        setStatsHistory((prev) => {
-          const next = [...prev, { cpu: data.cpuLoadPercent, gpu: data.gpuLoadPercent, memory: data.memoryUsedPercent, temp: data.temperatureValue, rxBytes: data.networkRxBytes, txBytes: data.networkTxBytes, time: Date.now() }];
-          return next.length > MAX_HISTORY ? next.slice(-MAX_HISTORY) : next;
-        });
-      } catch {
-        if (!alive) return;
-        setLoadError(true);
-      }
-    };
-    fetchInfo();
-    statsPollRef.current = setInterval(fetchInfo, 5000);
-    return () => {
-      alive = false;
-      if (statsPollRef.current) clearInterval(statsPollRef.current);
-    };
-  }, []);
 
   /* ── Fetch hotspot defaults on mount ── */
   useEffect(() => {
@@ -540,120 +334,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     return () => controller.abort();
   }, []);
 
-  /* ── Update polling ── */
-  const stopUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) {
-      clearInterval(updatePollRef.current);
-      updatePollRef.current = null;
-    }
-    updatePollControllerRef.current?.abort();
-    updatePollControllerRef.current = null;
-  }, []);
-
-  const startUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) return;
-    const controller = new AbortController();
-    updatePollControllerRef.current = controller;
-    let failureCount = 0;
-    let serverWentDown = false;
-    updatePollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch("/setup-api/update/status", {
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted) return;
-        if (!res.ok) {
-          failureCount++;
-          if (failureCount >= 3) serverWentDown = true;
-          return;
-        }
-        if (serverWentDown) {
-          window.location.reload();
-          return;
-        }
-        failureCount = 0;
-        const data: UpdateState = await res.json();
-        if (controller.signal.aborted) return;
-        setUpdateState(data);
-        if (data.phase !== "running") stopUpdatePolling();
-      } catch {
-        if (controller.signal.aborted) return;
-        failureCount++;
-        if (failureCount >= 3) serverWentDown = true;
-      }
-    }, 2000);
-  }, [stopUpdatePolling]);
-
-  useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
-
   /* ── Actions ── */
-
-  const openUpdateConfirm = async () => {
-    setVersionLoading(true);
-    setUpdateConfirm(true);
-    try {
-      const [statusRes, branchRes] = await Promise.all([
-        fetch("/setup-api/update/status"),
-        fetch("/setup-api/system/update-branch"),
-      ]);
-      if (statusRes.ok) {
-        const data = await statusRes.json();
-        if (data.versions) setVersionInfo(data.versions);
-      }
-      if (branchRes.ok) {
-        const data = await branchRes.json();
-        setUpdateBranch(data.branch ?? null);
-        setBranchInput(data.branch ?? "");
-      }
-    } catch {
-      // versions are nice-to-have, dialog still works without them
-    } finally {
-      setVersionLoading(false);
-    }
-  };
-
-  const saveUpdateBranch = async (branch: string) => {
-    setBranchSaving(true);
-    setBranchError(null);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: branch || null }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setUpdateBranch(data.branch ?? null);
-      } else {
-        setBranchError(data.error || "Failed to set branch");
-      }
-    } catch (err) {
-      setBranchError(err instanceof Error ? err.message : "Failed to set branch");
-    } finally {
-      setBranchSaving(false);
-    }
-  };
-
-  const triggerUpdate = async () => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: true }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setUpdateError(typeof data.error === "string" ? data.error : "Failed to start update");
-        return;
-      }
-      startUpdatePolling();
-    } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : "Failed to start update");
-    }
-  };
 
   const completeSetup = async () => {
     setFinishing(true);
@@ -1189,7 +870,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
       )}
 
       {/* Primary actions */}
-      <div className="grid grid-cols-2 gap-3 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-6">
           <button
             type="button"
             onClick={setupComplete ? () => (window.location.href = "/") : completeSetup}
@@ -1210,15 +891,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
           </a>
           <button
             type="button"
-            onClick={isUpdateRunning ? undefined : openUpdateConfirm}
-            disabled={isUpdateRunning}
-            className="py-3 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-500 hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span>
-            {isUpdateRunning ? "Updating..." : "System Update"}
-          </button>
-          <button
-            type="button"
             onClick={() => setResetConfirm(true)}
             className="py-3 bg-red-500/10 text-red-400 rounded-xl text-sm font-semibold hover:bg-red-500/20 hover:scale-105 transition-all cursor-pointer flex items-center justify-center gap-2 border border-red-500/20"
           >
@@ -1226,101 +898,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             Factory Reset
           </button>
       </div>
-
-      {/* Update confirmation popup */}
-      {updateConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
-            <h3 className="text-lg font-bold text-gray-100 mb-2">System Update</h3>
-            <p className="text-sm text-[var(--text-secondary)] mb-4 leading-relaxed">
-              This will pull the latest updates and restart the device. The process may take a few minutes.
-            </p>
-            {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)]">Checking versions...</div>
-            ) : versionInfo && (
-              <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-[var(--bg-deep)] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-secondary)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.clawbox.current}
-                    {versionInfo.clawbox.target && versionInfo.clawbox.target !== versionInfo.clawbox.current && (
-                      <span className="text-[var(--text-muted)]">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between bg-[var(--bg-deep)] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-secondary)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? "not installed"}
-                    {versionInfo.openclaw.target && versionInfo.openclaw.target !== versionInfo.openclaw.current && (
-                      <span className="text-[var(--text-muted)]">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
-                    )}
-                  </span>
-                </div>
-              </div>
-            )}
-            {/* Branch selector — only visible in dev (non-tag version) or when a branch is pinned */}
-            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
-              <div className="mb-4">
-                <label htmlFor="update-branch-input" className="text-xs text-[var(--text-muted)] mb-1 block">Update branch</label>
-                <div className="flex gap-2">
-                  <input
-                    id="update-branch-input"
-                    type="text"
-                    value={branchInput}
-                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder="main"
-                    className="flex-1 bg-[var(--bg-deep)] border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#00e5cc]"
-                  />
-                  <button
-                    type="button"
-                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
-                    onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white btn-gradient rounded-lg cursor-pointer disabled:opacity-40"
-                  >
-                    {branchSaving ? "..." : "Set"}
-                  </button>
-                </div>
-                {branchError && (
-                  <p className="mt-1 text-xs text-red-400">{branchError}</p>
-                )}
-                {updateBranch && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
-                    <button
-                      type="button"
-                      onClick={() => { setBranchInput(""); saveUpdateBranch(""); }}
-                      className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                )}
-                {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)]">Leave empty to follow current branch or main</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3 justify-end">
-              <button
-                type="button"
-                onClick={() => setUpdateConfirm(false)}
-                className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={branchSaving}
-                onClick={() => { setUpdateConfirm(false); triggerUpdate(); }}
-                className="px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100"
-              >
-                Update
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Reset confirmation / progress popup */}
       {resetConfirm && (
@@ -1378,31 +955,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               </>
             )}
           </div>
-        </div>
-      )}
-
-      {/* System Update Progress */}
-      {updateStarted && (
-        <div className="mb-4 card-surface rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-            <UpdateProgressHeading phase={updateState?.phase} />
-          </h3>
-          {updateError && (
-            <div className="mb-3 p-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">{updateError}</div>
-          )}
-          {updateState && (
-            <div className="space-y-0.5">
-              {updateState.steps.map((step) => (
-                <div key={step.id} className="flex items-center gap-2.5 py-1.5 px-2">
-                  <UpdateStepIcon status={step.status} />
-                  <span className={`flex-1 text-xs ${updateStepTextClass(step.status)}`}>{step.label}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {updateState?.phase === "failed" && (
-            <button type="button" onClick={triggerUpdate} className={`mt-3 ${SAVE_BUTTON_CLASS} text-xs`}>Retry Update</button>
-          )}
         </div>
       )}
 
@@ -1768,59 +1320,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         </CollapsibleSection>
       </div>
 
-      {/* System Info Widgets — 2 rows × 3 items */}
-      {info && (
-        <div className="grid grid-cols-3 gap-3">
-          {/* Row 1 */}
-          <SystemInfoWidget
-            label="CPU"
-            detail={`${info.cpus} cores`}
-            value={String(info.cpuLoadPercent)}
-            unit="%"
-            bar={{ percent: info.cpuLoadPercent, color: thresholdColor(info.cpuLoadPercent, 50, 80) }}
-          />
-          <SystemInfoWidget
-            label="GPU"
-            value={String(info.gpuLoadPercent)}
-            unit="%"
-            bar={{ percent: info.gpuLoadPercent, color: thresholdColor(info.gpuLoadPercent, 50, 80) }}
-          />
-          <SystemInfoWidget
-            label="Memory"
-            detail={`${info.memoryFree} free`}
-            value={String(info.memoryUsedPercent)}
-            unit="%"
-            bar={{ percent: info.memoryUsedPercent, color: thresholdColor(info.memoryUsedPercent, 60, 85) }}
-          />
-          {/* Row 2 */}
-          <SystemInfoWidget
-            label="Storage"
-            detail={`${info.diskFree} free`}
-            value={String(info.diskUsedPercent)}
-            unit="%"
-            bar={{ percent: info.diskUsedPercent, color: thresholdColor(info.diskUsedPercent, 70, 90) }}
-          />
-          <SystemInfoWidget
-            label="Temperature"
-            value={info.temperature}
-            bar={info.temperatureValue != null ? {
-              percent: Math.min(100, (info.temperatureValue / 85) * 100),
-              color: thresholdColor(info.temperatureValue, 55, 75),
-            } : undefined}
-          />
-          <SparklineWidget
-            label="CPU Timeline"
-            currentValue={statsHistory.length >= 1 ? `${statsHistory[statsHistory.length - 1].cpu}%` : "—"}
-            data={statsHistory.map((s) => s.cpu)}
-            color="#f97316"
-          />
-        </div>
-      )}
-      {!info && !loadError && (
-        <div className="flex items-center justify-center gap-2.5 py-4 text-[var(--text-secondary)] text-sm">
-          <div className="spinner" /> Loading system info...
-        </div>
-      )}
     </div>
   );
 }

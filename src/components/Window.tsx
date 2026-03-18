@@ -243,6 +243,7 @@ export default function Window({
   return (
     <div
       ref={windowRef}
+      data-window-id={win.id}
       className={`flex flex-col rounded-xl overflow-hidden shadow-2xl border border-[var(--border-subtle)] ${animationClass}`}
       style={windowStyle}
       onMouseDown={() => onFocus(win.id)}

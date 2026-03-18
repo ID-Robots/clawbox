@@ -65,10 +65,19 @@ export default function VNCApp() {
         rfb.resizeSession = false;
         rfb.clipViewport = false;
         rfb.showDotCursor = true;
+        rfb.focusOnClick = true;
 
         rfb.addEventListener("connect", () => {
           setStatus("connected");
           setError(null);
+          // Focus the VNC canvas so keyboard events pass through
+          rfb.focus();
+          // Ensure the internal canvas element is focusable
+          const canvas = canvasContainerRef.current?.querySelector("canvas");
+          if (canvas) {
+            canvas.tabIndex = 0;
+            canvas.focus();
+          }
         });
 
         rfb.addEventListener("disconnect", (e: CustomEvent) => {
@@ -103,6 +112,87 @@ export default function VNCApp() {
   useEffect(() => {
     if (rfbRef.current) rfbRef.current.scaleViewport = scale;
   }, [scale]);
+
+  // Track whether the VNC window is the "active" window so we know when to
+  // forward keyboard events. We set this on mousedown inside the VNC container.
+  const vncActiveRef = useRef(false);
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    const container = canvasContainerRef.current;
+    if (!container) return;
+
+    // Mark VNC as active when clicking inside the container
+    const activate = () => { vncActiveRef.current = true; };
+    // Deactivate when clicking outside
+    const deactivate = (e: MouseEvent) => {
+      if (!container.contains(e.target as Node)) {
+        vncActiveRef.current = false;
+      }
+    };
+
+    container.addEventListener("mousedown", activate, true);
+    document.addEventListener("mousedown", deactivate);
+
+    // Initially active since we just connected
+    vncActiveRef.current = true;
+
+    return () => {
+      container.removeEventListener("mousedown", activate, true);
+      document.removeEventListener("mousedown", deactivate);
+    };
+  }, [status]);
+
+  // Intercept keyboard events at the document level and send them to the VNC
+  // server using RFB.sendKey(). This bypasses all focus issues — we simply
+  // translate browser key events to X11 keysyms and send them directly.
+  useEffect(() => {
+    if (status !== "connected") return;
+
+    // Map browser event.key → X11 keysym
+    // Printable characters use their Unicode codepoint directly.
+    // Special keys are mapped explicitly.
+    const specialKeys: Record<string, number> = {
+      Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b,
+      Delete: 0xffff, Home: 0xff50, End: 0xff57,
+      PageUp: 0xff55, PageDown: 0xff56,
+      ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54,
+      Insert: 0xff63, F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1,
+      F5: 0xffc2, F6: 0xffc3, F7: 0xffc4, F8: 0xffc5,
+      F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
+      Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, Meta: 0xffe7,
+      CapsLock: 0xffe5, NumLock: 0xff7f, ScrollLock: 0xff14,
+      " ": 0x0020,
+    };
+
+    const toKeysym = (e: KeyboardEvent): number | null => {
+      if (e.key in specialKeys) return specialKeys[e.key];
+      // Single printable character → Unicode codepoint
+      if (e.key.length === 1) return e.key.charCodeAt(0);
+      return null;
+    };
+
+    const handler = (e: KeyboardEvent) => {
+      if (!vncActiveRef.current || !rfbRef.current) return;
+      // Don't steal from real HTML input fields
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const keysym = toKeysym(e);
+      if (keysym === null) return;
+
+      rfbRef.current.sendKey(keysym, e.code, e.type === "keydown");
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    document.addEventListener("keydown", handler, true);
+    document.addEventListener("keyup", handler, true);
+    return () => {
+      document.removeEventListener("keydown", handler, true);
+      document.removeEventListener("keyup", handler, true);
+    };
+  }, [status]);
 
   const handleReconnect = useCallback(() => {
     setStatus("connecting");
@@ -149,8 +239,8 @@ export default function VNCApp() {
 
   return (
     <div className="flex flex-col h-full bg-[#1a1a2e]">
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-2 py-1.5 bg-[#252547] border-b border-white/10">
+      {/* Toolbar — onMouseDown preventDefault keeps focus on VNC canvas */}
+      <div className="flex items-center gap-2 px-2 py-1.5 bg-[#252547] border-b border-white/10" onMouseDown={(e) => { if ((e.target as HTMLElement).tagName !== 'INPUT') e.preventDefault(); }}>
         {/* Status indicator */}
         <div className="flex items-center gap-1.5">
           <div className={`w-2 h-2 rounded-full ${
@@ -229,6 +319,16 @@ export default function VNCApp() {
         ref={canvasContainerRef}
         className="flex-1 overflow-hidden bg-black"
         style={{ position: "relative" }}
+        tabIndex={0}
+        onMouseDown={(e) => {
+          // Prevent the Window wrapper from stealing focus away from the canvas
+          e.stopPropagation();
+          // Let noVNC's own focusOnClick handle focusing the canvas
+          // If that doesn't work, force it after a microtask
+          requestAnimationFrame(() => {
+            rfbRef.current?.focus();
+          });
+        }}
       >
         {status === "connecting" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-white/50 gap-3">

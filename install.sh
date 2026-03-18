@@ -324,6 +324,13 @@ c.gateway.auth.mode='none';
 if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
+c.gateway.bind='lan';
+
+// Clean up keys that newer OpenClaw versions don't recognize
+if(c.agents&&c.agents.defaults){
+  delete c.agents.defaults.tools;
+  delete c.agents.defaults.systemPromptSuffix;
+}
 
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
@@ -460,6 +467,170 @@ step_chrome_install() {
   apt-get install -y chromium-browser
 }
 
+step_desktop_customize() {
+  # Enable GDM auto-login so desktop is available immediately after boot (needed for VNC)
+  local GDM_CONF="/etc/gdm3/custom.conf"
+  if [ -f "$GDM_CONF" ]; then
+    if ! grep -q "^AutomaticLoginEnable" "$GDM_CONF"; then
+      sed -i '/^\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin='"${SUDO_USER:-clawbox}" "$GDM_CONF"
+      echo "  GDM auto-login enabled for ${SUDO_USER:-clawbox}"
+    else
+      echo "  GDM auto-login already configured"
+    fi
+  fi
+
+  # Remove default NVIDIA desktop icons
+  local DESKTOP_DIR="/home/$SUDO_USER/Desktop"
+  if [ -d "$DESKTOP_DIR" ]; then
+    echo "  Removing desktop icons..."
+    rm -f "$DESKTOP_DIR"/*.desktop
+  fi
+
+  # Set a solid dark background (no wallpaper image)
+  local DBUS_ADDR
+  DBUS_ADDR=$(find /run/user/$(id -u "$SUDO_USER") -name 'bus' -type s 2>/dev/null | head -1)
+  if [ -n "$DBUS_ADDR" ]; then
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-options 'none'
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-uri ''
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-uri-dark ''
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background primary-color '#0a0a0f'
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background color-shading-type 'solid'
+    # Hide the Home folder icon from GNOME desktop-icons extension
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.shell.extensions.ding show-home false 2>/dev/null || true
+    echo "  Desktop background set to solid dark, Home icon hidden"
+  else
+    # User not logged in — write dconf defaults for next login
+    mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
+    cat > /etc/dconf/profile/user <<'DCONF_PROFILE'
+user-db:user
+system-db:local
+DCONF_PROFILE
+    cat > /etc/dconf/db/local.d/01-clawbox-desktop <<'DCONF_BG'
+[org/gnome/desktop/background]
+picture-options='none'
+picture-uri=''
+picture-uri-dark=''
+primary-color='#0a0a0f'
+color-shading-type='solid'
+
+[org/gnome/shell/extensions/ding]
+show-home=false
+DCONF_BG
+    dconf update 2>/dev/null || true
+    echo "  Desktop defaults configured for next login"
+  fi
+}
+
+step_vnc_install() {
+  # Install x11vnc (shares existing desktop) and websockify for Remote Desktop
+  if ! command -v x11vnc &>/dev/null; then
+    echo "  Installing x11vnc..."
+    apt-get install -y -qq x11vnc
+  else
+    echo "  x11vnc already installed"
+  fi
+  if ! command -v websockify &>/dev/null; then
+    echo "  Installing websockify..."
+    apt-get install -y -qq websockify
+  else
+    echo "  websockify already installed"
+  fi
+
+  # Set up VNC password (default: clawbox) if not already configured
+  local VNC_DIR="$CLAWBOX_HOME/.vnc"
+  if [ ! -f "$VNC_DIR/passwd" ]; then
+    mkdir -p "$VNC_DIR"
+    x11vnc -storepasswd clawbox "$VNC_DIR/passwd"
+    chmod 600 "$VNC_DIR/passwd"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$VNC_DIR"
+    echo "  VNC password set (default: clawbox)"
+  else
+    echo "  VNC password already configured"
+  fi
+
+  # Find the Xauthority file used by the display manager
+  local XAUTH_FILE
+  XAUTH_FILE=$(ps aux | grep -oP '\-auth \K\S+' | grep -v grep | head -1)
+  if [ -z "$XAUTH_FILE" ]; then
+    echo "  Warning: Could not find Xauthority file, trying common paths..."
+    for f in /run/user/128/gdm/Xauthority /run/user/*/gdm/Xauthority /var/run/lightdm/root/:0; do
+      if [ -f "$f" ]; then XAUTH_FILE="$f"; break; fi
+    done
+  fi
+  if [ -z "$XAUTH_FILE" ]; then
+    echo "  Error: No Xauthority file found. Is a display manager running?"
+    return 1
+  fi
+  echo "  Using Xauthority: $XAUTH_FILE"
+
+  # Install a helper script that launches x11vnc with the correct display and auth
+  cat > /usr/local/bin/clawbox-vnc-start <<'VNCSTART'
+#!/bin/bash
+# Wait for X11 socket to appear (up to 30s after boot)
+for i in $(seq 1 30); do
+  ls /tmp/.X11-unix/X* &>/dev/null && break
+  sleep 1
+done
+
+# Get display number from X11 socket
+DISPLAY_NUM=":$(ls /tmp/.X11-unix/ 2>/dev/null | head -1 | sed 's/X//')"
+[ "$DISPLAY_NUM" = ":" ] && DISPLAY_NUM=":0"
+
+# Extract auth file from running Xorg process (requires root to read GDM's auth)
+AUTH=$(ps aux | grep '[X]org' | grep -oP '\-auth \K\S+' | head -1)
+
+# Wait for auth file to exist
+for i in $(seq 1 15); do
+  [ -n "$AUTH" ] && [ -f "$AUTH" ] && break
+  sleep 1
+  AUTH=$(ps aux | grep '[X]org' | grep -oP '\-auth \K\S+' | head -1)
+done
+
+exec /usr/bin/x11vnc -display "$DISPLAY_NUM" -auth "$AUTH" -nopw -rfbport 5900 -forever -shared -noxdamage
+VNCSTART
+  chmod +x /usr/local/bin/clawbox-vnc-start
+
+  # Install systemd services for VNC and websockify
+  # x11vnc shares the existing X11 display (works on devices with a real desktop)
+  # Runs as root so it can read GDM's Xauthority file
+  cat > /etc/systemd/system/clawbox-vnc.service <<'VNCEOF'
+[Unit]
+Description=ClawBox VNC Server (x11vnc)
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/clawbox-vnc-start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCEOF
+
+  cat > /etc/systemd/system/clawbox-websockify.service <<WSEOF
+[Unit]
+Description=ClawBox WebSocket VNC Proxy
+After=clawbox-vnc.service
+Requires=clawbox-vnc.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/websockify 6080 localhost:5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+WSEOF
+
+  systemctl daemon-reload
+  systemctl enable clawbox-vnc.service clawbox-websockify.service
+  systemctl restart clawbox-vnc.service clawbox-websockify.service
+  echo "  VNC and websockify services installed and started"
+}
+
 step_code_server_install() {
   local CS_PORT="${CODE_SERVER_PORT:-8080}"
   if command -v code-server &>/dev/null; then
@@ -558,7 +729,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install chrome_install
-  code_server_install
+  desktop_customize vnc_install code_server_install
   openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -586,7 +757,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=19
+TOTAL_STEPS=20
 step=0
 log() {
   step=$((step + 1))
@@ -647,6 +818,12 @@ step_jtop_install
 
 log "Installing Chromium..."
 step_chrome_install
+
+log "Customizing desktop..."
+step_desktop_customize
+
+log "Installing VNC (Remote Desktop)..."
+step_vnc_install
 
 log "Installing code-server (VS Code in browser)..."
 step_code_server_install

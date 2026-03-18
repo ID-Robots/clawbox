@@ -7,7 +7,8 @@ import fs from "fs/promises";
 import path from "path";
 
 const exec = promisify(execFile);
-const HOME = process.env.HOME || "/home/clawbox";
+const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
+const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || path.join(HOME, ".openclaw");
 const OPENCLAW_CONFIG = path.join(OPENCLAW_HOME, "openclaw.json");
 
@@ -65,9 +66,9 @@ async function checkChromium(): Promise<{ installed: boolean; path?: string; ver
 // Check if browser is currently running
 async function isBrowserRunning(): Promise<{ running: boolean; pid?: number }> {
   try {
-    const { stdout } = await exec("pgrep", ["-f", "chromium.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
-    const pid = parseInt(stdout.trim().split("\n")[0]);
-    if (pid) return { running: true, pid };
+    const { stdout } = await exec("pgrep", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
+    const pids = stdout.trim().split("\n").map(s => parseInt(s)).filter(n => !isNaN(n) && n > 0);
+    if (pids.length > 0) return { running: true, pid: pids[0] };
   } catch {}
   return { running: false };
 }
@@ -82,13 +83,6 @@ async function readOpenClawConfig(): Promise<Record<string, unknown>> {
   }
 }
 
-// Write OpenClaw config
-async function writeOpenClawConfig(config: Record<string, unknown>): Promise<void> {
-  await fs.mkdir(OPENCLAW_HOME, { recursive: true });
-  const tmp = OPENCLAW_CONFIG + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(config, null, 2), "utf-8");
-  await fs.rename(tmp, OPENCLAW_CONFIG);
-}
 
 export async function GET() {
   try {
@@ -148,44 +142,7 @@ export async function POST(req: Request) {
         const profileDir = path.join(HOME, ".config", "clawbox-browser");
         await fs.mkdir(profileDir, { recursive: true });
 
-        const config = await readOpenClawConfig();
-
-        // Set up agents.defaults.tools.computer_use configuration
-        if (!config.agents) config.agents = {};
-        const agents = config.agents as Record<string, unknown>;
-        if (!agents.defaults) agents.defaults = {};
-        const defaults = agents.defaults as Record<string, unknown>;
-        if (!defaults.tools) defaults.tools = {};
-        const tools = defaults.tools as Record<string, unknown>;
-
-        tools.computer_use = {
-          enabled: true,
-          browser: {
-            command: chromium.path,
-            args: [
-              `--user-data-dir=${profileDir}`,
-              "--no-first-run",
-              "--no-default-browser-check",
-              "--disable-background-networking",
-              "--start-maximized",
-            ],
-            profileDir,
-          },
-        };
-
-        // Also configure the system prompt hint for browser use
-        if (!defaults.systemPromptSuffix) {
-          defaults.systemPromptSuffix = "";
-        }
-        const suffix = defaults.systemPromptSuffix as string;
-        if (!suffix.includes("browser")) {
-          defaults.systemPromptSuffix = (suffix ? suffix + "\n" : "") +
-            "You have access to a real Chromium browser on the desktop. Use computer_use tool to interact with web pages. The browser uses a persistent profile at ~/.config/clawbox-browser/ so sessions and logins are preserved.";
-        }
-
-        await writeOpenClawConfig(config);
-
-        // Also try to set via CLI if available
+        // Enable computer_use via CLI (avoids writing unrecognized keys to config)
         const openclawBin = findOpenClaw();
         try {
           await exec(openclawBin, [
@@ -197,13 +154,12 @@ export async function POST(req: Request) {
       }
 
       case "disable": {
-        const config = await readOpenClawConfig();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const tools = (config as any)?.agents?.defaults?.tools;
-        if (tools?.computer_use) {
-          tools.computer_use.enabled = false;
-        }
-        await writeOpenClawConfig(config);
+        const openclawBin = findOpenClaw();
+        try {
+          await exec(openclawBin, [
+            "config", "set", "agents.defaults.tools.computer_use.enabled", "false", "--json",
+          ], { timeout: 10000 });
+        } catch {}
         return NextResponse.json({ ok: true, enabled: false });
       }
 
@@ -222,31 +178,74 @@ export async function POST(req: Request) {
         const profileDir = path.join(HOME, ".config", "clawbox-browser");
         await fs.mkdir(profileDir, { recursive: true });
 
-        // Detect DISPLAY
-        const display = process.env.DISPLAY || ":0";
+        // Detect active X display dynamically
+        let display = process.env.DISPLAY || ":0";
+        try {
+          const { stdout: xdpy } = await exec("bash", ["-c",
+            "for d in 1 0 2; do if DISPLAY=\":$d\" xdpyinfo >/dev/null 2>&1; then echo \":$d\"; exit; fi; done; echo ':0'"
+          ], { timeout: 3000 });
+          display = xdpy.trim();
+        } catch {}
 
-        // Launch browser as the user (not root)
-        const user = process.env.SUDO_USER || process.env.USER || "clawbox";
+        // Launch browser
+        const isRoot = process.getuid?.() === 0;
         const args = [
           `--user-data-dir=${profileDir}`,
           "--no-first-run",
           "--no-default-browser-check",
           "--start-maximized",
+          "--disable-gpu",
+          "--disable-gpu-compositing",
+          "--disable-gpu-sandbox",
+          "--enable-features=UseOzonePlatform",
+          "--ozone-platform=x11",
+          "--in-process-gpu",
+          ...(isRoot ? ["--no-sandbox"] : []),
           "https://www.google.com",
         ];
 
         try {
-          // Try launching directly with DISPLAY set
-          const child = require("child_process").spawn(chromium.path, args, {
+          // Find Xauthority for the display
+          let xauth = "/run/user/1000/gdm/Xauthority";
+          try {
+            const { stdout: xa } = await exec("bash", ["-c",
+              "ps aux | grep '[X]org' | grep -oP '\\-auth \\K\\S+' | head -1"
+            ], { timeout: 3000 });
+            if (xa.trim()) xauth = xa.trim();
+          } catch {}
+
+          // Launch browser with correct DISPLAY and XAUTHORITY
+          // Use bash -c so the snap wrapper script works correctly
+          const launchCmd = `${chromium.path} ${args.map(a => `'${a}'`).join(" ")}`;
+          console.log(`[browser] Launching: bash -c ${launchCmd}`);
+          console.log(`[browser] DISPLAY=${display} XAUTHORITY=${xauth} USER=${CLAWBOX_USER}`);
+          const child = require("child_process").spawn("bash", ["-c", launchCmd], {
             detached: true,
-            stdio: "ignore",
-            env: { ...process.env, DISPLAY: display },
+            stdio: ["ignore", "pipe", "pipe"],
+            env: {
+              ...process.env,
+              DISPLAY: display,
+              XAUTHORITY: xauth,
+              DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+              HOME,
+            },
+          });
+
+          child.stderr?.on("data", (d: Buffer) => {
+            console.error(`[browser-stderr] ${d.toString().trim()}`);
+          });
+          child.on("exit", (code: number) => {
+            console.log(`[browser] Process exited with code ${code}`);
           });
           child.unref();
 
           // Wait briefly and check if it started
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 3000));
           const status = await isBrowserRunning();
+          const ok = status.running;
+          if (!ok) {
+            return NextResponse.json({ error: "Browser process exited immediately. Check server logs." }, { status: 500 });
+          }
           return NextResponse.json({ ok: true, pid: status.pid || child.pid });
         } catch (err) {
           return NextResponse.json({ error: `Failed to launch browser: ${err instanceof Error ? err.message : "unknown"}` }, { status: 500 });
@@ -259,9 +258,17 @@ export async function POST(req: Request) {
           return NextResponse.json({ ok: true, wasRunning: false });
         }
         try {
-          // Send SIGTERM to the process group
-          await exec("pkill", ["-f", "chromium.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
+          await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
         } catch {}
+        // Wait for processes to die, then clean up stale lock files
+        // so the next launch doesn't think an instance is already running
+        await new Promise(r => setTimeout(r, 1000));
+        const profileDir = path.join(HOME, ".config", "clawbox-browser");
+        await Promise.all(
+          ["SingletonLock", "SingletonSocket", "SingletonCookie"].map(f =>
+            fs.unlink(path.join(profileDir, f)).catch(() => {})
+          )
+        );
         return NextResponse.json({ ok: true, wasRunning: true });
       }
 

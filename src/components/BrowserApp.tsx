@@ -17,7 +17,11 @@ interface BrowserStatus {
   enabled: boolean;
 }
 
-export default function BrowserApp() {
+interface BrowserAppProps {
+  onOpenApp?: (appId: string) => void;
+}
+
+export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const [status, setStatus] = useState<BrowserStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -88,7 +92,13 @@ export default function BrowserApp() {
       <div className="shrink-0 px-6 pt-6 pb-4 border-b border-white/10">
         <div className="flex items-center gap-3 mb-1">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
-            <span className="material-symbols-rounded text-white" style={{ fontSize: 24 }}>web_asset</span>
+            <svg className="w-6 h-6" viewBox="0 0 135.47 135.47">
+              <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>
+              <path d="m67.733-1e-6c-25.07 0-46.942 13.63-58.654 33.875l29.324 50.792 29.33-16.933v-33.867h58.65c-11.714-20.24-33.583-33.867-58.65-33.867z" fill="#1767d1"/>
+              <path d="m0 67.733c0 37.408 30.324 67.733 67.733 67.733l29.33-50.8-29.33-16.933-29.33 16.933-29.324-50.792c-5.7637 9.9632-9.0794 21.519-9.0794 33.858" fill="#679ef5"/>
+              <path d="m101.6 67.733c0 18.704-15.163 33.867-33.867 33.867-18.704 0-33.867-15.163-33.867-33.867s15.163-33.867 33.867-33.867c18.704 0 33.867 15.163 33.867 33.867" fill="#fff"/>
+              <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
+            </svg>
           </div>
           <div>
             <h1 className="text-lg font-semibold">Browser Integration</h1>
@@ -266,6 +276,17 @@ export default function BrowserApp() {
                       Open Browser
                     </span>
                   )}
+                </button>
+              )}
+              {onOpenApp && (
+                <button
+                  onClick={() => onOpenApp("vnc")}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
+                    Preview
+                  </span>
                 </button>
               )}
             </div>

@@ -8,7 +8,7 @@ Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox
 ExecStartPre=/home/clawbox/clawbox/scripts/gateway-pre-start.sh
-ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind loopback
+ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind lan --token clawbox
 Restart=always
 RestartSec=5
 Environment=HOME=/home/clawbox

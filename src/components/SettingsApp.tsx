@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import StatusMessage from "./StatusMessage";
 import AIModelsStep from "./AIModelsStep";
+import type { StepStatus, UpdateState } from "@/lib/updater";
 
 /* ── Types ── */
 
@@ -91,6 +92,24 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 }
 
 
+/* ── Update step helpers ── */
+
+function updateStepTextClass(status: StepStatus): string {
+  switch (status) {
+    case "running": return "text-orange-400 font-medium";
+    case "completed": return "text-white/40";
+    case "failed": return "text-red-400";
+    default: return "text-white/25";
+  }
+}
+
+function UpdateStepIcon({ status }: { status: StepStatus }) {
+  if (status === "running") return <div className="w-4 h-4 border-2 border-orange-400 border-t-transparent rounded-full animate-spin shrink-0" />;
+  if (status === "completed") return <div className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[10px] font-bold shrink-0">&#10003;</div>;
+  if (status === "failed") return <div className="w-4 h-4 rounded-full bg-red-500 flex items-center justify-center text-white text-[10px] font-bold shrink-0">&#10005;</div>;
+  return <div className="w-4 h-4 rounded-full bg-white/10 shrink-0" />;
+}
+
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const [section, setSection] = useState<Section>("appearance");
 
@@ -103,6 +122,89 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
   }, [section]);
+
+  /* ── System update ── */
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [updateStarted, setUpdateStarted] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateConfirm, setUpdateConfirm] = useState(false);
+  const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
+  const [versionLoading, setVersionLoading] = useState(false);
+  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
+  const [branchInput, setBranchInput] = useState("");
+  const [branchSaving, setBranchSaving] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const updatePollControllerRef = useRef<AbortController | null>(null);
+
+  const stopUpdatePolling = useCallback(() => {
+    if (updatePollRef.current) { clearInterval(updatePollRef.current); updatePollRef.current = null; }
+    updatePollControllerRef.current?.abort();
+    updatePollControllerRef.current = null;
+  }, []);
+
+  const startUpdatePolling = useCallback(() => {
+    if (updatePollRef.current) return;
+    const controller = new AbortController();
+    updatePollControllerRef.current = controller;
+    let failureCount = 0;
+    let serverWentDown = false;
+    updatePollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/setup-api/update/status", { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!res.ok) { failureCount++; if (failureCount >= 3) serverWentDown = true; return; }
+        if (serverWentDown) { window.location.reload(); return; }
+        failureCount = 0;
+        const data: UpdateState = await res.json();
+        if (controller.signal.aborted) return;
+        setUpdateState(data);
+        if (data.phase !== "running") stopUpdatePolling();
+      } catch {
+        if (controller.signal.aborted) return;
+        failureCount++;
+        if (failureCount >= 3) serverWentDown = true;
+      }
+    }, 2000);
+  }, [stopUpdatePolling]);
+
+  useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
+
+  const isUpdateRunning = updateStarted && updateState?.phase === "running";
+
+  const openUpdateConfirm = async () => {
+    setVersionLoading(true);
+    setUpdateConfirm(true);
+    try {
+      const [statusRes, branchRes] = await Promise.all([
+        fetch("/setup-api/update/status"),
+        fetch("/setup-api/system/update-branch"),
+      ]);
+      if (statusRes.ok) { const data = await statusRes.json(); if (data.versions) setVersionInfo(data.versions); }
+      if (branchRes.ok) { const data = await branchRes.json(); setUpdateBranch(data.branch ?? null); setBranchInput(data.branch ?? ""); }
+    } catch {} finally { setVersionLoading(false); }
+  };
+
+  const saveUpdateBranch = async (branch: string) => {
+    setBranchSaving(true);
+    setBranchError(null);
+    try {
+      const res = await fetch("/setup-api/system/update-branch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ branch: branch || null }) });
+      const data = await res.json();
+      if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || "Failed to set branch"); }
+    } catch (err) { setBranchError(err instanceof Error ? err.message : "Failed to set branch"); } finally { setBranchSaving(false); }
+  };
+
+  const triggerUpdate = async () => {
+    setUpdateStarted(true);
+    setUpdateError(null);
+    setUpdateState(null);
+    try {
+      const res = await fetch("/setup-api/update/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
+      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : "Failed to start update"); return; }
+      startUpdatePolling();
+    } catch (err) { setUpdateError(err instanceof Error ? err.message : "Failed to start update"); }
+  };
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
@@ -635,6 +737,131 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="flex items-center justify-center py-12 text-white/30">
                 <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
                 <span className="text-sm">Loading system stats...</span>
+              </div>
+            )}
+
+            {/* System Update card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>system_update</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">System Update</label>
+              </div>
+
+              {/* Update progress (when running) */}
+              {updateStarted && (
+                <div className="mb-4">
+                  <div className="text-xs font-semibold text-white/70 mb-2">
+                    {updateState?.phase === "completed" ? <span className="text-emerald-400">Update Complete</span>
+                      : updateState?.phase === "failed" ? <span className="text-red-400">Update Failed</span>
+                      : "Updating..."}
+                  </div>
+                  {updateError && (
+                    <div className="mb-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">{updateError}</div>
+                  )}
+                  {updateState && (
+                    <div className="space-y-0.5">
+                      {updateState.steps.map((step) => (
+                        <div key={step.id} className="flex items-center gap-2.5 py-1 px-2">
+                          <UpdateStepIcon status={step.status} />
+                          <span className={`flex-1 text-xs ${updateStepTextClass(step.status)}`}>{step.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {updateState?.phase === "failed" && (
+                    <button type="button" onClick={triggerUpdate} className="mt-3 px-4 py-2 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer hover:bg-orange-600 transition-colors">
+                      Retry Update
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={isUpdateRunning ? undefined : openUpdateConfirm}
+                disabled={isUpdateRunning}
+                className="w-full py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-500 hover:scale-[1.02] transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span>
+                {isUpdateRunning ? "Updating..." : "Check for Updates"}
+              </button>
+            </div>
+
+            {/* Update confirmation modal */}
+            {updateConfirm && (
+              <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+                <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full">
+                  <h3 className="text-lg font-bold text-white/90 mb-2">System Update</h3>
+                  <p className="text-sm text-white/50 mb-4 leading-relaxed">
+                    This will pull the latest updates and restart the device. The process may take a few minutes.
+                  </p>
+                  {versionLoading ? (
+                    <div className="mb-4 text-xs text-white/30">Checking versions...</div>
+                  ) : versionInfo && (
+                    <div className="mb-4 space-y-2 text-xs">
+                      <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
+                        <span className="text-white/50 font-medium">ClawBox</span>
+                        <span className="text-white/80">
+                          {versionInfo.clawbox.current}
+                          {versionInfo.clawbox.target && versionInfo.clawbox.target !== versionInfo.clawbox.current && (
+                            <span className="text-white/30">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
+                        <span className="text-white/50 font-medium">OpenClaw</span>
+                        <span className="text-white/80">
+                          {versionInfo.openclaw.current ?? "not installed"}
+                          {versionInfo.openclaw.target && versionInfo.openclaw.target !== versionInfo.openclaw.current && (
+                            <span className="text-white/30">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {/* Branch selector */}
+                  {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
+                    <div className="mb-4">
+                      <label htmlFor="settings-update-branch" className="text-xs text-white/30 mb-1 block">Update branch</label>
+                      <div className="flex gap-2">
+                        <input
+                          id="settings-update-branch"
+                          type="text"
+                          value={branchInput}
+                          onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
+                          placeholder="main"
+                          className="flex-1 bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/80 placeholder:text-white/20 outline-none focus:border-orange-500"
+                        />
+                        <button
+                          type="button"
+                          disabled={branchSaving || branchInput === (updateBranch ?? "")}
+                          onClick={() => saveUpdateBranch(branchInput)}
+                          className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
+                        >
+                          {branchSaving ? "..." : "Set"}
+                        </button>
+                      </div>
+                      {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
+                      {updateBranch && (
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
+                          <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">Clear</button>
+                        </div>
+                      )}
+                      {!updateBranch && !branchError && (
+                        <p className="mt-1 text-xs text-white/20">Leave empty to follow current branch or main</p>
+                      )}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-3 justify-end">
+                    <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-white/80 border border-white/10 rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
+                      Cancel
+                    </button>
+                    <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
+                      Update
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
