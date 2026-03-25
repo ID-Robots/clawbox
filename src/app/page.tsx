@@ -1707,13 +1707,14 @@ export default function ChromeDesktop() {
               <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> Settings
               </button>
+              <div className="border-t border-white/10 my-1" />
+              <button onClick={() => window.location.reload()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> Refresh
+              </button>
               {!pwaInstalled && (
-                <>
-                  <div className="border-t border-white/10 my-1" />
-                  <button onClick={() => { pwaPrompt ? handlePwaInstall() : window.open('https://clawbox.local', '_blank'); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-orange-400">
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>install_desktop</span> {pwaPrompt ? 'Install ClawBox App' : 'Install as App'}
-                  </button>
-                </>
+                <button onClick={() => { pwaPrompt ? handlePwaInstall() : window.open('https://clawbox.local', '_blank'); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-orange-400">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>install_desktop</span> {pwaPrompt ? 'Install ClawBox App' : 'Install as App'}
+                </button>
               )}
             </>
           )}
