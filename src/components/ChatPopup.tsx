@@ -224,21 +224,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
     // Fetch WS config from server (gets the token)
     let token: string
+    let wsUrl: string
     try {
       const res = await fetch('/setup-api/gateway/ws-config')
       const config = await res.json()
       token = config.token
+      wsUrl = config.wsUrl
       gatewayTokenRef.current = token
     } catch {
       setStatus('error')
       setErrorMsg('Failed to get gateway config')
       return
     }
-
-    // Build WS URL using the browser's hostname (not server-side host)
-    // so it works from phones/external devices, not just localhost
-    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${wsProto}//${window.location.host}`
 
     // Define handlers BEFORE creating the WebSocket so no events are missed
     let connectSent = false

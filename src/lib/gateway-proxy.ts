@@ -82,7 +82,7 @@ export async function serveGatewayHTML(
   var SK="openclaw.control.settings.v1";
   var TP="openclaw.control.token.v1:";
   try{
-    var wsUrl="ws://"+location.hostname+":${GATEWAY_PORT}";
+    var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host;
     var s=JSON.parse(localStorage.getItem(SK)||"{}");
     if(s.gatewayUrl!==wsUrl){s.gatewayUrl=wsUrl;localStorage.setItem(SK,JSON.stringify(s))}
     ${safeToken ? `var t=${safeToken};var tk=TP+wsUrl;if(sessionStorage.getItem(tk)!==t){sessionStorage.setItem(tk,t)}` : ""}

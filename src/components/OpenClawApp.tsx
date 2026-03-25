@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 export default function OpenClawApp() {
   const [status, setStatus] = useState<"checking" | "running" | "not-running">("checking");
+  const [wsConfig, setWsConfig] = useState<{ wsUrl: string; token: string } | null>(null);
   const retryRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -14,6 +15,12 @@ export default function OpenClawApp() {
       const res = await fetch("/setup-api/gateway/health", { signal: AbortSignal.timeout(5000) });
       const data = await res.json();
       if (data.available) {
+        // Fetch WS config for token + URL to pass to the SPA
+        try {
+          const cfgRes = await fetch("/setup-api/gateway/ws-config", { signal: AbortSignal.timeout(3000) });
+          const cfg = await cfgRes.json();
+          if (cfg.wsUrl) setWsConfig(cfg);
+        } catch { /* token injection via HTML will be the fallback */ }
         setStatus("running");
         retryRef.current = 0;
         return;
@@ -58,12 +65,15 @@ export default function OpenClawApp() {
     );
   }
 
-  // Load through the Next.js proxy (same origin, port 80) so the gateway HTML
-  // gets the ClawBox bar and auth token injection. The catch-all route at
-  // /[...gateway] serves the gateway SPA with credentials pre-filled.
+  // Pass gatewayUrl + token via URL so the SPA picks them up directly,
+  // avoiding sessionStorage key mismatches between port 80 and 18789.
+  const iframeSrc = wsConfig
+    ? `/chat?gatewayUrl=${encodeURIComponent(wsConfig.wsUrl)}#token=${encodeURIComponent(wsConfig.token)}`
+    : "/chat";
+
   return (
     <iframe
-      src="/chat"
+      src={iframeSrc}
       className="w-full h-full border-0"
       title="OpenClaw Control"
     />

@@ -67,9 +67,10 @@ function uuid(): string {
 
 interface ChatAppProps {
   onThinkingChange?: (thinking: boolean) => void
+  hideHeader?: boolean
 }
 
-function ChatApp({ onThinkingChange }: ChatAppProps) {
+function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -126,19 +127,18 @@ function ChatApp({ onThinkingChange }: ChatAppProps) {
     connectedOnceRef.current = false
 
     let token: string
+    let wsUrl: string
     try {
       const res = await fetch('/setup-api/gateway/ws-config')
       const config = await res.json()
       token = config.token
+      wsUrl = config.wsUrl
       gatewayTokenRef.current = token
     } catch {
       setStatus('error')
       setErrorMsg('Failed to get gateway config')
       return
     }
-
-    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${wsProto}//${window.location.host}`
 
     let connectSent = false
     let ws: WebSocket
@@ -402,41 +402,43 @@ function ChatApp({ onThinkingChange }: ChatAppProps) {
       background: '#0d1117',
       overflow: 'hidden',
     }}>
-      {/* Connection status bar */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '6px 14px',
-        background: 'linear-gradient(135deg, rgba(249,115,22,0.12) 0%, rgba(13,17,23,0.95) 100%)',
-        borderBottom: '1px solid rgba(249,115,22,0.15)',
-        flexShrink: 0,
-      }}>
-        <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, opacity: 0.7 }} />
-        <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>Chat</span>
-        {status === 'connecting' && (
-          <div style={{
-            width: 10, height: 10,
-            border: '2px solid rgba(249,115,22,0.3)',
-            borderTopColor: '#f97316',
-            borderRadius: '50%',
-            animation: 'chatapp-spin 0.8s linear infinite',
-          }} />
-        )}
-        {status === 'connected' && (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
-        )}
-        {status === 'error' && (
-          <button
-            onClick={connect}
-            style={{
-              background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-              color: '#f97316', borderRadius: 6, padding: '2px 10px', cursor: 'pointer',
-              fontSize: 12, fontWeight: 500,
-            }}
-          >Reconnect</button>
-        )}
-      </div>
+      {/* Connection status bar — hidden when parent provides its own header */}
+      {!hideHeader && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '6px 14px',
+          background: 'linear-gradient(135deg, rgba(249,115,22,0.12) 0%, rgba(13,17,23,0.95) 100%)',
+          borderBottom: '1px solid rgba(249,115,22,0.15)',
+          flexShrink: 0,
+        }}>
+          <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, opacity: 0.7 }} />
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>Chat</span>
+          {status === 'connecting' && (
+            <div style={{
+              width: 10, height: 10,
+              border: '2px solid rgba(249,115,22,0.3)',
+              borderTopColor: '#f97316',
+              borderRadius: '50%',
+              animation: 'chatapp-spin 0.8s linear infinite',
+            }} />
+          )}
+          {status === 'connected' && (
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
+          )}
+          {status === 'error' && (
+            <button
+              onClick={connect}
+              style={{
+                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                color: '#f97316', borderRadius: 6, padding: '2px 10px', cursor: 'pointer',
+                fontSize: 12, fontWeight: 500,
+              }}
+            >Reconnect</button>
+          )}
+        </div>
+      )}
 
       {/* Messages area */}
       <div style={{

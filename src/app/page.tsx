@@ -1045,7 +1045,7 @@ export default function ChromeDesktop() {
       case "vscode":
         return <VSCodeApp />;
       case "chat":
-        return <ChatApp onThinkingChange={setBotThinking} />;
+        return <ChatApp onThinkingChange={setBotThinking} hideHeader={isMobile} />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -1134,22 +1134,31 @@ export default function ChromeDesktop() {
           </div>
         </div>
       )}
-      {/* PWA install banner */}
-      {pwaPrompt && !pwaInstalled && !pwaBannerDismissed && (
+      {/* PWA install banner — native prompt or manual instructions */}
+      {!pwaInstalled && !pwaBannerDismissed && (
         <div className="fixed top-0 left-0 right-0 z-[20000] flex items-center gap-3 px-4 py-2.5 bg-gradient-to-r from-[#1e2939]/95 to-[#0d1117]/95 backdrop-blur-md border-b border-orange-500/20"
           style={{ paddingTop: "max(env(safe-area-inset-top), 8px)" }}
         >
           <img src="/icon-192.png" alt="" className="w-9 h-9 rounded-lg shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold text-white/90">Install ClawBox</div>
-            <div className="text-xs text-white/50 truncate">Add to home screen for the best experience</div>
+            <div className="text-xs text-white/50 truncate">{pwaPrompt ? 'Add to home screen for the best experience' : 'Tap ⋮ → "Add to Home screen"'}</div>
           </div>
-          <button
-            onClick={handlePwaInstall}
-            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500 text-white hover:bg-orange-400 transition-colors shrink-0 cursor-pointer"
-          >
-            Install
-          </button>
+          {pwaPrompt ? (
+            <button
+              onClick={handlePwaInstall}
+              className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500 text-white hover:bg-orange-400 transition-colors shrink-0 cursor-pointer"
+            >
+              Install
+            </button>
+          ) : (
+            <button
+              onClick={dismissPwaBanner}
+              className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500/20 text-orange-400 border border-orange-500/30 hover:bg-orange-500/30 transition-colors shrink-0 cursor-pointer"
+            >
+              Got it
+            </button>
+          )}
           <button
             onClick={dismissPwaBanner}
             className="p-1 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/10 transition-colors cursor-pointer"
@@ -1698,6 +1707,14 @@ export default function ChromeDesktop() {
               <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> Settings
               </button>
+              {!pwaInstalled && (
+                <>
+                  <div className="border-t border-white/10 my-1" />
+                  <button onClick={() => { pwaPrompt ? handlePwaInstall() : window.open('https://clawbox.local', '_blank'); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-orange-400">
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>install_desktop</span> {pwaPrompt ? 'Install ClawBox App' : 'Install as App'}
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
