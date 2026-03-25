@@ -64,10 +64,10 @@ function waitForTermination(): Promise<void> {
  */
 async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   const service = `clawbox-root-update@${stepId}.service`;
-  execFile("systemctl", ["reset-failed", service], {
+  execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", service], {
     timeout: 10_000,
   }).catch(() => {});
-  await execFile("systemctl", ["start", "--no-block", service], {
+  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", "--no-block", service], {
     timeout: 10_000,
   });
 }
@@ -210,10 +210,10 @@ const UPDATE_STEPS: UpdateStepDef[] = [
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   const serviceName = `clawbox-root-update@${stepId}.service`;
-  await execFile("systemctl", ["reset-failed", serviceName], {
+  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", serviceName], {
     timeout: 10_000,
   }).catch(() => {});
-  await execFile("systemctl", ["start", serviceName], {
+  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", serviceName], {
     timeout: timeoutMs + 30_000,
   });
 }

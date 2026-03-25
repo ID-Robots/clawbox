@@ -163,7 +163,7 @@ export async function POST() {
     // 8. Schedule a full system reboot (short delay so the response reaches the client)
     setTimeout(async () => {
       try {
-        await execFile("systemctl", ["reboot"], { timeout: 10_000 });
+        await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
       } catch (err) {
         console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
       }

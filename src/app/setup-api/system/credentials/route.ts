@@ -92,10 +92,10 @@ export async function POST(request: Request) {
     });
     try {
       const serviceName = "clawbox-root-update@chpasswd.service";
-      await execFile("systemctl", ["reset-failed", serviceName], {
+      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", serviceName], {
         timeout: 10_000,
       }).catch(() => {});
-      await execFile("systemctl", ["start", serviceName], {
+      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", serviceName], {
         timeout: 30_000,
       });
     } catch (err) {

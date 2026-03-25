@@ -71,7 +71,7 @@ export default function VNCApp() {
           setStatus("connected");
           setError(null);
           // Focus the VNC canvas so keyboard events pass through
-          rfb.focus();
+          rfb?.focus();
           // Ensure the internal canvas element is focusable
           const canvas = canvasContainerRef.current?.querySelector("canvas");
           if (canvas) {

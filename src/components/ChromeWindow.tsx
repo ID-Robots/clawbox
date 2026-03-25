@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 
 interface ChromeWindowProps {
   title: string;
-  icon: ReactNode;
+  icon?: ReactNode;
   children: ReactNode;
   appId?: string;
   defaultWidth?: number;
@@ -85,7 +85,6 @@ function getInitialPosition(width: number, height: number) {
 
 export default function ChromeWindow({
   title,
-  icon,
   children,
   appId,
   defaultWidth = 800,
@@ -379,9 +378,8 @@ export default function ChromeWindow({
         onTouchStart={handleDragStart}
         onDoubleClick={handleMaximize}
       >
-        {/* Left: icon + title */}
+        {/* Left: title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <div className="w-4 h-4 flex items-center justify-center shrink-0">{icon}</div>
           <span className={`text-xs font-medium truncate ${isActive ? "text-white/80" : "text-white/50"}`}>{title}</span>
         </div>
 

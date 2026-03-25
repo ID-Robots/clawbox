@@ -78,7 +78,7 @@ step_ensure_user() {
 step_apt_update() {
   apt-get update -qq
   apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
-  # Node.js 22 (required for terminal server — node-pty is incompatible with bun)
+  # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
   else
@@ -140,10 +140,16 @@ step_git_pull() {
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
   else
-    echo "  Repository exists, pulling latest..."
+    local CURRENT_BRANCH
+    CURRENT_BRANCH=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" branch --show-current)
+    # Only switch branches if CLAWBOX_BRANCH was explicitly set
+    local TARGET_BRANCH="${CLAWBOX_BRANCH:-$CURRENT_BRANCH}"
+    echo "  Repository exists, pulling latest on branch '$TARGET_BRANCH'..."
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$REPO_BRANCH" 2>/dev/null || true
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$REPO_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
+    if [ "$TARGET_BRANCH" != "$CURRENT_BRANCH" ]; then
+      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null || true
+    fi
+    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
     # Fix .git ownership — git operations run as root create root-owned files
     # which block the clawbox user from pulling later (e.g. FETCH_HEAD)
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
@@ -164,8 +170,8 @@ step_install_bun() {
 
 step_build() {
   cd "$PROJECT_DIR"
-  as_clawbox "$BUN" install
-  as_clawbox "$BUN" run build
+  as_clawbox_login "cd $PROJECT_DIR && $BUN install"
+  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"
     exit 1
@@ -175,7 +181,7 @@ step_build() {
 
 step_openclaw_install() {
   local LATEST
-  LATEST=$("$BUN" pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
+  LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
   local TARGET="${LATEST:-$OPENCLAW_VERSION}"
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED
@@ -189,25 +195,12 @@ step_openclaw_install() {
   mkdir -p "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-  as_clawbox -H "$BUN" install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX" 2>/dev/null || as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
+  as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
   if [ ! -x "$OPENCLAW_BIN" ]; then
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
   fi
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
-
-  # Install ClawHub CLI (skill installer for app store)
-  CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
-  if [ ! -x "$CLAWHUB_BIN" ]; then
-    as_clawbox -H npm install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null || true
-    if [ -x "$CLAWHUB_BIN" ]; then
-      echo "  ClawHub CLI installed ✓"
-    else
-      echo "  Warning: ClawHub CLI install failed — app store installs won't work"
-    fi
-  else
-    echo "  ClawHub CLI already installed ✓"
-  fi
 }
 
 step_openclaw_patch() {
@@ -295,7 +288,7 @@ step_openclaw_config() {
   # in a single node invocation to avoid reading/writing the config file twice
   if [ -f "$OPENCLAW_CONFIG" ]; then
     CLAWBOX_CONFIG="$CLAWBOX_CONFIG" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" \
-      CLAWBOX_HOME="$CLAWBOX_HOME" "$BUN" -e "$(cat <<'NODE'
+      CLAWBOX_HOME="$CLAWBOX_HOME" node <<'NODE'
 const fs=require('fs');
 const cfgPath=process.env.OPENCLAW_CONFIG;
 const home=process.env.CLAWBOX_HOME;
@@ -324,17 +317,9 @@ c.gateway.auth.mode='none';
 if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
-c.gateway.bind='lan';
-
-// Clean up keys that newer OpenClaw versions don't recognize
-if(c.agents&&c.agents.defaults){
-  delete c.agents.defaults.tools;
-  delete c.agents.defaults.systemPromptSuffix;
-}
 
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
-)"
     echo "  OpenClaw config updated"
   fi
 
@@ -396,6 +381,13 @@ step_systemd_services() {
     [[ "$svc" == *@* ]] && continue
     systemctl enable "$svc"
   done
+  # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
+  if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
+    cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
+    chmod 0440 /etc/sudoers.d/clawbox
+    chown root:root /etc/sudoers.d/clawbox
+    echo "  Sudoers rules installed"
+  fi
   echo "  Services installed and enabled"
 }
 
@@ -437,11 +429,7 @@ step_performance_mode() {
     systemctl daemon-reload
     systemctl enable clawbox-performance.service
   fi
-  # Disable snapd to free ~22MB RAM — not needed on this device
-  if systemctl is-enabled --quiet snapd 2>/dev/null; then
-    systemctl disable --now snapd snapd.socket 2>/dev/null || true
-    echo "  Disabled snapd"
-  fi
+  # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   # Install sudoers rule so the web UI can run optimize-ollama.sh as root
@@ -459,251 +447,19 @@ step_jtop_install() {
   echo "  jtop installed"
 }
 
-step_chrome_install() {
-  if command -v chromium-browser &>/dev/null; then
-    echo "  Chromium already installed"
-    return
-  fi
-  apt-get install -y chromium-browser
-}
-
-step_desktop_customize() {
-  # Enable GDM auto-login so desktop is available immediately after boot (needed for VNC)
-  local GDM_CONF="/etc/gdm3/custom.conf"
-  if [ -f "$GDM_CONF" ]; then
-    if ! grep -q "^AutomaticLoginEnable" "$GDM_CONF"; then
-      sed -i '/^\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin='"${SUDO_USER:-clawbox}" "$GDM_CONF"
-      echo "  GDM auto-login enabled for ${SUDO_USER:-clawbox}"
-    else
-      echo "  GDM auto-login already configured"
-    fi
-  fi
-
-  # Remove default NVIDIA desktop icons
-  local DESKTOP_DIR="/home/$SUDO_USER/Desktop"
-  if [ -d "$DESKTOP_DIR" ]; then
-    echo "  Removing desktop icons..."
-    rm -f "$DESKTOP_DIR"/*.desktop
-  fi
-
-  # Set a solid dark background (no wallpaper image)
-  local DBUS_ADDR
-  DBUS_ADDR=$(find /run/user/$(id -u "$SUDO_USER") -name 'bus' -type s 2>/dev/null | head -1)
-  if [ -n "$DBUS_ADDR" ]; then
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-options 'none'
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-uri ''
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background picture-uri-dark ''
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background primary-color '#0a0a0f'
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.desktop.background color-shading-type 'solid'
-    # Hide the Home folder icon from GNOME desktop-icons extension
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_ADDR" gsettings set org.gnome.shell.extensions.ding show-home false 2>/dev/null || true
-    echo "  Desktop background set to solid dark, Home icon hidden"
+step_ollama_install() {
+  if command -v ollama &>/dev/null; then
+    echo "  Ollama already installed"
   else
-    # User not logged in — write dconf defaults for next login
-    mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
-    cat > /etc/dconf/profile/user <<'DCONF_PROFILE'
-user-db:user
-system-db:local
-DCONF_PROFILE
-    cat > /etc/dconf/db/local.d/01-clawbox-desktop <<'DCONF_BG'
-[org/gnome/desktop/background]
-picture-options='none'
-picture-uri=''
-picture-uri-dark=''
-primary-color='#0a0a0f'
-color-shading-type='solid'
-
-[org/gnome/shell/extensions/ding]
-show-home=false
-DCONF_BG
-    dconf update 2>/dev/null || true
-    echo "  Desktop defaults configured for next login"
+    echo "  Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
   fi
-}
-
-step_vnc_install() {
-  # Install x11vnc (shares existing desktop) and websockify for Remote Desktop
-  if ! command -v x11vnc &>/dev/null; then
-    echo "  Installing x11vnc..."
-    apt-get install -y -qq x11vnc
-  else
-    echo "  x11vnc already installed"
-  fi
-  if ! command -v websockify &>/dev/null; then
-    echo "  Installing websockify..."
-    apt-get install -y -qq websockify
-  else
-    echo "  websockify already installed"
-  fi
-
-  # Set up VNC password (default: clawbox) if not already configured
-  local VNC_DIR="$CLAWBOX_HOME/.vnc"
-  if [ ! -f "$VNC_DIR/passwd" ]; then
-    mkdir -p "$VNC_DIR"
-    x11vnc -storepasswd clawbox "$VNC_DIR/passwd"
-    chmod 600 "$VNC_DIR/passwd"
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$VNC_DIR"
-    echo "  VNC password set (default: clawbox)"
-  else
-    echo "  VNC password already configured"
-  fi
-
-  # Find the Xauthority file used by the display manager
-  local XAUTH_FILE
-  XAUTH_FILE=$(ps aux | grep -oP '\-auth \K\S+' | grep -v grep | head -1)
-  if [ -z "$XAUTH_FILE" ]; then
-    echo "  Warning: Could not find Xauthority file, trying common paths..."
-    for f in /run/user/128/gdm/Xauthority /run/user/*/gdm/Xauthority /var/run/lightdm/root/:0; do
-      if [ -f "$f" ]; then XAUTH_FILE="$f"; break; fi
-    done
-  fi
-  if [ -z "$XAUTH_FILE" ]; then
-    echo "  Error: No Xauthority file found. Is a display manager running?"
-    return 1
-  fi
-  echo "  Using Xauthority: $XAUTH_FILE"
-
-  # Install a helper script that launches x11vnc with the correct display and auth
-  cat > /usr/local/bin/clawbox-vnc-start <<'VNCSTART'
-#!/bin/bash
-# Wait for X11 socket to appear (up to 30s after boot)
-for i in $(seq 1 30); do
-  ls /tmp/.X11-unix/X* &>/dev/null && break
-  sleep 1
-done
-
-# Get display number from X11 socket
-DISPLAY_NUM=":$(ls /tmp/.X11-unix/ 2>/dev/null | head -1 | sed 's/X//')"
-[ "$DISPLAY_NUM" = ":" ] && DISPLAY_NUM=":0"
-
-# Extract auth file from running Xorg process (requires root to read GDM's auth)
-AUTH=$(ps aux | grep '[X]org' | grep -oP '\-auth \K\S+' | head -1)
-
-# Wait for auth file to exist
-for i in $(seq 1 15); do
-  [ -n "$AUTH" ] && [ -f "$AUTH" ] && break
-  sleep 1
-  AUTH=$(ps aux | grep '[X]org' | grep -oP '\-auth \K\S+' | head -1)
-done
-
-exec /usr/bin/x11vnc -display "$DISPLAY_NUM" -auth "$AUTH" -nopw -rfbport 5900 -forever -shared -noxdamage
-VNCSTART
-  chmod +x /usr/local/bin/clawbox-vnc-start
-
-  # Install systemd services for VNC and websockify
-  # x11vnc shares the existing X11 display (works on devices with a real desktop)
-  # Runs as root so it can read GDM's Xauthority file
-  cat > /etc/systemd/system/clawbox-vnc.service <<'VNCEOF'
-[Unit]
-Description=ClawBox VNC Server (x11vnc)
-After=display-manager.service
-Wants=display-manager.service
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/clawbox-vnc-start
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-VNCEOF
-
-  cat > /etc/systemd/system/clawbox-websockify.service <<WSEOF
-[Unit]
-Description=ClawBox WebSocket VNC Proxy
-After=clawbox-vnc.service
-Requires=clawbox-vnc.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/websockify 6080 localhost:5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-WSEOF
-
-  systemctl daemon-reload
-  systemctl enable clawbox-vnc.service clawbox-websockify.service
-  systemctl restart clawbox-vnc.service clawbox-websockify.service
-  echo "  VNC and websockify services installed and started"
-}
-
-step_code_server_install() {
-  local CS_PORT="${CODE_SERVER_PORT:-8080}"
-  if command -v code-server &>/dev/null; then
-    echo "  code-server already installed: $(code-server --version 2>/dev/null | head -1)"
-  else
-    echo "  Installing code-server..."
-    as_clawbox bash -o pipefail -c 'curl -fsSL https://code-server.dev/install.sh | sh'
-    echo "  code-server installed"
-  fi
-  # Configure for local use (no auth)
-  local CS_CONFIG="$CLAWBOX_HOME/.config/code-server/config.yaml"
-  mkdir -p "$(dirname "$CS_CONFIG")"
-  cat > "$CS_CONFIG" <<CSEOF
-bind-addr: 0.0.0.0:${CS_PORT}
-auth: none
-cert: false
-CSEOF
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.config/code-server"
-  echo "  Configured for port $CS_PORT (no auth)"
-  # Install systemd service
-  if [ -f /usr/lib/systemd/system/code-server@.service ] || [ -f /lib/systemd/system/code-server@.service ]; then
-    systemctl enable --now "code-server@$CLAWBOX_USER"
-    echo "  code-server service enabled"
-  else
-    echo "  Warning: code-server systemd service not found, start manually"
-  fi
-}
-
-step_gh_install() {
-  if command -v gh &>/dev/null; then
-    echo "  GitHub CLI already installed: $(gh --version | head -1)"
-    return
-  fi
-  echo "  Installing GitHub CLI..."
-  (type -p wget >/dev/null || apt-get install -y wget) \
-    && mkdir -p -m 755 /etc/apt/keyrings \
-    && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-    && apt-get update -qq \
-    && apt-get install -y -qq gh
-  echo "  GitHub CLI installed: $(gh --version | head -1)"
-}
-
-step_ai_tools_install() {
-  # Claude Code
-  if as_clawbox bash -c 'command -v claude' &>/dev/null; then
-    echo "  Claude Code already installed"
-  else
-    echo "  Installing Claude Code..."
-    as_clawbox bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-    echo "  Claude Code installed"
-  fi
-
-  # Gemini CLI
-  if as_clawbox bash -c 'command -v gemini' &>/dev/null; then
-    echo "  Gemini CLI already installed"
-  else
-    echo "  Installing Gemini CLI..."
-    as_clawbox npm install -g @google/gemini-cli 2>/dev/null \
-      || echo "  Warning: Gemini CLI install failed (manual install may be needed)"
-  fi
-
-  # Codex (OpenAI)
-  if as_clawbox bash -c 'command -v codex' &>/dev/null; then
-    echo "  Codex already installed"
-  else
-    echo "  Installing Codex..."
-    as_clawbox npm install -g @openai/codex 2>/dev/null \
-      || echo "  Warning: Codex install failed (manual install may be needed)"
-  fi
+  # Ensure the service is enabled and running
+  systemctl enable ollama 2>/dev/null || true
+  systemctl start ollama 2>/dev/null || true
+  # Apply Jetson memory optimizations
+  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  echo "  Ollama installed and running"
 }
 
 step_chpasswd() {
@@ -746,6 +502,140 @@ step_gateway_setup() {
   systemctl restart clawbox-gateway.service
 }
 
+step_chromium_install() {
+  if snap list chromium &>/dev/null 2>&1; then
+    echo "  Chromium already installed (snap)"
+    return
+  fi
+
+  # Ubuntu 22.04 ARM64 only ships Chromium as a snap — no native .deb available.
+  # Ensure snapd is running, install chromium, then continue.
+  systemctl enable --now snapd snapd.socket 2>/dev/null || true
+
+  # Wait for snapd to be ready (can take a few seconds after enable)
+  local retries=0
+  while ! snap version &>/dev/null && [ $retries -lt 30 ]; do
+    sleep 1
+    retries=$((retries + 1))
+  done
+
+  # Clean up any leftover Debian repo config from earlier install attempts
+  rm -f /etc/apt/sources.list.d/debian-chromium.list /etc/apt/preferences.d/debian-chromium /usr/share/keyrings/debian-bookworm.gpg
+
+  snap install chromium
+  echo "  Chromium installed (snap)"
+}
+
+step_code_server_install() {
+  if command -v code-server &>/dev/null; then
+    echo "  code-server already installed"
+  else
+    curl -fsSL https://code-server.dev/install.sh | sh
+    echo "  code-server installed"
+  fi
+
+  # Configure for local access (no auth, bind to all interfaces)
+  local CS_CONFIG_DIR="$CLAWBOX_HOME/.config/code-server"
+  mkdir -p "$CS_CONFIG_DIR"
+  cat > "$CS_CONFIG_DIR/config.yaml" <<'CSCONF'
+bind-addr: 0.0.0.0:8080
+auth: none
+cert: false
+CSCONF
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CS_CONFIG_DIR"
+
+  # Enable and start as a user service via systemd
+  systemctl enable --now "code-server@$CLAWBOX_USER" 2>/dev/null || true
+  echo "  code-server configured and started"
+}
+
+step_vnc_install() {
+  # Install x11vnc, Xvfb (virtual framebuffer fallback), and websockify
+  apt-get install -y x11vnc xvfb websockify dbus-x11
+
+  # Create the VNC startup script — detects physical display or starts virtual one
+  cat > "$PROJECT_DIR/scripts/start-vnc.sh" <<'VNCSH'
+#!/bin/bash
+# Mirrors the physical GNOME desktop if a monitor is connected,
+# otherwise starts a virtual GNOME session on a framebuffer.
+
+DISPLAY_NUM=0
+XAUTH="/run/user/$(id -u)/gdm/Xauthority"
+
+# Check if physical display :0 is available
+if xdpyinfo -display :0 >/dev/null 2>&1; then
+  echo "[vnc] Physical display :0 detected — mirroring"
+  exec x11vnc -display :0 -auth "$XAUTH" -forever -shared -nopw -localhost -noxdamage
+fi
+
+# No physical display — start a virtual framebuffer + GNOME session
+echo "[vnc] No physical display — starting virtual desktop on :99"
+DISPLAY_NUM=99
+
+# Start Xvfb if not already running
+if ! xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; then
+  Xvfb :${DISPLAY_NUM} -screen 0 1920x1080x24 &
+  sleep 1
+fi
+
+export DISPLAY=:${DISPLAY_NUM}
+export DBUS_SESSION_BUS_ADDRESS=""
+
+# Start a GNOME session (or fallback to xfce/openbox)
+if command -v gnome-session &>/dev/null; then
+  gnome-session --session=ubuntu &
+elif command -v startxfce4 &>/dev/null; then
+  startxfce4 &
+fi
+sleep 2
+
+# Mirror the virtual display
+exec x11vnc -display :${DISPLAY_NUM} -forever -shared -nopw -localhost -noxdamage
+VNCSH
+  chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+
+  # Systemd service for VNC
+  cat > /etc/systemd/system/clawbox-vnc.service <<VNCSVC
+[Unit]
+Description=ClawBox VNC (mirrors display or virtual desktop)
+After=display-manager.service network.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCSVC
+
+  # Systemd service for websockify
+  cat > /etc/systemd/system/clawbox-websockify.service <<WSSVC
+[Unit]
+Description=ClawBox WebSocket VNC Proxy
+After=clawbox-vnc.service
+Requires=clawbox-vnc.service
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+ExecStart=/usr/bin/websockify 6080 localhost:5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+WSSVC
+
+  systemctl daemon-reload
+  systemctl enable clawbox-vnc.service clawbox-websockify.service
+  systemctl start clawbox-vnc.service clawbox-websockify.service || true
+  echo "  VNC (x11vnc + Xvfb fallback) and websockify installed and started"
+}
+
 step_ffmpeg_install() {
   apt-get install -y ffmpeg
 }
@@ -764,6 +654,7 @@ step_rebuild_reboot() {
   step_directories_permissions
   step_systemd_services
   step_polkit_rules
+  step_ollama_install
   step_openclaw_patch
   step_openclaw_config
   do_rebuild
@@ -775,9 +666,8 @@ step_rebuild_reboot() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode jtop_install chrome_install
-  desktop_customize vnc_install code_server_install gh_install ai_tools_install
-  openclaw_install openclaw_patch openclaw_config openclaw_models
+  apt_update nvidia_jetpack performance_mode jtop_install ollama_install
+  chromium_install code_server_install vnc_install openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
@@ -804,7 +694,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=22
+TOTAL_STEPS=21
 step=0
 log() {
   step=$((step + 1))
@@ -863,23 +753,17 @@ step_polkit_rules
 log "Installing jtop (jetson-stats)..."
 step_jtop_install
 
+log "Installing Ollama..."
+step_ollama_install
+
 log "Installing Chromium..."
-step_chrome_install
+step_chromium_install
 
-log "Customizing desktop..."
-step_desktop_customize
-
-log "Installing VNC (Remote Desktop)..."
-step_vnc_install
-
-log "Installing code-server (VS Code in browser)..."
+log "Installing code-server (VS Code)..."
 step_code_server_install
 
-log "Installing GitHub CLI..."
-step_gh_install
-
-log "Installing AI coding tools (Claude, Gemini, Codex)..."
-step_ai_tools_install
+log "Installing VNC server..."
+step_vnc_install
 
 log "Starting services..."
 step_start_services
