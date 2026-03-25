@@ -27,7 +27,7 @@ function useLauncherGrid() {
     const update = () => {
       const w = window.innerWidth;
       const h = window.innerHeight;
-      const cols = w >= 1600 ? 7 : w >= 1200 ? 6 : w >= 900 ? 5 : 4;
+      const cols = 4;
       const rows = h >= 900 ? 3 : h >= 700 ? 2 : 2;
       setGrid({ cols, rows });
     };
@@ -254,7 +254,7 @@ export default function ChromeLauncher({
                     {app.icon}
                   </div>
                   {/* App name */}
-                  <span className="text-xs text-white/80 text-center line-clamp-1 w-full">
+                  <span className="text-xs text-white/80 text-center w-full">
                     {app.name}
                   </span>
                 </button>

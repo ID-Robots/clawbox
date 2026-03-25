@@ -17,7 +17,14 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import VSCodeApp from "@/components/VSCodeApp";
 import OpenClawApp from "@/components/OpenClawApp";
-import ChatPopup from "@/components/ChatPopup";
+import ChatApp from "@/components/ChatApp";
+import { resolveFlags, FLAG_GATED_APPS } from "@/lib/feature-flags";
+
+// PWA install prompt type (Chrome/Edge)
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -29,7 +36,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode";
+  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -40,13 +47,14 @@ interface AppDef {
 const apps: AppDef[] = [
   { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
   { id: "openclaw", name: "OpenClaw", color: "#0a0f1a", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
-  { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: true, defaultWidth: 900, defaultHeight: 600 },
+  { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "browser", name: "Browser", color: "#4285f4", type: "browser", pinned: true, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vnc", name: "Remote Desktop", color: "#7c3aed", type: "vnc", pinned: true, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vscode", name: "VS Code", color: "#007acc", type: "vscode", pinned: true, defaultWidth: 1100, defaultHeight: 750 },
+  { id: "browser", name: "Browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vnc", name: "Remote Desktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vscode", name: "VS Code", color: "#007acc", type: "vscode", pinned: false, defaultWidth: 1100, defaultHeight: 750 },
   { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
+  { id: "chat", name: "Chat", color: "#f97316", type: "chat", pinned: false, defaultWidth: 500, defaultHeight: 600 },
 ];
 
 // Inline SVG icons for each app
@@ -107,6 +115,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
+    chat: "chat_bubble",
   };
 
   const iconName = iconMap[id];
@@ -171,6 +180,55 @@ export default function ChromeDesktop() {
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
   }, []);
 
+  // ─── Haptic feedback helper ───
+  const vibrate = useCallback((ms: number = 10) => {
+    try { navigator.vibrate?.(ms); } catch {}
+  }, []);
+
+  // ─── PWA install prompt ───
+  const [pwaPrompt, setPwaPrompt] = useState<Event | null>(null);
+  const [pwaInstalled, setPwaInstalled] = useState(false);
+  const [pwaBannerDismissed, setPwaBannerDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("clawbox-pwa-dismissed") === "1";
+  });
+
+  useEffect(() => {
+    // Register service worker
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+    // Check if already installed as PWA
+    if (window.matchMedia("(display-mode: standalone)").matches) {
+      setPwaInstalled(true);
+    }
+    // Capture the beforeinstallprompt event
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setPwaPrompt(e);
+    };
+    const onInstalled = () => setPwaInstalled(true);
+    window.addEventListener("beforeinstallprompt", handler);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  const handlePwaInstall = useCallback(async () => {
+    if (!pwaPrompt) return;
+    (pwaPrompt as BeforeInstallPromptEvent).prompt();
+    const result = await (pwaPrompt as BeforeInstallPromptEvent).userChoice;
+    if (result.outcome === "accepted") setPwaInstalled(true);
+    setPwaPrompt(null);
+  }, [pwaPrompt]);
+
+  const dismissPwaBanner = useCallback(() => {
+    setPwaBannerDismissed(true);
+    try { localStorage.setItem("clawbox-pwa-dismissed", "1"); } catch {}
+  }, []);
+
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
@@ -181,6 +239,9 @@ export default function ChromeDesktop() {
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
   const INSTALLED_META_KEY = "installed_meta";
   const [installedMeta, setInstalledMeta] = useState<Record<string, { name: string; color: string; iconUrl: string }>>({});
+
+  // ─── Feature flags ───
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
 
   // ─── Desktop shortcuts for built-in apps ───
   const DESKTOP_APPS_KEY = "desktop_apps";
@@ -257,6 +318,8 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
+        // Feature flags
+        setFeatureFlags(resolveFlags(data));
       })
       .catch(() => { prefsLoaded.current = true; });
   }, []);
@@ -296,9 +359,8 @@ export default function ChromeDesktop() {
     e.target.value = "";
   }, []);
 
-  // ─── Chat popup (mascot click) ───
-  const [chatOpen, setChatOpen] = useState(false);
-  const [mascotX, setMascotX] = useState(30); // vw position for chat anchoring
+  // ─── Chat (mascot click opens chat app window) ───
+  const [botThinking, setBotThinking] = useState(false);
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
@@ -310,10 +372,23 @@ export default function ChromeDesktop() {
     return () => { window.removeEventListener("clawbox-show-mascot", onShow); window.removeEventListener("storage", onStorage); };
   }, []);
 
-  // ─── Desktop icon grid positions ───
-  const GRID_COLS = 10;
+  // ─── Desktop icon grid + mobile detection (single resize listener) ───
+  const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false });
+  useEffect(() => {
+    const update = () => {
+      const w = window.innerWidth;
+      const cellW = w < 500 ? 85 : 100;
+      const cols = Math.max(3, Math.floor(w / cellW));
+      setGridDims({ cols, cellW, mobile: w < 768 });
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  const GRID_COLS = gridDims.cols;
+  const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
-  const CELL_W = 100; // px
+  const CELL_W = gridDims.cellW;
   const CELL_H = 110; // px
   const ICON_GRID_KEY = "icon_grid";
   const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>({});
@@ -383,6 +458,16 @@ export default function ChromeDesktop() {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button")) return;
     setSelectedIcons(new Set());
+    // Long-press on touch → open desktop context menu
+    if (isTouchDevice) {
+      longPressFired.current = false;
+      const x = e.clientX, y = e.clientY;
+      longPressTimer.current = setTimeout(() => {
+        longPressFired.current = true;
+        ctxMenuOpenedAt.current = Date.now();
+        setCtxMenu({ x, y });
+      }, 500);
+    }
     marqueeRef.current = { active: true, startX: e.clientX, startY: e.clientY };
     setMarquee(null);
 
@@ -390,6 +475,11 @@ export default function ChromeDesktop() {
       if (!marqueeRef.current.active) return;
       const dx = ev.clientX - marqueeRef.current.startX;
       const dy = ev.clientY - marqueeRef.current.startY;
+      // Cancel long-press on movement
+      if (Math.abs(dx) + Math.abs(dy) >= 5 && longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = undefined;
+      }
       // Only start drawing after small threshold
       if (Math.abs(dx) + Math.abs(dy) < 5) return;
       const m = {
@@ -421,6 +511,7 @@ export default function ChromeDesktop() {
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
       marqueeRef.current.active = false;
       setMarquee(null);
     };
@@ -433,6 +524,11 @@ export default function ChromeDesktop() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string; isGroup?: boolean } | null>(null);
 
   const ctxMenuOpenedAt = useRef(0);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const longPressFired = useRef(false);
+  const isTouchDevice = typeof window !== "undefined" && "ontouchstart" in window;
+
+
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -472,7 +568,7 @@ export default function ChromeDesktop() {
 
 
 
-  // Arrange all desktop icons into a centered grid, preserving current visual order
+  // Arrange all desktop icons — desktop: single column top-left, mobile: centered grid
   const arrangeIcons = useCallback(() => {
     const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
     const builtinIds = desktopApps.map((id) => `desktop-${id}`);
@@ -484,32 +580,33 @@ export default function ChromeDesktop() {
       const pb = iconPositions[b] || { row: 999, col: 999 };
       return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
     });
-    // Compute centered grid
-    const areaW = GRID_COLS * CELL_W;
-    const rect = gridRef.current?.getBoundingClientRect();
-    const areaH = rect ? rect.height : (typeof window !== "undefined" ? window.innerHeight - 80 : GRID_ROWS * CELL_H);
-    const cols = Math.min(allIconIds.length, GRID_COLS);
-    const rows = Math.ceil(allIconIds.length / cols);
-    const gridW = cols * CELL_W;
-    const gridH = rows * CELL_H;
-    const offsetCol = Math.floor((areaW - gridW) / 2 / CELL_W);
-    const offsetRow = Math.max(0, Math.floor((areaH - gridH) / 2 / CELL_H));
     const positions: Record<string, { row: number; col: number }> = {};
-    allIconIds.forEach((id, i) => {
-      positions[id] = { row: Math.floor(i / cols) + offsetRow, col: (i % cols) + offsetCol };
-    });
+    const mobile = typeof window !== "undefined" && window.innerWidth < 768;
+    if (mobile) {
+      // Mobile: top-aligned grid, filling columns left to right
+      const cols = Math.min(allIconIds.length, GRID_COLS);
+      allIconIds.forEach((id, i) => {
+        positions[id] = { row: Math.floor(i / cols), col: i % cols };
+      });
+    } else {
+      // Desktop: single column, top-left aligned
+      allIconIds.forEach((id, i) => {
+        positions[id] = { row: i, col: 0 };
+      });
+    }
     setIconPositions(positions);
   }, [installedApps, hiddenInstalledApps, desktopApps, iconPositions]);
 
-  // Auto-arrange when icons are added or removed
+  // Auto-arrange when icons are added/removed or grid dimensions change
   useEffect(() => {
     const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
     const builtinIds = desktopApps.map((id) => `desktop-${id}`);
     const allIconIds = [...visibleInstalled, ...builtinIds];
     const missing = allIconIds.filter((id) => !iconPositions[id]);
-    if (missing.length === 0) return;
+    const overflow = allIconIds.some((id) => iconPositions[id] && iconPositions[id].col >= GRID_COLS);
+    if (missing.length === 0 && !overflow) return;
     arrangeIcons();
-  }, [installedApps, hiddenInstalledApps, desktopApps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [installedApps, hiddenInstalledApps, desktopApps, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Get icon position (should always be in iconPositions after effect runs)
   const getIconPosition = useCallback((appId: string, _index: number) => {
@@ -544,12 +641,30 @@ export default function ChromeDesktop() {
     const isGroupDrag = selectedIcons.size > 1 && selectedIcons.has(appId);
     const groupIds = isGroupDrag ? Array.from(selectedIcons) : [appId];
 
+    // Long-press on touch → open icon context menu
+    longPressFired.current = false;
+    if (isTouchDevice) {
+      longPressTimer.current = setTimeout(() => {
+        longPressFired.current = true;
+        ctxMenuOpenedAt.current = Date.now();
+        if (selectedIcons.size > 1 && selectedIcons.has(appId)) {
+          setCtxMenu({ x: startX, y: startY, appId, isGroup: true });
+        } else {
+          setCtxMenu({ x: startX, y: startY, appId });
+        }
+        // Clean up listeners since we're opening menu, not dragging
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      }, 500);
+    }
+
     const onMove = (ev: PointerEvent) => {
       const dx = ev.clientX - startX;
       const dy = ev.clientY - startY;
       if (!isDragging && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
       if (!isDragging) {
         isDragging = true;
+        if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
         setDraggingIcon(appId);
       }
       setDragPos({ x: ev.clientX, y: ev.clientY });
@@ -559,8 +674,9 @@ export default function ChromeDesktop() {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
       if (!isDragging) {
-        // It was a tap/click — open the app via the onClick handler
+        // It was a tap/click — open the app via the onClick handler (unless long-press fired)
         setDraggingIcon(null);
         return;
       } else {
@@ -689,6 +805,10 @@ export default function ChromeDesktop() {
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
+    // Filter out apps gated behind disabled feature flags
+    const filteredApps = apps.filter(a =>
+      !FLAG_GATED_APPS.has(a.id) || featureFlags[a.id] === true
+    );
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
       const meta = installedMeta[appId];
@@ -706,8 +826,8 @@ export default function ChromeDesktop() {
         });
       }
     }
-    return [...apps, ...installedAppDefs];
-  }, [installedApps, installedMeta]);
+    return [...filteredApps, ...installedAppDefs];
+  }, [installedApps, installedMeta, featureFlags]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -765,6 +885,37 @@ export default function ChromeDesktop() {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
   }, []);
 
+  // ─── Android back button / browser back handling ───
+  useEffect(() => {
+    // Push a dummy history state so back button triggers popstate instead of leaving
+    const pushState = () => {
+      if (window.history.state !== "clawbox") {
+        window.history.pushState("clawbox", "");
+      }
+    };
+    pushState();
+
+    const handleBack = (e: PopStateEvent) => {
+      // Re-push state to stay on the page
+      pushState();
+
+      // Close things in priority order
+      if (launcherOpen) { setLauncherOpen(false); return; }
+      if (trayOpen) { setTrayOpen(false); return; }
+
+      // Close topmost non-minimized window
+      const visible = openWindows.filter(w => !w.minimized);
+      if (visible.length > 0) {
+        const top = visible.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+        closeWindow(top.id);
+        return;
+      }
+    };
+
+    window.addEventListener("popstate", handleBack);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, [launcherOpen, trayOpen, openWindows, closeWindow]);
+
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
       prev.map((w) => w.id === windowId ? { ...w, x: geo.x, y: geo.y, width: geo.width, height: geo.height } : w)
@@ -785,6 +936,7 @@ export default function ChromeDesktop() {
   }, []);
 
   const handleShelfAppClick = useCallback((appId: string) => {
+    vibrate(10);
     const appWindows = openWindows.filter((w) => w.appId === appId);
     if (appWindows.length === 0) {
       openApp(appId);
@@ -892,6 +1044,8 @@ export default function ChromeDesktop() {
         return <VNCApp />;
       case "vscode":
         return <VSCodeApp />;
+      case "chat":
+        return <ChatApp onThinkingChange={setBotThinking} />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -934,12 +1088,77 @@ export default function ChromeDesktop() {
   // Get all apps for launcher (including installed)
   const allAppsForLauncher = getAllApps();
 
+  // ─── Mobile fullscreen splash (every load) ───
+  const [showSplash, setShowSplash] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const isMobileUA = /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
+    // Show on mobile browsers, not standalone PWA, not already fullscreen
+    return isMobileUA && !isStandalone && !document.fullscreenElement;
+  });
+
+  const handleSplashTap = useCallback(() => {
+    document.documentElement.requestFullscreen().catch(() => {});
+    setShowSplash(false);
+  }, []);
+
+  const dismissSplash = useCallback(() => {
+    setShowSplash(false);
+  }, []);
+
   if (!setupChecked) {
-    return <div className="min-h-screen bg-[#0a0f1a]" />;
+    return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
   }
 
   return (
-    <div className="min-h-screen relative overflow-hidden select-none">
+    <div className="relative overflow-hidden select-none" style={{ height: '100dvh' }}>
+      {/* Mobile fullscreen splash */}
+      {showSplash && (
+        <div
+          className="fixed inset-0 z-[99999] flex flex-col items-center justify-center bg-[#0a0f1a] cursor-pointer"
+          onClick={handleSplashTap}
+        >
+          <img src="/icon-512.png" alt="ClawBox" className="w-24 h-24 rounded-3xl mb-6 shadow-2xl" />
+          <h1 className="text-2xl font-bold text-white mb-2">ClawBox</h1>
+          <p className="text-white/50 text-sm mb-8">Personal AI Assistant</p>
+          <div className="flex flex-col items-center gap-3">
+            <div className="px-8 py-3 rounded-xl bg-orange-500 text-white font-semibold text-base shadow-lg">
+              Tap to Enter Fullscreen
+            </div>
+            <button
+              onClick={(e) => { e.stopPropagation(); dismissSplash(); }}
+              className="text-white/30 text-xs hover:text-white/50 bg-transparent border-none cursor-pointer mt-2"
+            >
+              Skip
+            </button>
+          </div>
+        </div>
+      )}
+      {/* PWA install banner */}
+      {pwaPrompt && !pwaInstalled && !pwaBannerDismissed && (
+        <div className="fixed top-0 left-0 right-0 z-[20000] flex items-center gap-3 px-4 py-2.5 bg-gradient-to-r from-[#1e2939]/95 to-[#0d1117]/95 backdrop-blur-md border-b border-orange-500/20"
+          style={{ paddingTop: "max(env(safe-area-inset-top), 8px)" }}
+        >
+          <img src="/icon-192.png" alt="" className="w-9 h-9 rounded-lg shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-white/90">Install ClawBox</div>
+            <div className="text-xs text-white/50 truncate">Add to home screen for the best experience</div>
+          </div>
+          <button
+            onClick={handlePwaInstall}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500 text-white hover:bg-orange-400 transition-colors shrink-0 cursor-pointer"
+          >
+            Install
+          </button>
+          <button
+            onClick={dismissPwaBanner}
+            className="p-1 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
+
       {/* Desktop wallpaper background */}
       {(() => {
         const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
@@ -1007,7 +1226,7 @@ export default function ChromeDesktop() {
             >
               <button
                 onPointerDown={(e) => handleIconDragStart(app.id, e)}
-                onClick={() => { if (!draggingIcon) openApp(`installed-${app.id}`); }}
+                onClick={() => { if (!draggingIcon && !longPressFired.current) openApp(`installed-${app.id}`); }}
                 onContextMenu={(e) => handleIconContextMenu(e, app.id)}
                 className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
                   isRecent ? "animate-install-bounce" : ""
@@ -1067,7 +1286,7 @@ export default function ChromeDesktop() {
             >
               <button
                 onPointerDown={(e) => handleIconDragStart(`desktop-${app.id}`, e)}
-                onClick={() => { if (!draggingIcon) openApp(app.id); }}
+                onClick={() => { if (!draggingIcon && !longPressFired.current) openApp(app.id); }}
                 onContextMenu={(e) => handleIconContextMenu(e, `desktop-${app.id}`)}
                 className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
@@ -1137,60 +1356,106 @@ export default function ChromeDesktop() {
         )}
       </div>
 
-      {/* Mascot - only show when no windows are maximized */}
-      <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotX} />
+      {/* Mascot - tapping opens/focuses the chat app */}
+      <Mascot frozen={false} thinking={botThinking} onTap={() => { openApp("chat"); }} />
 
-      {/* Windows */}
-      {openWindows.map((window) => {
-        const allApps = getAllApps();
-        const app = allApps.find((a) => a.id === window.appId);
-        if (!app) return null;
+      {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
+      {isMobile ? (
+        // Mobile: render only the topmost non-minimized window as fullscreen
+        (() => {
+          const visible = openWindows.filter(w => !w.minimized);
+          if (visible.length === 0) return null;
+          const top = visible.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+          const allApps = getAllApps();
+          const app = allApps.find(a => a.id === top.appId);
+          if (!app) return null;
+          return (
+            <div
+              key={top.id}
+              className="fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
+              style={{ paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
+            >
+              {/* Mobile window header */}
+              <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
+                <button
+                  onClick={() => { vibrate(10); closeWindow(top.id); }}
+                  className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+                </button>
+                <div className="w-6 h-6 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: app.color }}>
+                  {app.type === "installed" && app.storeApp
+                    ? <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
+                    : <AppIcon id={app.id} size="w-3 h-3" />}
+                </div>
+                <span className="text-sm font-medium text-white/80 truncate flex-1">{app.name}</span>
+                {visible.length > 1 && (
+                  <button
+                    onClick={() => minimizeWindow(top.id)}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                    title="Switch app"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
+                  </button>
+                )}
+              </div>
+              {/* Mobile window content */}
+              <div className="flex-1 overflow-hidden">
+                {renderWindowContent(top.appId)}
+              </div>
+            </div>
+          );
+        })()
+      ) : (
+        // Desktop: normal ChromeWindow rendering
+        openWindows.map((window) => {
+          const app = allAppsForLauncher.find((a) => a.id === window.appId);
+          if (!app) return null;
 
-        // Render icon based on app type
-        const renderWindowIcon = () => {
-          if (app.type === "installed" && app.storeApp) {
+          const renderWindowIcon = () => {
+            if (app.type === "installed" && app.storeApp) {
+              return (
+                <div
+                  className="w-5 h-5 rounded flex items-center justify-center"
+                  style={{ backgroundColor: app.color }}
+                >
+                  <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
+                </div>
+              );
+            }
             return (
               <div
                 className="w-5 h-5 rounded flex items-center justify-center"
                 style={{ backgroundColor: app.color }}
               >
-                <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
+                <AppIcon id={app.id} size="w-3 h-3" />
               </div>
             );
-          }
-          return (
-            <div
-              className="w-5 h-5 rounded flex items-center justify-center"
-              style={{ backgroundColor: app.color }}
-            >
-              <AppIcon id={app.id} size="w-3 h-3" />
-            </div>
-          );
-        };
+          };
 
-        return (
-          <ChromeWindow
-            key={window.id}
-            title={app.name}
-            icon={renderWindowIcon()}
-            appId={window.appId}
-            defaultWidth={app.defaultWidth}
-            defaultHeight={app.defaultHeight}
-            initialPosition={window.x !== undefined && window.y !== undefined ? { x: window.x, y: window.y } : undefined}
-            initialSize={window.width !== undefined && window.height !== undefined ? { width: window.width, height: window.height } : undefined}
-            isActive={window.id === activeWindowId}
-            zIndex={window.zIndex}
-            onClose={() => closeWindow(window.id)}
-            onFocus={() => focusWindow(window.id)}
-            onMinimize={() => minimizeWindow(window.id)}
-            onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
-            minimized={window.minimized}
-          >
-            {renderWindowContent(window.appId)}
-          </ChromeWindow>
-        );
-      })}
+          return (
+            <ChromeWindow
+              key={window.id}
+              title={app.name}
+              icon={renderWindowIcon()}
+              appId={window.appId}
+              defaultWidth={app.defaultWidth}
+              defaultHeight={app.defaultHeight}
+              initialPosition={window.x !== undefined && window.y !== undefined ? { x: window.x, y: window.y } : undefined}
+              initialSize={window.width !== undefined && window.height !== undefined ? { width: window.width, height: window.height } : undefined}
+              isActive={window.id === activeWindowId}
+              zIndex={window.zIndex}
+              onClose={() => closeWindow(window.id)}
+              onFocus={() => focusWindow(window.id)}
+              onMinimize={() => minimizeWindow(window.id)}
+              onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
+              minimized={window.minimized}
+            >
+              {renderWindowContent(window.appId)}
+            </ChromeWindow>
+          );
+        })
+      )}
 
       {/* App Launcher */}
       <ChromeLauncher
@@ -1226,6 +1491,9 @@ export default function ChromeDesktop() {
         onClose={() => setTrayOpen(false)}
         date={date}
         time={time}
+        pwaPrompt={pwaPrompt}
+        pwaInstalled={pwaInstalled}
+        onPwaInstall={handlePwaInstall}
       />
 
       {/* Shelf (taskbar) */}

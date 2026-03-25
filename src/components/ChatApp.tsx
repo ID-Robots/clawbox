@@ -2,37 +2,28 @@
 
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 
-// ── Gateway WebSocket chat widget ──
-// Connects directly to the OpenClaw gateway, no iframe.
-
-interface ChatPopupProps {
-  isOpen: boolean
-  onClose: () => void
-  onOpenFull?: () => void
-  onThinkingChange?: (thinking: boolean) => void
-  mascotX?: number
-  mobile?: boolean
-}
+// ── Gateway WebSocket chat app ──
+// Full-window chat component (fills parent container).
+// Extracted from ChatPopup for use as a proper app window.
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   text: string
   timestamp: number
+  images?: string[] // data URLs for display
 }
 
 // Simple markdown-ish rendering: bold, italic, code, links
 function renderText(text: string) {
-  // Split into code blocks vs rest
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g)
   return parts.map((part, i) => {
     if (part.startsWith('```') && part.endsWith('```')) {
-      const code = part.slice(3, -3).replace(/^\w*\n/, '') // strip language hint
+      const code = part.slice(3, -3).replace(/^\w*\n/, '')
       return <pre key={i} style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px', margin: '6px 0', fontSize: 12, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{code}</pre>
     }
     if (part.startsWith('`') && part.endsWith('`')) {
       return <code key={i} style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 4, padding: '1px 5px', fontSize: '0.9em' }}>{part.slice(1, -1)}</code>
     }
-    // Inline: bold, italic, links
     const inlined = part.split(/(\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g)
     return inlined.map((seg, j) => {
       if (seg.startsWith('**') && seg.endsWith('**')) return <strong key={`${i}-${j}`}>{seg.slice(2, -2)}</strong>
@@ -44,21 +35,13 @@ function renderText(text: string) {
   })
 }
 
-// Strip gateway wrapper tags like <final>, <thinking>, etc.
-function stripGatewayTags(text: string): string {
-  return text
-    .replace(/<\/?(?:final|thinking|response|answer|reply)>/gi, '')
-    .trim()
-}
-
-// Extract text content from gateway message object
 function extractText(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return ''
   const m = msg as Record<string, unknown>
-  if (typeof m.text === 'string') return stripGatewayTags(m.text)
-  if (typeof m.content === 'string') return stripGatewayTags(m.content)
+  if (typeof m.text === 'string') return m.text
+  if (typeof m.content === 'string') return m.content
   if (Array.isArray(m.content)) {
-    const raw = m.content
+    return m.content
       .map((block: unknown) => {
         if (!block || typeof block !== 'object') return ''
         const b = block as Record<string, unknown>
@@ -68,108 +51,34 @@ function extractText(msg: unknown): string {
       })
       .filter(Boolean)
       .join('\n')
-    return stripGatewayTags(raw)
   }
   return ''
 }
 
-// uuid() requires secure context (HTTPS).
-// Fall back for HTTP deployments.
 function uuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return uuid()
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
   })
 }
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mobile = false }: ChatPopupProps) {
-  const [visible, setVisible] = useState(false)
+interface ChatAppProps {
+  onThinkingChange?: (thinking: boolean) => void
+}
+
+function ChatApp({ onThinkingChange }: ChatAppProps) {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
-
-  // ── Drag + resize state ──
-  const CHAT_SIZE_KEY = 'clawbox-chat-size'
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
-  const [size, setSize] = useState<{ w: number; h: number }>(() => {
-    if (typeof window === 'undefined') return { w: 400, h: 500 }
-    try {
-      const saved = localStorage.getItem(CHAT_SIZE_KEY)
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return { w: 400, h: 500 }
-  })
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
-  const popupRef = useRef<HTMLDivElement>(null)
-
-  // Reset position (not size) when reopened
-  useEffect(() => { if (isOpen) setPos(null) }, [isOpen])
-
-  const onDragStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    const el = popupRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: rect.left, origY: rect.top }
-    const onMove = (ev: PointerEvent) => {
-      const d = dragRef.current
-      if (!d) return
-      setPos({ x: d.origX + (ev.clientX - d.startX), y: d.origY + (ev.clientY - d.startY) })
-    }
-    const onUp = () => {
-      dragRef.current = null
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-  }, [])
-
-  const handleResizeStart = useCallback((edge: string, e: React.MouseEvent | React.TouchEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const el = popupRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    // Snap to absolute x/y positioning so all edges work correctly
-    setPos({ x: rect.left, y: rect.top })
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
-    const start = { x: clientX, y: clientY, w: rect.width, h: rect.height, left: rect.left, top: rect.top }
-    const onMove = (ev: MouseEvent | TouchEvent) => {
-      const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const cy = 'touches' in ev ? ev.touches[0].clientY : (ev as MouseEvent).clientY
-      const dx = cx - start.x
-      const dy = cy - start.y
-      let newW = start.w, newH = start.h, newX = start.left, newY = start.top
-      if (edge.includes('r')) newW = Math.max(280, start.w + dx)
-      if (edge.includes('b')) newH = Math.max(250, start.h + dy)
-      if (edge.includes('l')) { newW = Math.max(280, start.w - dx); newX = start.left + (start.w - newW) }
-      if (edge.includes('t')) { newH = Math.max(250, start.h - dy); newY = start.top + (start.h - newH) }
-      setSize({ w: newW, h: newH })
-      setPos({ x: newX, y: newY })
-    }
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      window.removeEventListener('touchmove', onMove)
-      window.removeEventListener('touchend', onUp)
-      // Persist resized dimensions
-      const finalRect = popupRef.current?.getBoundingClientRect()
-      if (finalRect) {
-        const s = { w: Math.round(finalRect.width), h: Math.round(finalRect.height) }
-        try { localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(s)) } catch {}
-      }
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    window.addEventListener('touchmove', onMove)
-    window.addEventListener('touchend', onUp)
-  }, [])
+  const [pendingImages, setPendingImages] = useState<{ dataUrl: string; mimeType: string; base64: string }[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
@@ -179,16 +88,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
 
-  // Auto-scroll to bottom — instant jump, no smooth animation
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
-  useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
 
-
-  // Send a request over WS
   const wsRequest = useCallback((method: string, params: unknown): Promise<unknown> => {
     return new Promise((resolve, reject) => {
       const ws = wsRef.current
@@ -199,7 +104,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       const id = uuid()
       pendingRef.current.set(id, { resolve, reject })
       ws.send(JSON.stringify({ type: 'req', id, method, params }))
-      // Timeout after 30s
       setTimeout(() => {
         if (pendingRef.current.has(id)) {
           pendingRef.current.delete(id)
@@ -209,7 +113,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     })
   }, [])
 
-  // Connect to gateway
   const gatewayTokenRef = useRef('')
 
   const connect = useCallback(async () => {
@@ -222,7 +125,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     setErrorMsg('')
     connectedOnceRef.current = false
 
-    // Fetch WS config from server (gets the token)
     let token: string
     try {
       const res = await fetch('/setup-api/gateway/ws-config')
@@ -235,12 +137,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       return
     }
 
-    // Build WS URL using the browser's hostname (not server-side host)
-    // so it works from phones/external devices, not just localhost
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${wsProto}//${window.location.host}`
 
-    // Define handlers BEFORE creating the WebSocket so no events are missed
     let connectSent = false
     let ws: WebSocket
 
@@ -291,7 +190,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       let data: Record<string, unknown>
       try { data = JSON.parse(String(event.data)) } catch { return }
 
-      // Handle responses
       if (data.type === 'res') {
         const id = data.id as string
         const pending = pendingRef.current.get(id)
@@ -307,7 +205,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         return
       }
 
-      // Handle events
       if (data.type === 'event') {
         const eventName = data.event as string
 
@@ -364,7 +261,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       }
     }
 
-    // Create WebSocket AFTER all handlers are defined to avoid race conditions
     try {
       ws = new WebSocket(wsUrl)
     } catch {
@@ -378,7 +274,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     ws.onerror = () => {}
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load chat history
   const loadHistory = useCallback(async () => {
     try {
       const result = await wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Record<string, unknown>
@@ -390,7 +285,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
         if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
-        // Strip the [WebChat ...] prefix from user messages
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
@@ -400,13 +294,42 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     }
   }, [wsRequest])
 
-  // Send a message
+  // Handle file/image selection
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files) return
+    Array.from(files).forEach(file => {
+      if (!file.type.startsWith('image/')) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = reader.result as string
+        const base64 = dataUrl.split(',')[1] || ''
+        setPendingImages(prev => [...prev, { dataUrl, mimeType: file.type, base64 }])
+      }
+      reader.readAsDataURL(file)
+    })
+    e.target.value = ''
+  }, [])
+
+  const removePendingImage = useCallback((index: number) => {
+    setPendingImages(prev => prev.filter((_, i) => i !== index))
+  }, [])
+
   const sendMessage = useCallback(async () => {
     const text = input.trim()
-    if (!text || sending) return
+    const hasImages = pendingImages.length > 0
+    if ((!text && !hasImages) || sending) return
 
+    const displayText = text || (hasImages ? `📷 ${pendingImages.length} image${pendingImages.length > 1 ? 's' : ''}` : '')
     setInput('')
-    setMessages(prev => [...prev, { role: 'user', text, timestamp: Date.now() }])
+    const imagesToSend = [...pendingImages]
+    setPendingImages([])
+    setMessages(prev => [...prev, {
+      role: 'user',
+      text: displayText,
+      timestamp: Date.now(),
+      images: imagesToSend.map(img => img.dataUrl),
+    }])
     setSending(true)
     setStreaming('')
 
@@ -414,65 +337,55 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     runIdRef.current = idempotencyKey
 
     try {
-      await wsRequest('chat.send', {
+      const params: Record<string, unknown> = {
         sessionKey: sessionKeyRef.current,
-        message: text,
+        message: text || 'What do you see in this image?',
         deliver: false,
         idempotencyKey,
-      })
+      }
+      if (imagesToSend.length > 0) {
+        params.attachments = imagesToSend.map(img => ({
+          mimeType: img.mimeType,
+          content: img.base64,
+        }))
+      }
+      await wsRequest('chat.send', params)
     } catch (err) {
       setSending(false)
       runIdRef.current = null
       setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
     }
-  }, [input, sending, wsRequest])
+  }, [input, sending, wsRequest, pendingImages])
 
-  // Abort generation
   const abort = useCallback(async () => {
     try {
       await wsRequest('chat.abort', { sessionKey: sessionKeyRef.current })
     } catch {}
   }, [wsRequest])
 
-  // Connect/disconnect on open/close
+  // Connect on mount
   useEffect(() => {
-    if (isOpen) {
-      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        connect()
-      }
-    } else {
-      setVisible(false)
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      connect()
     }
-  }, [isOpen, connect])
-
-  // Cleanup on unmount
-  useEffect(() => {
     return () => {
       wsRef.current?.close()
       wsRef.current = null
     }
-  }, [])
+  }, [connect])
 
-  // Focus input when opened
+  // Focus input when connected
   useEffect(() => {
-    if (isOpen && visible && status === 'connected') {
+    if (status === 'connected') {
       setTimeout(() => inputRef.current?.focus(), 100)
     }
-  }, [isOpen, visible, status])
+  }, [status])
 
-  // Close on Escape
-  useEffect(() => {
-    if (!isOpen) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [isOpen, onClose])
+
 
   // Notify parent of thinking state
   useEffect(() => { onThinkingChange?.(sending) }, [sending, onThinkingChange])
 
-  // Handle Enter to send
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -480,94 +393,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     }
   }, [sendMessage])
 
-  if (!isOpen) return null
-
-  // Default position: above mascot (desktop only)
-  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - 416))
-  const posStyle: React.CSSProperties = mobile
-    ? { left: 0, top: 0, right: 0, bottom: 220 }
-    : pos
-      ? { left: pos.x, top: pos.y, bottom: 'auto' }
-      : { left: defaultLeft, bottom: 170 }
-
   return (
-    <div
-      ref={popupRef}
-      style={{
-        position: 'fixed',
-        ...posStyle,
-        ...(mobile ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 } : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
-        zIndex: 10010,
-        overflow: 'hidden',
-        boxShadow: mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
-        background: '#0d1117',
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#0d1117',
+      overflow: 'hidden',
+    }}>
+      {/* Connection status bar */}
+      <div style={{
         display: 'flex',
-        flexDirection: 'column',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.92) translateY(16px)'),
-        transition: dragRef.current ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
-        pointerEvents: visible ? 'auto' : 'none',
-      }}
-    >
-      {/* Header — drag handle (desktop) / simple bar (mobile) */}
-      <div
-        onPointerDown={mobile ? undefined : onDragStart}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '6px 10px',
-          background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
-          borderBottom: '1px solid rgba(249,115,22,0.2)',
-          flexShrink: 0,
-          userSelect: 'none',
-          cursor: mobile ? 'default' : 'grab',
-          touchAction: 'none',
-        }}>
-        <div style={{ flex: 1 }} />
+        alignItems: 'center',
+        gap: 8,
+        padding: '6px 14px',
+        background: 'linear-gradient(135deg, rgba(249,115,22,0.12) 0%, rgba(13,17,23,0.95) 100%)',
+        borderBottom: '1px solid rgba(249,115,22,0.15)',
+        flexShrink: 0,
+      }}>
+        <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, opacity: 0.7 }} />
+        <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>Chat</span>
         {status === 'connecting' && (
           <div style={{
-            width: 12, height: 12,
+            width: 10, height: 10,
             border: '2px solid rgba(249,115,22,0.3)',
             borderTopColor: '#f97316',
             borderRadius: '50%',
-            animation: 'spin 0.8s linear infinite',
+            animation: 'chatapp-spin 0.8s linear infinite',
           }} />
         )}
         {status === 'connected' && (
           <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
         )}
-        {onOpenFull && (
+        {status === 'error' && (
           <button
-            onClick={() => { onOpenFull(); onClose() }}
-            title="Open full UI"
+            onClick={connect}
             style={{
-              background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
-              cursor: 'pointer', padding: 4, borderRadius: 6,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+              color: '#f97316', borderRadius: 6, padding: '2px 10px', cursor: 'pointer',
+              fontSize: 12, fontWeight: 500,
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.1)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" />
-            </svg>
-          </button>
+          >Reconnect</button>
         )}
-        <button
-          onClick={onClose}
-          style={{
-            background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer', padding: 4, borderRadius: 6,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.1)' }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <path d="M18 6L6 18M6 6l12 12" />
-          </svg>
-        </button>
       </div>
 
       {/* Messages area */}
@@ -577,10 +445,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
+        <style>{`@keyframes chatapp-spin { to { transform: rotate(360deg) } } @keyframes chatapp-blink { 50% { opacity: 0 } } @keyframes chatapp-bounce-dot { 0%, 80%, 100% { transform: translateY(0) } 40% { transform: translateY(-5px) } }`}</style>
+
         {status === 'connecting' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
-            <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-            <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+            <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite' }} />
             Connecting to gateway...
           </div>
         )}
@@ -626,12 +495,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
               lineHeight: 1.45,
               wordBreak: 'break-word',
             }}>
+              {msg.images && msg.images.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
+                  {msg.images.map((src, j) => (
+                    <img key={j} src={src} alt="" style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'cover' }} />
+                  ))}
+                </div>
+              )}
               {msg.role === 'user' ? msg.text : renderText(msg.text)}
             </div>
           </div>
         ))}
 
-        {/* Streaming message */}
         {streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
@@ -642,13 +517,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
               fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
             }}>
               {renderText(streaming)}
-              <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
-              <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
+              <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>
         )}
 
-        {/* Typing indicator when sending but no stream yet */}
         {sending && !streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
@@ -657,11 +530,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
               background: 'rgba(255,255,255,0.06)',
               display: 'flex', gap: 4, alignItems: 'center',
             }}>
-              <style>{`@keyframes bounce-dot { 0%, 80%, 100% { transform: translateY(0) } 40% { transform: translateY(-5px) } }`}</style>
               {[0, 0.15, 0.3].map((delay, i) => (
                 <div key={i} style={{
                   width: 6, height: 6, borderRadius: '50%', background: 'rgba(249,115,22,0.6)',
-                  animation: `bounce-dot 1s ${delay}s ease-in-out infinite`,
+                  animation: `chatapp-bounce-dot 1s ${delay}s ease-in-out infinite`,
                 }} />
               ))}
             </div>
@@ -671,13 +543,82 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Hidden file inputs */}
+      <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={handleFileSelect} />
+
+      {/* Pending images preview */}
+      {pendingImages.length > 0 && (
+        <div style={{
+          padding: '8px 14px 0',
+          borderTop: '1px solid rgba(255,255,255,0.06)',
+          background: 'rgba(0,0,0,0.2)',
+          display: 'flex', gap: 6, overflowX: 'auto', flexShrink: 0,
+        }}>
+          {pendingImages.map((img, i) => (
+            <div key={i} style={{ position: 'relative', flexShrink: 0 }}>
+              <img src={img.dataUrl} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: 'cover', border: '1px solid rgba(255,255,255,0.1)' }} />
+              <button
+                onClick={() => removePendingImage(i)}
+                style={{
+                  position: 'absolute', top: -6, right: -6,
+                  width: 18, height: 18, borderRadius: '50%',
+                  background: '#ef4444', border: 'none', color: '#fff',
+                  fontSize: 11, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  lineHeight: 1,
+                }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
-        borderTop: '1px solid rgba(255,255,255,0.06)',
+        borderTop: pendingImages.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
       }}>
+        {/* Attachment buttons */}
+        <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach image"
+            style={{
+              width: 32, height: 32, borderRadius: 8, border: 'none',
+              background: 'transparent', color: 'rgba(255,255,255,0.35)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'color 0.15s',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </button>
+          <button
+            onClick={() => cameraInputRef.current?.click()}
+            title="Take photo"
+            style={{
+              width: 32, height: 32, borderRadius: 8, border: 'none',
+              background: 'transparent', color: 'rgba(255,255,255,0.35)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'color 0.15s',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+          </button>
+        </div>
         <textarea
           ref={inputRef}
           value={input}
@@ -735,20 +676,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           </button>
         )}
       </div>
-
-      {/* Resize edges — desktop only */}
-      {!mobile && <>
-        <div className="absolute top-0 left-2 right-2 h-1 cursor-n-resize" onMouseDown={(e) => handleResizeStart("t", e)} onTouchStart={(e) => handleResizeStart("t", e)} />
-        <div className="absolute bottom-0 left-2 right-2 h-1 cursor-s-resize" onMouseDown={(e) => handleResizeStart("b", e)} onTouchStart={(e) => handleResizeStart("b", e)} />
-        <div className="absolute left-0 top-2 bottom-2 w-1 cursor-w-resize" onMouseDown={(e) => handleResizeStart("l", e)} onTouchStart={(e) => handleResizeStart("l", e)} />
-        <div className="absolute right-0 top-2 bottom-2 w-1 cursor-e-resize" onMouseDown={(e) => handleResizeStart("r", e)} onTouchStart={(e) => handleResizeStart("r", e)} />
-        <div className="absolute top-0 left-0 w-3 h-3 cursor-nw-resize" onMouseDown={(e) => handleResizeStart("tl", e)} onTouchStart={(e) => handleResizeStart("tl", e)} />
-        <div className="absolute top-0 right-0 w-3 h-3 cursor-ne-resize" onMouseDown={(e) => handleResizeStart("tr", e)} onTouchStart={(e) => handleResizeStart("tr", e)} />
-        <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={(e) => handleResizeStart("bl", e)} onTouchStart={(e) => handleResizeStart("bl", e)} />
-        <div className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize" onMouseDown={(e) => handleResizeStart("br", e)} onTouchStart={(e) => handleResizeStart("br", e)} />
-      </>}
     </div>
   )
 }
 
-export default memo(ChatPopup)
+export default memo(ChatApp)

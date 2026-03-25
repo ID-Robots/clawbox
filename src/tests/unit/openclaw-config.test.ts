@@ -169,9 +169,9 @@ describe("openclaw-config", () => {
       await openclawConfig.restartGateway();
 
       expect(mockExecFile).toHaveBeenCalledWith(
-        "systemctl",
-        ["restart", "clawbox-gateway.service"],
-        expect.objectContaining({ timeout: 15000 }),
+        "/usr/bin/sudo",
+        ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"],
+        expect.objectContaining({ timeout: 60000 }),
         expect.any(Function)
       );
     });

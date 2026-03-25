@@ -636,5 +636,5 @@ export function heartsString(value: number, max = 4): string {
 export function disciplineString(value: number): string {
   const filled = value
   const empty = DISCIPLINE_MAX - value
-  return '▰'.repeat(filled) + '▱'.repeat(empty)
+  return '🟧'.repeat(filled) + '⬛'.repeat(empty)
 }

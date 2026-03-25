@@ -4,7 +4,7 @@ import * as config from "@/lib/config-store";
 export const dynamic = "force-dynamic";
 
 // Allowed preference keys (prefix-based whitelist)
-const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_"];
+const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_", "ff_"];
 
 function isAllowed(key: string) {
   return ALLOWED_PREFIXES.some((p) => key.startsWith(p));

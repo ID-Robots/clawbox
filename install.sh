@@ -77,7 +77,7 @@ step_ensure_user() {
 
 step_apt_update() {
   apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
+  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip gh
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
@@ -549,6 +549,15 @@ CSCONF
   echo "  code-server configured and started"
 }
 
+step_claude_code_install() {
+  if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
+    echo "  Claude Code already installed"
+  else
+    sudo -u "$CLAWBOX_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+    echo "  Claude Code installed"
+  fi
+}
+
 step_vnc_install() {
   # Install x11vnc, Xvfb (virtual framebuffer fallback), and websockify
   apt-get install -y x11vnc xvfb websockify dbus-x11
@@ -667,7 +676,7 @@ step_rebuild_reboot() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install ollama_install
-  chromium_install code_server_install vnc_install openclaw_install openclaw_patch openclaw_config openclaw_models
+  chromium_install code_server_install claude_code_install vnc_install openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   fix_git_perms
@@ -761,6 +770,9 @@ step_chromium_install
 
 log "Installing code-server (VS Code)..."
 step_code_server_install
+
+log "Installing Claude Code..."
+step_claude_code_install
 
 log "Installing VNC server..."
 step_vnc_install

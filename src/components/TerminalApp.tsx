@@ -207,18 +207,38 @@ function TerminalInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Focus terminal on container click
+  // Focus terminal on any interaction with the container
   const handleContainerClick = useCallback(() => {
     termRef.current?.focus();
   }, []);
 
-  // Keyboard shortcut: Ctrl+Shift+C to copy, Ctrl+Shift+V to paste
+  // Re-focus terminal when the window becomes visible/active
+  useEffect(() => {
+    const refocus = () => {
+      if (termRef.current && statusRef.current === "connected") {
+        termRef.current.focus();
+      }
+    };
+    // Focus when tab becomes visible
+    document.addEventListener("visibilitychange", refocus);
+    // Focus when window receives focus
+    window.addEventListener("focus", refocus);
+    return () => {
+      document.removeEventListener("visibilitychange", refocus);
+      window.removeEventListener("focus", refocus);
+    };
+  }, []);
+
+  // Keyboard handler: shortcuts + fallback input forwarding
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Ctrl+Shift+C to copy
     if (e.ctrlKey && e.shiftKey && e.key === "C") {
       e.preventDefault();
       const sel = termRef.current?.getSelection();
       if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+      return;
     }
+    // Ctrl+Shift+V to paste
     if (e.ctrlKey && e.shiftKey && e.key === "V") {
       e.preventDefault();
       navigator.clipboard.readText().then((text) => {
@@ -226,6 +246,32 @@ function TerminalInner() {
           wsRef.current.send(JSON.stringify({ type: "input", data: text }));
         }
       }).catch(() => {});
+      return;
+    }
+
+    // Fallback: if xterm's textarea doesn't have focus, forward key to PTY directly
+    const xtermTextarea = containerRef.current?.querySelector("textarea.xterm-helper-textarea");
+    if (xtermTextarea && document.activeElement !== xtermTextarea) {
+      // Try to focus xterm first
+      termRef.current?.focus();
+      // Map key to terminal data and send directly
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      let data = "";
+      if (e.key === "Enter") data = "\r";
+      else if (e.key === "Backspace") data = "\x7f";
+      else if (e.key === "Tab") data = "\t";
+      else if (e.key === "Escape") data = "\x1b";
+      else if (e.key === "ArrowUp") data = "\x1b[A";
+      else if (e.key === "ArrowDown") data = "\x1b[B";
+      else if (e.key === "ArrowRight") data = "\x1b[C";
+      else if (e.key === "ArrowLeft") data = "\x1b[D";
+      else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) data = e.key;
+      else if (e.ctrlKey && e.key.length === 1) data = String.fromCharCode(e.key.toUpperCase().charCodeAt(0) - 64);
+      if (data) {
+        e.preventDefault();
+        ws.send(JSON.stringify({ type: "input", data }));
+      }
     }
   }, []);
 
@@ -297,12 +343,14 @@ function TerminalInner() {
       {/* Terminal container */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-hidden"
+        tabIndex={0}
+        className="flex-1 overflow-hidden outline-none"
         style={{
           padding: "6px 4px",
           background: "#0d0d1a",
         }}
         onClick={handleContainerClick}
+        onFocus={handleContainerClick}
       />
     </div>
   );

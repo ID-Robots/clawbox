@@ -79,6 +79,7 @@ export default function FilesApp() {
   const [dialog, setDialog] = useState<DialogState>({ type: null });
   const [dragOver, setDragOver] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(() => typeof window !== "undefined" ? window.innerWidth >= 768 : true);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -228,50 +229,68 @@ export default function FilesApp() {
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full overflow-hidden" style={{ background: "#1e1e2e", color: "#e0e0e0", fontFamily: "system-ui, sans-serif" }}>
+    <div className="flex h-full overflow-hidden relative" style={{ background: "#1e1e2e", color: "#e0e0e0", fontFamily: "system-ui, sans-serif" }}>
 
       {/* ── Sidebar ── */}
-      <aside style={{ width: 200, background: "#16161e", flexShrink: 0, borderRight: "1px solid rgba(255,255,255,0.07)" }}
-        className="flex flex-col py-4 overflow-y-auto">
-        <div className="px-4 pb-2 text-xs font-semibold uppercase tracking-widest" style={{ color: "rgba(224,224,224,0.4)" }}>
-          Favorites
-        </div>
-        {FAVORITES.map((fav) => {
-          const active = currentPath === fav.path;
-          return (
-            <button
-              key={fav.path}
-              onClick={() => load(fav.path)}
-              className="flex items-center gap-2 px-4 py-2 text-sm transition-colors text-left"
-              style={{
-                background: active ? "rgba(255,255,255,0.08)" : "transparent",
-                color: active ? "#fff" : "rgba(224,224,224,0.7)",
-                borderLeft: active ? "2px solid #f97316" : "2px solid transparent",
-              }}
-            >
-              <span>{fav.icon}</span>
-              <span>{fav.label}</span>
-            </button>
-          );
-        })}
+      {sidebarOpen && (
+        <>
+          {/* Overlay on mobile to close sidebar when tapping outside */}
+          <div
+            className="fixed inset-0 z-[5] bg-black/40 md:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
+          <aside style={{ width: 200, background: "#16161e", flexShrink: 0, borderRight: "1px solid rgba(255,255,255,0.07)" }}
+            className="flex flex-col py-4 overflow-y-auto absolute md:relative z-[6] h-full">
+            <div className="px-4 pb-2 text-xs font-semibold uppercase tracking-widest" style={{ color: "rgba(224,224,224,0.4)" }}>
+              Favorites
+            </div>
+            {FAVORITES.map((fav) => {
+              const active = currentPath === fav.path;
+              return (
+                <button
+                  key={fav.path}
+                  onClick={() => { load(fav.path); if (window.innerWidth < 768) setSidebarOpen(false); }}
+                  className="flex items-center gap-2 px-4 py-2 text-sm transition-colors text-left"
+                  style={{
+                    background: active ? "rgba(255,255,255,0.08)" : "transparent",
+                    color: active ? "#fff" : "rgba(224,224,224,0.7)",
+                    borderLeft: active ? "2px solid #f97316" : "2px solid transparent",
+                  }}
+                >
+                  <span>{fav.icon}</span>
+                  <span>{fav.label}</span>
+                </button>
+              );
+            })}
 
-        <div className="mt-auto px-4 pt-4">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm transition-colors"
-            style={{ background: "rgba(249,115,22,0.2)", color: "#f97316", border: "1px solid rgba(249,115,22,0.3)" }}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>upload</span>
-            Upload
-          </button>
-        </div>
-      </aside>
+            <div className="mt-auto px-4 pt-4">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm transition-colors"
+                style={{ background: "rgba(249,115,22,0.2)", color: "#f97316", border: "1px solid rgba(249,115,22,0.3)" }}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>upload</span>
+                Upload
+              </button>
+            </div>
+          </aside>
+        </>
+      )}
 
       {/* ── Main area ── */}
       <div className="flex flex-col flex-1 min-w-0">
 
         {/* ── Toolbar ── */}
         <div className="flex items-center gap-2 px-3 py-2 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.07)", background: "#1e1e2e" }}>
+          {/* Sidebar toggle (visible on mobile) */}
+          <button
+            onClick={() => setSidebarOpen(p => !p)}
+            className="p-1.5 rounded-md transition-colors md:hidden"
+            style={{ color: "rgba(224,224,224,0.8)" }}
+            title="Favorites"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>menu</span>
+          </button>
           {/* Back */}
           <button
             onClick={() => {

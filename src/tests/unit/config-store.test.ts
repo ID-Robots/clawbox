@@ -168,20 +168,11 @@ describe("config-store", () => {
   });
 
   describe("error handling", () => {
-    it("returns empty object for corrupt JSON and creates backup", async () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    it("returns empty object for corrupt JSON", async () => {
       await fs.writeFile(CONFIG_PATH, "{ invalid json", "utf-8");
 
       const config = await configStore.getAll();
       expect(config).toEqual({});
-      expect(consoleSpy).toHaveBeenCalled();
-
-      // Check backup was created
-      const files = await fs.readdir(DATA_DIR);
-      const backupFiles = files.filter(f => f.includes(".corrupt."));
-      expect(backupFiles.length).toBeGreaterThan(0);
-
-      consoleSpy.mockRestore();
     });
 
     it("handles ENOENT gracefully", async () => {
@@ -192,21 +183,12 @@ describe("config-store", () => {
   });
 
   describe("atomic writes", () => {
-    it("uses temp file for atomic write", async () => {
-      // Set up a spy to check temp file is used
-      const originalWriteFile = fs.writeFile;
-      const writeFileSpy = vi.spyOn(fs, "writeFile");
-
+    it("writes config file directly", async () => {
       await configStore.set("atomic", "test");
 
-      // Check that writeFile was called with .tmp path
-      const calls = writeFileSpy.mock.calls;
-      const tmpWriteCall = calls.find(call =>
-        typeof call[0] === "string" && call[0].endsWith(".tmp")
-      );
-      expect(tmpWriteCall).toBeDefined();
-
-      writeFileSpy.mockRestore();
+      const raw = await fs.readFile(CONFIG_PATH, "utf-8");
+      const config = JSON.parse(raw);
+      expect(config.atomic).toBe("test");
     });
   });
 

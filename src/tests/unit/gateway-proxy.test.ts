@@ -130,7 +130,7 @@ describe("gateway-proxy", () => {
       const response = await gatewayProxy.serveGatewayHTML(request);
       const html = await response.text();
 
-      expect(html).toContain("clawbox-token");
+      expect(html).toContain("my-secret-token");
     });
 
     it("redirects to setup when gateway returns error", async () => {

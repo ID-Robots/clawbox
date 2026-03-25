@@ -18,7 +18,7 @@ const mockGetAll = vi.mocked(getAll);
 const mockRedirectToSetup = vi.mocked(redirectToSetup);
 const mockServeGatewayHTML = vi.mocked(serveGatewayHTML);
 
-describe("GET / (root route)", () => {
+describe("GET / (root route — served by catch-all)", () => {
   let rootGet: (req: NextRequest) => Promise<Response>;
 
   function createRequest(url: string = "http://localhost/"): NextRequest {
@@ -33,7 +33,7 @@ describe("GET / (root route)", () => {
     mockRedirectToSetup.mockReturnValue(NextResponse.redirect(new URL("http://localhost/setup"), 302));
     mockServeGatewayHTML.mockResolvedValue(new NextResponse("<html></html>", { status: 200 }));
 
-    const mod = await import("@/app/route");
+    const mod = await import("@/app/[...gateway]/route");
     rootGet = mod.GET;
   });
 

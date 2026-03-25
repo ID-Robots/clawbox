@@ -362,7 +362,7 @@ export default function ChromeWindow({
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
           : "opacity 0.15s, box-shadow 0.15s",
       }}
-      onMouseDown={onFocus}
+      onMouseDown={isActive ? undefined : onFocus}
     >
       {/* Title bar — ChromeOS style */}
       <div

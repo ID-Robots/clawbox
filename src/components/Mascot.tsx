@@ -190,7 +190,7 @@ const FACEPALM_LINES = [
   'Тоя ден е cancelled.', 'Изтривам се от съществуване.',
 ]
 
-function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; onPositionChange?: (x: number) => void } = {}) {
+function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void } = {}) {
   const frozenRef = useRef(false)
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
@@ -643,6 +643,8 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
   const didDragRef = useRef(false)
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    // Right-click — let onContextMenu handle it, don't start drag/tap
+    if (e.button === 2) return
     e.preventDefault(); e.stopPropagation()
     // When dead, only allow taps (revive), not dragging
     if (isDead) {
@@ -660,8 +662,6 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-    // Wake from sleep if dragged
-    if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null; setSpeech(''); setState('idle'); try { localStorage.removeItem('clawbox-mascot-sleep') } catch {} }
     onBoxRef.current = false; setCrabOnBox(false); setBoxGlow(false)
     const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
@@ -699,17 +699,34 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
     if (!draggingRef.current) return
     draggingRef.current = false
 
-    // Tap detection — if pointer barely moved, trigger sass or revive
+    const wasSleeping = tamaRef.current.isSleeping
+
+    // Tap detection — if pointer barely moved, trigger sass/chat or revive
     if (!didDragRef.current) {
       setPhysicsActive(false)
       if (isDead) { tamaRevive() } else {
-        // Open OpenClaw chat on tap, with a sass line
-        say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
+        // Open chat on tap — works even when sleeping
         if (onTap) onTap(xRef.current)
-        // Restart the action loop so mascot doesn't freeze after tap
-        if (stateTimeout.current) clearTimeout(stateTimeout.current)
-        stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
+        if (!wasSleeping) {
+          say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
+          // Restart the action loop so mascot doesn't freeze after tap
+          if (stateTimeout.current) clearTimeout(stateTimeout.current)
+          stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
+        }
       }
+      return
+    }
+
+    // Drag-and-drop while sleeping wakes the mascot
+    if (wasSleeping) {
+      wakeSleepRef.current?.()
+      // Let physics play out the drop, then resume normal actions
+      const p = physicsRef.current
+      p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+      p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+      p.lastTime = performance.now()
+      p.active = true
+      physicsRAF.current = requestAnimationFrame(physicsLoop)
       return
     }
 
@@ -866,6 +883,28 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
     }, remainingMs) as ReturnType<typeof setTimeout>
   }, [say])
 
+  // Wake from sleep — clears all sleep state (mascot + tamagotchi engine)
+  const wakeSleep = useCallback(() => {
+    if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
+    if (stateTimeout.current) clearTimeout(stateTimeout.current)
+    setSpeech('')
+    setState('idle')
+    try { localStorage.removeItem(SLEEP_KEY) } catch {}
+    setTama(prev => {
+      if (!prev.isSleeping) return prev
+      const next = { ...prev, timers: { ...prev.timers } }
+      next.isSleeping = false
+      next.lightsOff = false
+      next.timers.sleepStart = null
+      next.timers.careAlertStart = null
+      Tama.saveState(next)
+      return next
+    })
+    say('*yawn* I\'m awake! 😤', 2500)
+  }, [say])
+  const wakeSleepRef = useRef(wakeSleep)
+  wakeSleepRef.current = wakeSleep
+
   // tamaSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
   const tamaSleep = useCallback(() => {
     setTama(prev => {
@@ -885,6 +924,7 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
 
   const doAction = useCallback(() => {
     if (frozenRef.current) return // Don't start new actions while frozen
+    if (tamaRef.current.isSleeping) return // No random actions while sleeping
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     const action = pickAction()
@@ -1170,6 +1210,8 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const bodyAnim = (() => {
+    // Thinking animation overrides when bot is processing
+    if (thinking) return 'mascot-thinking 1.5s ease-in-out infinite'
     switch (state) {
       case 'waddle': return 'mascot-waddle 1.2s ease-in-out infinite'
       case 'jump': return 'mascot-squish 0.4s ease'
@@ -1231,6 +1273,13 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
         @keyframes mascot-idle {
           0%, 100% { transform: translateY(0) rotate(0deg); }
           50% { transform: translateY(-2px) rotate(1deg); }
+        }
+        @keyframes mascot-thinking {
+          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
+          20% { transform: translateY(-4px) rotate(-3deg) scale(1.02); }
+          40% { transform: translateY(-2px) rotate(3deg) scale(1); }
+          60% { transform: translateY(-6px) rotate(-2deg) scale(1.03); }
+          80% { transform: translateY(-3px) rotate(2deg) scale(1.01); }
         }
         @keyframes mascot-celebrate {
           0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
@@ -1332,6 +1381,15 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
           60% { transform: scale(1.08); }
           100% { transform: scale(1); opacity: 1; }
         }
+        @keyframes think-dot {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+          40% { transform: translateY(-8px); opacity: 1; }
+        }
+        @keyframes zzz-float {
+          0% { transform: translateY(0) translateX(0) scale(0.5) rotate(-10deg); opacity: 0; }
+          15% { opacity: 1; }
+          100% { transform: translateY(-80px) translateX(30px) scale(1.3) rotate(10deg); opacity: 0; }
+        }
         @keyframes tama-btn-pop {
           0% { transform: scale(0) translateY(20px); opacity: 0; }
           70% { transform: scale(1.1) translateY(-2px); }
@@ -1352,13 +1410,19 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : 8,
         transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
-        zIndex: 10001, pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
+        zIndex: 10001, pointerEvents: 'auto',
+        cursor: 'grab',
+        touchAction: 'none',
         willChange: 'transform, bottom, filter',
-        filter: frenzy
-          ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
-          : crabOnBox
-            ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
-            : 'none',
+        filter: tama.isSleeping
+          ? 'brightness(0.8) drop-shadow(0 0 10px rgba(147,197,253,0.3))'
+          : frenzy
+            ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
+            : thinking
+              ? 'drop-shadow(0 0 12px rgba(99,179,237,0.6))'
+              : crabOnBox
+                ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
+                : 'none',
       }}>
         {/* Body */}
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
@@ -1454,6 +1518,43 @@ function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: numbe
               {speech}
               <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${frenzy ? 'rgba(251,191,36,0.95)' : state === 'sass' ? 'rgba(220,38,38,0.9)' : state === 'facepalm' ? 'rgba(100,100,100,0.9)' : 'rgba(249,115,22,0.92)'}` }} />
             </div>
+          </div>
+        )}
+        {/* ZZZ floating animation when tamagotchi is sleeping */}
+        {tama.isSleeping && !isDead && (
+          <div style={{
+            position: 'absolute', top: 30, right: 15,
+            pointerEvents: 'none', zIndex: 11,
+          }}>
+            {[0, 1.2, 2.4].map((delay, i) => (
+              <div key={i} style={{
+                position: 'absolute',
+                fontSize: [14, 18, 24][i],
+                fontWeight: 900,
+                color: 'rgba(147,197,253,0.9)',
+                textShadow: '0 0 8px rgba(147,197,253,0.5)',
+                animation: `zzz-float 3s ${delay}s ease-out infinite`,
+                left: i * 6,
+                top: -i * 4,
+              }}>Z</div>
+            ))}
+          </div>
+        )}
+        {/* Thinking indicator — dots above mascot head */}
+        {thinking && !isDead && (
+          <div style={{
+            position: 'absolute', top: -5, left: '50%', transform: 'translateX(-50%)',
+            display: 'flex', gap: 5, alignItems: 'center', zIndex: 11,
+            pointerEvents: 'none',
+          }}>
+            {[0, 0.2, 0.4].map((delay, i) => (
+              <div key={i} style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: 'rgba(99,179,237,0.9)',
+                boxShadow: '0 0 6px rgba(99,179,237,0.5)',
+                animation: `think-dot 1.2s ${delay}s ease-in-out infinite`,
+              }} />
+            ))}
           </div>
         )}
         {/* Shadow */}

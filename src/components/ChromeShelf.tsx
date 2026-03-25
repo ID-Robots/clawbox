@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useState, useEffect, useRef } from "react";
+import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 
 interface ShelfApp {
   id: string;
@@ -42,6 +42,28 @@ export default function ChromeShelf({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => {
+      window.removeEventListener("resize", checkMobile);
+      document.removeEventListener("fullscreenchange", onFsChange);
+    };
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     if (!ctxMenu && !shelfMenu) return;
@@ -112,8 +134,10 @@ export default function ChromeShelf({
   return (
     <>
       <div
-        className="fixed bottom-0 left-0 right-0 h-14 flex items-center justify-center px-2 z-[10000]"
+        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2 z-[10000]"
         style={{
+          height: "calc(56px + env(safe-area-inset-bottom))",
+          paddingBottom: "env(safe-area-inset-bottom)",
           background: "rgba(17, 24, 39, 0.55)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
@@ -125,9 +149,8 @@ export default function ChromeShelf({
           setShelfMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        {/* Centered: launcher + pinned apps + open apps */}
-        <div className="flex items-center gap-1">
-          {/* Launcher button */}
+        {/* Launcher button — left on mobile, inline on desktop */}
+        <div className="absolute left-2 flex items-center sm:hidden">
           <button
             onClick={onLauncherClick}
             className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -137,9 +160,23 @@ export default function ChromeShelf({
               <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
             </div>
           </button>
+        </div>
 
-          {/* Separator */}
-          <div className="w-px h-8 bg-white/10 mx-1" />
+        {/* Centered: pinned apps + open apps (launcher inline on desktop) */}
+        <div className="flex items-center gap-1">
+          {/* Launcher button — desktop only (inline) */}
+          <button
+            onClick={onLauncherClick}
+            className="w-11 h-11 hidden sm:flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+            title="App Launcher"
+          >
+            <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
+              <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
+            </div>
+          </button>
+
+          {/* Separator (desktop only) */}
+          <div className="w-px h-8 bg-white/10 mx-1 hidden sm:block" />
 
           {/* Pinned apps */}
           {pinnedApps.map(renderApp)}
@@ -162,6 +199,17 @@ export default function ChromeShelf({
           >
             <span className="text-sm text-white/80 font-medium hidden sm:inline">{time}</span>
           </button>
+          {isMobile && (
+            <button
+              onClick={toggleFullscreen}
+              className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+              title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+            >
+              <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>
+                {isFullscreen ? "fullscreen_exit" : "fullscreen"}
+              </span>
+            </button>
+          )}
           <button
             onClick={onPowerClick}
             className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

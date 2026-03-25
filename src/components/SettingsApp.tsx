@@ -5,6 +5,7 @@ import StatusMessage from "./StatusMessage";
 import AIModelsStep from "./AIModelsStep";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
+import { FEATURE_FLAGS, resolveFlags } from "@/lib/feature-flags";
 
 /* ── Types ── */
 
@@ -54,7 +55,7 @@ const RESET_STEPS = [
   "Finalizing...",
 ];
 
-type Section = "appearance" | "wifi" | "ai" | "telegram" | "system" | "about";
+type Section = "appearance" | "wifi" | "ai" | "telegram" | "features" | "system" | "about";
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
@@ -62,6 +63,7 @@ const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
   { id: "wifi", icon: "wifi", label: "Network" },
   { id: "ai", icon: "smart_toy", label: "AI Provider" },
   { id: "telegram", icon: "send", label: "Telegram" },
+  { id: "features", icon: "toggle_on", label: "Features" },
   { id: "system", icon: "monitor_heart", label: "System" },
   { id: "about", icon: "info", label: "About" },
 ];
@@ -116,6 +118,51 @@ function UpdateStepIcon({ status }: { status: StepStatus }) {
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const [section, setSection] = useState<Section>("appearance");
+  // Mobile: null means show nav list, a section means show content with back button
+  const [mobileSection, setMobileSection] = useState<Section | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 640);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+
+  /* ── Developer mode + feature flags ── */
+  const [devMode, setDevMode] = useState(false);
+  const [flags, setFlags] = useState<Record<string, boolean>>({});
+  const flagsLoaded = useRef(false);
+  useEffect(() => {
+    fetch("/setup-api/preferences?all=1")
+      .then(r => r.json())
+      .then((data: Record<string, unknown>) => {
+        setFlags(resolveFlags(data));
+        if (data.ui_developer_mode === true) setDevMode(true);
+        flagsLoaded.current = true;
+      })
+      .catch(() => { flagsLoaded.current = true; });
+  }, []);
+
+  const toggleFlag = useCallback((flagId: string, value: boolean) => {
+    setFlags(prev => ({ ...prev, [flagId]: value }));
+    fetch("/setup-api/preferences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [`ff_${flagId}`]: value }),
+    }).catch(() => {});
+  }, []);
+
+  const toggleDevMode = useCallback((on: boolean) => {
+    setDevMode(on);
+    if (!on) setSection("about");
+    fetch("/setup-api/preferences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ui_developer_mode: on }),
+    }).catch(() => {});
+  }, []);
+
+  // Android-style: tap version 7 times to enable developer mode
 
   /* ── System stats (only poll when visible) ── */
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -370,52 +417,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setResetting(false);
   };
 
-  return (
-    <div className="flex h-full bg-[#0d1117]">
-      {/* Sidebar */}
-      <nav className="w-48 shrink-0 bg-white/[0.02] border-r border-white/5 py-3 flex flex-col">
-        {NAV_ITEMS.map(item => (
-          <button
-            key={item.id}
-            onClick={() => setSection(item.id)}
-            className={`flex items-center gap-3 px-4 py-2.5 text-sm border-none cursor-pointer transition-colors ${
-              section === item.id
-                ? "bg-orange-500/10 text-orange-400 border-r-2 border-r-orange-400"
-                : "text-white/50 hover:text-white/80 hover:bg-white/5"
-            }`}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 20 }}>{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
-        <div className="flex-1" />
-        <div className="px-3 pb-2 space-y-1.5">
-          <button
-            onClick={() => openUpdateConfirm()}
-            className="flex items-center gap-2.5 w-full px-3 py-2 text-xs text-white/50 hover:text-white/80 bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] rounded-lg cursor-pointer transition-colors"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>system_update</span>
-            System Update
-          </button>
-          <button
-            onClick={() => setResetConfirm(true)}
-            className="flex items-center gap-2.5 w-full px-3 py-2 text-xs text-red-400/50 hover:text-red-400 bg-red-500/[0.03] hover:bg-red-500/[0.06] border border-red-500/[0.06] rounded-lg cursor-pointer transition-colors"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>restart_alt</span>
-            Factory Reset
-          </button>
-          {versionInfo && (
-            <div className="text-center text-[10px] text-emerald-400/40 pt-1">
-              {versionInfo.clawbox.current}
-            </div>
-          )}
-        </div>
-      </nav>
+  const activeSection = isMobile ? (mobileSection ?? section) : section;
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
+  const renderContent = () => (
+    <>
         {/* ─── Appearance ─── */}
-        {section === "appearance" && (
+        {activeSection === "appearance" && (
           <div className="max-w-2xl space-y-5">
             <h2 className="text-lg font-semibold text-white/90">Appearance</h2>
 
@@ -572,7 +579,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Network ─── */}
-        {section === "wifi" && (
+        {activeSection === "wifi" && (
           <div className="max-w-lg space-y-5">
             <h2 className="text-lg font-semibold text-white/90">Network</h2>
 
@@ -698,14 +705,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── AI Provider ─── */}
-        {section === "ai" && (
+        {activeSection === "ai" && (
           <div className="max-w-lg">
             <AIModelsStep embedded />
           </div>
         )}
 
         {/* ─── Telegram ─── */}
-        {section === "telegram" && (
+        {activeSection === "telegram" && (
           <div className="max-w-lg space-y-5">
             <h2 className="text-lg font-semibold text-white/90">Telegram</h2>
 
@@ -863,8 +870,37 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Features ─── */}
+        {activeSection === "features" && (
+          <div className="max-w-2xl space-y-5">
+            <h2 className="text-lg font-semibold text-white/90">Feature Flags</h2>
+            <p className="text-sm text-white/40">Enable or disable experimental features. Changes take effect immediately.</p>
+
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.06]">
+              {FEATURE_FLAGS.map(flag => (
+                <div key={flag.id} className="flex items-center justify-between px-5 py-4">
+                  <div className="flex-1 min-w-0 mr-4">
+                    <div className="text-sm font-medium text-white/90">{flag.name}</div>
+                    <div className="text-xs text-white/40 mt-0.5">{flag.description}</div>
+                  </div>
+                  <button
+                    onClick={() => toggleFlag(flag.id, !flags[flag.id])}
+                    className={`relative w-11 h-6 rounded-full transition-colors shrink-0 cursor-pointer ${flags[flag.id] ? "bg-orange-500" : "bg-white/10"}`}
+                  >
+                    <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${flags[flag.id] ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {FEATURE_FLAGS.length === 0 && (
+              <div className="text-center text-white/30 py-8 text-sm">No feature flags available</div>
+            )}
+          </div>
+        )}
+
         {/* ─── System ─── */}
-        {section === "system" && (
+        {activeSection === "system" && (
           <div className="max-w-2xl space-y-5">
             <h2 className="text-lg font-semibold text-white/90">System</h2>
 
@@ -1011,7 +1047,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── About ─── */}
-        {section === "about" && (
+        {activeSection === "about" && (
           <div className="max-w-md space-y-6">
             <h2 className="text-lg font-semibold text-white/90 mb-4">About ClawBox</h2>
 
@@ -1072,11 +1108,108 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               Discord Community
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
+
+            {/* Developer Mode */}
+            <div className={`rounded-xl p-4 space-y-4 ${devMode ? "bg-amber-500/5 border border-amber-500/10" : "bg-white/5"}`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className={`text-sm font-medium ${devMode ? "text-amber-400" : "text-white/80"}`}>Developer Mode</div>
+                  <div className="text-xs text-white/40 mt-0.5">Feature flags and advanced options</div>
+                </div>
+                <button
+                  onClick={() => toggleDevMode(!devMode)}
+                  className={`relative w-10 h-5 rounded-full transition-colors shrink-0 cursor-pointer border-none ${devMode ? "bg-amber-500" : "bg-white/15"}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200 ${devMode ? "translate-x-[18px]" : "translate-x-0"}`} />
+                </button>
+              </div>
+
+              {/* Inline feature flags when dev mode is on */}
+              {devMode && FEATURE_FLAGS.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-amber-500/10">
+                  <div className="text-xs text-white/30 font-medium uppercase tracking-wider">Feature Flags</div>
+                  {FEATURE_FLAGS.map(flag => (
+                    <div key={flag.id} className="flex items-center justify-between py-1">
+                      <div>
+                        <div className="text-sm text-white/80">{flag.name}</div>
+                        <div className="text-xs text-white/30">{flag.description}</div>
+                      </div>
+                      <button
+                        onClick={() => toggleFlag(flag.id, !flags[flag.id])}
+                        className={`relative w-10 h-5 rounded-full transition-colors shrink-0 cursor-pointer border-none ${flags[flag.id] ? "bg-orange-500" : "bg-white/15"}`}
+                      >
+                        <span className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200 ${flags[flag.id] ? "translate-x-[18px]" : "translate-x-0"}`} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <button
+                onClick={() => openUpdateConfirm()}
+                className="flex items-center gap-3 w-full bg-white/5 rounded-xl px-4 py-3 text-sm text-white/60 hover:text-white/80 transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
+                System Update
+              </button>
+              <button
+                onClick={() => setResetConfirm(true)}
+                className="flex items-center gap-3 w-full bg-red-500/5 rounded-xl px-4 py-3 text-sm text-red-400/60 hover:text-red-400 transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>restart_alt</span>
+                Factory Reset
+              </button>
+            </div>
           </div>
         )}
-      </div>
+    </>
+  );
 
-      {/* Update confirmation modal */}
+  // ─── Mobile layout: full-screen nav or full-screen content ───
+  if (isMobile) {
+    return (
+      <div className="flex flex-col h-full bg-[#0d1117]">
+        {mobileSection === null ? (
+          /* Nav list */
+          <div className="flex-1 overflow-y-auto">
+            <h2 className="text-lg font-semibold text-white/90 px-5 pt-4 pb-2">Settings</h2>
+            <nav className="flex flex-col">
+              {NAV_ITEMS.filter(item => item.id !== "features" || devMode).map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => { setSection(item.id); setMobileSection(item.id); }}
+                  className="flex items-center gap-3 px-5 py-3.5 text-sm border-none cursor-pointer transition-colors text-white/70 hover:bg-white/5 active:bg-white/10"
+                >
+                  <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 20 }}>{item.icon}</span>
+                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="material-symbols-rounded text-white/20" style={{ fontSize: 18 }}>chevron_right</span>
+                </button>
+              ))}
+            </nav>
+          </div>
+        ) : (
+          /* Content with back button */
+          <>
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] shrink-0">
+              <button
+                onClick={() => setMobileSection(null)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+              </button>
+              <span className="text-sm font-medium text-white/80">
+                {NAV_ITEMS.find(i => i.id === mobileSection)?.label ?? "Settings"}
+              </span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {renderContent()}
+            </div>
+          </>
+        )}
+
+        {/* Update confirmation modal */}
       {updateConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full">
@@ -1119,6 +1252,160 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="flex gap-2">
                   <input
                     id="settings-update-branch"
+                    type="text"
+                    value={branchInput}
+                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
+                    placeholder="main"
+                    className="flex-1 bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/80 placeholder:text-white/20 outline-none focus:border-orange-500"
+                  />
+                  <button
+                    type="button"
+                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
+                    onClick={() => saveUpdateBranch(branchInput)}
+                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
+                  >
+                    {branchSaving ? "..." : "Set"}
+                  </button>
+                </div>
+                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
+                {updateBranch && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
+                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">Clear</button>
+                  </div>
+                )}
+                {!updateBranch && !branchError && (
+                  <p className="mt-1 text-xs text-white/20">Leave empty to follow current branch or main</p>
+                )}
+              </div>
+            )}
+            <div className="flex items-center gap-3 justify-end">
+              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-white/80 border border-white/10 rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
+                Cancel
+              </button>
+              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
+                Update
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Factory Reset modal */}
+      {resetConfirm && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#1a1f2e] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-white/10">
+            {!resetting ? (
+              <>
+                <h3 className="text-lg font-bold text-white/90 mb-2">Factory Reset?</h3>
+                <p className="text-sm text-white/50 mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
+                <div className="flex gap-3">
+                  <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-white/60 rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
+                    Reset
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-lg font-bold text-white/90 mb-4">Resetting...</h3>
+                <div className="space-y-2 mb-4">
+                  {RESET_STEPS.map((step, i) => (
+                    <div key={i} className="flex items-center gap-2.5 text-sm">
+                      {i < resetStep ? (
+                        <span className="material-symbols-rounded text-green-400" style={{ fontSize: 16 }}>check</span>
+                      ) : i === resetStep ? (
+                        <span className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <span className="w-4 h-4 rounded-full border-2 border-white/10" />
+                      )}
+                      <span className={i <= resetStep ? "text-white/80" : "text-white/20"}>{step}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="w-full bg-white/5 rounded-full h-2 overflow-hidden">
+                  <div className="h-full bg-red-500 rounded-full transition-all duration-300" style={{ width: `${resetProgress}%` }} />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+  }
+
+  // ─── Desktop layout: sidebar + content ───
+  return (
+    <div className="flex h-full bg-[#0d1117]">
+      {/* Sidebar */}
+      <nav className="w-48 shrink-0 bg-white/[0.02] border-r border-white/5 py-3 flex flex-col">
+        {NAV_ITEMS.filter(item => item.id !== "features" || devMode).map(item => (
+          <button
+            key={item.id}
+            onClick={() => setSection(item.id)}
+            className={`flex items-center gap-3 px-4 py-2.5 text-sm border-none cursor-pointer transition-colors ${
+              activeSection === item.id
+                ? "bg-orange-500/10 text-orange-400 border-r-2 border-r-orange-400"
+                : "text-white/50 hover:text-white/80 hover:bg-white/5"
+            }`}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 20 }}>{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
+        <div className="flex-1" />
+      </nav>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {renderContent()}
+      </div>
+
+      {/* Update confirmation modal */}
+      {updateConfirm && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold text-white/90 mb-2">System Update</h3>
+            <p className="text-sm text-white/50 mb-4 leading-relaxed">
+              This will pull the latest updates and restart the device. The process may take a few minutes.
+            </p>
+            {versionLoading ? (
+              <div className="mb-4 text-xs text-white/30">Checking versions...</div>
+            ) : versionInfo && (
+              <div className="mb-4 space-y-2 text-xs">
+                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
+                  <span className="text-white/50 font-medium">ClawBox</span>
+                  <span className="text-white/80">
+                    {versionInfo.clawbox.current}
+                    {versionInfo.clawbox.target ? (
+                      <span className="text-white/30">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
+                    ) : (
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
+                  <span className="text-white/50 font-medium">OpenClaw</span>
+                  <span className="text-white/80">
+                    {versionInfo.openclaw.current ?? "not installed"}
+                    {versionInfo.openclaw.target ? (
+                      <span className="text-white/30">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
+                    ) : versionInfo.openclaw.current ? (
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                    ) : null}
+                  </span>
+                </div>
+              </div>
+            )}
+            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
+              <div className="mb-4">
+                <label htmlFor="settings-update-branch-d" className="text-xs text-white/30 mb-1 block">Update branch</label>
+                <div className="flex gap-2">
+                  <input
+                    id="settings-update-branch-d"
                     type="text"
                     value={branchInput}
                     onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
