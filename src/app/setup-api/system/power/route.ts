@@ -10,14 +10,14 @@ export async function POST(req: Request) {
     if (action === "shutdown") {
       // Short delay so the response reaches the client
       setTimeout(() => {
-        execFile("systemctl", ["poweroff"], { timeout: 10_000 });
+        execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "poweroff"], { timeout: 10_000 });
       }, 1500);
       return NextResponse.json({ ok: true, action: "shutdown" });
     }
 
     if (action === "restart") {
       setTimeout(() => {
-        execFile("systemctl", ["reboot"], { timeout: 10_000 });
+        execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
       }, 1500);
       return NextResponse.json({ ok: true, action: "restart" });
     }

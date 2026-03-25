@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import StatusMessage from "./StatusMessage";
 import AIModelsStep from "./AIModelsStep";
+import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 
 /* ── Types ── */
@@ -36,6 +37,8 @@ interface SystemStats {
   overview: { hostname: string; os: string; kernel: string; uptime: string; arch: string; platform: string };
   cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number };
   memory: { total: number; used: number; free: number; usedPercent: number; swap: SwapStats };
+  temperature?: { value: number | null; display: string };
+  gpu?: { usage: number };
   storage: DiskMount[];
   network: NetworkIface[];
   processes: ProcessEntry[];
@@ -51,13 +54,14 @@ const RESET_STEPS = [
   "Finalizing...",
 ];
 
-type Section = "appearance" | "wifi" | "ai" | "system" | "about";
+type Section = "appearance" | "wifi" | "ai" | "telegram" | "system" | "about";
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
   { id: "appearance", icon: "palette", label: "Appearance" },
   { id: "wifi", icon: "wifi", label: "Network" },
   { id: "ai", icon: "smart_toy", label: "AI Provider" },
+  { id: "telegram", icon: "send", label: "Telegram" },
   { id: "system", icon: "monitor_heart", label: "System" },
   { id: "about", icon: "info", label: "About" },
 ];
@@ -221,11 +225,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
 
+  /* ── Hotspot ── */
+  const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
+  const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
+  const [hotspotToggling, setHotspotToggling] = useState(false);
+
   useEffect(() => {
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
     }).catch(() => {});
+    fetch("/setup-api/system/hotspot").then(r => r.json()).then(d => {
+      setHotspotEnabled(d.enabled ?? true);
+      if (d.ssid) setHotspotSSID(d.ssid);
+    }).catch(() => {});
   }, []);
+
+  const toggleHotspot = async () => {
+    const newEnabled = !hotspotEnabled;
+    setHotspotToggling(true);
+    try {
+      const res = await fetch("/setup-api/system/hotspot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: hotspotSSID, enabled: newEnabled }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
+      setHotspotEnabled(newEnabled);
+    } catch { /* leave state unchanged */ } finally {
+      setHotspotToggling(false);
+    }
+  };
 
   const connectWifi = async () => {
     if (!ssid.trim()) return;
@@ -250,6 +279,63 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
+
+  /* ── Telegram ── */
+  const [tgToken, setTgToken] = useState("");
+  const [tgShowToken, setTgShowToken] = useState(false);
+  const [tgSaving, setTgSaving] = useState(false);
+  const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
+  const [tgReconfigure, setTgReconfigure] = useState(false);
+  const tgSaveControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (section !== "telegram") return;
+    fetch("/setup-api/telegram/status").then(r => r.json()).then(d => {
+      setTgConfigured(d.configured ?? false);
+    }).catch(() => setTgConfigured(false));
+  }, [section]);
+
+  const saveTelegram = async () => {
+    if (!tgToken.trim()) {
+      setTgStatus({ type: "error", message: "Please enter a bot token" });
+      return;
+    }
+    tgSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    tgSaveControllerRef.current = controller;
+    setTgSaving(true);
+    setTgStatus(null);
+    try {
+      const res = await fetch("/setup-api/telegram/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ botToken: tgToken.trim() }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setTgStatus({ type: "error", message: data.error || "Failed to save" });
+        return;
+      }
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+      if (data.success) {
+        setTgStatus({ type: "success", message: "Telegram bot configured successfully!" });
+        setTgConfigured(true);
+        setTgReconfigure(false);
+        setTgToken("");
+      } else {
+        setTgStatus({ type: "error", message: data.error || "Failed to save" });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setTgStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
+    } finally {
+      if (!controller.signal.aborted) setTgSaving(false);
+    }
+  };
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -522,6 +608,33 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
+            {/* Hotspot toggle card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${hotspotEnabled ? "bg-orange-500/15" : "bg-white/5"}`}>
+                    <span className={`material-symbols-rounded ${hotspotEnabled ? "text-orange-400" : "text-white/25"}`} style={{ fontSize: 22 }}>wifi_tethering</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-white/90 font-medium">Hotspot</div>
+                    <div className="text-xs text-white/35 mt-0.5">{hotspotSSID}</div>
+                  </div>
+                </div>
+                <button
+                  onClick={toggleHotspot}
+                  disabled={hotspotEnabled === null || hotspotToggling}
+                  className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer border-none ${hotspotEnabled ? "bg-[#fe6e00]" : "bg-white/10"} ${hotspotToggling ? "opacity-50" : ""}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${hotspotEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                </button>
+              </div>
+              {hotspotEnabled && (
+                <p className="text-[11px] text-white/25 mt-3 leading-relaxed">
+                  The hotspot broadcasts <span className="text-white/40 font-medium">{hotspotSSID}</span> so you can connect to this device directly.
+                </p>
+              )}
+            </div>
+
             {/* Connect to network card */}
             <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
               <div className="flex items-center gap-2 mb-4">
@@ -588,6 +701,165 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {section === "ai" && (
           <div className="max-w-lg">
             <AIModelsStep embedded />
+          </div>
+        )}
+
+        {/* ─── Telegram ─── */}
+        {section === "telegram" && (
+          <div className="max-w-lg space-y-5">
+            <h2 className="text-lg font-semibold text-white/90">Telegram</h2>
+
+            {/* Status card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="#f97316"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.96 6.504-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.492-1.302.48-.428-.012-1.252-.242-1.865-.44-.751-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Status</label>
+              </div>
+              {tgConfigured === null ? (
+                <div className="flex items-center gap-3 text-white/30 text-sm">
+                  <div className="w-5 h-5 border-2 border-white/15 border-t-orange-400 rounded-full animate-spin" />
+                  Checking...
+                </div>
+              ) : tgConfigured && !tgReconfigure ? (
+                <div>
+                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
+                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white/90 font-medium">Bot Connected</div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                        <span className="text-xs text-green-400/80">Telegram channel active</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
+                    className="text-sm text-orange-400 hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                  >
+                    Reconfigure bot token
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-white/25" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-white/50">Not configured</div>
+                    <div className="text-xs text-white/25 mt-0.5">Set up a Telegram bot below</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Setup card — shown when not configured or reconfiguring */}
+            {(tgConfigured === false || tgReconfigure) && (
+              <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>add_circle</span>
+                  <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+                    {tgReconfigure ? "Reconfigure Bot" : "Setup Bot"}
+                  </label>
+                </div>
+
+                {/* Instructions with QR */}
+                <div className="flex gap-4 items-start mb-5">
+                  <div className="shrink-0 p-2 bg-white rounded-lg">
+                    <QRCodeSVG value="https://t.me/BotFather" size={80} level="M" bgColor="#ffffff" fgColor="#000000" />
+                  </div>
+                  <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                    <li>
+                      Scan the QR or open{" "}
+                      <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:text-orange-300 font-semibold no-underline">
+                        @BotFather
+                      </a>{" "}
+                      in Telegram
+                    </li>
+                    <li>
+                      Send{" "}
+                      <code className="bg-white/[0.06] px-1.5 py-0.5 rounded text-xs text-orange-400">
+                        /newbot
+                      </code>{" "}
+                      and follow the prompts
+                    </li>
+                    <li>
+                      Copy the <strong className="text-white/90">Bot Token</strong> and paste below
+                    </li>
+                  </ol>
+                </div>
+
+                {/* Token input */}
+                <div>
+                  <label htmlFor="settings-tg-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Bot Token</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/20" style={{ fontSize: 18 }}>key</span>
+                    <input
+                      id="settings-tg-token"
+                      type={tgShowToken ? "text" : "password"}
+                      value={tgToken}
+                      onChange={(e) => { setTgToken(e.target.value); setTgStatus(null); }}
+                      placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-white/90 outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      onKeyDown={e => e.key === "Enter" && saveTelegram()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setTgShowToken(v => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/25 hover:text-white/60 bg-transparent border-none cursor-pointer p-0.5"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{tgShowToken ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {tgStatus && <div className="mt-3"><StatusMessage type={tgStatus.type} message={tgStatus.message} /></div>}
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    onClick={saveTelegram}
+                    disabled={tgSaving || !tgToken.trim()}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {tgSaving ? (
+                      <>
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>save</span>
+                        Save
+                      </>
+                    )}
+                  </button>
+                  {tgReconfigure && (
+                    <button
+                      onClick={() => { setTgReconfigure(false); setTgStatus(null); setTgToken(""); }}
+                      className="text-sm text-white/40 hover:text-white/60 bg-transparent border-none cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Info card */}
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>info</span>
+                <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">How it works</label>
+              </div>
+              <p className="text-xs text-white/40 leading-relaxed">
+                Once configured, you can chat with your ClawBox AI assistant directly from Telegram. 
+                Send messages to your bot and it will respond using the AI provider configured in the AI Provider settings.
+                Your conversations are private and processed on your device.
+              </p>
+            </div>
           </div>
         )}
 
@@ -660,7 +932,50 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <div className="text-right text-[10px] text-white/25 mt-1">{stats.memory.swap.percent}% used</div>
                     </div>
                   )}
+
+                  {/* GPU bar */}
+                  {stats.gpu != null && (
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs text-white/50">GPU</span>
+                        <span className="text-xs font-mono font-semibold" style={{ color: barColor(stats.gpu.usage) }}>{stats.gpu.usage}%</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.gpu.usage}%`, backgroundColor: barColor(stats.gpu.usage) }} />
+                      </div>
+                    </div>
+                  )}
                 </div>
+
+                {/* Temperature card */}
+                {stats.temperature?.value != null && (
+                  <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 18 }}>thermostat</span>
+                      <label className="text-xs font-semibold text-white/50 uppercase tracking-wider">Temperature</label>
+                    </div>
+                    <div className="flex items-end gap-3">
+                      <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
+                        {stats.temperature.display}
+                      </span>
+                      <span className="text-xs text-white/25 mb-1.5">
+                        {stats.temperature.value > 80 ? "Critical" : stats.temperature.value > 60 ? "Warm" : "Normal"}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden mt-3">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${Math.min(100, (stats.temperature.value / 100) * 100)}%`,
+                          backgroundColor: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee",
+                        }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[10px] text-white/20 mt-1.5 font-mono">
+                      <span>0°C</span><span>50°C</span><span>100°C</span>
+                    </div>
+                  </div>
+                )}
 
                 {/* Storage card */}
                 <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
@@ -720,7 +1035,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-white/40">Platform</span>
-                  <span className="text-white/80">x64 Desktop</span>
+                  <span className="text-white/80">{stats ? `${stats.overview.arch} ${stats.overview.platform}` : "..."}</span>
                 </div>
               </div>
             </div>

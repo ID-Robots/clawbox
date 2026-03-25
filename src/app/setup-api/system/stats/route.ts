@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import os from "os";
 import { execSync } from "child_process";
 import fs from "fs";
+import fsP from "fs/promises";
 
 export const dynamic = "force-dynamic";
 
@@ -180,6 +181,27 @@ function getKernelRelease(): string {
   }
 }
 
+async function getTemperature(): Promise<{ value: number | null; display: string }> {
+  try {
+    const raw = await fsP.readFile("/sys/devices/virtual/thermal/thermal_zone0/temp", "utf-8");
+    const millideg = parseInt(raw.trim(), 10);
+    if (!isFinite(millideg)) return { value: null, display: "unknown" };
+    const celsius = millideg / 1000;
+    return { value: celsius, display: celsius.toFixed(1) + "°C" };
+  } catch {
+    return { value: null, display: "unknown" };
+  }
+}
+
+async function getGpuUsage(): Promise<number> {
+  try {
+    const raw = await fsP.readFile("/sys/devices/platform/bus@0/17000000.gpu/load", "utf-8");
+    return Math.round((parseInt(raw.trim(), 10) || 0) / 10);
+  } catch {
+    return 0;
+  }
+}
+
 function getSwapUsage(): { used: number; total: number; percent: number } {
   try {
     const meminfo = fs.readFileSync("/proc/meminfo", "utf-8");
@@ -199,6 +221,8 @@ export async function GET() {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
+
+    const [temp, gpuUsage] = await Promise.all([getTemperature(), getGpuUsage()]);
 
     const stats = {
       overview: {
@@ -223,6 +247,8 @@ export async function GET() {
         usedPercent: Math.round((usedMem / totalMem) * 100),
         swap: getSwapUsage(),
       },
+      temperature: temp,
+      gpu: { usage: gpuUsage },
       storage: getDiskUsage(),
       network: getNetworkInterfaces(),
       processes: getTopProcesses(),

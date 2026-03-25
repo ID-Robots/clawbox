@@ -74,17 +74,18 @@ export async function serveGatewayHTML(
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : "";
-    // Script to set WebSocket URL + token so the OpenClaw UI connects directly to the gateway
+    // Script to set WebSocket URL + token so the OpenClaw UI connects directly to the gateway.
+    // The SPA stores settings in localStorage (field "gatewayUrl") and tokens in
+    // sessionStorage under per-URL key "openclaw.control.token.v1:<normalized_ws_url>".
     const wsScript = `<script>
 (function(){
-  var KEY="openclaw.control.settings.v1";
+  var SK="openclaw.control.settings.v1";
+  var TP="openclaw.control.token.v1:";
   try{
-    var s=JSON.parse(localStorage.getItem(KEY)||"{}");
     var wsUrl="ws://"+location.hostname+":${GATEWAY_PORT}";
-    var changed=false;
-    if(s.url!==wsUrl){s.url=wsUrl;changed=true}
-    ${safeToken ? `var t=${safeToken};if(s.token!==t){s.token=t;changed=true}` : ""}
-    if(changed)localStorage.setItem(KEY,JSON.stringify(s));
+    var s=JSON.parse(localStorage.getItem(SK)||"{}");
+    if(s.gatewayUrl!==wsUrl){s.gatewayUrl=wsUrl;localStorage.setItem(SK,JSON.stringify(s))}
+    ${safeToken ? `var t=${safeToken};var tk=TP+wsUrl;if(sessionStorage.getItem(tk)!==t){sessionStorage.setItem(tk,t)}` : ""}
   }catch(e){}
 })();
 </script>`;

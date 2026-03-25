@@ -17,6 +17,7 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import VSCodeApp from "@/components/VSCodeApp";
 import OpenClawApp from "@/components/OpenClawApp";
+import ChatPopup from "@/components/ChatPopup";
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -294,6 +295,10 @@ export default function ChromeDesktop() {
     reader.readAsDataURL(file);
     e.target.value = "";
   }, []);
+
+  // ─── Chat popup (mascot click) ───
+  const [chatOpen, setChatOpen] = useState(false);
+  const [mascotX, setMascotX] = useState(30); // vw position for chat anchoring
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
@@ -1133,7 +1138,8 @@ export default function ChromeDesktop() {
       </div>
 
       {/* Mascot - only show when no windows are maximized */}
-      <Mascot />
+      <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotX} />
 
       {/* Windows */}
       {openWindows.map((window) => {
@@ -1277,6 +1283,9 @@ export default function ChromeDesktop() {
           setLauncherOpen((prev) => !prev);
         }}
         onTrayClick={() => {
+          // Clock click — no-op for now (could open a calendar/notifications panel)
+        }}
+        onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
         }}

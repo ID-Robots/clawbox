@@ -211,9 +211,9 @@ export default function SystemTray({
         onClick={handleClose}
       />
 
-      {/* Tray panel */}
+      {/* Power menu panel — anchored above the power button (bottom-right) */}
       <div
-        className={`fixed bottom-16 right-2 w-80 z-[9999] transition-all duration-150 ${
+        className={`fixed bottom-16 right-2 w-72 z-[9999] transition-all duration-150 ${
           closing
             ? "opacity-0 translate-y-2 scale-95"
             : "opacity-100 translate-y-0 scale-100"

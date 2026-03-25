@@ -52,8 +52,8 @@ export async function setTelegramToken(botToken: string): Promise<void> {
 
 export async function restartGateway(): Promise<void> {
   try {
-    await exec("systemctl", ["restart", "clawbox-gateway.service"], {
-      timeout: 15000,
+    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
+      timeout: 60000,
     });
   } catch (err) {
     console.error(

@@ -160,7 +160,7 @@ export default function ChromeShelf({
             className="flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title="System Settings"
           >
-            <span className="text-sm text-white/80 font-medium">{time}</span>
+            <span className="text-sm text-white/80 font-medium hidden sm:inline">{time}</span>
           </button>
           <button
             onClick={onPowerClick}

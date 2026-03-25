@@ -89,7 +89,8 @@ export async function POST(request: Request) {
     // Start or stop the AP service based on enabled state
     try {
       if (isEnabled) {
-        await execFileAsync("systemctl", [
+        await execFileAsync("/usr/bin/sudo", [
+          "/usr/bin/systemctl",
           "start",
           "clawbox-root-update@restart_ap.service",
         ]);

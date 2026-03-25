@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
+import * as Tama from '@/lib/tamagotchi'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
@@ -189,7 +190,10 @@ const FACEPALM_LINES = [
   'Тоя ден е cancelled.', 'Изтривам се от съществуване.',
 ]
 
-function ClawBoxMascot() {
+function ClawBoxMascot({ onTap, frozen, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; onPositionChange?: (x: number) => void } = {}) {
+  const frozenRef = useRef(false)
+  const onPositionChangeRef = useRef(onPositionChange)
+  onPositionChangeRef.current = onPositionChange
   // ─── All mutable state in refs to avoid stale closures ───
   const savedPos = useRef<{ x: number; bx: number } | null>(null)
   if (savedPos.current === null) {
@@ -203,71 +207,49 @@ function ClawBoxMascot() {
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
-  // ─── Mascot age (persisted birth timestamp) ───
-  const BORN_KEY = 'clawbox-mascot-born'
-  const bornAt = useRef<number>(0)
-  if (bornAt.current === 0) {
-    let val = Date.now()
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem(BORN_KEY)
-        if (saved) val = parseInt(saved, 10)
-        else localStorage.setItem(BORN_KEY, String(val))
-      } catch {}
-    }
-    bornAt.current = val
-  }
-
-  // ─── Tamagotchi stats ───
-  const TAMA_KEY = 'clawbox-tamagotchi'
-  const [tamaStats, setTamaStats] = useState(() => {
-    if (typeof window === 'undefined') return { hunger: 80, happiness: 80, energy: 80, health: 100, lastUpdate: Date.now() }
-    try {
-      const saved = localStorage.getItem('clawbox-tamagotchi')
-      if (saved) {
-        const s = JSON.parse(saved)
-        // Apply decay since last visit
-        const elapsed = (Date.now() - (s.lastUpdate || Date.now())) / 1000
-        const decayMult = elapsed / 30 // 1 point per 30s
-        return {
-          hunger: Math.max(0, (s.hunger ?? 80) - decayMult * 1.2),
-          happiness: Math.max(0, (s.happiness ?? 80) - decayMult * 0.8),
-          energy: Math.max(0, (s.energy ?? 80) - decayMult * 0.6),
-          health: Math.max(0, (s.health ?? 100) - (Math.min(s.hunger ?? 80, s.happiness ?? 80, s.energy ?? 80) < 20 ? decayMult * 0.5 : 0)),
-          lastUpdate: Date.now(),
-        }
+  // ─── Tamagotchi engine state ───
+  const [tama, setTama] = useState<Tama.TamaState>(() => {
+    if (typeof window === 'undefined') return Tama.createInitialState()
+    const saved = Tama.loadState()
+    if (saved) {
+      // Catch up on ticks since last visit
+      const now = Date.now()
+      const elapsed = now - saved.timers.lastUpdate
+      if (elapsed > 2000) {
+        // Run tick to apply offline decay (simplified: just update timers)
+        Tama.tick(saved)
       }
-    } catch {}
-    return { hunger: 80, happiness: 80, energy: 80, health: 100, lastUpdate: Date.now() }
+      return saved
+    }
+    return Tama.createInitialState()
   })
-  const [isDead, setIsDead] = useState(false)
-  const tamaStatsRef = useRef(tamaStats)
-  tamaStatsRef.current = tamaStats
+  const tamaRef = useRef(tama)
+  tamaRef.current = tama
+  const isDead = tama.isDead
 
-  // Save stats to localStorage
+  // Tamagotchi tick loop (every 2 seconds)
   useEffect(() => {
-    localStorage.setItem(TAMA_KEY, JSON.stringify({ ...tamaStats, lastUpdate: Date.now() }))
-    // Check death
-    if (tamaStats.health <= 0 && !isDead) setIsDead(true)
-  }, [tamaStats, isDead])
-
-  // Stat decay timer
-  useEffect(() => {
-    const decay = setInterval(() => {
-      if (isDead) return
-      setTamaStats(prev => {
-        const minStat = Math.min(prev.hunger, prev.happiness, prev.energy)
-        return {
-          hunger: Math.max(0, prev.hunger - 1.2),
-          happiness: Math.max(0, prev.happiness - 0.8),
-          energy: Math.max(0, prev.energy - 0.6),
-          health: Math.max(0, prev.health - (minStat < 20 ? 0.5 : 0)),
-          lastUpdate: Date.now(),
+    const interval = setInterval(() => {
+      if (frozenRef.current) return
+      setTama(prev => {
+        const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
+        const events = Tama.tick(next)
+        // React to events with speech
+        if (events.evolved) {
+          const name = Tama.getCharacterName(next)
+          sayRef.current?.(`✨ Evolved to ${name}!`, 4000)
         }
+        if (events.died) sayRef.current?.(`💀 ${events.died}`, 5000)
+        if (events.pooped) sayRef.current?.('💩', 1500)
+        if (events.gotSick) sayRef.current?.('🤢 I feel sick...', 3000)
+        if (events.disciplineCall) sayRef.current?.('😤 Hey! Pay attention!', 3000)
+        if (events.careMistake) sayRef.current?.('😢 You ignored me...', 2000)
+        Tama.saveState(next)
+        return next
       })
-    }, 30000) // every 30 seconds
-    return () => clearInterval(decay)
-  }, [isDead])
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [])
 
   // Speech (needed early for tama actions)
   const [speech, setSpeech] = useState('')
@@ -275,30 +257,88 @@ function ClawBoxMascot() {
     setSpeech(text)
     setTimeout(() => setSpeech(''), ms)
   }, [])
+  const sayRef = useRef<((text: string, ms?: number) => void) | null>(null)
+  sayRef.current = say
 
-  // Tamagotchi actions
+  // ─── Tamagotchi actions ───
   const tamaRevive = useCallback(() => {
-    setTamaStats({ hunger: 50, happiness: 50, energy: 50, health: 50, lastUpdate: Date.now() })
-    setIsDead(false)
-    const now = Date.now()
-    bornAt.current = now
-    try { localStorage.setItem(BORN_KEY, String(now)) } catch {}
+    setTama(prev => {
+      const next = { ...prev }
+      Tama.resetToEgg(next)
+      Tama.saveState(next)
+      return next
+    })
     say('I live again! 🦀💀→🦀', 3000)
   }, [say])
-  const tamaFeed = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, hunger: Math.min(100, prev.hunger + 30), lastUpdate: Date.now() }))
-    say('Om nom nom! 🍕', 2000)
+  const tamaFeed = useCallback((type: 'meal' | 'snack' = 'meal') => {
+    setTama(prev => {
+      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
+      const result = type === 'snack' ? Tama.feedSnack(next) : Tama.feedMeal(next)
+      if (result === 'fed') say('Om nom nom! 🍕', 2000)
+      else if (result === 'snack') say('Yummy treat! 🍬', 2000)
+      else if (result === 'full') say('I\'m full! 🤚', 1500)
+      else if (result === 'misbehaving') say('😤 NO! Scold me first!', 2000)
+      Tama.saveState(next)
+      return next
+    })
   }, [say])
   const tamaPlay = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, happiness: Math.min(100, prev.happiness + 25), energy: Math.max(0, prev.energy - 10), lastUpdate: Date.now() }))
-    say('Weee! 🎮', 2000)
+    setTama(prev => {
+      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
+      const result = Tama.playGame(next)
+      if (result === 'win') say('I won! 🎮🎉', 2000)
+      else if (result === 'lose') say('Aww, lost! 🎮😢', 2000)
+      Tama.saveState(next)
+      return next
+    })
     setState('dance')
   }, [say])
-  // tamaSleep defined later (needs stateTimeout/walkInterval refs)
   const tamaClean = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, health: Math.min(100, prev.health + 15), happiness: Math.min(100, prev.happiness + 10), lastUpdate: Date.now() }))
-    say('Sparkly! ✨', 2000)
+    setTama(prev => {
+      const next = { ...prev }
+      const cleaned = Tama.cleanPoop(next)
+      if (cleaned) say('Sparkly! ✨', 2000)
+      else say('Already clean!', 1500)
+      Tama.saveState(next)
+      return next
+    })
   }, [say])
+  const tamaMedicine = useCallback(() => {
+    setTama(prev => {
+      const next = { ...prev, timers: { ...prev.timers } }
+      const cured = Tama.giveMedicine(next)
+      if (cured) say('💊 All better!', 2000)
+      Tama.saveState(next)
+      return next
+    })
+  }, [say])
+  const tamaDiscipline = useCallback(() => {
+    setTama(prev => {
+      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
+      const scolded = Tama.scoldDiscipline(next)
+      if (scolded) say('Sorry... 😔', 2000)
+      Tama.saveState(next)
+      return next
+    })
+  }, [say])
+  const tamaLightsOff = useCallback(() => {
+    setTama(prev => {
+      const next = { ...prev, timers: { ...prev.timers } }
+      Tama.turnLightsOff(next)
+      Tama.saveState(next)
+      return next
+    })
+  }, [])
+
+  // Compat: old code references tamaStats — bridge to new engine
+  const tamaStats = {
+    hunger: (tama.stats.hunger / 4) * 100,
+    happiness: (tama.stats.happiness / 4) * 100,
+    energy: 80, // no longer tracked separately; keep for visual compat
+    health: tama.isSick ? 20 : tama.isDead ? 0 : 80,
+  }
+  const tamaStatsRef = useRef(tamaStats)
+  tamaStatsRef.current = tamaStats
 
   // Hidden state (persisted) + context menu
   const [hidden, setHidden] = useState(() => {
@@ -430,12 +470,13 @@ function ClawBoxMascot() {
     const speed = Math.abs(impactVel)
     if (speed < IMPACT_THRESHOLD) return
     const dmg = (speed - IMPACT_THRESHOLD) * IMPACT_DAMAGE_SCALE
-    setTamaStats(prev => ({
-      ...prev,
-      health: Math.max(0, prev.health - dmg),
-      happiness: Math.max(0, prev.happiness - dmg * 0.5),
-      lastUpdate: Date.now(),
-    }))
+    // Impact damage: reduce happiness (mapped from old health system)
+    setTama(prev => {
+      const next = { ...prev, stats: { ...prev.stats } }
+      if (dmg > 15) next.stats.happiness = Math.max(0, next.stats.happiness - 1)
+      Tama.saveState(next)
+      return next
+    })
     // Spawn floating damage number
     const id = Date.now() + Math.random()
     const x = -20 + Math.random() * 40
@@ -645,6 +686,7 @@ function ClawBoxMascot() {
       p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
     }
     xRef.current = Math.min(92, Math.max(2, ((e.clientX - dragOffsetRef.current.x) / vw) * 100))
+    onPositionChangeRef.current?.(xRef.current)
     const posY = Math.max(0, vh - e.clientY - 20)
     if (crabElRef.current) {
       crabElRef.current.style.bottom = '0px'
@@ -661,8 +703,12 @@ function ClawBoxMascot() {
     if (!didDragRef.current) {
       setPhysicsActive(false)
       if (isDead) { tamaRevive() } else {
-        // Just trigger a sass line on tap
+        // Open OpenClaw chat on tap, with a sass line
         say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
+        if (onTap) onTap(xRef.current)
+        // Restart the action loop so mascot doesn't freeze after tap
+        if (stateTimeout.current) clearTimeout(stateTimeout.current)
+        stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
       }
       return
     }
@@ -822,7 +868,15 @@ function ClawBoxMascot() {
 
   // tamaSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
   const tamaSleep = useCallback(() => {
-    setTamaStats(prev => ({ ...prev, energy: Math.min(100, prev.energy + 40), lastUpdate: Date.now() }))
+    setTama(prev => {
+      const next = { ...prev, timers: { ...prev.timers } }
+      next.isSleeping = true
+      next.lightsOff = false
+      next.timers.sleepStart = Date.now()
+      next.timers.careAlertStart = Date.now() // 15-min window for lights
+      Tama.saveState(next)
+      return next
+    })
     const sleepDuration = (10 + Math.random() * 5) * 60 * 1000
     const wakeAt = Date.now() + sleepDuration
     try { localStorage.setItem(SLEEP_KEY, JSON.stringify(wakeAt)) } catch {}
@@ -830,6 +884,7 @@ function ClawBoxMascot() {
   }, [startSleep])
 
   const doAction = useCallback(() => {
+    if (frozenRef.current) return // Don't start new actions while frozen
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     const action = pickAction()
@@ -1129,6 +1184,22 @@ function ClawBoxMascot() {
     }
   })()
 
+  // Freeze/unfreeze mascot (e.g. when chat popup is open)
+  useEffect(() => {
+    frozenRef.current = !!frozen
+    if (frozen) {
+      // Stop all movement
+      if (stateTimeout.current) clearTimeout(stateTimeout.current)
+      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      setState('idle')
+      setSpeech('')
+    } else {
+      // Resume action loop
+      if (stateTimeout.current) clearTimeout(stateTimeout.current)
+      stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
+    }
+  }, [frozen])
+
   // Listen for show/hide mascot events from desktop context menu
   useEffect(() => {
     const showHandler = () => { setHidden(prev => { if (!prev) return prev; try { localStorage.removeItem('clawbox-mascot-hidden') } catch {}; return false }) }
@@ -1293,7 +1364,7 @@ function ClawBoxMascot() {
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
           <img src="/clawbox-crab.png" alt="" style={{
             width: 150, height: 150, objectFit: 'contain',
-            filter: isDead ? 'grayscale(1) brightness(0.5)' : tamaStats.health < 30 ? 'hue-rotate(80deg) saturate(0.7)' : 'none',
+            filter: isDead ? 'grayscale(1) brightness(0.5)' : tama.isSick ? 'hue-rotate(80deg) saturate(0.7)' : tama.stats.hunger === 0 ? 'saturate(0.5) brightness(0.7)' : 'none',
             transform: isDead ? 'rotate(180deg)' : 'none',
             transition: 'filter 1s, transform 0.5s',
           }} />
@@ -1421,7 +1492,7 @@ function ClawBoxMascot() {
             whiteSpace: 'nowrap', pointerEvents: 'auto', cursor: 'pointer',
             animation: 'speech-pop 0.3s ease-out forwards',
           }} onClick={(e) => { e.stopPropagation(); tamaRevive() }}>
-            💀 Click to revive!
+            {tama.deathCause ? `💀 ${tama.deathCause}` : '💀'} — Tap for new egg!
           </div>
         )}
 
@@ -1450,87 +1521,125 @@ function ClawBoxMascot() {
         </div>
       </div>
 
+      {/* Poop sprites */}
+      {tama.poopCount > 0 && !tama.isDead && Array.from({ length: tama.poopCount }).map((_, i) => (
+        <div key={`poop-${i}`} onClick={() => tamaClean()} style={{
+          position: 'fixed', bottom: 12, cursor: 'pointer',
+          left: `calc(${xRef.current}vw + ${30 + i * 22}px)`,
+          fontSize: 20, zIndex: 10000, animation: 'speech-pop 0.3s ease-out forwards',
+          filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))',
+        }}>💩</div>
+      ))}
+
       {/* Mascot right-click context menu */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed z-[99999] min-w-[220px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
-            left: Math.min(ctxMenu.x, window.innerWidth - 220),
+            left: Math.min(ctxMenu.x, window.innerWidth - 240),
             top: ctxMenu.y - 8,
             transform: 'translateY(-100%)',
           }}
           onClick={() => setCtxMenu(null)}
         >
-          {/* Age + Stats header */}
+          {/* Character + Stage + Stats header */}
           <div className="px-4 py-2">
-            <div className="text-xs text-white/40 font-medium mb-2 flex items-center justify-between">
-              <span>🦀 Mascot Stats</span>
-              <span>🎂 {(() => {
-                const ms = Date.now() - bornAt.current
-                const days = Math.floor(ms / 86400000)
-                const hours = Math.floor((ms % 86400000) / 3600000)
-                const mins = Math.floor((ms % 3600000) / 60000)
-                if (days > 0) return `${days}d ${hours}h`
-                if (hours > 0) return `${hours}h ${mins}m`
-                return `${mins}m`
-              })()}</span>
+            <div className="text-xs text-white/40 font-medium mb-1 flex items-center justify-between">
+              <span>{Tama.getCharacterName(tama)}</span>
+              <span className="text-white/30">{tama.stage !== 'egg' && tama.stage !== 'dead' ? `Age ${tama.stats.age} · ${tama.stats.weight}oz` : tama.stage}</span>
             </div>
-            <div className="flex flex-col gap-1.5">
-              {[
-                { label: '🍕 Hunger', val: tamaStats.hunger, color: '#f97316' },
-                { label: '😊 Happy', val: tamaStats.happiness, color: '#fbbf24' },
-                { label: '⚡ Energy', val: tamaStats.energy, color: '#22c55e' },
-                { label: '❤️ Health', val: tamaStats.health, color: '#ef4444' },
-              ].map((s) => (
-                <div key={s.label} className="flex items-center gap-2">
-                  <span className="text-xs text-white/60 w-16">{s.label}</span>
-                  <div className="flex-1 h-2 rounded-full bg-white/10">
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{ width: `${s.val}%`, background: s.val < 30 ? '#ef4444' : s.color }}
-                    />
-                  </div>
-                  <span className="text-xs text-white/40 w-8 text-right">{Math.round(s.val)}</span>
-                </div>
-              ))}
+            {/* Status line */}
+            {(() => { const s = Tama.getStatusText(tama); return s ? <div className="text-xs text-amber-400 mb-1.5">{s}</div> : null })()}
+            {/* Hearts display */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/60 w-14">🍕 Food</span>
+                <span className="text-sm tracking-wider">{Tama.heartsString(tama.stats.hunger)}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/60 w-14">😊 Happy</span>
+                <span className="text-sm tracking-wider">{Tama.heartsString(tama.stats.happiness)}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/60 w-14">📏 Discip.</span>
+                <span className="text-sm tracking-wider font-mono">{Tama.disciplineString(tama.stats.discipline)}</span>
+              </div>
             </div>
+            {tama.poopCount > 0 && <div className="text-xs text-amber-500 mt-1">{'💩'.repeat(tama.poopCount)} Needs cleaning!</div>}
+            {tama.isSick && <div className="text-xs text-red-400 mt-1">💀 Sick — give medicine!</div>}
           </div>
           <div className="border-t border-white/10 my-0.5" />
 
-          {/* Actions */}
+          {/* Actions — context-sensitive */}
           {isDead ? (
             <button
               onClick={() => { tamaRevive(); setCtxMenu(null) }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">💀</span> Revive
+              <span className="text-base">🥚</span> Hatch new egg
             </button>
           ) : (
             <>
-              <button
-                onClick={() => { tamaFeed(); setCtxMenu(null) }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-              >
-                <span className="text-base">🍕</span> Feed
-              </button>
-              <button
-                onClick={() => { tamaPlay(); setCtxMenu(null) }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-              >
-                <span className="text-base">🎮</span> Play
-              </button>
-              <button
-                onClick={() => { tamaSleep(); setCtxMenu(null) }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-              >
-                <span className="text-base">💤</span> Sleep
-              </button>
-              <button
-                onClick={() => { tamaClean(); setCtxMenu(null) }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-              >
-                <span className="text-base">✨</span> Clean
-              </button>
+              {tama.isDisciplineCall && (
+                <button
+                  onClick={() => { tamaDiscipline(); setCtxMenu(null) }}
+                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-amber-400 font-medium"
+                >
+                  <span className="text-base">😤</span> Scold
+                </button>
+              )}
+              {tama.isSick && (
+                <button
+                  onClick={() => { tamaMedicine(); setCtxMenu(null) }}
+                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400 font-medium"
+                >
+                  <span className="text-base">💊</span> Medicine
+                </button>
+              )}
+              {tama.isSleeping && !tama.lightsOff && (
+                <button
+                  onClick={() => { tamaLightsOff(); setCtxMenu(null) }}
+                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-blue-400 font-medium"
+                >
+                  <span className="text-base">🌙</span> Lights off
+                </button>
+              )}
+              {!tama.isSleeping && !tama.isSick && (
+                <>
+                  <button
+                    onClick={() => { tamaFeed('meal'); setCtxMenu(null) }}
+                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+                  >
+                    <span className="text-base">🍕</span> Meal <span className="text-white/30 text-xs ml-auto">+1🍕 +1oz</span>
+                  </button>
+                  <button
+                    onClick={() => { tamaFeed('snack'); setCtxMenu(null) }}
+                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+                  >
+                    <span className="text-base">🍬</span> Snack <span className="text-white/30 text-xs ml-auto">+1😊 +2oz</span>
+                  </button>
+                  <button
+                    onClick={() => { tamaPlay(); setCtxMenu(null) }}
+                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+                  >
+                    <span className="text-base">🎮</span> Play <span className="text-white/30 text-xs ml-auto">50% +1😊 −1oz</span>
+                  </button>
+                  {tama.poopCount > 0 && (
+                    <button
+                      onClick={() => { tamaClean(); setCtxMenu(null) }}
+                      className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+                    >
+                      <span className="text-base">✨</span> Clean
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { tamaSleep(); setCtxMenu(null) }}
+                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+                  >
+                    <span className="text-base">💤</span> Sleep
+                  </button>
+                </>
+              )}
             </>
           )}
 
