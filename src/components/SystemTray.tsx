@@ -9,9 +9,6 @@ interface SystemTrayProps {
   onClose: () => void;
   date: string;
   time: string;
-  pwaPrompt?: Event | null;
-  pwaInstalled?: boolean;
-  onPwaInstall?: () => void;
 }
 
 type RebootState =
@@ -26,9 +23,6 @@ export default function SystemTray({
   onClose,
   date,
   time,
-  pwaPrompt,
-  pwaInstalled,
-  onPwaInstall,
 }: SystemTrayProps) {
   const [closing, setClosing] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
@@ -240,32 +234,6 @@ export default function SystemTray({
             <div className="text-2xl font-medium text-white">{time}</div>
             <div className="text-sm text-white/60">{date}</div>
           </div>
-
-          {/* Install App button — show when not installed as PWA */}
-          {!pwaInstalled && (
-            <div className="px-4 pt-3 pb-1">
-              {pwaPrompt ? (
-                <button
-                  onClick={() => { onPwaInstall?.(); }}
-                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/20 transition-colors cursor-pointer"
-                >
-                  <span className="material-symbols-rounded text-orange-400 shrink-0" style={{ fontSize: 20 }}>install_mobile</span>
-                  <div className="flex-1 text-left">
-                    <div className="text-sm font-medium text-white/90">Install ClawBox</div>
-                    <div className="text-xs text-white/40">Add to home screen</div>
-                  </div>
-                </button>
-              ) : (
-                <div className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10">
-                  <span className="material-symbols-rounded text-white/50 shrink-0" style={{ fontSize: 20 }}>install_mobile</span>
-                  <div className="flex-1 text-left">
-                    <div className="text-sm font-medium text-white/70">Install ClawBox</div>
-                    <div className="text-xs text-white/40">Tap ⋮ → &quot;Add to Home screen&quot;</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
 
           {/* Bottom actions */}
           <div className="p-4 grid grid-cols-2 gap-2">

@@ -76,7 +76,7 @@ function extractText(msg: unknown): string {
 // uuid() requires secure context (HTTPS).
 // Fall back for HTTP deployments.
 function uuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return uuid()
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
@@ -93,21 +93,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
   const [errorMsg, setErrorMsg] = useState('')
 
   // ── Drag + resize state ──
-  const CHAT_SIZE_KEY = 'clawbox-chat-size'
+  const DEFAULT_SIZE = { w: 400, h: 500 }
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
-  const [size, setSize] = useState<{ w: number; h: number }>(() => {
-    if (typeof window === 'undefined') return { w: 400, h: 500 }
-    try {
-      const saved = localStorage.getItem(CHAT_SIZE_KEY)
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return { w: 400, h: 500 }
-  })
+  const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
   const popupRef = useRef<HTMLDivElement>(null)
 
-  // Reset position (not size) when reopened
-  useEffect(() => { if (isOpen) setPos(null) }, [isOpen])
+  // Reset position and size when reopened
+  useEffect(() => { if (isOpen) { setPos(null); setSize(DEFAULT_SIZE) } }, [isOpen])
 
   const onDragStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
@@ -158,12 +151,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       window.removeEventListener('mouseup', onUp)
       window.removeEventListener('touchmove', onMove)
       window.removeEventListener('touchend', onUp)
-      // Persist resized dimensions
-      const finalRect = popupRef.current?.getBoundingClientRect()
-      if (finalRect) {
-        const s = { w: Math.round(finalRect.width), h: Math.round(finalRect.height) }
-        try { localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(s)) } catch {}
-      }
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -512,8 +499,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          padding: '6px 10px',
+          gap: 10,
+          padding: '8px 12px',
           background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
           borderBottom: '1px solid rgba(249,115,22,0.2)',
           flexShrink: 0,

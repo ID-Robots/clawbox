@@ -5,7 +5,6 @@ import StatusMessage from "./StatusMessage";
 import AIModelsStep from "./AIModelsStep";
 import { QRCodeSVG } from "qrcode.react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
-import { FEATURE_FLAGS, resolveFlags } from "@/lib/feature-flags";
 
 /* ── Types ── */
 
@@ -55,7 +54,7 @@ const RESET_STEPS = [
   "Finalizing...",
 ];
 
-type Section = "appearance" | "wifi" | "ai" | "telegram" | "features" | "system" | "about";
+type Section = "appearance" | "wifi" | "ai" | "telegram" | "system" | "about";
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
@@ -63,7 +62,6 @@ const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
   { id: "wifi", icon: "wifi", label: "Network" },
   { id: "ai", icon: "smart_toy", label: "AI Provider" },
   { id: "telegram", icon: "send", label: "Telegram" },
-  { id: "features", icon: "toggle_on", label: "Features" },
   { id: "system", icon: "monitor_heart", label: "System" },
   { id: "about", icon: "info", label: "About" },
 ];
@@ -127,42 +125,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     window.addEventListener("resize", check);
     return () => window.removeEventListener("resize", check);
   }, []);
-
-  /* ── Developer mode + feature flags ── */
-  const [devMode, setDevMode] = useState(false);
-  const [flags, setFlags] = useState<Record<string, boolean>>({});
-  const flagsLoaded = useRef(false);
-  useEffect(() => {
-    fetch("/setup-api/preferences?all=1")
-      .then(r => r.json())
-      .then((data: Record<string, unknown>) => {
-        setFlags(resolveFlags(data));
-        if (data.ui_developer_mode === true) setDevMode(true);
-        flagsLoaded.current = true;
-      })
-      .catch(() => { flagsLoaded.current = true; });
-  }, []);
-
-  const toggleFlag = useCallback((flagId: string, value: boolean) => {
-    setFlags(prev => ({ ...prev, [flagId]: value }));
-    fetch("/setup-api/preferences", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [`ff_${flagId}`]: value }),
-    }).catch(() => {});
-  }, []);
-
-  const toggleDevMode = useCallback((on: boolean) => {
-    setDevMode(on);
-    if (!on) setSection("about");
-    fetch("/setup-api/preferences", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ui_developer_mode: on }),
-    }).catch(() => {});
-  }, []);
-
-  // Android-style: tap version 7 times to enable developer mode
 
   /* ── System stats (only poll when visible) ── */
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -870,35 +832,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── Features ─── */}
-        {activeSection === "features" && (
-          <div className="max-w-2xl space-y-5">
-            <h2 className="text-lg font-semibold text-white/90">Feature Flags</h2>
-            <p className="text-sm text-white/40">Enable or disable experimental features. Changes take effect immediately.</p>
-
-            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.06]">
-              {FEATURE_FLAGS.map(flag => (
-                <div key={flag.id} className="flex items-center justify-between px-5 py-4">
-                  <div className="flex-1 min-w-0 mr-4">
-                    <div className="text-sm font-medium text-white/90">{flag.name}</div>
-                    <div className="text-xs text-white/40 mt-0.5">{flag.description}</div>
-                  </div>
-                  <button
-                    onClick={() => toggleFlag(flag.id, !flags[flag.id])}
-                    className={`relative w-11 h-6 rounded-full transition-colors shrink-0 cursor-pointer ${flags[flag.id] ? "bg-orange-500" : "bg-white/10"}`}
-                  >
-                    <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${flags[flag.id] ? "translate-x-[22px]" : "translate-x-0.5"}`} />
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            {FEATURE_FLAGS.length === 0 && (
-              <div className="text-center text-white/30 py-8 text-sm">No feature flags available</div>
-            )}
-          </div>
-        )}
-
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-2xl space-y-5">
@@ -1109,47 +1042,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
-            {/* Developer Mode */}
-            <div className={`rounded-xl p-4 space-y-4 ${devMode ? "bg-amber-500/5 border border-amber-500/10" : "bg-white/5"}`}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className={`text-sm font-medium ${devMode ? "text-amber-400" : "text-white/80"}`}>Developer Mode</div>
-                  <div className="text-xs text-white/40 mt-0.5">Feature flags and advanced options</div>
-                </div>
-                <button
-                  onClick={() => toggleDevMode(!devMode)}
-                  className={`relative w-10 h-5 rounded-full transition-colors shrink-0 cursor-pointer border-none ${devMode ? "bg-amber-500" : "bg-white/15"}`}
-                >
-                  <span className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200 ${devMode ? "translate-x-[18px]" : "translate-x-0"}`} />
-                </button>
-              </div>
-
-              {/* Inline feature flags when dev mode is on */}
-              {devMode && FEATURE_FLAGS.length > 0 && (
-                <div className="space-y-2 pt-2 border-t border-amber-500/10">
-                  <div className="text-xs text-white/30 font-medium uppercase tracking-wider">Feature Flags</div>
-                  {FEATURE_FLAGS.map(flag => (
-                    <div key={flag.id} className="flex items-center justify-between py-1">
-                      <div>
-                        <div className="text-sm text-white/80">{flag.name}</div>
-                        <div className="text-xs text-white/30">{flag.description}</div>
-                      </div>
-                      <button
-                        onClick={() => toggleFlag(flag.id, !flags[flag.id])}
-                        className={`relative w-10 h-5 rounded-full transition-colors shrink-0 cursor-pointer border-none ${flags[flag.id] ? "bg-orange-500" : "bg-white/15"}`}
-                      >
-                        <span className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200 ${flags[flag.id] ? "translate-x-[18px]" : "translate-x-0"}`} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
             <div className="space-y-2 pt-2">
               <button
                 onClick={() => openUpdateConfirm()}
-                className="flex items-center gap-3 w-full bg-white/5 rounded-xl px-4 py-3 text-sm text-white/60 hover:text-white/80 transition-colors cursor-pointer"
+                className="flex items-center gap-3 w-full bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
                 System Update
@@ -1176,7 +1072,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="flex-1 overflow-y-auto">
             <h2 className="text-lg font-semibold text-white/90 px-5 pt-4 pb-2">Settings</h2>
             <nav className="flex flex-col">
-              {NAV_ITEMS.filter(item => item.id !== "features" || devMode).map(item => (
+              {NAV_ITEMS.map(item => (
                 <button
                   key={item.id}
                   onClick={() => { setSection(item.id); setMobileSection(item.id); }}
@@ -1342,7 +1238,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     <div className="flex h-full bg-[#0d1117]">
       {/* Sidebar */}
       <nav className="w-48 shrink-0 bg-white/[0.02] border-r border-white/5 py-3 flex flex-col">
-        {NAV_ITEMS.filter(item => item.id !== "features" || devMode).map(item => (
+        {NAV_ITEMS.map(item => (
           <button
             key={item.id}
             onClick={() => setSection(item.id)}

@@ -16,15 +16,8 @@ import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import VSCodeApp from "@/components/VSCodeApp";
-import OpenClawApp from "@/components/OpenClawApp";
-import ChatApp from "@/components/ChatApp";
-import { resolveFlags, FLAG_GATED_APPS } from "@/lib/feature-flags";
+import ChatPopup from "@/components/ChatPopup";
 
-// PWA install prompt type (Chrome/Edge)
-interface BeforeInstallPromptEvent extends Event {
-  prompt(): Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
-}
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
@@ -36,7 +29,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "openclaw" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -46,16 +39,15 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "openclaw", name: "OpenClaw", color: "#0a0f1a", type: "openclaw", pinned: true, defaultWidth: 900, defaultHeight: 700 },
+  { id: "openclaw", name: "OpenClaw", color: "#0a0f1a", type: "external", url: "http://clawbox.local/chat", pinned: true },
   { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
   { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "Browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "Remote Desktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vscode", name: "VS Code", color: "#007acc", type: "vscode", pinned: false, defaultWidth: 1100, defaultHeight: 750 },
-  { id: "help", name: "Help", color: "#ec4899", type: "external", url: "https://openclawhardware.dev/docs", pinned: false },
-  { id: "chat", name: "Chat", color: "#f97316", type: "chat", pinned: false, defaultWidth: 500, defaultHeight: 600 },
 ];
+const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
 
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
@@ -111,7 +103,6 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     settings: "settings",
     terminal: "terminal",
     files: "folder",
-    help: "help",
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
@@ -185,50 +176,6 @@ export default function ChromeDesktop() {
     try { navigator.vibrate?.(ms); } catch {}
   }, []);
 
-  // ─── PWA install prompt ───
-  const [pwaPrompt, setPwaPrompt] = useState<Event | null>(null);
-  const [pwaInstalled, setPwaInstalled] = useState(false);
-  const [pwaBannerDismissed, setPwaBannerDismissed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("clawbox-pwa-dismissed") === "1";
-  });
-
-  useEffect(() => {
-    // Register service worker
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
-    }
-    // Check if already installed as PWA
-    if (window.matchMedia("(display-mode: standalone)").matches) {
-      setPwaInstalled(true);
-    }
-    // Capture the beforeinstallprompt event
-    const handler = (e: Event) => {
-      e.preventDefault();
-      setPwaPrompt(e);
-    };
-    const onInstalled = () => setPwaInstalled(true);
-    window.addEventListener("beforeinstallprompt", handler);
-    window.addEventListener("appinstalled", onInstalled);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-      window.removeEventListener("appinstalled", onInstalled);
-    };
-  }, []);
-
-  const handlePwaInstall = useCallback(async () => {
-    if (!pwaPrompt) return;
-    (pwaPrompt as BeforeInstallPromptEvent).prompt();
-    const result = await (pwaPrompt as BeforeInstallPromptEvent).userChoice;
-    if (result.outcome === "accepted") setPwaInstalled(true);
-    setPwaPrompt(null);
-  }, [pwaPrompt]);
-
-  const dismissPwaBanner = useCallback(() => {
-    setPwaBannerDismissed(true);
-    try { localStorage.setItem("clawbox-pwa-dismissed", "1"); } catch {}
-  }, []);
-
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
@@ -240,12 +187,9 @@ export default function ChromeDesktop() {
   const INSTALLED_META_KEY = "installed_meta";
   const [installedMeta, setInstalledMeta] = useState<Record<string, { name: string; color: string; iconUrl: string }>>({});
 
-  // ─── Feature flags ───
-  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
-
   // ─── Desktop shortcuts for built-in apps ───
   const DESKTOP_APPS_KEY = "desktop_apps";
-  const [desktopApps, setDesktopApps] = useState<string[]>([]);
+  const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
   const HIDDEN_INSTALLED_KEY = "hidden_installed";
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
   const handleAddToDesktop = useCallback((appId: string) => {
@@ -318,8 +262,6 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
-        // Feature flags
-        setFeatureFlags(resolveFlags(data));
       })
       .catch(() => { prefsLoaded.current = true; });
   }, []);
@@ -359,8 +301,13 @@ export default function ChromeDesktop() {
     e.target.value = "";
   }, []);
 
-  // ─── Chat (mascot click opens chat app window) ───
-  const [botThinking, setBotThinking] = useState(false);
+  // ─── Chat (mascot click toggles chat popup) ───
+  const [chatOpen, setChatOpen] = useState(() => {
+    // Auto-open chat on first visit (no saved mascot position = fresh install)
+    if (typeof window === "undefined") return false;
+    return !localStorage.getItem("clawbox-crab-pos");
+  });
+  const [mascotX, setMascotX] = useState(50);
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
@@ -805,10 +752,6 @@ export default function ChromeDesktop() {
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
-    // Filter out apps gated behind disabled feature flags
-    const filteredApps = apps.filter(a =>
-      !FLAG_GATED_APPS.has(a.id) || featureFlags[a.id] === true
-    );
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
       const meta = installedMeta[appId];
@@ -826,8 +769,8 @@ export default function ChromeDesktop() {
         });
       }
     }
-    return [...filteredApps, ...installedAppDefs];
-  }, [installedApps, installedMeta, featureFlags]);
+    return [...apps, ...installedAppDefs];
+  }, [installedApps, installedMeta]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -1010,14 +953,6 @@ export default function ChromeDesktop() {
             }} />
           </div>
         );
-      case "openclaw":
-        return (
-          <iframe
-            src="/setup-api/gateway"
-            className="w-full h-full border-0"
-            title="OpenClaw Control"
-          />
-        );
       case "terminal":
         return <TerminalApp />;
       case "store":
@@ -1044,8 +979,6 @@ export default function ChromeDesktop() {
         return <VNCApp />;
       case "vscode":
         return <VSCodeApp />;
-      case "chat":
-        return <ChatApp onThinkingChange={setBotThinking} hideHeader={isMobile} />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -1132,39 +1065,6 @@ export default function ChromeDesktop() {
               Skip
             </button>
           </div>
-        </div>
-      )}
-      {/* PWA install banner — native prompt or manual instructions */}
-      {!pwaInstalled && !pwaBannerDismissed && (
-        <div className="fixed top-0 left-0 right-0 z-[20000] flex items-center gap-3 px-4 py-2.5 bg-gradient-to-r from-[#1e2939]/95 to-[#0d1117]/95 backdrop-blur-md border-b border-orange-500/20"
-          style={{ paddingTop: "max(env(safe-area-inset-top), 8px)" }}
-        >
-          <img src="/icon-192.png" alt="" className="w-9 h-9 rounded-lg shrink-0" />
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-white/90">Install ClawBox</div>
-            <div className="text-xs text-white/50 truncate">{pwaPrompt ? 'Add to home screen for the best experience' : 'Tap ⋮ → "Add to Home screen"'}</div>
-          </div>
-          {pwaPrompt ? (
-            <button
-              onClick={handlePwaInstall}
-              className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500 text-white hover:bg-orange-400 transition-colors shrink-0 cursor-pointer"
-            >
-              Install
-            </button>
-          ) : (
-            <button
-              onClick={dismissPwaBanner}
-              className="px-4 py-1.5 rounded-lg text-sm font-medium bg-orange-500/20 text-orange-400 border border-orange-500/30 hover:bg-orange-500/30 transition-colors shrink-0 cursor-pointer"
-            >
-              Got it
-            </button>
-          )}
-          <button
-            onClick={dismissPwaBanner}
-            className="p-1 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/10 transition-colors cursor-pointer"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-          </button>
         </div>
       )}
 
@@ -1365,8 +1265,9 @@ export default function ChromeDesktop() {
         )}
       </div>
 
-      {/* Mascot - tapping opens/focuses the chat app */}
-      <Mascot frozen={false} thinking={botThinking} onTap={() => { openApp("chat"); }} />
+      {/* Mascot - tapping toggles chat popup */}
+      <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotX} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1500,9 +1401,6 @@ export default function ChromeDesktop() {
         onClose={() => setTrayOpen(false)}
         date={date}
         time={time}
-        pwaPrompt={pwaPrompt}
-        pwaInstalled={pwaInstalled}
-        onPwaInstall={handlePwaInstall}
       />
 
       {/* Shelf (taskbar) */}
@@ -1711,11 +1609,6 @@ export default function ChromeDesktop() {
               <button onClick={() => window.location.reload()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> Refresh
               </button>
-              {!pwaInstalled && (
-                <button onClick={() => { pwaPrompt ? handlePwaInstall() : window.open('https://clawbox.local', '_blank'); }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-orange-400">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>install_desktop</span> {pwaPrompt ? 'Install ClawBox App' : 'Install as App'}
-                </button>
-              )}
             </>
           )}
         </div>

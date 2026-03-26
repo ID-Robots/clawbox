@@ -195,15 +195,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
   // ─── All mutable state in refs to avoid stale closures ───
+  const DEFAULT_POS = { x: 50, bx: 50 }
   const savedPos = useRef<{ x: number; bx: number } | null>(null)
   if (savedPos.current === null) {
     try {
       const s = typeof window !== 'undefined' ? localStorage.getItem('clawbox-crab-pos') : null
-      savedPos.current = s ? JSON.parse(s) : { x: 32 + Math.random() * 20, bx: 35 + Math.random() * 15 }
-    } catch { savedPos.current = { x: 50, bx: 42 } }
+      savedPos.current = s ? JSON.parse(s) : DEFAULT_POS
+    } catch { savedPos.current = DEFAULT_POS }
   }
-  const xRef = useRef(savedPos.current?.x ?? 50)
-  const boxXRef = useRef(savedPos.current?.bx ?? 42)
+  const xRef = useRef(savedPos.current?.x ?? DEFAULT_POS.x)
+  const boxXRef = useRef(savedPos.current?.bx ?? DEFAULT_POS.bx)
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
@@ -1226,17 +1227,26 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     }
   })()
 
-  // Freeze/unfreeze mascot (e.g. when chat popup is open)
+  // Freeze/unfreeze mascot (e.g. when chat popup is open) — enter power stance
   useEffect(() => {
     frozenRef.current = !!frozen
     if (frozen) {
-      // Stop all movement
+      // Stop all movement and enter power stance on the box
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      onBoxRef.current = true
+      setCrabOnBox(true)
+      setBoxGlow(true)
+      const bx = boxXRef.current
+      xRef.current = bx
+      setX(bx)
       setState('idle')
       setSpeech('')
     } else {
-      // Resume action loop
+      // Leave box and resume action loop
+      onBoxRef.current = false
+      setCrabOnBox(false)
+      setBoxGlow(false)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
     }
