@@ -467,6 +467,16 @@ html {
   animation: bounce-once 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
+@keyframes welcome-powerup {
+  0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); filter: drop-shadow(0 0 8px rgba(249,115,22,0.4)); }
+  33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); filter: drop-shadow(0 0 14px rgba(249,115,22,0.6)); }
+  66% { transform: translateY(-4px) scale(1.08) rotate(2deg); filter: drop-shadow(0 0 10px rgba(249,115,22,0.5)); }
+}
+
+.animate-welcome-powerup {
+  animation: welcome-powerup 1.5s ease-in-out infinite;
+}
+
 /* Custom range slider thumb — orange brand */
 input[type="range"].appearance-none::-webkit-slider-thumb {
   -webkit-appearance: none;

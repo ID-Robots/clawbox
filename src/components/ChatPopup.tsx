@@ -83,6 +83,8 @@ function uuid(): string {
   })
 }
 
+const DEFAULT_SIZE = { w: 400, h: 500 }
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mobile = false }: ChatPopupProps) {
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
@@ -93,7 +95,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
   const [errorMsg, setErrorMsg] = useState('')
 
   // ── Drag + resize state ──
-  const DEFAULT_SIZE = { w: 400, h: 500 }
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)

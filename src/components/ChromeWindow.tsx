@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } from "react";
 import { createPortal } from "react-dom";
+import * as kv from "@/lib/client-kv";
 
 interface ChromeWindowProps {
   title: string;
@@ -23,13 +24,8 @@ interface ChromeWindowProps {
 
 function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
   if (!appId || typeof window === "undefined") return { width: defaultWidth, height: defaultHeight };
-  try {
-    const saved = localStorage.getItem(`clawbox-winsize-${appId}`);
-    if (saved) {
-      const { width, height } = JSON.parse(saved);
-      if (width >= 300 && height >= 200) return { width, height };
-    }
-  } catch {}
+  const saved = kv.getJSON<{ width: number; height: number }>(`clawbox-winsize-${appId}`);
+  if (saved && saved.width >= 300 && saved.height >= 200) return saved;
   return { width: defaultWidth, height: defaultHeight };
 }
 
@@ -264,7 +260,7 @@ export default function ChromeWindow({
         // Save resized size per app
         if (appId) {
           const cur = currentSizeRef.current;
-          try { localStorage.setItem(`clawbox-winsize-${appId}`, JSON.stringify({ width: cur.width, height: cur.height })); } catch {}
+          kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
         }
         notifyGeometry();
         return;
@@ -307,7 +303,7 @@ export default function ChromeWindow({
     // Save window size per app
     if (appId) {
       const cur = currentSizeRef.current;
-      try { localStorage.setItem(`clawbox-winsize-${appId}`, JSON.stringify({ width: cur.width, height: cur.height })); } catch {}
+      kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
     }
     setClosing(true);
     setTimeout(() => onClose(), 150);

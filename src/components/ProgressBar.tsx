@@ -19,7 +19,7 @@ function badgeColor(isDone: boolean, isActive: boolean): string {
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
   return (
     <div
-      className="flex items-center justify-center gap-1 sm:gap-1"
+      className="flex items-center justify-center gap-1"
       role="progressbar"
       aria-valuemin={1}
       aria-valuemax={STEP_LABELS.length}

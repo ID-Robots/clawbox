@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
+import * as kv from "@/lib/client-kv";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
@@ -159,9 +160,11 @@ export default function ChromeDesktop() {
 
   // Check if setup is complete — redirect to /setup if not
   useEffect(() => {
-    fetch("/setup-api/setup/status")
-      .then(r => r.json())
-      .then(data => {
+    Promise.all([
+      fetch("/setup-api/setup/status").then(r => r.json()),
+      kv.init(),
+    ])
+      .then(([data]) => {
         if (!data.setup_complete) {
           window.location.href = "/setup";
         } else {
@@ -275,13 +278,12 @@ export default function ChromeDesktop() {
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
   const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
-  // Custom wallpapers are large base64 — keep in localStorage only
+  // Wallpapers are large base64 blobs — keep in localStorage to avoid
+  // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (saved) { setCustomWallpapers(JSON.parse(saved)); return; }
-      const old = localStorage.getItem("clawbox-custom-wallpaper");
-      if (old) { const arr = [old]; localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(arr)); localStorage.removeItem("clawbox-custom-wallpaper"); setCustomWallpapers(arr); }
+      if (saved) setCustomWallpapers(JSON.parse(saved));
     } catch {}
   }, []);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
@@ -311,10 +313,10 @@ export default function ChromeDesktop() {
   const [mascotHidden, setMascotHidden] = useState(false);
   useEffect(() => {
     const onShow = () => setMascotHidden(false);
-    const onStorage = (e: StorageEvent) => { if (e.key === "clawbox-mascot-hidden") setMascotHidden(e.newValue === "1"); };
+    const onHide = () => setMascotHidden(true);
     window.addEventListener("clawbox-show-mascot", onShow);
-    window.addEventListener("storage", onStorage);
-    return () => { window.removeEventListener("clawbox-show-mascot", onShow); window.removeEventListener("storage", onStorage); };
+    window.addEventListener("clawbox-hide-mascot", onHide);
+    return () => { window.removeEventListener("clawbox-show-mascot", onShow); window.removeEventListener("clawbox-hide-mascot", onHide); };
   }, []);
 
   // ─── Desktop icon grid + mobile detection (single resize listener) ───

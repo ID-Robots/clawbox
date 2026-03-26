@@ -37,6 +37,9 @@ function StepIcon({ status }: { status: StepStatus }) {
   return <div className="w-5 h-5 rounded-full bg-gray-600" />;
 }
 
+// Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
+const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
+
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
   const [, setTargetVersion] = useState<string | null>(null);
@@ -209,8 +212,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   // Idle state — show trigger button or "up to date"
   const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
-  // Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
-  const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
 
   if (isIdle && !starting) {
     return (

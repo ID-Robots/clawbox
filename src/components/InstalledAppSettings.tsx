@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import type { StoreApp } from "./AppStore";
+import * as kv from "@/lib/client-kv";
 
 interface AppSetting {
   key: string;
@@ -55,30 +56,19 @@ export default function InstalledAppSettings({ appId, storeApp, icon }: Installe
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // Load settings from localStorage + SQLite
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(SETTINGS_KEY);
-      if (stored) setSettings(JSON.parse(stored));
-    } catch {}
-    // Also try loading from server
-    fetch(`/setup-api/preferences?keys=app_${appId}_settings`)
-      .then(r => r.json())
-      .then((data) => {
-        const serverSettings = data[`app_${appId}_settings`];
-        if (serverSettings && typeof serverSettings === "object") {
-          setSettings(prev => ({ ...prev, ...serverSettings }));
-        }
-      })
-      .catch(() => {});
-  }, [appId, SETTINGS_KEY]);
+    kv.init().then(() => {
+      const stored = kv.getJSON<Record<string, string | boolean>>(SETTINGS_KEY);
+      if (stored) setSettings(stored);
+    });
+  }, [SETTINGS_KEY]);
 
   const appSettings = getAppSettings(appId);
 
   const updateSetting = useCallback((key: string, value: string | boolean) => {
     setSettings(prev => {
       const next = { ...prev, [key]: value };
-      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch {}
+      kv.setJSON(SETTINGS_KEY, next);
       return next;
     });
     setSaved(false);

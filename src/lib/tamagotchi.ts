@@ -2,6 +2,8 @@
 // Pure state machine implementing the P1/P2 mechanics adapted for desktop.
 // No React dependencies — consumed by the Mascot component.
 
+import * as kv from './client-kv'
+
 // ─── Types ───
 
 export type LifeStage = 'egg' | 'baby' | 'child' | 'teen' | 'adult' | 'dead'
@@ -167,19 +169,11 @@ export function createInitialState(): TamaState {
 const STORAGE_KEY = 'clawbox-tamagotchi-v2'
 
 export function saveState(state: TamaState): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch { /* quota exceeded, etc. */ }
+  kv.setJSON(STORAGE_KEY, state)
 }
 
 export function loadState(): TamaState | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    return JSON.parse(raw) as TamaState
-  } catch {
-    return null
-  }
+  return kv.getJSON<TamaState>(STORAGE_KEY)
 }
 
 // ─── Decay helpers ───

@@ -34,6 +34,137 @@ const ButtonSpinner = (
   <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
 );
 
+const PROVIDER_ICONS: Record<string, string> = {
+  anthropic: "🧠",
+  openai: "⚡",
+  google: "✨",
+  openrouter: "🔀",
+  ollama: "🦙",
+};
+
+const CONFIGURING_STEPS = [
+  { label: "Credentials verified", delay: 0 },
+  { label: "Updating AI configuration", delay: 2000 },
+  { label: "Restarting gateway service", delay: 5000 },
+  { label: "Warming up models", delay: 12000 },
+  { label: "Almost ready", delay: 22000 },
+];
+
+function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: () => void }) {
+  const [phase, setPhase] = useState(0);
+  const [dots, setDots] = useState("");
+  const providerName = PROVIDERS.find((p) => p.id === provider)?.name ?? "AI";
+  const icon = PROVIDER_ICONS[provider] ?? "🤖";
+
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const timers = CONFIGURING_STEPS.map((step, i) =>
+      i > 0 ? setTimeout(() => setPhase(i), step.delay) : null
+    );
+    const lastDelay = CONFIGURING_STEPS[CONFIGURING_STEPS.length - 1].delay;
+    const done = setTimeout(onDone, lastDelay + 10000);
+    // Trap focus inside overlay
+    overlayRef.current?.focus();
+    return () => {
+      timers.forEach((t) => t && clearTimeout(t));
+      clearTimeout(done);
+    };
+  }, [onDone]);
+
+  useEffect(() => {
+    const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div ref={overlayRef} tabIndex={-1} className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-6 p-8 bg-[var(--bg-surface)] rounded-2xl outline-none">
+      <style>{`
+        @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
+        @keyframes aimodels-check-circle { to { stroke-dashoffset: 0 } }
+        @keyframes aimodels-fade-in { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
+        @keyframes aimodels-pulse-ring { 0% { transform: scale(0.8); opacity: 0.6 } 50% { transform: scale(1.2); opacity: 0 } 100% { transform: scale(0.8); opacity: 0.6 } }
+        @keyframes aimodels-orbit { from { transform: rotate(0deg) translateX(40px) rotate(0deg) } to { transform: rotate(360deg) translateX(40px) rotate(-360deg) } }
+        .aimodels-fade-in { animation: aimodels-fade-in 0.4s ease-out both }
+        .aimodels-step-enter { animation: aimodels-fade-in 0.3s ease-out both }
+      `}</style>
+
+      {/* Central icon with orbiting particles */}
+      <div className="relative w-28 h-28 flex items-center justify-center">
+        {/* Pulse rings */}
+        <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite" }} />
+        <div className="absolute inset-2 rounded-full border border-emerald-500/10" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite 0.5s" }} />
+
+        {/* Orbiting dots */}
+        {phase >= 1 && [0, 1, 2].map((i) => (
+          <div key={i} className="absolute inset-0 flex items-center justify-center" style={{ animation: `aimodels-orbit ${3 + i * 0.5}s linear infinite`, animationDelay: `${i * 0.4}s` }}>
+            <div className="w-2 h-2 rounded-full bg-[var(--coral-bright)]" style={{ opacity: 0.4 + i * 0.2 }} />
+          </div>
+        ))}
+
+        {/* Check circle (phase 0) then provider icon (phase 1+) */}
+        {phase === 0 ? (
+          <svg width="56" height="56" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
+            <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-circle 0.6s ease-out 0.1s forwards" }} />
+            <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw 0.4s ease-out 0.5s forwards" }} />
+          </svg>
+        ) : (
+          <span className="text-5xl aimodels-fade-in">{icon}</span>
+        )}
+      </div>
+
+      {/* Provider name */}
+      <div className="text-center aimodels-fade-in" style={{ animationDelay: "0.3s" }}>
+        <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
+          {phase === 0 ? "Connected!" : `Setting up ${providerName}`}
+        </h2>
+        <p className="text-sm text-[var(--text-muted)]">
+          {phase === 0
+            ? "Credentials verified successfully"
+            : `Configuring your AI assistant${dots}`}
+        </p>
+      </div>
+
+      {/* Progress steps */}
+      <div className="w-full max-w-[280px] space-y-2.5 mt-2">
+        {CONFIGURING_STEPS.map((step, i) => (
+          <div
+            key={i}
+            className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
+              i <= phase ? "opacity-100" : "opacity-0 translate-y-1"
+            }`}
+            style={i <= phase ? { animation: "aimodels-fade-in 0.3s ease-out both", animationDelay: `${i * 0.1}s` } : undefined}
+          >
+            {i < phase ? (
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+              </span>
+            ) : i === phase ? (
+              <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+              </span>
+            ) : (
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+              </span>
+            )}
+            <span className={i <= phase ? (i < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+              {step.label}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Reassuring footer */}
+      {phase >= 1 && (
+        <p className="text-xs text-[var(--text-muted)] text-center mt-2 aimodels-step-enter">
+          This takes about 30 seconds. Please don&apos;t close this page.
+        </p>
+      )}
+    </div>
+  );
+}
+
 const PROVIDERS: Provider[] = [
   {
     id: "anthropic",
@@ -156,6 +287,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   } | null>(null);
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+  const [configuring, setConfiguring] = useState(false);
 
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
@@ -206,13 +338,17 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   const showError = (message: string) => setStatus({ type: "error", message });
 
   const showSuccessAndContinue = (message: string) => {
-    const { tabClosed, closeHint } = tryCloseOAuthWindow(oauthWindowRef);
-    const displayMsg = embedded ? message.replace(/\s*Continuing\.\.\.$/i, "") : message;
-    setStatus({ type: "success", message: displayMsg + closeHint });
-    if (!embedded && onNext) {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      timeoutRef.current = setTimeout(() => onNext(), tabClosed ? 1500 : 3000);
+    tryCloseOAuthWindow(oauthWindowRef);
+    if (embedded) {
+      // In embedded/settings mode, just show success inline
+      setStatus({ type: "success", message: message.replace(/\s*Continuing\.\.\.$/i, "") });
+      return;
     }
+    // In setup wizard, show the full configuring overlay
+    setSaving(false);
+    setExchanging(false);
+    setDeviceSaving(false);
+    setConfiguring(true);
   };
 
   const extractError = async (res: Response, fallback: string) => {
@@ -710,9 +846,16 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     </div>
   );
 
+  const handleConfiguringDone = useCallback(() => {
+    if (onNext) onNext();
+  }, [onNext]);
+
   return (
     <div className="w-full max-w-[520px]">
-      <div className="card-surface rounded-2xl p-8">
+      <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
+        {configuring && (
+          <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} />
+        )}
         <h1 className="text-2xl font-bold font-display mb-2">
           Connect AI Model
         </h1>
@@ -906,15 +1049,6 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
             >
               {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
             </button>
-          )}
-          {!embedded && (
-          <button
-            type="button"
-            onClick={onNext}
-            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-          >
-            Skip for now
-          </button>
           )}
         </div>
       </div>

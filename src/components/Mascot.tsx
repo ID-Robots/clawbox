@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
 import * as Tama from '@/lib/tamagotchi'
+import * as kv from '@/lib/client-kv'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
@@ -195,13 +196,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
   // ─── All mutable state in refs to avoid stale closures ───
-  const DEFAULT_POS = { x: 50, bx: 50 }
+  const DEFAULT_POS = { x: 50, bx: 85 }
   const savedPos = useRef<{ x: number; bx: number } | null>(null)
   if (savedPos.current === null) {
-    try {
-      const s = typeof window !== 'undefined' ? localStorage.getItem('clawbox-crab-pos') : null
-      savedPos.current = s ? JSON.parse(s) : DEFAULT_POS
-    } catch { savedPos.current = DEFAULT_POS }
+    savedPos.current = kv.getJSON<{ x: number; bx: number }>('clawbox-crab-pos') ?? DEFAULT_POS
   }
   const xRef = useRef(savedPos.current?.x ?? DEFAULT_POS.x)
   const boxXRef = useRef(savedPos.current?.bx ?? DEFAULT_POS.bx)
@@ -344,7 +342,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   // Hidden state (persisted) + context menu
   const [hidden, setHidden] = useState(() => {
     if (typeof window === 'undefined') return false
-    try { return localStorage.getItem('clawbox-mascot-hidden') === '1' } catch { return false }
+    return kv.get('clawbox-mascot-hidden') === '1'
   })
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
@@ -424,7 +422,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
   // ─── Direct DOM update for position (bypasses React render cycle) ───
   const saveCrabPos = useCallback(() => {
-    try { localStorage.setItem('clawbox-crab-pos', JSON.stringify({ x: xRef.current, bx: boxXRef.current })) } catch {}
+    kv.setJSON('clawbox-crab-pos', { x: xRef.current, bx: boxXRef.current })
   }, [])
 
   const updateCrabPos = useCallback(() => {
@@ -707,7 +705,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       setPhysicsActive(false)
       if (isDead) { tamaRevive() } else {
         // Open chat on tap — works even when sleeping
-        if (onTap) onTap(xRef.current)
+        if (onTap) onTap(boxXRef.current)
         if (!wasSleeping) {
           say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
           // Restart the action loop so mascot doesn't freeze after tap
@@ -879,7 +877,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
       setSpeech('')
       setState('idle')
-      try { localStorage.removeItem(SLEEP_KEY) } catch {}
+      kv.remove(SLEEP_KEY)
       setTimeout(() => doActionRef.current(), 1000)
     }, remainingMs) as ReturnType<typeof setTimeout>
   }, [say])
@@ -890,7 +888,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     setSpeech('')
     setState('idle')
-    try { localStorage.removeItem(SLEEP_KEY) } catch {}
+    kv.remove(SLEEP_KEY)
     setTama(prev => {
       if (!prev.isSleeping) return prev
       const next = { ...prev, timers: { ...prev.timers } }
@@ -919,7 +917,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     })
     const sleepDuration = (10 + Math.random() * 5) * 60 * 1000
     const wakeAt = Date.now() + sleepDuration
-    try { localStorage.setItem(SLEEP_KEY, JSON.stringify(wakeAt)) } catch {}
+    kv.setJSON(SLEEP_KEY, wakeAt)
     startSleep(sleepDuration)
   }, [startSleep])
 
@@ -1194,13 +1192,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
     // Resume sleep if mascot was sleeping before refresh
     let savedSleep = 0
-    try { savedSleep = JSON.parse(localStorage.getItem('clawbox-mascot-sleep') || '0') } catch {}
+    savedSleep = kv.getJSON<number>('clawbox-mascot-sleep') ?? 0
     const remaining = savedSleep - Date.now()
     const startDelay = remaining > 1000
       ? setTimeout(() => startSleep(remaining), 500)
       : setTimeout(doAction, 2000)
     // Clean up expired sleep key
-    if (savedSleep && remaining <= 1000) try { localStorage.removeItem('clawbox-mascot-sleep') } catch {}
+    if (savedSleep && remaining <= 1000) kv.remove('clawbox-mascot-sleep')
     return () => {
       clearTimeout(startDelay)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
@@ -1231,20 +1229,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   useEffect(() => {
     frozenRef.current = !!frozen
     if (frozen) {
-      // Stop all movement and enter power stance on the box
+      // Stop all movement — stay in place with power-up glow (don't teleport to box)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-      onBoxRef.current = true
       setCrabOnBox(true)
       setBoxGlow(true)
-      const bx = boxXRef.current
-      xRef.current = bx
-      setX(bx)
       setState('idle')
       setSpeech('')
     } else {
-      // Leave box and resume action loop
-      onBoxRef.current = false
+      // Remove power-up and resume action loop
       setCrabOnBox(false)
       setBoxGlow(false)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
@@ -1254,8 +1247,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
   // Listen for show/hide mascot events from desktop context menu
   useEffect(() => {
-    const showHandler = () => { setHidden(prev => { if (!prev) return prev; try { localStorage.removeItem('clawbox-mascot-hidden') } catch {}; return false }) }
-    const hideHandler = () => { setHidden(prev => { if (prev) return prev; try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; return true }) }
+    const showHandler = () => { setHidden(prev => { if (!prev) return prev; kv.remove('clawbox-mascot-hidden'); return false }) }
+    const hideHandler = () => { setHidden(prev => { if (prev) return prev; kv.set('clawbox-mascot-hidden', '1'); return true }) }
     window.addEventListener('clawbox-show-mascot', showHandler)
     window.addEventListener('clawbox-hide-mascot', hideHandler)
     return () => { window.removeEventListener('clawbox-show-mascot', showHandler); window.removeEventListener('clawbox-hide-mascot', hideHandler) }
@@ -1756,7 +1749,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
           <div className="border-t border-white/10 my-0.5" />
           <button
-            onClick={() => { setHidden(true); try { localStorage.setItem('clawbox-mascot-hidden', '1') } catch {}; setCtxMenu(null) }}
+            onClick={() => { setHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null) }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
           >
             <span className="text-base">👁️‍🗨️</span> Hide mascot

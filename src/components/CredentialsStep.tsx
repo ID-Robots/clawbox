@@ -15,6 +15,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [showHotspotPassword, setShowHotspotPassword] = useState(false);
+  const [hotspotEnabled, setHotspotEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
     type: "success" | "error";
@@ -30,6 +31,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       .then((data) => {
         if (data && !controller.signal.aborted) {
           if (data.ssid) setHotspotName(data.ssid);
+          if (typeof data.enabled === "boolean") setHotspotEnabled(data.enabled);
         }
       })
       .catch(() => {});
@@ -59,17 +61,19 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       }
     }
 
-    // Validate hotspot fields
-    if (!hotspotName.trim()) {
-      setStatus({ type: "error", message: "Hotspot name is required" });
-      return;
-    }
-    if (hotspotPassword && hotspotPassword.length < 8) {
-      setStatus({
-        type: "error",
-        message: "Hotspot password must be at least 8 characters",
-      });
-      return;
+    // Validate hotspot fields (only when enabled)
+    if (hotspotEnabled) {
+      if (!hotspotName.trim()) {
+        setStatus({ type: "error", message: "Hotspot name is required" });
+        return;
+      }
+      if (hotspotPassword && hotspotPassword.length < 8) {
+        setStatus({
+          type: "error",
+          message: "Hotspot password must be at least 8 characters",
+        });
+        return;
+      }
     }
 
     saveControllerRef.current?.abort();
@@ -103,8 +107,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ssid: hotspotName.trim(),
-          password: hotspotPassword || undefined,
+          ssid: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
+          password: hotspotEnabled ? (hotspotPassword || undefined) : undefined,
+          enabled: hotspotEnabled,
         }),
         signal: controller.signal,
       });
@@ -213,54 +218,78 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
         {/* Hotspot Settings */}
         <div className="border-t border-[var(--border-subtle)] pt-5 mb-1">
-          <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Hotspot Settings</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Hotspot Settings</h2>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={hotspotEnabled}
+              aria-label="Enable hotspot"
+              onClick={() => setHotspotEnabled((v) => !v)}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                hotspotEnabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                  hotspotEnabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
           <p className="text-[var(--text-muted)] text-xs mb-3">
-            Changes apply next time the hotspot starts.
+            {hotspotEnabled
+              ? "Changes apply next time the hotspot starts."
+              : "Hotspot will not start automatically."}
           </p>
 
-          <div className="mb-4">
-            <label htmlFor="hotspot-name" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-              Hotspot Name
-            </label>
-            <input
-              id="hotspot-name"
-              type="text"
-              value={hotspotName}
-              onChange={(e) => setHotspotName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") save();
-              }}
-              maxLength={32}
-              className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-            />
-          </div>
+          {hotspotEnabled && (
+            <>
+              <div className="mb-4">
+                <label htmlFor="hotspot-name" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+                  Hotspot Name
+                </label>
+                <input
+                  id="hotspot-name"
+                  type="text"
+                  value={hotspotName}
+                  onChange={(e) => setHotspotName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") save();
+                  }}
+                  maxLength={32}
+                  className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                />
+              </div>
 
-          <div>
-            <label htmlFor="hotspot-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-              Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span>
-            </label>
-            <div className="relative">
-              <input
-                id="hotspot-password"
-                type={showHotspotPassword ? "text" : "password"}
-                value={hotspotPassword}
-                onChange={(e) => setHotspotPassword(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
-                }}
-                placeholder="Leave empty for open network"
-                className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-              />
-              <button
-                type="button"
-                onClick={() => setShowHotspotPassword((v) => !v)}
-                aria-label={showHotspotPassword ? "Hide password" : "Show password"}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
-              >
-                {showHotspotPassword ? EyeClosed : EyeOpen}
-              </button>
-            </div>
-          </div>
+              <div>
+                <label htmlFor="hotspot-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+                  Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    id="hotspot-password"
+                    type={showHotspotPassword ? "text" : "password"}
+                    value={hotspotPassword}
+                    onChange={(e) => setHotspotPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") save();
+                    }}
+                    placeholder="Leave empty for open network"
+                    className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowHotspotPassword((v) => !v)}
+                    aria-label={showHotspotPassword ? "Hide password" : "Show password"}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                  >
+                    {showHotspotPassword ? EyeClosed : EyeOpen}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         {status && (
