@@ -19,7 +19,7 @@ function badgeColor(isDone: boolean, isActive: boolean): string {
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
   return (
     <div
-      className="flex gap-1 flex-wrap"
+      className="flex items-center justify-center gap-1 sm:gap-1"
       role="progressbar"
       aria-valuemin={1}
       aria-valuemax={STEP_LABELS.length}
@@ -35,10 +35,10 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
             key={num}
             aria-current={num === currentStep ? "step" : undefined}
             aria-disabled={num > currentStep ? true : undefined}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${stepColors(isDone, isActive)}`}
+            className={`flex items-center gap-1.5 px-1.5 py-1.5 sm:px-3 rounded-full text-xs font-medium transition-all ${stepColors(isDone, isActive)}`}
           >
             <span
-              className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold text-white ${badgeColor(isDone, isActive)}`}
+              className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold text-white shrink-0 ${badgeColor(isDone, isActive)}`}
             >
               {num}
             </span>

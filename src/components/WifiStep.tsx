@@ -76,13 +76,21 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   return (
     <div className="w-full max-w-[520px]">
       <div className="card-surface rounded-2xl p-8">
+        <style>{`
+          @keyframes welcome-powerup {
+            0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); filter: drop-shadow(0 0 8px rgba(249,115,22,0.4)); }
+            33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); filter: drop-shadow(0 0 14px rgba(249,115,22,0.6)); }
+            66% { transform: translateY(-4px) scale(1.08) rotate(2deg); filter: drop-shadow(0 0 10px rgba(249,115,22,0.5)); }
+          }
+        `}</style>
         <div className="flex flex-col items-center gap-2 mb-6">
           <Image
-            src="/clawbox-logo.png"
+            src="/clawbox-crab.png"
             alt="ClawBox"
             width={120}
             height={120}
             className="w-[120px] h-[120px] object-contain"
+            style={{ animation: 'welcome-powerup 1.5s ease-in-out infinite' }}
             priority
           />
           <h1 className="text-2xl font-bold font-display text-center">

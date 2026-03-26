@@ -209,6 +209,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   // Idle state — show trigger button or "up to date"
   const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
+  // Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
+  const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
 
   if (isIdle && !starting) {
     return (
@@ -230,22 +232,22 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             <div className="mb-6 space-y-1.5 text-sm">
               <div className="flex items-center gap-2">
                 <span className="text-[var(--text-muted)] w-20">ClawBox</span>
-                <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{versions.clawbox.current}</span>
+                <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{cleanVersion(versions.clawbox.current)}</span>
                 {versions.clawbox.target && (
                   <>
                     <span className="text-[var(--text-muted)]">&rarr;</span>
-                    <span className="text-green-400 font-semibold">{versions.clawbox.target}</span>
+                    <span className="text-green-400 font-semibold">{cleanVersion(versions.clawbox.target)}</span>
                   </>
                 )}
               </div>
               {versions.openclaw.current && (
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--text-muted)] w-20">OpenClaw</span>
-                  <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{versions.openclaw.current}</span>
+                  <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{cleanVersion(versions.openclaw.current)}</span>
                   {versions.openclaw.target && (
                     <>
                       <span className="text-[var(--text-muted)]">&rarr;</span>
-                      <span className="text-green-400 font-semibold">{versions.openclaw.target}</span>
+                      <span className="text-green-400 font-semibold">{cleanVersion(versions.openclaw.target)}</span>
                     </>
                   )}
                 </div>
