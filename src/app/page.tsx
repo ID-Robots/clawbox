@@ -307,7 +307,7 @@ export default function ChromeDesktop() {
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
-  const [mascotX, setMascotX] = useState(50);
+  const [mascotX, setMascotX] = useState(85);
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
