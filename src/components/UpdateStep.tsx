@@ -264,22 +264,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 Continue
               </button>
             ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={triggerUpdate}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-                >
-                  Start Update
-                </button>
-                <button
-                  type="button"
-                  onClick={onNext}
-                  className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-                >
-                  Skip
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={triggerUpdate}
+                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+              >
+                Start Update
+              </button>
             )}
           </div>
         </div>
