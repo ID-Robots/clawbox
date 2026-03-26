@@ -262,6 +262,8 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
+        // Auto-open chat on fresh install (no saved preferences yet)
+        if (!data.desktop_apps && !data.wp_id) setChatOpen(true);
       })
       .catch(() => { prefsLoaded.current = true; });
   }, []);
@@ -302,11 +304,7 @@ export default function ChromeDesktop() {
   }, []);
 
   // ─── Chat (mascot click toggles chat popup) ───
-  const [chatOpen, setChatOpen] = useState(() => {
-    // Auto-open chat on first visit (no saved mascot position = fresh install)
-    if (typeof window === "undefined") return false;
-    return !localStorage.getItem("clawbox-crab-pos");
-  });
+  const [chatOpen, setChatOpen] = useState(false);
   const [mascotX, setMascotX] = useState(50);
 
   // ─── Mascot visibility ───
