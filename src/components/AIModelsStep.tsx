@@ -78,7 +78,7 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
   }, []);
 
   return (
-    <div ref={overlayRef} tabIndex={-1} className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-6 p-8 bg-[var(--bg-surface)] rounded-2xl outline-none">
+    <div ref={overlayRef} tabIndex={-1} className="absolute inset-0 z-10 flex flex-col items-center gap-6 px-8 pt-12 pb-8 bg-[var(--bg-surface)] rounded-2xl outline-none overflow-auto">
       <style>{`
         @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
         @keyframes aimodels-check-circle { to { stroke-dashoffset: 0 } }
@@ -89,8 +89,19 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
         .aimodels-step-enter { animation: aimodels-fade-in 0.3s ease-out both }
       `}</style>
 
+      {/* Info banner */}
+      <div className="w-full p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 aimodels-fade-in">
+        <div className="flex items-center gap-2 text-sm text-emerald-400 font-medium">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+          {providerName} credentials accepted
+        </div>
+        <p className="text-xs text-[var(--text-muted)] mt-1">
+          Setting up your AI assistant. This usually takes about 30 seconds.
+        </p>
+      </div>
+
       {/* Central icon with orbiting particles */}
-      <div className="relative w-28 h-28 flex items-center justify-center">
+      <div className="relative w-24 h-24 flex items-center justify-center">
         {/* Pulse rings */}
         <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite" }} />
         <div className="absolute inset-2 rounded-full border border-emerald-500/10" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite 0.5s" }} />
@@ -104,7 +115,7 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
 
         {/* Check circle (phase 0) then provider icon (phase 1+) */}
         {phase === 0 ? (
-          <svg width="56" height="56" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
+          <svg width="48" height="48" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
             <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-circle 0.6s ease-out 0.1s forwards" }} />
             <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw 0.4s ease-out 0.5s forwards" }} />
           </svg>
@@ -335,20 +346,27 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     };
   }, []);
 
-  const showError = (message: string) => setStatus({ type: "error", message });
+  const showError = (message: string) => {
+    setConfiguring(false);
+    setStatus({ type: "error", message });
+  };
 
-  const showSuccessAndContinue = (message: string) => {
+  const showConfiguring = () => {
+    if (embedded) return;
     tryCloseOAuthWindow(oauthWindowRef);
-    if (embedded) {
-      // In embedded/settings mode, just show success inline
-      setStatus({ type: "success", message: message.replace(/\s*Continuing\.\.\.$/i, "") });
-      return;
-    }
-    // In setup wizard, show the full configuring overlay
     setSaving(false);
     setExchanging(false);
     setDeviceSaving(false);
     setConfiguring(true);
+  };
+
+  const showSuccessAndContinue = (message: string) => {
+    tryCloseOAuthWindow(oauthWindowRef);
+    if (embedded) {
+      setStatus({ type: "success", message: message.replace(/\s*Continuing\.\.\.$/i, "") });
+      return;
+    }
+    // Overlay is already showing — no-op in setup wizard mode
   };
 
   const extractError = async (res: Response, fallback: string) => {
@@ -414,7 +432,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     saveControllerRef.current = controller;
 
     setSaving(true);
-    setStatus(null);
+    showConfiguring();
     try {
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
@@ -612,6 +630,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
 
     setExchanging(true);
     setStatus(null);
+    showConfiguring();
     try {
       const exchangeRes = await fetch("/setup-api/ai-models/oauth/exchange", {
         method: "POST",

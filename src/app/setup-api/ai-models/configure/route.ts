@@ -30,7 +30,7 @@ interface ProviderConfig {
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-4-5-20250929",
+    defaultModel: "anthropic/claude-opus-4-6",
     profileKey: "anthropic:default",
   },
   openai: {
