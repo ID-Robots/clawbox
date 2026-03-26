@@ -89,17 +89,6 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
         .aimodels-step-enter { animation: aimodels-fade-in 0.3s ease-out both }
       `}</style>
 
-      {/* Info banner */}
-      <div className="w-full p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 aimodels-fade-in">
-        <div className="flex items-center gap-2 text-sm text-emerald-400 font-medium">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
-          {providerName} credentials accepted
-        </div>
-        <p className="text-xs text-[var(--text-muted)] mt-1">
-          Setting up your AI assistant. This usually takes about 30 seconds.
-        </p>
-      </div>
-
       {/* Central icon with orbiting particles */}
       <div className="relative w-24 h-24 flex items-center justify-center">
         {/* Pulse rings */}

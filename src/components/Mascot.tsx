@@ -211,11 +211,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     if (typeof window === 'undefined') return Tama.createInitialState()
     const saved = Tama.loadState()
     if (saved) {
-      // Catch up on ticks since last visit
       const now = Date.now()
       const elapsed = now - saved.timers.lastUpdate
+      // Cap offline catch-up to 5 minutes so stats aren't drained
+      // after long absences (factory reset, device off overnight, etc.)
+      if (elapsed > 5 * 60 * 1000) {
+        saved.timers.lastUpdate = now - 5 * 60 * 1000
+        saved.timers.lastHungerDecay = Math.max(saved.timers.lastHungerDecay, saved.timers.lastUpdate)
+        saved.timers.lastHappinessDecay = Math.max(saved.timers.lastHappinessDecay, saved.timers.lastUpdate)
+      }
       if (elapsed > 2000) {
-        // Run tick to apply offline decay (simplified: just update timers)
         Tama.tick(saved)
       }
       return saved

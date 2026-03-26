@@ -352,32 +352,48 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [resetStep, setResetStep] = useState(0);
   const [resetProgress, setResetProgress] = useState(0);
 
+  const [resetPhase, setResetPhase] = useState<"waiting" | "reconnecting" | "done" | null>(null);
+  const [resetDots, setResetDots] = useState(0);
+  const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const resetSetup = async () => {
     setResetting(true);
-    setResetStep(0);
-    setResetProgress(0);
-    let step = 0;
-    const iv = setInterval(() => {
-      step++;
-      if (step < RESET_STEPS.length) {
-        setResetStep(step);
-        setResetProgress(Math.round((step / RESET_STEPS.length) * 100));
-      }
-    }, 800);
+    setResetConfirm(false);
+    setResetPhase("waiting");
+    setResetDots(0);
+
+    // Animate dots
+    resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
+
     try {
-      const res = await fetch("/setup-api/setup/reset", { method: "POST" });
-      clearInterval(iv);
-      if (res.ok) {
-        setResetStep(RESET_STEPS.length - 1);
-        setResetProgress(100);
-        await new Promise(r => setTimeout(r, 2000));
-        window.location.href = "/setup";
-        return;
-      }
-    } catch { /* ignore */ }
-    clearInterval(iv);
-    setResetting(false);
+      await fetch("/setup-api/setup/reset", { method: "POST" });
+    } catch { /* device reboots, connection drops */ }
+
+    // Wait for device to go down, then poll for reconnect
+    setTimeout(() => {
+      setResetPhase("reconnecting");
+      resetPollRef.current = setInterval(async () => {
+        try {
+          const res = await fetch("/setup-api/setup/status", { signal: AbortSignal.timeout(3000) });
+          if (res.ok) {
+            if (resetPollRef.current) clearInterval(resetPollRef.current);
+            if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+            setResetPhase("done");
+            setTimeout(() => { window.location.href = "/setup"; }, 1500);
+          }
+        } catch { /* still offline */ }
+      }, 3000);
+    }, 5000);
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (resetPollRef.current) clearInterval(resetPollRef.current);
+      if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+    };
+  }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
 
@@ -1187,43 +1203,52 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
-      {/* Factory Reset modal */}
-      {resetConfirm && (
+      {/* Factory Reset confirmation modal */}
+      {resetConfirm && !resetting && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-[#1a1f2e] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-white/10">
-            {!resetting ? (
-              <>
-                <h3 className="text-lg font-bold text-white/90 mb-2">Factory Reset?</h3>
-                <p className="text-sm text-white/50 mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
-                <div className="flex gap-3">
-                  <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-white/60 rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                    Cancel
-                  </button>
-                  <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                    Reset
-                  </button>
-                </div>
-              </>
+            <h3 className="text-lg font-bold text-white/90 mb-2">Factory Reset?</h3>
+            <p className="text-sm text-white/50 mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-white/60 rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
+                Cancel
+              </button>
+              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Factory Reset full-screen overlay */}
+      {resetting && resetPhase && (
+        <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
+          <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
+            {resetPhase === "done" ? (
+              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
+                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
+              </div>
             ) : (
+              <div className="w-16 h-16 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+            )}
+
+            {resetPhase === "waiting" && (
               <>
-                <h3 className="text-lg font-bold text-white/90 mb-4">Resetting...</h3>
-                <div className="space-y-2 mb-4">
-                  {RESET_STEPS.map((step, i) => (
-                    <div key={i} className="flex items-center gap-2.5 text-sm">
-                      {i < resetStep ? (
-                        <span className="material-symbols-rounded text-green-400" style={{ fontSize: 16 }}>check</span>
-                      ) : i === resetStep ? (
-                        <span className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <span className="w-4 h-4 rounded-full border-2 border-white/10" />
-                      )}
-                      <span className={i <= resetStep ? "text-white/80" : "text-white/20"}>{step}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="w-full bg-white/5 rounded-full h-2 overflow-hidden">
-                  <div className="h-full bg-red-500 rounded-full transition-all duration-300" style={{ width: `${resetProgress}%` }} />
-                </div>
+                <h2 className="text-xl font-semibold text-white">Resetting{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-white/50">Erasing all settings and restarting. Please wait.</p>
+              </>
+            )}
+            {resetPhase === "reconnecting" && (
+              <>
+                <h2 className="text-xl font-semibold text-white">Reconnecting{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-white/50">Waiting for device to come back online.</p>
+              </>
+            )}
+            {resetPhase === "done" && (
+              <>
+                <h2 className="text-xl font-semibold text-white">Device is back online</h2>
+                <p className="text-sm text-white/50">Starting setup wizard...</p>
               </>
             )}
           </div>
@@ -1341,43 +1366,52 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
-      {/* Factory Reset modal */}
-      {resetConfirm && (
+      {/* Factory Reset confirmation modal */}
+      {resetConfirm && !resetting && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-[#1a1f2e] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-white/10">
-            {!resetting ? (
-              <>
-                <h3 className="text-lg font-bold text-white/90 mb-2">Factory Reset?</h3>
-                <p className="text-sm text-white/50 mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
-                <div className="flex gap-3">
-                  <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-white/60 rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                    Cancel
-                  </button>
-                  <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                    Reset
-                  </button>
-                </div>
-              </>
+            <h3 className="text-lg font-bold text-white/90 mb-2">Factory Reset?</h3>
+            <p className="text-sm text-white/50 mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-white/60 rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
+                Cancel
+              </button>
+              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Factory Reset full-screen overlay */}
+      {resetting && resetPhase && (
+        <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
+          <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
+            {resetPhase === "done" ? (
+              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
+                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
+              </div>
             ) : (
+              <div className="w-16 h-16 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+            )}
+
+            {resetPhase === "waiting" && (
               <>
-                <h3 className="text-lg font-bold text-white/90 mb-4">Resetting...</h3>
-                <div className="space-y-2 mb-4">
-                  {RESET_STEPS.map((step, i) => (
-                    <div key={i} className="flex items-center gap-2.5 text-sm">
-                      {i < resetStep ? (
-                        <span className="material-symbols-rounded text-green-400" style={{ fontSize: 16 }}>check</span>
-                      ) : i === resetStep ? (
-                        <span className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <span className="w-4 h-4 rounded-full border-2 border-white/10" />
-                      )}
-                      <span className={i <= resetStep ? "text-white/80" : "text-white/20"}>{step}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="w-full bg-white/5 rounded-full h-2 overflow-hidden">
-                  <div className="h-full bg-red-500 rounded-full transition-all duration-300" style={{ width: `${resetProgress}%` }} />
-                </div>
+                <h2 className="text-xl font-semibold text-white">Resetting{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-white/50">Erasing all settings and restarting. Please wait.</p>
+              </>
+            )}
+            {resetPhase === "reconnecting" && (
+              <>
+                <h2 className="text-xl font-semibold text-white">Reconnecting{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-white/50">Waiting for device to come back online.</p>
+              </>
+            )}
+            {resetPhase === "done" && (
+              <>
+                <h2 className="text-xl font-semibold text-white">Device is back online</h2>
+                <p className="text-sm text-white/50">Starting setup wizard...</p>
               </>
             )}
           </div>

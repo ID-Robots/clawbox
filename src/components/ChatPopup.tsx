@@ -363,7 +363,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     ws.onerror = () => {}
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load chat history
+  // Load chat history, auto-greet if empty
+  const greetedRef = useRef(false)
   const loadHistory = useCallback(async () => {
     try {
       const result = await wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Record<string, unknown>
@@ -375,11 +376,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
         if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
-        // Strip the [WebChat ...] prefix from user messages
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
       setMessages(chatMsgs)
+
+      // Auto-send a greeting if no history exists (first conversation)
+      if (chatMsgs.length === 0 && !greetedRef.current) {
+        greetedRef.current = true
+        setSending(true)
+        setStreaming('')
+        const idempotencyKey = uuid()
+        runIdRef.current = idempotencyKey
+        try {
+          await wsRequest('chat.send', {
+            sessionKey: sessionKeyRef.current,
+            message: 'hi',
+            deliver: false,
+            idempotencyKey,
+          })
+        } catch {
+          setSending(false)
+          runIdRef.current = null
+        }
+      }
     } catch (err) {
       console.error('Failed to load history:', err)
     }
