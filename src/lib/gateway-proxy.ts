@@ -74,24 +74,24 @@ export async function serveGatewayHTML(
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : "";
-    // Script to set WebSocket URL + token so the OpenClaw UI connects directly to the gateway.
+    // Script to set WebSocket URL + token so the OpenClaw UI auto-connects to the gateway.
     // The SPA stores settings in localStorage (field "gatewayUrl") and tokens in
     // sessionStorage under per-URL key "openclaw.control.token.v1:<normalized_ws_url>".
+    // Use the gateway port directly (not port 80) — the port-80 WS upgrade proxy is
+    // unreliable under bun, but the gateway is always reachable at its own port.
     const wsScript = `<script>
 (function(){
   var SK="openclaw.control.settings.v1";
   var TP="openclaw.control.token.v1:";
   try{
-    var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host;
+    var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.hostname+":${GATEWAY_PORT}";
     var s=JSON.parse(localStorage.getItem(SK)||"{}");
     if(s.gatewayUrl!==wsUrl){s.gatewayUrl=wsUrl;localStorage.setItem(SK,JSON.stringify(s))}
     ${safeToken ? `var t=${safeToken};var tk=TP+wsUrl;if(sessionStorage.getItem(tk)!==t){sessionStorage.setItem(tk,t)}` : ""}
   }catch(e){}
 })();
 </script>`;
-    const tokenScript = wsScript;
-
-    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${tokenScript}`);
+    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${wsScript}`);
     return new NextResponse(html, {
       status: 200,
       headers: {

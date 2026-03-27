@@ -25,13 +25,16 @@ interface ProviderConfig {
   defaultModel: string;
   profileKey: string;
   /** Override config used when authMode is "subscription" (OAuth). */
-  subscriptionOverride?: { defaultModel: string; profileKey: string };
+  subscriptionOverride?: { defaultModel: string; profileKey?: string };
 }
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: {
     defaultModel: "anthropic/claude-opus-4-6",
     profileKey: "anthropic:default",
+    subscriptionOverride: {
+      defaultModel: "anthropic/claude-sonnet-4-6",
+    },
   },
   openai: {
     defaultModel: "openai/gpt-4o",
@@ -142,7 +145,7 @@ export async function POST(request: Request) {
 
     // For subscription (OAuth) providers, use the subscription-specific config
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
-      ? { ...baseConfig.subscriptionOverride }
+      ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
     const ocProvider = config.profileKey.split(":")[0];
 

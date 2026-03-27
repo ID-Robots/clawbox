@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
-import * as Tama from '@/lib/tamagotchi'
 import * as kv from '@/lib/client-kv'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
@@ -206,56 +205,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const kickedRef = useRef(false) // prevent double-kick per walk
   const [mounted, setMounted] = useState(false)
 
-  // ─── Tamagotchi engine state ───
-  const [tama, setTama] = useState<Tama.TamaState>(() => {
-    if (typeof window === 'undefined') return Tama.createInitialState()
-    const saved = Tama.loadState()
-    if (saved) {
-      const now = Date.now()
-      const elapsed = now - saved.timers.lastUpdate
-      // Cap offline catch-up to 5 minutes so stats aren't drained
-      // after long absences (factory reset, device off overnight, etc.)
-      if (elapsed > 5 * 60 * 1000) {
-        saved.timers.lastUpdate = now - 5 * 60 * 1000
-        saved.timers.lastHungerDecay = Math.max(saved.timers.lastHungerDecay, saved.timers.lastUpdate)
-        saved.timers.lastHappinessDecay = Math.max(saved.timers.lastHappinessDecay, saved.timers.lastUpdate)
-      }
-      if (elapsed > 2000) {
-        Tama.tick(saved)
-      }
-      return saved
-    }
-    return Tama.createInitialState()
-  })
-  const tamaRef = useRef(tama)
-  tamaRef.current = tama
-  const isDead = tama.isDead
-
-  // Tamagotchi tick loop (every 2 seconds)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (frozenRef.current) return
-      setTama(prev => {
-        const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
-        const events = Tama.tick(next)
-        // React to events with speech
-        if (events.evolved) {
-          const name = Tama.getCharacterName(next)
-          sayRef.current?.(`✨ Evolved to ${name}!`, 4000)
-        }
-        if (events.died) sayRef.current?.(`💀 ${events.died}`, 5000)
-        if (events.pooped) sayRef.current?.('💩', 1500)
-        if (events.gotSick) sayRef.current?.('🤢 I feel sick...', 3000)
-        if (events.disciplineCall) sayRef.current?.('😤 Hey! Pay attention!', 3000)
-        if (events.careMistake) sayRef.current?.('😢 You ignored me...', 2000)
-        Tama.saveState(next)
-        return next
-      })
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [])
-
-  // Speech (needed early for tama actions)
+  // Speech
   const [speech, setSpeech] = useState('')
   const say = useCallback((text: string, ms = 3000) => {
     setSpeech(text)
@@ -264,85 +214,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const sayRef = useRef<((text: string, ms?: number) => void) | null>(null)
   sayRef.current = say
 
-  // ─── Tamagotchi actions ───
-  const tamaRevive = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev }
-      Tama.resetToEgg(next)
-      Tama.saveState(next)
-      return next
-    })
-    say('I live again! 🦀💀→🦀', 3000)
-  }, [say])
-  const tamaFeed = useCallback((type: 'meal' | 'snack' = 'meal') => {
-    setTama(prev => {
-      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
-      const result = type === 'snack' ? Tama.feedSnack(next) : Tama.feedMeal(next)
-      if (result === 'fed') say('Om nom nom! 🍕', 2000)
-      else if (result === 'snack') say('Yummy treat! 🍬', 2000)
-      else if (result === 'full') say('I\'m full! 🤚', 1500)
-      else if (result === 'misbehaving') say('😤 NO! Scold me first!', 2000)
-      Tama.saveState(next)
-      return next
-    })
-  }, [say])
-  const tamaPlay = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
-      const result = Tama.playGame(next)
-      if (result === 'win') say('I won! 🎮🎉', 2000)
-      else if (result === 'lose') say('Aww, lost! 🎮😢', 2000)
-      Tama.saveState(next)
-      return next
-    })
-    setState('dance')
-  }, [say])
-  const tamaClean = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev }
-      const cleaned = Tama.cleanPoop(next)
-      if (cleaned) say('Sparkly! ✨', 2000)
-      else say('Already clean!', 1500)
-      Tama.saveState(next)
-      return next
-    })
-  }, [say])
-  const tamaMedicine = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev, timers: { ...prev.timers } }
-      const cured = Tama.giveMedicine(next)
-      if (cured) say('💊 All better!', 2000)
-      Tama.saveState(next)
-      return next
-    })
-  }, [say])
-  const tamaDiscipline = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev, stats: { ...prev.stats }, timers: { ...prev.timers } }
-      const scolded = Tama.scoldDiscipline(next)
-      if (scolded) say('Sorry... 😔', 2000)
-      Tama.saveState(next)
-      return next
-    })
-  }, [say])
-  const tamaLightsOff = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev, timers: { ...prev.timers } }
-      Tama.turnLightsOff(next)
-      Tama.saveState(next)
-      return next
-    })
-  }, [])
-
-  // Compat: old code references tamaStats — bridge to new engine
-  const tamaStats = {
-    hunger: (tama.stats.hunger / 4) * 100,
-    happiness: (tama.stats.happiness / 4) * 100,
-    energy: 80, // no longer tracked separately; keep for visual compat
-    health: tama.isSick ? 20 : tama.isDead ? 0 : 80,
-  }
-  const tamaStatsRef = useRef(tamaStats)
-  tamaStatsRef.current = tamaStats
+  // Simple sleeping state (no tamagotchi engine)
+  const [isSleeping, setIsSleeping] = useState(false)
+  const isSleepingRef = useRef(false)
+  isSleepingRef.current = isSleeping
 
   // Hidden state (persisted) + context menu
   const [hidden, setHidden] = useState(() => {
@@ -381,7 +256,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [state, setState] = useState<MascotState>('idle')
   const [physicsActive, setPhysicsActive] = useState(false)
-  const physicsActiveRef = useRef(false)
   const [frenzy, setFrenzy] = useState(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
@@ -390,10 +264,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
   const onBoxRef = useRef(false)
   const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
+  const frenzyIntervalsRef = useRef<ReturnType<typeof setInterval>[]>([])
   const doActionRef = useRef<() => void>(() => {})
   const draggingRef = useRef(false)
   const dragOffsetRef = useRef({ x: 0, y: 0 })
-  const dragYRef = useRef(0) // vertical position in pixels from bottom
   // ImpactJS-style physics engine state
   const physicsRef = useRef({
     active: false,
@@ -411,7 +285,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     lastPointerTime: 0,
   })
   const physicsRAF = useRef<number>(0)
-  const physicsPosRef = useRef({ x: 0, y: 0 }) // last physics position for React render
   // Box physics (separate entity)
   const boxDraggingRef = useRef(false)
   const boxDragOffsetRef = useRef({ x: 0, y: 0 })
@@ -474,13 +347,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     const speed = Math.abs(impactVel)
     if (speed < IMPACT_THRESHOLD) return
     const dmg = (speed - IMPACT_THRESHOLD) * IMPACT_DAMAGE_SCALE
-    // Impact damage: reduce happiness (mapped from old health system)
-    setTama(prev => {
-      const next = { ...prev, stats: { ...prev.stats } }
-      if (dmg > 15) next.stats.happiness = Math.max(0, next.stats.happiness - 1)
-      Tama.saveState(next)
-      return next
-    })
     // Spawn floating damage number
     const id = Date.now() + Math.random()
     const x = -20 + Math.random() * 40
@@ -562,7 +428,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       } else {
         p.velY = 0
         if (Math.abs(p.velX) < 5) {
-          p.active = false; physicsActiveRef.current = false; setPhysicsActive(false)
+          p.active = false; setPhysicsActive(false)
           updateCrabPos()
           setTimeout(() => doAction(), 2000)
           return
@@ -591,7 +457,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         p.velY = 0
         // Landed — stop physics if X vel is also ~0
         if (Math.abs(p.velX) < 5) {
-          p.active = false; physicsActiveRef.current = false; setPhysicsActive(false)
+          p.active = false; setPhysicsActive(false)
           updateCrabPos()
           setTimeout(() => doAction(), 2000)
           return
@@ -633,8 +499,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
     // Render
     if (crabElRef.current) {
-      const scaleX = facingRef.current === 'left' ? -1 : 1
-      physicsPosRef.current = { x: xRef.current, y: p.posY }
       crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px)`
     }
@@ -650,14 +514,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     // Right-click — let onContextMenu handle it, don't start drag/tap
     if (e.button === 2) return
     e.preventDefault(); e.stopPropagation()
-    // When dead, only allow taps (revive), not dragging
-    if (isDead) {
-      didDragRef.current = false
-      dragStartPos.current = { x: e.clientX, y: e.clientY }
-      draggingRef.current = true
-      ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
-      return
-    }
     draggingRef.current = true; setPhysicsActive(true)
     didDragRef.current = false
     dragStartPos.current = { x: e.clientX, y: e.clientY }
@@ -672,11 +528,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
     ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
-  }, [isDead])
+  }, [])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
-    if (isDead) return // Don't allow moving when dead
     e.preventDefault()
     // Detect actual drag vs tap
     const dx = e.clientX - dragStartPos.current.x, dy = e.clientY - dragStartPos.current.y
@@ -703,26 +558,22 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     if (!draggingRef.current) return
     draggingRef.current = false
 
-    const wasSleeping = tamaRef.current.isSleeping
-
-    // Tap detection — if pointer barely moved, trigger sass/chat or revive
+    // Tap detection — if pointer barely moved, trigger sass/chat
     if (!didDragRef.current) {
       setPhysicsActive(false)
-      if (isDead) { tamaRevive() } else {
-        // Open chat on tap — works even when sleeping
-        if (onTap) onTap(boxXRef.current)
-        if (!wasSleeping) {
-          say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
-          // Restart the action loop so mascot doesn't freeze after tap
-          if (stateTimeout.current) clearTimeout(stateTimeout.current)
-          stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
-        }
+      // Open chat on tap — works even when sleeping
+      if (onTap) onTap(boxXRef.current)
+      if (!isSleepingRef.current) {
+        say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
+        // Restart the action loop so mascot doesn't freeze after tap
+        if (stateTimeout.current) clearTimeout(stateTimeout.current)
+        stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
       }
       return
     }
 
     // Drag-and-drop while sleeping wakes the mascot
-    if (wasSleeping) {
+    if (isSleepingRef.current) {
       wakeSleepRef.current?.()
       // Let physics play out the drop, then resume normal actions
       const p = physicsRef.current
@@ -740,7 +591,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     p.lastTime = performance.now()
     p.active = true
     physicsRAF.current = requestAnimationFrame(physicsLoop)
-  }, [physicsLoop, isDead, tamaRevive])
+  }, [physicsLoop])
 
   // ─── Box physics loop ───
   const boxPhysicsLoop = useCallback(() => {
@@ -882,44 +733,28 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
       setSpeech('')
       setState('idle')
+      setIsSleeping(false)
       kv.remove(SLEEP_KEY)
       setTimeout(() => doActionRef.current(), 1000)
     }, remainingMs) as ReturnType<typeof setTimeout>
   }, [say])
 
-  // Wake from sleep — clears all sleep state (mascot + tamagotchi engine)
+  // Wake from sleep — clears all sleep state
   const wakeSleep = useCallback(() => {
     if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     setSpeech('')
     setState('idle')
+    setIsSleeping(false)
     kv.remove(SLEEP_KEY)
-    setTama(prev => {
-      if (!prev.isSleeping) return prev
-      const next = { ...prev, timers: { ...prev.timers } }
-      next.isSleeping = false
-      next.lightsOff = false
-      next.timers.sleepStart = null
-      next.timers.careAlertStart = null
-      Tama.saveState(next)
-      return next
-    })
     say('*yawn* I\'m awake! 😤', 2500)
   }, [say])
   const wakeSleepRef = useRef(wakeSleep)
   wakeSleepRef.current = wakeSleep
 
-  // tamaSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
-  const tamaSleep = useCallback(() => {
-    setTama(prev => {
-      const next = { ...prev, timers: { ...prev.timers } }
-      next.isSleeping = true
-      next.lightsOff = false
-      next.timers.sleepStart = Date.now()
-      next.timers.careAlertStart = Date.now() // 15-min window for lights
-      Tama.saveState(next)
-      return next
-    })
+  // mascotSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
+  const mascotSleep = useCallback(() => {
+    setIsSleeping(true)
     const sleepDuration = (10 + Math.random() * 5) * 60 * 1000
     const wakeAt = Date.now() + sleepDuration
     kv.setJSON(SLEEP_KEY, wakeAt)
@@ -928,7 +763,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
   const doAction = useCallback(() => {
     if (frozenRef.current) return // Don't start new actions while frozen
-    if (tamaRef.current.isSleeping) return // No random actions while sleeping
+    if (isSleepingRef.current) return // No random actions while sleeping
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     const action = pickAction()
@@ -970,24 +805,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       ]
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
-      // Tamagotchi-aware speech
-      const s = tamaStatsRef.current
-      if (s.hunger < 25) {
-        const hungerLines = ['I\'m starving... 🍕', 'Feed me please!', 'Гладен съм...', 'So... hungry... 😩']
-        say(hungerLines[Math.floor(Math.random() * hungerLines.length)], 2500)
-      } else if (s.energy < 20) {
-        const tiredLines = ['So tired... 😴', 'Can\'t... keep... eyes... open...', 'Нуждая се от сън...', '*yawn*']
-        say(tiredLines[Math.floor(Math.random() * tiredLines.length)], 2500)
-      } else if (s.happiness < 25) {
-        const sadLines = ['Nobody plays with me... 😢', 'Тъжен съм...', 'Life is meaningless.', 'I miss fun...']
-        say(sadLines[Math.floor(Math.random() * sadLines.length)], 2500)
-      } else if (s.health < 30) {
-        const sickLines = ['I don\'t feel so good... 🤢', 'Need a bath...', 'Зле ми е...', '*cough*']
-        say(sickLines[Math.floor(Math.random() * sickLines.length)], 2500)
-      } else {
-        const line = getSpeech('idle')
-        if (line) say(line, Math.min(duration - 500, 3000))
-      }
+      const line = getSpeech('idle')
+      if (line) say(line, Math.min(duration - 500, 3000))
     }
 
     if (action.state === 'waddle') {
@@ -1115,7 +934,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
 
       // Excited fast walk — bounce across screen
       let frenzyDir: 'left' | 'right' = Math.random() > 0.5 ? 'right' : 'left'
-      let frenzyTarget = frenzyDir === 'right' ? 85 : 10
       setFacingDirect(frenzyDir)
 
       let lastFrenzyFrame = 0
@@ -1138,6 +956,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       // Cycle through quotes every 5 seconds — longer display for readability
       let quoteIdx = 0
       say(FRENZY_QUOTES[0], 4500)
+      frenzyIntervalsRef.current.forEach(clearInterval)
+      frenzyIntervalsRef.current = []
       const quoteInterval = setInterval(() => {
         quoteIdx = (quoteIdx + 1) % FRENZY_QUOTES.length
         say(FRENZY_QUOTES[quoteIdx], 4500)
@@ -1170,13 +990,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         }
       }, 2000)
 
+      frenzyIntervalsRef.current = [quoteInterval, moneyInterval, jumpInterval]
+
       // End frenzy after 60 seconds
       frenzyTimeout.current = setTimeout(() => {
         setFrenzy(false)
         setMoneyParticles([])
-        clearInterval(quoteInterval)
-        clearInterval(moneyInterval)
-        clearInterval(jumpInterval)
+        frenzyIntervalsRef.current.forEach(clearInterval)
+        frenzyIntervalsRef.current = []
         if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
         doAction()
       }, 60000)
@@ -1200,7 +1021,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     savedSleep = kv.getJSON<number>('clawbox-mascot-sleep') ?? 0
     const remaining = savedSleep - Date.now()
     const startDelay = remaining > 1000
-      ? setTimeout(() => startSleep(remaining), 500)
+      ? setTimeout(() => { setIsSleeping(true); startSleep(remaining) }, 500)
       : setTimeout(doAction, 2000)
     // Clean up expired sleep key
     if (savedSleep && remaining <= 1000) kv.remove('clawbox-mascot-sleep')
@@ -1210,6 +1031,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
       if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
+      frenzyIntervalsRef.current.forEach(clearInterval)
+      if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
+      if (boxPhysicsRAF.current) cancelAnimationFrame(boxPhysicsRAF.current)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1398,11 +1222,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           15% { opacity: 1; }
           100% { transform: translateY(-80px) translateX(30px) scale(1.3) rotate(10deg); opacity: 0; }
         }
-        @keyframes tama-btn-pop {
-          0% { transform: scale(0) translateY(20px); opacity: 0; }
-          70% { transform: scale(1.1) translateY(-2px); }
-          100% { transform: scale(1) translateY(0); opacity: 1; }
-        }
       `}</style>
       <div ref={crabElRef}
         onPointerDown={handlePointerDown}
@@ -1422,7 +1241,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         cursor: 'grab',
         touchAction: 'none',
         willChange: 'transform, bottom, filter',
-        filter: tama.isSleeping
+        filter: isSleeping
           ? 'brightness(0.8) drop-shadow(0 0 10px rgba(147,197,253,0.3))'
           : frenzy
             ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
@@ -1436,9 +1255,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
           <img src="/clawbox-crab.png" alt="" style={{
             width: 150, height: 150, objectFit: 'contain',
-            filter: isDead ? 'grayscale(1) brightness(0.5)' : tama.isSick ? 'hue-rotate(80deg) saturate(0.7)' : tama.stats.hunger === 0 ? 'saturate(0.5) brightness(0.7)' : 'none',
-            transform: isDead ? 'rotate(180deg)' : 'none',
-            transition: 'filter 1s, transform 0.5s',
           }} />
           {/* FRENZY MODE — money rain + shockwaves */}
           {frenzy && (
@@ -1528,8 +1344,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
             </div>
           </div>
         )}
-        {/* ZZZ floating animation when tamagotchi is sleeping */}
-        {tama.isSleeping && !isDead && (
+        {/* ZZZ floating animation when sleeping */}
+        {isSleeping && (
           <div style={{
             position: 'absolute', top: 30, right: 15,
             pointerEvents: 'none', zIndex: 11,
@@ -1549,7 +1365,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           </div>
         )}
         {/* Thinking indicator — dots above mascot head */}
-        {thinking && !isDead && (
+        {thinking && (
           <div style={{
             position: 'absolute', top: -5, left: '50%', transform: 'translateX(-50%)',
             display: 'flex', gap: 5, alignItems: 'center', zIndex: 11,
@@ -1574,36 +1390,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           opacity: state === 'jump' ? 0.2 : state === 'sleep' ? 0.4 : 0.5,
           transition: 'opacity 0.5s ease',
         }} />
-
-        {/* TAMAGOTCHI — tap to revive when dead */}
-        {isDead && (
-          <div
-            onClick={(e) => {
-              if (!draggingRef.current) {
-                e.stopPropagation()
-                tamaRevive()
-              }
-            }}
-            style={{
-              position: 'absolute', top: -60, left: '50%',
-              transform: 'translateX(-50%)',
-              pointerEvents: physicsActive ? 'none' : 'auto',
-            }}
-          />
-        )}
-
-        {/* TAMAGOTCHI — Death overlay */}
-        {isDead && (
-          <div style={{
-            position: 'absolute', top: 40, left: '50%', transform: 'translateX(-50%)',
-            background: 'rgba(0,0,0,0.8)', color: '#ef4444', padding: '8px 16px',
-            borderRadius: 8, fontSize: 14, fontWeight: 700, textAlign: 'center' as const,
-            whiteSpace: 'nowrap', pointerEvents: 'auto', cursor: 'pointer',
-            animation: 'speech-pop 0.3s ease-out forwards',
-          }} onClick={(e) => { e.stopPropagation(); tamaRevive() }}>
-            {tama.deathCause ? `💀 ${tama.deathCause}` : '💀'} — Tap for new egg!
-          </div>
-        )}
 
       </div>
 
@@ -1630,16 +1416,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         </div>
       </div>
 
-      {/* Poop sprites */}
-      {tama.poopCount > 0 && !tama.isDead && Array.from({ length: tama.poopCount }).map((_, i) => (
-        <div key={`poop-${i}`} onClick={() => tamaClean()} style={{
-          position: 'fixed', bottom: 12, cursor: 'pointer',
-          left: `calc(${xRef.current}vw + ${30 + i * 22}px)`,
-          fontSize: 20, zIndex: 10000, animation: 'speech-pop 0.3s ease-out forwards',
-          filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))',
-        }}>💩</div>
-      ))}
-
       {/* Mascot right-click context menu */}
       {ctxMenu && (
         <div
@@ -1651,108 +1427,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           }}
           onClick={() => setCtxMenu(null)}
         >
-          {/* Character + Stage + Stats header */}
-          <div className="px-4 py-2">
-            <div className="text-xs text-white/40 font-medium mb-1 flex items-center justify-between">
-              <span>{Tama.getCharacterName(tama)}</span>
-              <span className="text-white/30">{tama.stage !== 'egg' && tama.stage !== 'dead' ? `Age ${tama.stats.age} · ${tama.stats.weight}oz` : tama.stage}</span>
-            </div>
-            {/* Status line */}
-            {(() => { const s = Tama.getStatusText(tama); return s ? <div className="text-xs text-amber-400 mb-1.5">{s}</div> : null })()}
-            {/* Hearts display */}
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-white/60 w-14">🍕 Food</span>
-                <span className="text-sm tracking-wider">{Tama.heartsString(tama.stats.hunger)}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-white/60 w-14">😊 Happy</span>
-                <span className="text-sm tracking-wider">{Tama.heartsString(tama.stats.happiness)}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-white/60 w-14">📏 Discip.</span>
-                <span className="text-sm tracking-wider font-mono">{Tama.disciplineString(tama.stats.discipline)}</span>
-              </div>
-            </div>
-            {tama.poopCount > 0 && <div className="text-xs text-amber-500 mt-1">{'💩'.repeat(tama.poopCount)} Needs cleaning!</div>}
-            {tama.isSick && <div className="text-xs text-red-400 mt-1">💀 Sick — give medicine!</div>}
-          </div>
-          <div className="border-t border-white/10 my-0.5" />
-
-          {/* Actions — context-sensitive */}
-          {isDead ? (
+          {!isSleeping && (
             <button
-              onClick={() => { tamaRevive(); setCtxMenu(null) }}
+              onClick={() => { mascotSleep(); setCtxMenu(null) }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">🥚</span> Hatch new egg
+              <span className="text-base">💤</span> Sleep
             </button>
-          ) : (
-            <>
-              {tama.isDisciplineCall && (
-                <button
-                  onClick={() => { tamaDiscipline(); setCtxMenu(null) }}
-                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-amber-400 font-medium"
-                >
-                  <span className="text-base">😤</span> Scold
-                </button>
-              )}
-              {tama.isSick && (
-                <button
-                  onClick={() => { tamaMedicine(); setCtxMenu(null) }}
-                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400 font-medium"
-                >
-                  <span className="text-base">💊</span> Medicine
-                </button>
-              )}
-              {tama.isSleeping && !tama.lightsOff && (
-                <button
-                  onClick={() => { tamaLightsOff(); setCtxMenu(null) }}
-                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-blue-400 font-medium"
-                >
-                  <span className="text-base">🌙</span> Lights off
-                </button>
-              )}
-              {!tama.isSleeping && !tama.isSick && (
-                <>
-                  <button
-                    onClick={() => { tamaFeed('meal'); setCtxMenu(null) }}
-                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                  >
-                    <span className="text-base">🍕</span> Meal <span className="text-white/30 text-xs ml-auto">+1🍕 +1oz</span>
-                  </button>
-                  <button
-                    onClick={() => { tamaFeed('snack'); setCtxMenu(null) }}
-                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                  >
-                    <span className="text-base">🍬</span> Snack <span className="text-white/30 text-xs ml-auto">+1😊 +2oz</span>
-                  </button>
-                  <button
-                    onClick={() => { tamaPlay(); setCtxMenu(null) }}
-                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                  >
-                    <span className="text-base">🎮</span> Play <span className="text-white/30 text-xs ml-auto">50% +1😊 −1oz</span>
-                  </button>
-                  {tama.poopCount > 0 && (
-                    <button
-                      onClick={() => { tamaClean(); setCtxMenu(null) }}
-                      className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                    >
-                      <span className="text-base">✨</span> Clean
-                    </button>
-                  )}
-                  <button
-                    onClick={() => { tamaSleep(); setCtxMenu(null) }}
-                    className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                  >
-                    <span className="text-base">💤</span> Sleep
-                  </button>
-                </>
-              )}
-            </>
           )}
-
-          <div className="border-t border-white/10 my-0.5" />
           <button
             onClick={() => { setHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null) }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
