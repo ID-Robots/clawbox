@@ -265,8 +265,11 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
-        // Auto-open chat on fresh install (no saved preferences yet)
-        if (!data.desktop_apps && !data.wp_id) setChatOpen(true);
+        // Auto-open chat once after fresh install (no saved preferences yet)
+        if (!data.desktop_apps && !data.wp_id && !kv.get('clawbox-chat-greeted')) {
+          kv.set('clawbox-chat-greeted', '1');
+          setChatOpen(true);
+        }
       })
       .catch(() => { prefsLoaded.current = true; });
   }, []);

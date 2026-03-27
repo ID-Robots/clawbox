@@ -9,6 +9,7 @@ interface WifiStepProps {
 }
 
 export default function WifiStep({ onNext }: WifiStepProps) {
+  const [showWifiForm, setShowWifiForm] = useState(false);
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -86,108 +87,129 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             priority
           />
           <h1 className="text-2xl font-bold font-display text-center">
-            Welcome to{" "}
-            <span className="title-gradient">
-              ClawBox
-            </span>
+            Welcome
           </h1>
         </div>
         <p className="text-[var(--text-secondary)] mb-6 leading-relaxed text-center">
-          Enter your home WiFi details to connect ClawBox to the internet.
+          Connect ClawBox to the internet.
         </p>
 
-        <div className="flex flex-col gap-4">
-          <div>
-            <label
-              htmlFor="wifi-ssid"
-              className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-            >
-              Network Name (SSID)
-            </label>
-            <input
-              id="wifi-ssid"
-              type="text"
-              value={ssid}
-              onChange={(e) => setSsid(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") connectWifi();
-              }}
-              placeholder="Enter WiFi network name"
-              autoComplete="off"
-              className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-            />
-          </div>
+        {showWifiForm && (
+          <>
+            <div className="flex flex-col gap-4">
+              <div>
+                <label
+                  htmlFor="wifi-ssid"
+                  className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+                >
+                  Network Name (SSID)
+                </label>
+                <input
+                  id="wifi-ssid"
+                  type="text"
+                  value={ssid}
+                  onChange={(e) => setSsid(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") connectWifi();
+                  }}
+                  placeholder="Enter WiFi network name"
+                  autoComplete="off"
+                  autoFocus
+                  className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                />
+              </div>
 
-          <div>
-            <label
-              htmlFor="wifi-password"
-              className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-            >
-              Password
-            </label>
-            <div className="relative">
-              <input
-                id="wifi-password"
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") connectWifi();
-                }}
-                placeholder="Enter WiFi password (leave empty if open)"
-                autoComplete="off"
-                className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-              />
+              <div>
+                <label
+                  htmlFor="wifi-password"
+                  className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+                >
+                  Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="wifi-password"
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") connectWifi();
+                    }}
+                    placeholder="Enter WiFi password (leave empty if open)"
+                    autoComplete="off"
+                    className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
+                      {showPassword ? "visibility_off" : "visibility"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {status && (
+              <div className="mt-4">
+                <StatusMessage type={status.type} message={status.message} />
+              </div>
+            )}
+
+            <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
+              <span className="font-semibold">Note:</span> Connecting to WiFi will stop the ClawBox-Setup hotspot.
+              You will lose this connection and need to join your home WiFi to continue setup at{" "}
+              <span className="font-semibold">http://clawbox.local</span>.
+            </p>
+
+            <div className="flex items-center gap-3 mt-3">
               <button
                 type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                onClick={connectWifi}
+                disabled={connecting || !ssid.trim()}
+                className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
-                  {showPassword ? "visibility_off" : "visibility"}
-                </span>
+                {connecting ? "Connecting..." : "Connect"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowWifiForm(false); setStatus(null) }}
+                className="bg-transparent border-none text-[#fb923c] text-sm underline cursor-pointer p-1"
+              >
+                Back
               </button>
             </div>
-          </div>
-        </div>
-
-        {status && (
-          <div className="mt-4">
-            <StatusMessage type={status.type} message={status.message} />
-          </div>
+          </>
         )}
 
-        <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
-          <span className="font-semibold">Note:</span> Connecting to WiFi will stop the ClawBox-Setup hotspot.
-          You will lose this connection and need to join your home WiFi to continue setup at{" "}
-          <span className="font-semibold">http://clawbox.local</span>.
-        </p>
-
-        <div className="flex items-center gap-3 mt-3">
-          <button
-            type="button"
-            onClick={connectWifi}
-            disabled={connecting || !ssid.trim()}
-            className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
-          >
-            {connecting ? "Connecting..." : "Connect"}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              fetch("/setup-api/wifi/connect", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ skip: true }),
-              }).catch(() => {});
-              onNext();
-            }}
-            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-          >
-            Skip (Ethernet only)
-          </button>
-        </div>
+        {!showWifiForm && (
+          <div className="flex flex-col sm:flex-row gap-3 mt-3">
+            <button
+              type="button"
+              onClick={() => {
+                fetch("/setup-api/wifi/connect", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ skip: true }),
+                }).catch(() => {});
+                onNext();
+              }}
+              className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+            >
+              Ethernet (Recommended)
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowWifiForm(true)}
+              className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 transition"
+            >
+              Connect to WiFi
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

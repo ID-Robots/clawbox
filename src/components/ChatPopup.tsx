@@ -5,6 +5,41 @@ import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 // ── Gateway WebSocket chat widget ──
 // Connects directly to the OpenClaw gateway, no iframe.
 
+// Save short assistant snippets for mascot speech lines via client-kv
+import * as kv from '@/lib/client-kv'
+
+const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
+const MAX_RETRIES = 8
+const RETRY_DELAY = 3000
+let snippetFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function saveMascotSnippet(text: string) {
+  if (!text || text.length < 10) return
+  const sentences = text
+    .replace(/\n+/g, '. ')
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length >= 10 && s.length <= 80)
+    .filter(s => !/^(here|sure|ok|yes|no|let me|i'll|i can|```)/i.test(s))
+    .filter(s => !s.includes('```') && !s.includes('http') && !s.includes('**'))
+  if (sentences.length === 0) return
+  const picks = sentences.slice(0, 2)
+  // In-memory merge + debounced flush (avoids GET+POST per message)
+  const existing = kv.getJSON<{ lines: string[]; date: string }>(MASCOT_LINES_KEY) || { lines: [], date: '' }
+  const today = new Date().toISOString().slice(0, 10)
+  if (existing.date !== today) { existing.lines = []; existing.date = today }
+  let changed = false
+  for (const p of picks) {
+    if (!existing.lines.includes(p)) { existing.lines.push(p); changed = true }
+  }
+  if (!changed) return
+  if (existing.lines.length > 50) existing.lines = existing.lines.slice(-50)
+  kv.setJSON(MASCOT_LINES_KEY, existing)
+  // Debounce: only flush to server after 5s of quiet
+  if (snippetFlushTimer) clearTimeout(snippetFlushTimer)
+  snippetFlushTimer = setTimeout(() => { snippetFlushTimer = null }, 5000)
+}
+
 interface ChatPopupProps {
   isOpen: boolean
   onClose: () => void
@@ -93,6 +128,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [modelName, setModelName] = useState('')
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -199,6 +235,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
+  const retryCountRef = useRef(0)
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const connect = useCallback(async () => {
     if (wsRef.current) {
@@ -220,6 +258,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
     } catch {
+      // Auto-retry if gateway config not ready yet
+      if (retryCountRef.current < MAX_RETRIES) {
+        retryCountRef.current++
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
+        return
+      }
       setStatus('error')
       setErrorMsg('Failed to get gateway config')
       return
@@ -238,11 +283,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         resolve: (hello: unknown) => {
           setStatus('connected')
           connectedOnceRef.current = true
+          retryCountRef.current = 0
           const h = hello as Record<string, unknown>
           const snapshot = h.snapshot as Record<string, unknown> | undefined
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
+          // Extract model name from snapshot
+          const profiles = snapshot?.profiles as Record<string, unknown> | undefined
+          if (profiles) {
+            const firstProfile = Object.values(profiles)[0] as Record<string, unknown> | undefined
+            const model = (firstProfile?.model as string) || ''
+            if (model) setModelName(model.replace(/^.*\//, ''))
+          }
           loadHistory()
         },
         reject: (err: Error) => {
@@ -319,6 +372,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
             const text = extractText(msg)
             if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
               setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
+              saveMascotSnippet(text)
             }
             setStreaming('')
             runIdRef.current = null
@@ -344,6 +398,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     const onClose = () => {
       wsRef.current = null
       if (!connectedOnceRef.current) {
+        // Auto-retry if gateway isn't ready yet
+        if (retryCountRef.current < MAX_RETRIES) {
+          retryCountRef.current++
+          if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+          retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
+          return
+        }
         setStatus('error')
         setErrorMsg('Could not connect to gateway')
       }
@@ -456,6 +517,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     return () => {
       wsRef.current?.close()
       wsRef.current = null
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
     }
   }, [])
 
@@ -529,6 +591,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           cursor: mobile ? 'default' : 'grab',
           touchAction: 'none',
         }}>
+        {modelName && status === 'connected' && (
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
+            {modelName}
+          </span>
+        )}
         <div style={{ flex: 1 }} />
         {status === 'connecting' && (
           <div style={{
@@ -595,7 +662,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || 'Connection failed'}</span>
             <button
-              onClick={connect}
+              onClick={() => { retryCountRef.current = 0; connect() }}
               style={{
                 background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
                 color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',

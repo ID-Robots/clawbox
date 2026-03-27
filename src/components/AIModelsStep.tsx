@@ -78,7 +78,7 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
   }, []);
 
   return (
-    <div ref={overlayRef} tabIndex={-1} className="absolute inset-0 z-10 flex flex-col items-center gap-6 px-8 pt-12 pb-8 bg-[var(--bg-surface)] rounded-2xl outline-none overflow-auto">
+    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-8 pt-4 pb-8 outline-none">
       <style>{`
         @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
         @keyframes aimodels-check-circle { to { stroke-dashoffset: 0 } }
@@ -864,6 +864,8 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
         {configuring && (
           <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} />
         )}
+        {/* Hide form content when configuring overlay is shown */}
+        <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         <h1 className="text-2xl font-bold font-display mb-2">
           Connect AI Model
         </h1>
@@ -1058,6 +1060,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
             </button>
           )}
+        </div>
         </div>
       </div>
     </div>

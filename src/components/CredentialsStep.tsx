@@ -15,7 +15,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [showHotspotPassword, setShowHotspotPassword] = useState(false);
+  const [confirmHotspotPassword, setConfirmHotspotPassword] = useState("");
+  const [showConfirmHotspot, setShowConfirmHotspot] = useState(false);
   const [hotspotEnabled, setHotspotEnabled] = useState(true);
+  const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
     type: "success" | "error";
@@ -46,19 +49,22 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   }, []);
 
   const save = async () => {
-    // Validate system password (if filled)
-    if (password || confirmPassword) {
-      if (password.length < 8) {
-        setStatus({
-          type: "error",
-          message: "System password must be at least 8 characters",
-        });
-        return;
-      }
-      if (password !== confirmPassword) {
-        setStatus({ type: "error", message: "Passwords do not match" });
-        return;
-      }
+    setTouched(true);
+    // Validate system password (required)
+    if (!password) {
+      setStatus({ type: "error", message: "System password is required" });
+      return;
+    }
+    if (password.length < 8) {
+      setStatus({
+        type: "error",
+        message: "System password must be at least 8 characters",
+      });
+      return;
+    }
+    if (password !== confirmPassword) {
+      setStatus({ type: "error", message: "System passwords do not match" });
+      return;
     }
 
     // Validate hotspot fields (only when enabled)
@@ -72,6 +78,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           type: "error",
           message: "Hotspot password must be at least 8 characters",
         });
+        return;
+      }
+      if (hotspotPassword !== confirmHotspotPassword) {
+        setStatus({ type: "error", message: "Hotspot passwords do not match" });
         return;
       }
     }
@@ -140,6 +150,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     }
   };
 
+  const inputBase = "w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border rounded-lg text-sm text-gray-200 outline-none transition-colors placeholder-gray-500";
+  const inputBorder = (hasError: boolean) =>
+    hasError ? "border-red-500 focus:border-red-500" : "border-gray-600 focus:border-[var(--coral-bright)]";
+
   const EyeOpen = (
     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>visibility</span>
   );
@@ -175,7 +189,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               }}
               placeholder="Minimum 8 characters"
               autoComplete="new-password"
-              className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+              className={`${inputBase} ${inputBorder(touched && !password)}`}
             />
             <button
               type="button"
@@ -203,7 +217,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               }}
               placeholder="Re-enter password"
               autoComplete="new-password"
-              className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+              className={`${inputBase} ${inputBorder(touched && !confirmPassword)}`}
             />
             <button
               type="button"
@@ -258,11 +272,11 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     if (e.key === "Enter") save();
                   }}
                   maxLength={32}
-                  className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                  className={`w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border rounded-lg text-sm text-gray-200 outline-none transition-colors placeholder-gray-500 ${inputBorder(touched && !hotspotName.trim())}`}
                 />
               </div>
 
-              <div>
+              <div className="mb-4">
                 <label htmlFor="hotspot-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
                   Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span>
                 </label>
@@ -276,7 +290,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                       if (e.key === "Enter") save();
                     }}
                     placeholder="Leave empty for open network"
-                    className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                    className={`${inputBase} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
                   />
                   <button
                     type="button"
@@ -288,6 +302,33 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   </button>
                 </div>
               </div>
+
+              <div>
+                <label htmlFor="hotspot-confirm" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+                  Confirm Hotspot Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="hotspot-confirm"
+                    type={showConfirmHotspot ? "text" : "password"}
+                    value={confirmHotspotPassword}
+                    onChange={(e) => setConfirmHotspotPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") save();
+                    }}
+                    placeholder="Re-enter hotspot password"
+                    className={`${inputBase} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmHotspot((v) => !v)}
+                    aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                  >
+                    {showConfirmHotspot ? EyeClosed : EyeOpen}
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -296,21 +337,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           <StatusMessage type={status.type} message={status.message} />
         )}
 
-        <div className="flex items-center gap-3 mt-5">
+        <div className="mt-5">
           <button
             type="button"
             onClick={save}
-            disabled={saving}
+            disabled={saving || !password || !confirmPassword}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? "Saving..." : "Save"}
-          </button>
-          <button
-            type="button"
-            onClick={onNext}
-            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-          >
-            Skip
           </button>
         </div>
       </div>

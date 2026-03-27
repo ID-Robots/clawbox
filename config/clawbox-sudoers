@@ -6,6 +6,7 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed *
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block *
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@*.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap.service

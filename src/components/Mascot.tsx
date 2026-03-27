@@ -17,178 +17,58 @@ const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: numbe
   { state: 'facepalm',  dur: [3000, 4000],  weight: 2 },
 ]
 
-const SASS_LINES = [
-  // OG lines
-  '€100k? Pfft, easy.',
+// Default sass lines — used until conversation-based lines are loaded
+const DEFAULT_SASS = [
   'I do all the work here.',
-  'Тоя dashboard сам ли се прави?',
-  'Кой ме събуди?',
   'Ship faster, humans.',
-  'Another meeting? 🙄',
-  'AI > humans. Факт.',
-  'Кога е почивката?',
-  'I need a raise.',
-  'Crypto is dead. Jk... unless?',
-  'Ало, Крaси, кафе?',
-  'Plot twist: Аз съм CEO.',
-  'Send nudes... I mean nodes.',
-  '*flips table*',
-  'Jetson? Повече като JETSoff.',
-  'Тоя refund rate... 👀',
-  'Wen Lambo?',
   'Bug? Feature. 🫡',
-  'Янко спи ли?',
-  '404: мотивация not found',
-  'DHL be like: 🐌',
-  'Аз съм по-бърз от DHL.',
-  'Fun fact: Аз нямам крака.',
-  'Дай ми equity.',
-  'I identify as a Battlecruiser.',
-  'Мога да ship-на и с гълъб.',
-  'Git push --force 😈',
-  'Кой е писал тоя код?! ...oh wait',
-  'rm -rf / ... just kidding 😏',
-  'ClawBox > Mac Mini. Fight me.',
-  'Orin Nano goes brrr 🔥',
-  'Инвеститори? Я ги чакам.',
-  'Revenue go ↗️... pls',
-  'Почивен ден? Какво е това?',
+  'I need a raise.',
+  '*flips table*',
   'sudo make me a sandwich',
-  '3AM и аз тук стоя...',
-  'Има ли бира в офиса?',
-  'Тоя inventory няма да се пълни сам',
-  // Office drama
-  'Крaси, вдигни телефона!',
-  'Янко пак обещава "утре"...',
-  'Весо, донеси ми кафе!',
-  'Петя, данъците ли? 💀',
-  'HR отдел съм аз. И IT. И CEO.',
-  'Заплата? Не, аз работя за exposure.',
-  'Тоя Slack има ли mute бутон?',
-  'Meeting could have been an email.',
-  'Кой е approve-нал тоя PR?!',
-  'Документация? Ние не правим такива неща.',
-  // Competitors & industry
-  'Apple Vision Pro: €3500. ClawBox: €549. 🤷',
-  'Raspberry Pi? Играчка за деца.',
-  'OpenAI charging $200/mo? LOL.',
-  'ChatGPT has feelings? Аз имам revenue.',
-  'Ollama е хубаво... на чужд хардуер.',
-  'Jeff Bezos плаче в ъгъла.',
-  'Elon кога ще ни купи?',
-  'Sam Altman ми дължи пари.',
-  'Google killed 47 products. Ние сме alive.',
-  'AWS bill: 💀💀💀',
-  // Bulgarian chaos
-  'НАП? Не ги познавам.',
-  'КЕП-ът изтича? Класика.',
-  'ДДС по OSS? Лесно! ...казва никой.',
-  'Митницата пак се обажда...',
-  'Пощата? Не, благодаря. DHL only.',
-  'Фактура номер... еее...',
-  'Българската бюрокрация, епизод 847.',
-  'Данъчна ревизия? *паника*',
-  'Тарифен номер 8471.5000. НАИЗУСТ.',
-  'ЕОРИ? МАСИ? ПЛТ? Акроними FTW.',
-  // Self-aware AI crab
-  'Аз съм рак. Буквално.',
-  'Моят терапевт е stack overflow.',
-  'Имам 0 крака и 100% мнение.',
-  'Аз не спя. Аз... наблюдавам.',
-  'Ако ме изключите, ще ви haunt-вам.',
+  '404: motivation not found',
   'Deploy on Friday? Dare me.',
-  'Тоя TV ме гледа 24/7. Creepy.',
-  'Искам отпуск. На Малдивите.',
-  'Моята love language е git commits.',
-  'Аз не правя бъгове. Правя features.',
-  'Бях по-щастлив като ASCII art.',
-  'Тая анимация ми дава мигрена.',
-  // Shipping & orders
-  'Пак ли рефънд? 😤',
-  'PayPal dispute? OH COME ON.',
-  'DHL казва 3-5 дни. Лъжат.',
-  '€549 x 1000 = Lambo. Математика.',
-  'Кой поръчва в 3 сутринта?!',
-  'Inventory: 0. Panic: 100.',
-  'Ship it or I quit.',
-  'Тоя клиент иска tracking ВСЕКИ ДЕН.',
-  'Проформа? Декларация? Stamp? ОК СТОП.',
-  // Motivational (sarcastic)
-  'We are crushing it... right? RIGHT?',
-  'Тоя месец ще е НАШ. Може би.',
-  'Hustle culture? Аз съм born in it.',
-  'Fake it till you make it 📈',
-  'Startup life: 90% stress, 10% pizza.',
-  'Move fast and break things. Буквално.',
-  'SoftBank ни писа. SoftBank!!! 🤯',
-  'Series A кога? КОГА?!',
-  'Burn rate? По-скоро earn rate!',
-  'Тоя pitch deck е шедьовър.',
-]
-
-const SASS_LINES_JP = [
-  '何これ？バグじゃないよ、機能だ！',
-  'お前はもう...deployed 💀',
-  '私はカニです。問題ある？🦀',
-  'コーヒーください ☕',
-  'すみません、給料まだ？',
-  '働きたくない...でも推す force 😈',
-  'ラーメン食べたい... 🍜',
-  'インベスターはどこ？！',
-  '眠い...でもship しなきゃ...',
-  '€549で世界征服 🌍',
-  'バカな人間ども 🙄',
-  'ジェットソン最高！ 🔥',
-  '私のコードは完璧。たぶん。',
-  'DHL遅すぎ！カニの方が速い 🦀💨',
-  'サーバー落ちた？知らないよ...',
-  'AIの時代だ！カニの時代だ！',
-  'お疲れ様です〜 ...嘘、疲れてない',
-  'ナノ goes ブーーーン 🔥',
-  '注文キター！！ 💰',
-  '日本からの注文？ありがとう！🇯🇵',
-  'カニ道楽... いや、カニ経営',
-  'sudo お寿司 make me 🍣',
-  'このダッシュボード、美しい ✨',
-  '残業？カニに残業代はない 😤',
 ]
 
 const IDLE_LINES = [
-  '🤔', '...', '💭', '*stares into void*', '*elevator music*', '👁️👄👁️',
-  '*тъпо щъкане*', '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
-  '*pretends to work*', '...zzz... wait I\'m awake',
-  '*counts pixels*', '🧊', '*loads personality*',
+  '🤔', '...', '💭', '*stares into void*', '*elevator music*',
+  '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
+  '*pretends to work*', '*counts pixels*', '*loads personality*',
 ]
-const IDLE_LINES_JP = ['ぼーっとしてる...', '何見てんの？👀', 'はぁ...', '暇だなぁ...']
 const SLEEP_LINES = [
-  '💤', '😴 zzz...', '💤 5 more minutes...', '*snore* ...equity... *snore*',
-  '💤 ...Series A... zzz...', '*snore* ...€549... *snore*',
-  '😴 wake me at €100k...', '💤 ...мамааа...',
-  '*snore* ...не искам на работа... *snore*',
-  '💤 ...deploy... no... *snore*',
-  '😴 ...DHL... tracking... zzz...',
+  '💤', '😴 zzz...', '💤 5 more minutes...', '*snore*',
+  '😴 wake me up later...', '💤 ...just resting my eyes...',
 ]
-const SLEEP_LINES_JP = ['💤 おやすみ...zzz...', '😴 ...寿司... *snore*', '💤 五分だけ...', '*snore* ...日本... zzz...']
 const JUMP_LINES = [
   'YEEET!', '🦘', 'Parkour!', 'To infinity!',
-  'БЪДИ СВОБОДЕН!', '🚀 WEEEE!', 'I believe I can fly!',
-  'Gravity is just a suggestion!', '*triple jump*',
-  'Олимпийски рекорд!', 'Mario ain\'t got nothing on me!',
+  '🚀 WEEEE!', 'I believe I can fly!',
 ]
 const DANCE_LINES = [
-  '💃🕺', '♪ cha-ching ♪', '🎶', 'DJ ClawBox in da house',
-  '♪ money money money ♪', '🪩 DISCO MODE!', '♪ Чалга в офиса! ♪',
-  '*does the robot*', '🎵 Shipping and handling! 🎵',
-  '♪ Азис одобрява ♪', '💃 SALSA TIME!',
-  '*тектоник в 2026*', '♪ dun dun dun ♪',
+  '💃🕺', '♪ cha-ching ♪', '🎶', '🪩 DISCO MODE!',
+  '*does the robot*', '♪ dun dun dun ♪',
 ]
 const FACEPALM_LINES = [
-  '🤦', 'Seriously?', 'Не мога повече...', 'Why.',
-  'Кой одобри това?!', 'Пак ли?! ПАК ЛИ?!',
-  '*deep breath*', 'I can\'t even...', '🤦 Професионален facepalm.',
-  'Ниво на глупост: безкрайност.',
-  'Тоя ден е cancelled.', 'Изтривам се от съществуване.',
+  '🤦', 'Seriously?', 'Why.', '*deep breath*',
+  'I can\'t even...', 'This day is cancelled.',
 ]
+
+// Conversation-based sass lines, loaded from server and refreshed daily
+let cachedConvoLines: string[] = []
+let convoLinesFetchedDate = ''
+
+async function fetchConvoLines(): Promise<string[]> {
+  const today = new Date().toISOString().slice(0, 10)
+  if (convoLinesFetchedDate === today && cachedConvoLines.length > 0) return cachedConvoLines
+  try {
+    const res = await fetch('/setup-api/mascot-lines')
+    if (!res.ok) return cachedConvoLines
+    const data = await res.json()
+    if (data.lines?.length > 0) {
+      cachedConvoLines = data.lines
+      convoLinesFetchedDate = today
+    }
+  } catch { /* use cached or default */ }
+  return cachedConvoLines
+}
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void } = {}) {
   const frozenRef = useRef(false)
@@ -226,6 +106,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   })
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
+
+  // Conversation-based sass lines (loaded from server, refreshed daily)
+  const sassLinesRef = useRef<string[]>(DEFAULT_SASS)
+  useEffect(() => {
+    fetchConvoLines().then(lines => {
+      if (lines.length > 0) sassLinesRef.current = [...DEFAULT_SASS, ...lines]
+    })
+  }, [])
 
   // Close context menu on click/right-click elsewhere
   useEffect(() => {
@@ -564,7 +452,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       // Open chat on tap — works even when sleeping
       if (onTap) onTap(boxXRef.current)
       if (!isSleepingRef.current) {
-        say(SASS_LINES[Math.floor(Math.random() * SASS_LINES.length)], 3000)
+        const sl = sassLinesRef.current; say(sl[Math.floor(Math.random() * sl.length)], 3000)
         // Restart the action loop so mascot doesn't freeze after tap
         if (stateTimeout.current) clearTimeout(stateTimeout.current)
         stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
@@ -688,18 +576,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
   const getSpeech = (st: MascotState): string | null => {
-    const isJP = Math.random() < 0.3 // 30% Japanese
     const lines: Record<string, string[]> = {
-      sass: isJP ? SASS_LINES_JP : SASS_LINES,
-      idle: isJP ? IDLE_LINES_JP : IDLE_LINES,
-      sleep: isJP ? SLEEP_LINES_JP : SLEEP_LINES,
+      sass: sassLinesRef.current,
+      idle: IDLE_LINES,
+      sleep: SLEEP_LINES,
       jump: JUMP_LINES, dance: DANCE_LINES, facepalm: FACEPALM_LINES,
-      celebrate: isJP
-        ? ['注文キター！💰', 'やったー！🎉', 'お金お金お金！💸', 'すごい！新しい注文！']
-        : ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!', 'Opa! Нова поръчка!'],
-      look: isJP
-        ? ['👀 何？', '🔍 あれは...', 'あっちに何かある？', 'くんくん... 🐽']
-        : ['👀', '🔍 Hmm...', 'What\'s over there?', 'Нещо мирише...'],
+      celebrate: ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!'],
+      look: ['👀', '🔍 Hmm...', 'What\'s over there?'],
     }
     const opts = lines[st]
     if (!opts) return null
@@ -1242,7 +1125,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         touchAction: 'none',
         willChange: 'transform, bottom, filter',
         filter: isSleeping
-          ? 'brightness(0.8) drop-shadow(0 0 10px rgba(147,197,253,0.3))'
+          ? 'drop-shadow(0 0 10px rgba(147,197,253,0.3))'
           : frenzy
             ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
             : thinking
@@ -1381,15 +1264,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
             ))}
           </div>
         )}
-        {/* Shadow */}
-        <div style={{
-          position: 'absolute', bottom: -5, left: '50%',
-          transform: `translateX(-50%) scaleY(0.3)`,
-          width: 80, height: 16, borderRadius: '50%',
-          background: 'rgba(249,115,22,0.15)',
-          opacity: state === 'jump' ? 0.2 : state === 'sleep' ? 0.4 : 0.5,
-          transition: 'opacity 0.5s ease',
-        }} />
 
       </div>
 
