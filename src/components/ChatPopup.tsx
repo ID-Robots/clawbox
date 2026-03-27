@@ -257,6 +257,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
+      if (config.model) setModelName(config.model.replace(/^.*\//, ''))
     } catch {
       // Auto-retry if gateway config not ready yet
       if (retryCountRef.current < MAX_RETRIES) {
@@ -289,13 +290,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
-          // Extract model name from snapshot
-          const profiles = snapshot?.profiles as Record<string, unknown> | undefined
-          if (profiles) {
-            const firstProfile = Object.values(profiles)[0] as Record<string, unknown> | undefined
-            const model = (firstProfile?.model as string) || ''
-            if (model) setModelName(model.replace(/^.*\//, ''))
-          }
           loadHistory()
         },
         reject: (err: Error) => {
