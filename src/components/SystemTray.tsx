@@ -127,7 +127,7 @@ export default function SystemTray({
       : "";
 
     return (
-      <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: rebootState.phase === "shutdown" ? "rgba(0, 0, 0, 0.97)" : "rgba(0, 0, 0, 0.92)" }}>
+      <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: rebootState.phase === "shutdown" ? "rgba(0, 0, 0, 0.99)" : "rgba(13, 17, 23, 1)" }}>
         <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
           {/* Icon */}
           {rebootState.phase === "restoring" ? (
