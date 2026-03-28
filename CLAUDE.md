@@ -1,73 +1,107 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) and other AI coding agents.
 
 ## Project
 
-ClawBox is a setup wizard and dashboard for a personal AI assistant device running on an NVIDIA Jetson (Tegra/ARM). It creates a WiFi access point with a captive portal so users can configure the device from their phone, then transitions to their home network. The setup wizard guides users through WiFi configuration and Telegram bot setup.
+ClawBox is the setup wizard and dashboard for [OpenClaw Hardware](https://openclawhardware.dev/) — a private AI assistant device running on NVIDIA Jetson Orin Nano. It creates a WiFi access point with a captive portal so users can configure the device from their phone, then transitions to their home network. After setup, it proxies the OpenClaw gateway Control UI.
 
 ## Stack
 
-Bun runtime, Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4. Optimized for local edge deployment on Jetson — `output: 'standalone'` in next.config.ts, no external CDN dependencies, fully offline-capable.
+- **Runtime:** Node.js 22 (production), Bun (dev/build/package management)
+- **Framework:** Next.js 16 (App Router), React 19
+- **Language:** TypeScript 5
+- **Styling:** Tailwind CSS 4
+- **Testing:** Vitest + @vitest/coverage-v8 (80% coverage target)
+- **Linting:** ESLint 9 with next/core-web-vitals + next/typescript
+- **Output:** Standalone build (`output: 'standalone'`), fully offline-capable
 
 ## Commands
 
-- `bun run dev` — dev server on port 80 at 0.0.0.0 (requires root for port 80)
-- `bun run build` — production build (generates `.next/standalone/`)
-- `bun run start` — run standalone production server on port 80
-- `bun run lint` — run ESLint
-- `sudo bash install.sh` — full system install: installs bun, builds, configures avahi/mDNS, installs systemd services, starts AP and web server
-
-No test framework is configured yet.
+```bash
+bun install              # install dependencies
+bun run dev              # dev server (port 3000 by default)
+bun run build            # production build → .next/standalone/
+bun run start            # production server (port 80)
+bun run test             # run tests
+bun run test:coverage    # run tests with coverage
+bun run lint             # ESLint
+sudo bash install.sh     # full system install on Jetson
+sudo bash install.sh --step NAME  # run single update step
+bash install-x64.sh      # x64 Linux development install
+```
 
 ## Architecture
 
 ### Routing
 
-After setup completes, the root `/` proxies the OpenClaw Control UI from the gateway at `127.0.0.1:18789`. The setup wizard lives at `/setup`. The root route handler (`src/app/route.ts`) checks `setup_complete` in config and either redirects to `/setup` or serves the gateway HTML.
-
-Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`, favicons) to the gateway. A fallback rewrite catches remaining paths.
+- `/` → Proxies OpenClaw Control UI from gateway at `127.0.0.1:18789` (after setup)
+- `/setup` → Setup wizard React SPA (redirected to if not configured)
+- `/setup-api/*` → Backend API routes (WiFi, AI models, Telegram, system, updates)
+- `/api/*` → Proxy to OpenClaw gateway
+- WebSocket connections proxied via `production-server.js` upgrade handler
 
 ### Setup API Routes (`src/app/setup-api/`)
 
-Next.js Route Handlers for the setup wizard (namespaced under `/setup-api/` to avoid conflicts with the OpenClaw gateway's `/api/*`):
+| Endpoint | Purpose |
+|----------|---------|
+| `wifi/scan`, `wifi/connect`, `wifi/status` | WiFi AP and client management |
+| `ai-models/configure` | API key configuration |
+| `ai-models/oauth/*` | OAuth device flow for Claude/GPT/Gemini |
+| `ollama/*` | Local model management (pull, delete, search, status) |
+| `telegram/configure`, `telegram/status` | Telegram bot setup |
+| `system/info`, `system/credentials`, `system/hotspot` | System management |
+| `system/update-branch` | Branch selection for updates |
+| `update/run`, `update/status` | System update execution |
+| `setup/complete`, `setup/status`, `setup/reset` | Setup flow state |
 
-- `GET /setup-api/wifi/scan`, `POST /setup-api/wifi/connect`, `GET /setup-api/wifi/status` — WiFi management
-- `POST /setup-api/telegram/configure`, `GET /setup-api/telegram/status` — Telegram bot config
-- `GET /setup-api/system/info` — system info (hostname, CPU, memory, temp, disk)
-- `POST /setup-api/setup/complete`, `GET /setup-api/setup/status` — setup flow state
+### Key Libraries (`src/lib/`)
 
-All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent caching.
+- **`config-store.ts`** — SQLite-backed config store (was JSON, migrated)
+- **`network.ts`** — WiFi management via `nmcli` using `child_process.execFile`
+- **`system-info.ts`** — Hardware info (hostname, CPU, memory, temp, disk)
+- **`gateway-proxy.ts`** — Proxy helpers for OpenClaw gateway
+- **`oauth-config.ts`** / **`oauth-utils.ts`** — OAuth device flow for AI providers
+- **`openclaw-config.ts`** — OpenClaw gateway configuration
+- **`updater.ts`** — System update steps and phases
+- **`google-project.ts`** — Google Cloud project setup for Gemini
+
+### Frontend Components (`src/components/`)
+
+7-step setup wizard:
+1. `WelcomeStep.tsx` — Introduction
+2. `CredentialsStep.tsx` — Device password
+3. `WifiStep.tsx` — Network selection and connection
+4. `UpdateStep.tsx` — System packages, JetPack, OpenClaw
+5. `AIModelsStep.tsx` — Provider configuration + `OllamaModelPanel.tsx`
+6. `TelegramStep.tsx` — Bot token setup
+7. `DoneStep.tsx` — Dashboard with system info and factory reset
 
 ### Captive Portal (`src/middleware.ts`)
 
-Next.js middleware intercepts OS-specific captive portal detection URLs (Android, Apple, Windows, Firefox) and redirects to `http://10.42.0.1/`. Uses a `matcher` config to only run on the 9 specific paths.
+Intercepts OS-specific captive portal detection URLs (Android, Apple, Windows, Firefox) and redirects to `http://10.42.0.1/`.
 
-### Server Libraries (`src/lib/`)
+### System Integration
 
-- **`network.ts`** — WiFi management via `nmcli` using `child_process.execFile`. Hardcoded interface: `wlP1p1s0`.
-- **`config-store.ts`** — JSON key-value store at `/home/clawbox/clawbox/data/config.json`.
-- **`system-info.ts`** — gathers hostname, memory, CPU, temperature, disk info via OS module and shell commands.
-
-### Frontend (`src/components/`)
-
-React component tree for the 4-step setup wizard:
-- **`SetupWizard.tsx`** — client component, manages step state, checks setup status on mount
-- **`WifiStep.tsx`** — WiFi scan, network selection modal, connect flow
-- **`TelegramStep.tsx`** — bot token input and validation
-- **`DoneStep.tsx`** — system info display and setup completion
-
-### System Integration (`scripts/`, `config/`)
-
-- **`scripts/start-ap.sh`** / **`scripts/stop-ap.sh`** — create/tear down a NetworkManager WiFi AP named "ClawBox-Setup" on `wlP1p1s0` at `10.42.0.1/24`, with iptables rules for HTTP redirect.
-- **`config/clawbox-ap.service`** — systemd oneshot service for the WiFi AP.
-- **`config/clawbox-setup.service`** — systemd service that runs the Next.js standalone server via bun as root.
-- **`config/dnsmasq-captive.conf`** — DNS hijack config resolving all queries to `10.42.0.1`.
+- **`scripts/start-ap.sh`** / **`stop-ap.sh`** — WiFi AP "ClawBox-Setup" at `10.42.0.1/24`
+- **`scripts/install-voice.sh`** — Optional STT/TTS pipeline
+- **`scripts/optimize-ollama.sh`** — Jetson-specific Ollama tuning
+- **`scripts/recover.sh`** — Recovery/factory reset
+- **`config/clawbox-*.service`** — Systemd services
+- **`config/dnsmasq-captive.conf`** — DNS hijack for captive portal
 
 ### Key Constants
 
-- WiFi interface: `wlP1p1s0` (hardcoded in `src/lib/network.ts` and shell scripts)
+- WiFi interface: auto-detected (override with `NETWORK_INTERFACE` env)
 - AP SSID: `ClawBox-Setup`, AP IP: `10.42.0.1`
-- Config file: `/home/clawbox/clawbox/data/config.json` (created at runtime, gitignored)
+- Config: SQLite at `/home/clawbox/clawbox/local-data/data/config.db`
 - Project directory: `/home/clawbox/clawbox`
-- OpenClaw gateway: `http://127.0.0.1:18789` (loopback, proxied through Next.js rewrites)
+- OpenClaw gateway: `http://127.0.0.1:18789`
+
+## Conventions
+
+- All API routes use `export const dynamic = "force-dynamic"` (no caching)
+- Node.js for production-server.js (Bun lacks HTTP upgrade events for WebSocket proxy)
+- Shell commands use `execFile` (not `exec`) to prevent injection
+- Test files: `src/tests/*.test.ts`
+- Git: Never push directly to `main` — use feature branches + PRs

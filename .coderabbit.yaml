@@ -12,24 +12,30 @@ reviews:
   path_instructions:
     - path: "src/app/**/*.ts*"
       instructions: |
-        Next.js 16 App Router (TypeScript) running on an embedded NVIDIA Jetson device with bun runtime.
+        Next.js 16 App Router (TypeScript) running on NVIDIA Jetson with Node.js 22 production runtime.
         Review for:
         - Proper async/await error handling
         - Shell command injection risks (execFile usage with nmcli, iptables)
         - Resource constraints (limited memory/CPU on embedded hardware)
         - Security of network management operations
     - path: "src/app/**/route.ts"
-      instructions: "Next.js Route Handlers. Ensure proper input validation, HTTP status codes, and error responses"
+      instructions: "Next.js Route Handlers. Ensure proper input validation, HTTP status codes, error responses, and `export const dynamic = 'force-dynamic'`."
     - path: "src/lib/network.ts"
-      instructions: "Critical system file — manages WiFi AP and client mode via nmcli. Review for race conditions and proper cleanup on failure"
+      instructions: "Critical system file — manages WiFi AP and client mode via nmcli. Review for race conditions and proper cleanup on failure."
+    - path: "src/lib/config-store.ts"
+      instructions: "SQLite-backed config store. Review for SQL injection, proper connection handling, and concurrent access safety."
     - path: "src/lib/**"
-      instructions: "TypeScript server-side libraries. Review for proper error handling and type safety"
+      instructions: "TypeScript server-side libraries. Review for proper error handling, type safety, and resource cleanup."
     - path: "src/components/**"
-      instructions: "React 19 components with Tailwind CSS v4. Review for accessibility, proper state management, and XSS prevention"
+      instructions: "React 19 components with Tailwind CSS v4. Review for accessibility, proper state management, and XSS prevention."
     - path: "scripts/**/*.sh"
-      instructions: "Bash scripts managing NetworkManager and iptables. Review for proper error handling, quoting, and idempotency"
+      instructions: "Bash scripts managing NetworkManager and iptables. Review for proper error handling, quoting, and idempotency."
     - path: "config/**"
-      instructions: "Systemd service units and dnsmasq config for embedded deployment. Review for correct dependencies and security settings"
+      instructions: "Systemd service units and dnsmasq config for embedded deployment. Review for correct dependencies and security settings."
+    - path: "install*.sh"
+      instructions: "System install scripts run as root. Review for proper error handling, idempotency, path safety, and user/permission management."
+    - path: "production-server.js"
+      instructions: "Node.js HTTP/WebSocket proxy server. Review for memory leaks, proper WebSocket upgrade handling, and error recovery."
   tools:
     gitleaks:
       enabled: true
