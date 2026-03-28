@@ -1,15 +1,40 @@
+# Dependencies
 node_modules/
+
+# Next.js
 .next/
 .next-old/
 out/
 build/
+
+# Testing
 coverage/
+
+# Runtime data
 data/
+local-data/data/
+
+# Logs
 *.log
+
+# Build artifacts
 *.tsbuildinfo
 next-env.d.ts
-.DS_Store
+
+# Environment
 .env*
 !.env.example
 !.env.template
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Update
 .update-branch
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~

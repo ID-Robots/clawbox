@@ -1,8 +1,15 @@
 {
-  "name": "clawbox-setup",
+  "name": "clawbox",
   "version": "2.2.2",
   "private": true,
-  "description": "ClawBox setup wizard and dashboard",
+  "description": "Setup wizard and dashboard for ClawBox — a private AI assistant on NVIDIA Jetson",
+  "homepage": "https://openclawhardware.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ID-Robots/clawbox.git"
+  },
+  "author": "IDRobots Ltd <yanko@idrobots.com> (https://idrobots.com)",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",

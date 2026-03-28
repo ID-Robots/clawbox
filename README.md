@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ID-Robots/clawbox/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ID-Robots/clawbox/ci.yml?style=flat-square&label=CI" /></a>
   <a href="https://openclawhardware.dev"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-openclawhardware.dev-orange?style=flat-square" /></a>
   <a href="https://discord.gg/FbKmnxYnpq"><img alt="Discord" src="https://img.shields.io/badge/Discord-78K+_members-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
