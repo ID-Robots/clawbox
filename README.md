@@ -223,5 +223,5 @@ You may view and study the code. Commercial use, redistribution, and modificatio
 ---
 
 <p align="center">
-  <sub>Built with ❤️ by <a href="https://idrobots.com">IDRobots</a> in Bulgaria 🇧🇬</sub>
+  <sub>Built with ❤️ by <a href="https://idrobots.com">IDRobots</a> in the EU 🇪🇺</sub>
 </p>
