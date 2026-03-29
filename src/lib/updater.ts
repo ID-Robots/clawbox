@@ -165,7 +165,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
   },
   {
-    id: "chrome_install",
+    id: "chromium_install",
     label: "Installing Chromium",
     timeoutMs: 300_000,
     requiresRoot: true,

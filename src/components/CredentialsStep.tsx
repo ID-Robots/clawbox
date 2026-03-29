@@ -73,7 +73,11 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         setStatus({ type: "error", message: "Hotspot name is required" });
         return;
       }
-      if (hotspotPassword && hotspotPassword.length < 8) {
+      if (!hotspotPassword) {
+        setStatus({ type: "error", message: "Hotspot password is required" });
+        return;
+      }
+      if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
           message: "Hotspot password must be at least 8 characters",
@@ -163,7 +167,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
   return (
     <div className="w-full max-w-[520px]">
-      <div className="card-surface  rounded-2xl p-8">
+      <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           Security
         </h1>
@@ -278,7 +282,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
               <div className="mb-4">
                 <label htmlFor="hotspot-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                  Hotspot Password <span className="text-[var(--text-muted)] font-normal">(optional)</span>
+                  Hotspot Password
                 </label>
                 <div className="relative">
                   <input
@@ -289,8 +293,8 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     onKeyDown={(e) => {
                       if (e.key === "Enter") save();
                     }}
-                    placeholder="Leave empty for open network"
-                    className={`${inputBase} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
+                    placeholder="Minimum 8 characters"
+                    className={`${inputBase} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
                   />
                   <button
                     type="button"
@@ -341,7 +345,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           <button
             type="button"
             onClick={save}
-            disabled={saving || !password || !confirmPassword}
+            disabled={saving || !password || !confirmPassword || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? "Saving..." : "Save"}

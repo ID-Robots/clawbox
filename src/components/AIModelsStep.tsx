@@ -905,9 +905,12 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                     <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />
                   )}
                 </span>
-                <div>
-                  <span className="block text-sm font-medium text-gray-200">
+                <div className="flex-1">
+                  <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
+                    {provider.id === "anthropic" && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
+                    )}
                   </span>
                   <span className="block text-xs text-[var(--text-muted)]">
                     {provider.description}
@@ -969,6 +972,9 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                     }`}
                   >
                     {opt.label}
+                    {opt.mode === "subscription" && selectedProvider === "anthropic" && (
+                      <span className="ml-1 px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
+                    )}
                   </button>
                 ))}
               </div>

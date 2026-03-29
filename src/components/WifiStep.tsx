@@ -199,7 +199,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               }}
               className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
-              Ethernet (Recommended)
+              Ethernet <span className="ml-1.5 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide rounded bg-white/15 text-white/80 leading-none">Recommended</span>
             </button>
             <button
               type="button"

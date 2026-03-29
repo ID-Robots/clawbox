@@ -56,6 +56,10 @@ do_rebuild() {
   rm -rf "$PROJECT_DIR/.next"
   echo "Running bun install..."
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
+  if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
+    echo "Rebuilding native modules (node-pty)..."
+    as_clawbox_login "cd $PROJECT_DIR && npm rebuild node-pty"
+  fi
   echo "Running bun build..."
   as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
 }
@@ -171,6 +175,10 @@ step_install_bun() {
 step_build() {
   cd "$PROJECT_DIR"
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
+  if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
+    echo "  Rebuilding native modules (node-pty)..."
+    as_clawbox_login "cd $PROJECT_DIR && npm rebuild node-pty"
+  fi
   as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"
