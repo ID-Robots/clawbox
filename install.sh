@@ -761,6 +761,9 @@ step_captive_portal_dns
 log "Setting up directories and permissions..."
 step_directories_permissions
 
+# Clean up default NVIDIA desktop shortcuts
+rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
+
 log "Installing systemd services..."
 step_systemd_services
 

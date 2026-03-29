@@ -11,8 +11,6 @@ import * as kv from '@/lib/client-kv'
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
 const RETRY_DELAY = 3000
-let snippetFlushTimer: ReturnType<typeof setTimeout> | null = null
-
 function saveMascotSnippet(text: string) {
   if (!text || text.length < 10) return
   const sentences = text
@@ -24,7 +22,6 @@ function saveMascotSnippet(text: string) {
     .filter(s => !s.includes('```') && !s.includes('http') && !s.includes('**'))
   if (sentences.length === 0) return
   const picks = sentences.slice(0, 2)
-  // In-memory merge + debounced flush (avoids GET+POST per message)
   const existing = kv.getJSON<{ lines: string[]; date: string }>(MASCOT_LINES_KEY) || { lines: [], date: '' }
   const today = new Date().toISOString().slice(0, 10)
   if (existing.date !== today) { existing.lines = []; existing.date = today }
@@ -35,9 +32,6 @@ function saveMascotSnippet(text: string) {
   if (!changed) return
   if (existing.lines.length > 50) existing.lines = existing.lines.slice(-50)
   kv.setJSON(MASCOT_LINES_KEY, existing)
-  // Debounce: only flush to server after 5s of quiet
-  if (snippetFlushTimer) clearTimeout(snippetFlushTimer)
-  snippetFlushTimer = setTimeout(() => { snippetFlushTimer = null }, 5000)
 }
 
 interface ChatPopupProps {
@@ -47,6 +41,7 @@ interface ChatPopupProps {
   onThinkingChange?: (thinking: boolean) => void
   mascotX?: number
   mobile?: boolean
+  trayMode?: boolean
 }
 
 interface ChatMessage {
@@ -120,7 +115,7 @@ function uuid(): string {
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mobile = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -549,7 +544,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     ? { left: 0, top: 0, right: 0, bottom: 220 }
     : pos
       ? { left: pos.x, top: pos.y, bottom: 'auto' }
-      : { left: defaultLeft, bottom: 170 }
+      : trayMode
+        ? { right: 8, bottom: 52 }
+        : { left: defaultLeft, bottom: 170 }
 
   return (
     <div

@@ -124,6 +124,7 @@ interface OpenWindow {
   y?: number;
   width?: number;
   height?: number;
+  meta?: Record<string, string>;
 }
 
 // Icon component for installed store apps — tries local cached icon first, then store URL
@@ -862,6 +863,27 @@ export default function ChromeDesktop() {
     return () => window.removeEventListener("popstate", handleBack);
   }, [launcherOpen, trayOpen, openWindows, closeWindow]);
 
+  // ─── Open file in VS Code from other apps (e.g. file manager) ───
+  const nextZIndexRef = useRef(nextZIndex);
+  nextZIndexRef.current = nextZIndex;
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { filePath?: string };
+      const fp = detail?.filePath;
+      if (!fp) return;
+      const windowId = `vscode-${Date.now()}`;
+      const z = nextZIndexRef.current;
+      setOpenWindows((prev) => [
+        ...prev,
+        { id: windowId, appId: "vscode", zIndex: z, minimized: false, meta: { filePath: fp } },
+      ]);
+      setNextZIndex(z + 1);
+    };
+    window.addEventListener("clawbox:open-in-vscode", handler);
+    return () => window.removeEventListener("clawbox:open-in-vscode", handler);
+  }, []);
+
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
       prev.map((w) => w.id === windowId ? { ...w, x: geo.x, y: geo.y, width: geo.width, height: geo.height } : w)
@@ -922,7 +944,7 @@ export default function ChromeDesktop() {
 
   const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
 
-  const renderWindowContent = (appId: string) => {
+  const renderWindowContent = (appId: string, meta?: Record<string, string>) => {
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return null;
@@ -981,7 +1003,7 @@ export default function ChromeDesktop() {
       case "vnc":
         return <VNCApp />;
       case "vscode":
-        return <VSCodeApp />;
+        return <VSCodeApp filePath={meta?.filePath} />;
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -1270,7 +1292,7 @@ export default function ChromeDesktop() {
 
       {/* Mascot - tapping toggles chat popup */}
       <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotX} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1314,7 +1336,7 @@ export default function ChromeDesktop() {
               </div>
               {/* Mobile window content */}
               <div className="flex-1 overflow-hidden">
-                {renderWindowContent(top.appId)}
+                {renderWindowContent(top.appId, top.meta)}
               </div>
             </div>
           );
@@ -1364,7 +1386,7 @@ export default function ChromeDesktop() {
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
             >
-              {renderWindowContent(window.appId)}
+              {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>
           );
         })
@@ -1473,6 +1495,8 @@ export default function ChromeDesktop() {
           setOpenWindows(prev => prev.filter(w => w.appId !== appId));
         }}
         onShelfSettings={() => openApp("settings")}
+        onChatClick={() => setChatOpen(prev => !prev)}
+        showChatButton={mascotHidden}
         time={time}
       />
 

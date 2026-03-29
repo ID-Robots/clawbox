@@ -4,7 +4,7 @@ import path from "path";
 
 export const dynamic = "force-dynamic";
 
-const BASE_DIR = process.env.CLAWBOX_ROOT ?? path.join(process.cwd(), "local-data");
+const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 
 function safePath(segments: string[]): string | null {
   const rel = segments.join("/");
