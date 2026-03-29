@@ -70,14 +70,14 @@ export default function VNCApp() {
         rfb.addEventListener("connect", () => {
           setStatus("connected");
           setError(null);
-          // Focus the VNC canvas so keyboard events pass through
           rfb?.focus();
-          // Ensure the internal canvas element is focusable
           const canvas = canvasContainerRef.current?.querySelector("canvas");
           if (canvas) {
             canvas.tabIndex = 0;
             canvas.focus();
           }
+          // Prevent browser context menu so right-clicks pass to the remote desktop
+          canvasContainerRef.current?.addEventListener("contextmenu", (e) => e.preventDefault());
         });
 
         rfb.addEventListener("disconnect", (e: CustomEvent) => {

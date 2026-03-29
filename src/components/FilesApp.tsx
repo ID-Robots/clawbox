@@ -127,7 +127,6 @@ export default function FilesApp() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window !== "undefined" ? window.innerWidth >= 768 : true);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
-  const [baseDir, setBaseDir] = useState("/home/clawbox");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -143,7 +142,6 @@ export default function FilesApp() {
       const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load");
-      if (data.baseDir) setBaseDir(data.baseDir);
       const sorted = [...(data.files as FileEntry[])].sort((a, b) => {
         if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
         return a.name.localeCompare(b.name);
@@ -278,10 +276,19 @@ export default function FilesApp() {
 
   // ─── Open in VS Code ───────────────────────────────────────────────────────
 
-  const openInVSCode = (entry: FileEntry) => {
-    const sep = baseDir.endsWith("/") ? "" : "/";
-    const absPath = `${baseDir}${sep}${currentPath ? currentPath + "/" : ""}${entry.name}`;
-    window.dispatchEvent(new CustomEvent("clawbox:open-in-vscode", { detail: { filePath: absPath } }));
+  const openInVSCode = async (entry: FileEntry) => {
+    const filePath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+    try {
+      const res = await fetch("/setup-api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "resolve", filePath }),
+      });
+      const data = await res.json();
+      if (data.absPath) {
+        window.dispatchEvent(new CustomEvent("clawbox:open-in-vscode", { detail: { filePath: data.absPath } }));
+      }
+    } catch { /* resolve failed */ }
   };
 
   // ─── Context menu ──────────────────────────────────────────────────────────

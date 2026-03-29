@@ -13,8 +13,9 @@ const BRAND_ORANGE_LIGHT = "#ff8b1a";
 
 interface BrowserStatus {
   chromium: { installed: boolean; path?: string; version?: string };
-  browser: { running: boolean; pid?: number };
+  browser: { running: boolean; pid?: number; cdpReady?: boolean };
   enabled: boolean;
+  cdpPort?: number;
 }
 
 interface BrowserAppProps {
@@ -29,15 +30,23 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const actionErrorRef = useRef(false);
+  const lastStatusJson = useRef("");
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/browser/manage");
       if (!res.ok) throw new Error("Failed to fetch status");
       const data: BrowserStatus = await res.json();
-      setStatus(data);
-      setError(null);
+      // Only update state if data actually changed to avoid unnecessary re-renders
+      const json = JSON.stringify(data);
+      if (json !== lastStatusJson.current) {
+        lastStatusJson.current = json;
+        setStatus(data);
+      }
+      if (!actionErrorRef.current) setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect");
+      if (!actionErrorRef.current) setError(err instanceof Error ? err.message : "Failed to connect");
     } finally {
       setLoading(false);
     }
@@ -53,6 +62,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     setActionLoading(loadingLabel);
     setError(null);
     setSuccessMsg(null);
+    actionErrorRef.current = false;
     try {
       const res = await fetch("/setup-api/browser/manage", {
         method: "POST",
@@ -67,6 +77,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
       }
       await fetchStatus();
     } catch (err) {
+      actionErrorRef.current = true;
       setError(err instanceof Error ? err.message : "Action failed");
     } finally {
       setActionLoading(null);
@@ -183,10 +194,14 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   : "Connect the browser to OpenClaw so your AI assistant can use it for web browsing, research, and automation."}
               </p>
               {isEnabled && (
-                <div className="mt-2 flex items-center gap-4">
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
-                    <span className="text-xs text-white/40">computer_use tool enabled</span>
+                    <span className="text-xs text-white/40">tools profile: full</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>bug_report</span>
+                    <span className="text-xs text-white/30 font-mono">CDP port {status?.cdpPort ?? 18800}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>folder</span>
@@ -232,10 +247,18 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   ? "Chromium is running on the desktop. OpenClaw can interact with it in real time."
                   : "Launch a real Chromium window on the desktop that OpenClaw can control."}
               </p>
-              {browserRunning && status?.browser?.pid && (
-                <div className="mt-2 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                  <span className="text-xs text-white/40">Running (PID {status.browser.pid})</span>
+              {browserRunning && (
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                    <span className="text-xs text-white/40">PID {status?.browser?.pid ?? "?"}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${status?.browser?.cdpReady ? "bg-green-400" : "bg-yellow-400"}`} />
+                    <span className="text-xs text-white/40 font-mono">
+                      CDP :{status?.cdpPort ?? 18800} {status?.browser?.cdpReady ? "ready" : "starting..."}
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
@@ -303,11 +326,11 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
             </div>
             <div className="flex gap-3">
               <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>link</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Enable</span> — Configures OpenClaw&apos;s computer_use tool to control the browser. Your AI can navigate, click, type, and read pages.</p>
+              <p className="text-xs text-white/50"><span className="text-white/70">Enable</span> — Sets OpenClaw tools profile to &quot;full&quot; for browser control via the built-in browser tool.</p>
             </div>
             <div className="flex gap-3">
               <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>desktop_windows</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Open/Close</span> — Launches or stops the real Chromium window on your desktop. The browser keeps its profile between sessions.</p>
+              <p className="text-xs text-white/50"><span className="text-white/70">Open Browser</span> — Launches Chromium with remote debugging (CDP port {status?.cdpPort ?? 18800}). OpenClaw connects via <code className="text-white/60">ws://127.0.0.1:{status?.cdpPort ?? 18800}</code> to navigate, click, type, and read pages. Profile persists logins and cookies.</p>
             </div>
           </div>
         </div>

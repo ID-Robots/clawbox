@@ -545,7 +545,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     : pos
       ? { left: pos.x, top: pos.y, bottom: 'auto' }
       : trayMode
-        ? { right: 8, bottom: 52 }
+        ? { right: 8, bottom: 65 }
         : { left: defaultLeft, bottom: 170 }
 
   return (

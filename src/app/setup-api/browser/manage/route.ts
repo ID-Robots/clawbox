@@ -5,57 +5,50 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
+import { readConfig } from "@/lib/openclaw-config";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
 const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || path.join(HOME, ".openclaw");
-const OPENCLAW_CONFIG = path.join(OPENCLAW_HOME, "openclaw.json");
+const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
+const CDP_PORT = 18800;
 
-// Find openclaw binary
-function findOpenClaw(): string {
-  const existsSync = require("fs").existsSync;
-  const nodeDir = path.dirname(process.execPath);
-  const npmGlobal = path.join(HOME, ".npm-global", "bin", "openclaw");
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+async function findOpenClaw(): Promise<string> {
   const candidates = [
-    path.join(nodeDir, "openclaw"),
-    npmGlobal,
+    path.join(HOME, ".npm-global", "bin", "openclaw"),
+    path.join(path.dirname(process.execPath), "openclaw"),
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw",
   ];
-  const nvmDir = path.join(HOME, ".nvm", "versions", "node");
-  try {
-    const versions = require("fs").readdirSync(nvmDir) as string[];
-    for (const v of versions.sort().reverse()) {
-      candidates.push(path.join(nvmDir, v, "bin", "openclaw"));
-    }
-  } catch {}
   for (const p of candidates) {
-    if (existsSync(p)) return p;
+    try { await fs.access(p); return p; } catch {}
   }
   return "openclaw";
 }
 
-// Check if Chromium is installed
 async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
+  // Check all candidates in parallel
   const candidates = ["chromium-browser", "chromium", "google-chrome", "google-chrome-stable"];
-  for (const bin of candidates) {
+  const results = await Promise.all(candidates.map(async (bin) => {
     try {
-      const { stdout } = await exec("which", [bin], { timeout: 5000 });
-      const chromPath = stdout.trim();
-      if (chromPath) {
-        try {
-          const { stdout: ver } = await exec(chromPath, ["--version"], { timeout: 5000 });
-          return { installed: true, path: chromPath, version: ver.trim() };
-        } catch {
-          return { installed: true, path: chromPath };
-        }
-      }
-    } catch {}
+      const { stdout } = await exec("which", [bin], { timeout: 3000 });
+      return stdout.trim() || null;
+    } catch { return null; }
+  }));
+  const found = results.find(p => p);
+  if (found) {
+    try {
+      const { stdout: ver } = await exec(found, ["--version"], { timeout: 3000 });
+      return { installed: true, path: found, version: ver.trim() };
+    } catch {
+      return { installed: true, path: found };
+    }
   }
-  // Check snap chromium
+  // Check snap
   try {
-    const { stdout } = await exec("snap", ["list", "chromium"], { timeout: 5000 });
+    const { stdout } = await exec("snap", ["list", "chromium"], { timeout: 3000 });
     if (stdout.includes("chromium")) {
       return { installed: true, path: "/snap/bin/chromium", version: stdout.split("\n")[1]?.trim() };
     }
@@ -63,48 +56,65 @@ async function checkChromium(): Promise<{ installed: boolean; path?: string; ver
   return { installed: false };
 }
 
-// Check if browser is currently running
-async function isBrowserRunning(): Promise<{ running: boolean; pid?: number }> {
+async function cleanBrowserLocks() {
+  await Promise.all(
+    ["SingletonLock", "SingletonSocket", "SingletonCookie"].map(f =>
+      fs.unlink(path.join(PROFILE_DIR, f)).catch(() => {})
+    )
+  );
+}
+
+/** Check if browser is running and CDP is accessible */
+async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean }> {
+  // Check CDP endpoint first (most reliable)
   try {
-    const { stdout } = await exec("pgrep", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
-    const pids = stdout.trim().split("\n").map(s => parseInt(s)).filter(n => !isNaN(n) && n > 0);
-    if (pids.length > 0) return { running: true, pid: pids[0] };
+    const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      // Find the main process PID
+      try {
+        const { stdout } = await exec("pgrep", ["-f", `remote-debugging-port=${CDP_PORT}`], { timeout: 3000 });
+        const pid = parseInt(stdout.trim().split("\n")[0]);
+        return { running: true, pid: isNaN(pid) ? undefined : pid, cdpReady: true };
+      } catch {
+        return { running: true, cdpReady: true };
+      }
+    }
   } catch {}
-  return { running: false };
-}
-
-// Read OpenClaw config
-async function readOpenClawConfig(): Promise<Record<string, unknown>> {
+  // Fallback: check process
   try {
-    const raw = await fs.readFile(OPENCLAW_CONFIG, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+    const { stdout } = await exec("pgrep", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 3000 });
+    const pids = stdout.trim().split("\n").map(s => parseInt(s)).filter(n => !isNaN(n) && n > 0);
+    if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
+  } catch {}
+  return { running: false, cdpReady: false };
 }
 
+const readOpenClawConfig = readConfig;
+
+// ─── GET — status ────────────────────────────────────────────────────────────
 
 export async function GET() {
   try {
     const [chromium, browser, config] = await Promise.all([
       checkChromium(),
-      isBrowserRunning(),
+      getBrowserStatus(),
       readOpenClawConfig(),
     ]);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const computerUse = (config as any)?.agents?.defaults?.tools?.computer_use;
-    const enabled = !!computerUse?.enabled;
+    const enabled = config.tools?.profile === "full";
 
     return NextResponse.json({
       chromium,
       browser,
       enabled,
+      cdpPort: CDP_PORT,
     });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Status check failed" }, { status: 500 });
   }
 }
+
+// ─── POST — actions ──────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
   try {
@@ -112,7 +122,6 @@ export async function POST(req: Request) {
 
     switch (action) {
       case "install-chromium": {
-        // Try apt first, then snap
         try {
           await exec("sudo", ["apt-get", "update", "-qq"], { timeout: 30000 });
           await exec("sudo", ["apt-get", "install", "-y", "-qq", "chromium-browser"], { timeout: 120000 });
@@ -120,7 +129,6 @@ export async function POST(req: Request) {
           try {
             await exec("sudo", ["snap", "install", "chromium"], { timeout: 120000 });
           } catch (snapErr) {
-            // Try chromium package name (Debian/Ubuntu variations)
             try {
               await exec("sudo", ["apt-get", "install", "-y", "-qq", "chromium"], { timeout: 120000 });
             } catch {
@@ -128,148 +136,120 @@ export async function POST(req: Request) {
             }
           }
         }
-        const status = await checkChromium();
-        return NextResponse.json({ ok: true, chromium: status });
+        return NextResponse.json({ ok: true, chromium: await checkChromium() });
       }
 
       case "enable": {
-        // Configure OpenClaw with computer-use browser settings
         const chromium = await checkChromium();
         if (!chromium.installed) {
           return NextResponse.json({ error: "Chromium not installed" }, { status: 400 });
         }
 
-        const profileDir = path.join(HOME, ".config", "clawbox-browser");
-        await fs.mkdir(profileDir, { recursive: true });
+        await fs.mkdir(PROFILE_DIR, { recursive: true });
 
-        // Enable computer_use via CLI (avoids writing unrecognized keys to config)
-        const openclawBin = findOpenClaw();
+        const openclawBin = await findOpenClaw();
         try {
-          await exec(openclawBin, [
-            "config", "set", "agents.defaults.tools.computer_use.enabled", "true", "--json",
-          ], { timeout: 10000 });
-        } catch {}
+          await Promise.all([
+            exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 }),
+            exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 }),
+          ]);
+        } catch (err) {
+          console.error("[browser] Failed to set tools config:", err);
+        }
 
-        return NextResponse.json({ ok: true, enabled: true, profileDir });
+        let enableRestartOk = true;
+        try {
+          await exec("sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+        } catch (err) {
+          console.error("[browser] Gateway restart failed:", err);
+          enableRestartOk = false;
+        }
+
+        return NextResponse.json({ ok: true, enabled: true, profileDir: PROFILE_DIR, gatewayRestarted: enableRestartOk });
       }
 
       case "disable": {
-        const openclawBin = findOpenClaw();
+        const openclawBin = await findOpenClaw();
         try {
-          await exec(openclawBin, [
-            "config", "set", "agents.defaults.tools.computer_use.enabled", "false", "--json",
-          ], { timeout: 10000 });
-        } catch {}
-        return NextResponse.json({ ok: true, enabled: false });
+          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 10000 });
+        } catch (err) {
+          console.error("[browser] Failed to unset tools config:", err);
+        }
+
+        let disableRestartOk = true;
+        try {
+          await exec("sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+        } catch (err) {
+          console.error("[browser] Gateway restart failed:", err);
+          disableRestartOk = false;
+        }
+
+        return NextResponse.json({ ok: true, enabled: false, gatewayRestarted: disableRestartOk });
       }
 
       case "open-browser": {
+        // Check if already running via CDP
+        const existing = await getBrowserStatus();
+        if (existing.cdpReady) {
+          return NextResponse.json({ ok: true, alreadyRunning: true, pid: existing.pid, cdpPort: CDP_PORT });
+        }
+
         const chromium = await checkChromium();
         if (!chromium.installed || !chromium.path) {
           return NextResponse.json({ error: "Chromium not installed" }, { status: 400 });
         }
 
-        // Check if already running
-        const running = await isBrowserRunning();
-        if (running.running) {
-          return NextResponse.json({ ok: true, alreadyRunning: true, pid: running.pid });
-        }
+        await fs.mkdir(PROFILE_DIR, { recursive: true });
 
-        const profileDir = path.join(HOME, ".config", "clawbox-browser");
-        await fs.mkdir(profileDir, { recursive: true });
-
-        // Detect active X display dynamically
-        let display = process.env.DISPLAY || ":0";
-        try {
-          const { stdout: xdpy } = await exec("bash", ["-c",
-            "for d in 1 0 2; do if DISPLAY=\":$d\" xdpyinfo >/dev/null 2>&1; then echo \":$d\"; exit; fi; done; echo ':0'"
-          ], { timeout: 3000 });
-          display = xdpy.trim();
-        } catch {}
-
-        // Launch browser
-        const isRoot = process.getuid?.() === 0;
-        const args = [
-          `--user-data-dir=${profileDir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--start-maximized",
-          "--disable-gpu",
-          "--disable-gpu-compositing",
-          "--disable-gpu-sandbox",
-          "--enable-features=UseOzonePlatform",
-          "--ozone-platform=x11",
-          "--in-process-gpu",
-          ...(isRoot ? ["--no-sandbox"] : []),
-          "https://www.google.com",
-        ];
+        await cleanBrowserLocks();
 
         try {
-          // Find Xauthority for the display
-          let xauth = "/run/user/1000/gdm/Xauthority";
-          try {
-            const { stdout: xa } = await exec("bash", ["-c",
-              "ps aux | grep '[X]org' | grep -oP '\\-auth \\K\\S+' | head -1"
-            ], { timeout: 3000 });
-            if (xa.trim()) xauth = xa.trim();
-          } catch {}
-
-          // Launch browser with correct DISPLAY and XAUTHORITY
-          // Use bash -c so the snap wrapper script works correctly
-          const launchCmd = `${chromium.path} ${args.map(a => `'${a}'`).join(" ")}`;
-          console.log(`[browser] Launching: bash -c ${launchCmd}`);
-          console.log(`[browser] DISPLAY=${display} XAUTHORITY=${xauth} USER=${CLAWBOX_USER}`);
-          const child = require("child_process").spawn("bash", ["-c", launchCmd], {
-            detached: true,
-            stdio: ["ignore", "pipe", "pipe"],
-            env: {
-              ...process.env,
-              DISPLAY: display,
-              XAUTHORITY: xauth,
-              DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
-              HOME,
-            },
+          console.log(`[browser] Starting clawbox-browser.service (CDP port ${CDP_PORT})`);
+          // Start dedicated service — runs as root, drops to clawbox via runuser
+          await exec("sudo", [
+            "/usr/bin/systemctl", "start", "clawbox-browser.service",
+          ], { timeout: 5000 }).catch((err) => {
+            console.error("[browser] systemctl start failed:", err);
           });
 
-          child.stderr?.on("data", (d: Buffer) => {
-            console.error(`[browser-stderr] ${d.toString().trim()}`);
-          });
-          child.on("exit", (code: number) => {
-            console.log(`[browser] Process exited with code ${code}`);
-          });
-          child.unref();
-
-          // Wait briefly and check if it started
-          await new Promise(r => setTimeout(r, 3000));
-          const status = await isBrowserRunning();
-          const ok = status.running;
-          if (!ok) {
-            return NextResponse.json({ error: "Browser process exited immediately. Check server logs." }, { status: 500 });
+          // Wait for CDP to become ready
+          for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            try {
+              const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+              if (res.ok) {
+                const version = await res.json();
+                return NextResponse.json({
+                  ok: true,
+                  cdpPort: CDP_PORT,
+                  cdpReady: true,
+                  browser: version.Browser || version.product,
+                });
+              }
+            } catch {}
           }
-          return NextResponse.json({ ok: true, pid: status.pid || child.pid });
+
+          // CDP didn't respond but process might be running
+          const status = await getBrowserStatus();
+          if (status.running) {
+            return NextResponse.json({ ok: true, pid: status.pid, cdpPort: CDP_PORT, cdpReady: false });
+          }
+          return NextResponse.json({ error: "Browser failed to start. Check /tmp/clawbox-browser.log" }, { status: 500 });
         } catch (err) {
           return NextResponse.json({ error: `Failed to launch browser: ${err instanceof Error ? err.message : "unknown"}` }, { status: 500 });
         }
       }
 
       case "close-browser": {
-        const running = await isBrowserRunning();
-        if (!running.running || !running.pid) {
-          return NextResponse.json({ ok: true, wasRunning: false });
-        }
+        try {
+          await exec("sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
+        } catch {}
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
         } catch {}
-        // Wait for processes to die, then clean up stale lock files
-        // so the next launch doesn't think an instance is already running
         await new Promise(r => setTimeout(r, 1000));
-        const profileDir = path.join(HOME, ".config", "clawbox-browser");
-        await Promise.all(
-          ["SingletonLock", "SingletonSocket", "SingletonCookie"].map(f =>
-            fs.unlink(path.join(profileDir, f)).catch(() => {})
-          )
-        );
-        return NextResponse.json({ ok: true, wasRunning: true });
+        await cleanBrowserLocks();
+        return NextResponse.json({ ok: true });
       }
 
       default:

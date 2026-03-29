@@ -28,14 +28,15 @@ function rateLimit(ip: string): boolean {
   return rec.count <= RATE_LIMIT_MAX;
 }
 
-function clientIP(req: Request): string {
+function clientIP(req: Request): string | null {
   return req.headers.get("x-forwarded-for")?.split(",")[0].trim()
     || req.headers.get("x-real-ip")
-    || "unknown";
+    || req.headers.get("cf-connecting-ip")
+    || null;
 }
 
 export async function POST(request: Request) {
-  const ip = clientIP(request);
+  const ip = clientIP(request) || "no-ip";
   if (!rateLimit(ip)) {
     return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
   }

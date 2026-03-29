@@ -44,8 +44,9 @@ export default function LoginPage() {
       // Redirect to the original page or home (validate to prevent open redirect)
       const params = new URLSearchParams(window.location.search);
       const raw = params.get("redirect") || "/";
-      const redirect = raw.startsWith("/") && !raw.startsWith("//") && !raw.includes(":") ? raw : "/";
-      window.location.href = redirect;
+      const decoded = decodeURIComponent(raw);
+      const safe = decoded.startsWith("/") && !decoded.startsWith("//") && !decoded.includes(":") && !decoded.includes("\\");
+      window.location.href = safe ? decoded : "/";
     } catch {
       setError("Connection failed");
       setLoading(false);

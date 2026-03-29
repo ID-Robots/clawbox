@@ -60,7 +60,7 @@ export async function GET(req: NextRequest) {
     })
     .filter(Boolean);
 
-  return NextResponse.json({ files, baseDir: BASE_DIR });
+  return NextResponse.json({ files });
 }
 
 // POST /setup-api/files?dir=relative/path
@@ -98,6 +98,13 @@ export async function POST(req: NextRequest) {
     if (fs.existsSync(newDir)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
     fs.mkdirSync(newDir, { recursive: true });
     return NextResponse.json({ ok: true });
+  }
+
+  if (body.action === "resolve") {
+    if (!body.filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    const resolved = safePath(body.filePath);
+    if (!resolved) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+    return NextResponse.json({ absPath: resolved });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
