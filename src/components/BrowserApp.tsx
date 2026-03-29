@@ -264,23 +264,36 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
             </div>
             <div className="flex gap-2 shrink-0">
               {browserRunning ? (
-                <button
-                  onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
-                  disabled={!!actionLoading}
-                  className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {actionLoading === "Closing..." ? (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                      Closing...
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
-                      Close Browser
-                    </span>
+                <>
+                  {onOpenApp && (
+                    <button
+                      onClick={() => onOpenApp("vnc")}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
+                        Preview
+                      </span>
+                    </button>
                   )}
-                </button>
+                  <button
+                    onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
+                    disabled={!!actionLoading}
+                    className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {actionLoading === "Closing..." ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                        Closing...
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+                        Close Browser
+                      </span>
+                    )}
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={() => doAction("open-browser", "Opening...", "Browser launched")}
@@ -301,36 +314,6 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   )}
                 </button>
               )}
-              {onOpenApp && (
-                <button
-                  onClick={() => onOpenApp("vnc")}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
-                    Preview
-                  </span>
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Info card */}
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
-          <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">How it works</h3>
-          <div className="space-y-3">
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>download</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Install</span> — Sets up Chromium with a dedicated ClawBox profile for persistent sessions and logins.</p>
-            </div>
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>link</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Enable</span> — Sets OpenClaw tools profile to &quot;full&quot; for browser control via the built-in browser tool.</p>
-            </div>
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>desktop_windows</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Open Browser</span> — Launches Chromium with remote debugging (CDP port {status?.cdpPort ?? 18800}). OpenClaw connects via <code className="text-white/60">ws://127.0.0.1:{status?.cdpPort ?? 18800}</code> to navigate, click, type, and read pages. Profile persists logins and cookies.</p>
             </div>
           </div>
         </div>
