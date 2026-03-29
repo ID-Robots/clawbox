@@ -4,7 +4,7 @@ import path from "path";
 
 export const dynamic = "force-dynamic";
 
-const BASE_DIR = process.env.CLAWBOX_ROOT ?? path.join(process.cwd(), "local-data");
+const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 
 function safePath(rel: string): string | null {
   const resolved = path.resolve(BASE_DIR, rel);
@@ -13,7 +13,14 @@ function safePath(rel: string): string | null {
 }
 
 function ensureBaseDir() {
-  if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true });
+  try { if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true }); } catch { /* read-only fs */ }
+  // Ensure standard home subdirectories exist (skip when FILES_ROOT is explicitly set, e.g. tests)
+  if (!process.env.FILES_ROOT) {
+    for (const sub of ["Documents", "Downloads", "Desktop"]) {
+      const p = path.join(BASE_DIR, sub);
+      try { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); } catch { /* read-only fs */ }
+    }
+  }
 }
 
 // GET /setup-api/files?dir=relative/path
@@ -35,7 +42,7 @@ export async function GET(req: NextRequest) {
   const stat = fs.statSync(abs);
   if (!stat.isDirectory()) return NextResponse.json({ error: "Not a directory" }, { status: 400 });
 
-  const entries = fs.readdirSync(abs);
+  const entries = fs.readdirSync(abs).filter((name) => !name.startsWith("."));
   const files = entries
     .map((name) => {
       try {
@@ -91,6 +98,13 @@ export async function POST(req: NextRequest) {
     if (fs.existsSync(newDir)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
     fs.mkdirSync(newDir, { recursive: true });
     return NextResponse.json({ ok: true });
+  }
+
+  if (body.action === "resolve") {
+    if (!body.filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    const resolved = safePath(body.filePath);
+    if (!resolved) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+    return NextResponse.json({ absPath: resolved });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });

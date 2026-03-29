@@ -1,0 +1,153 @@
+"use client";
+
+import { useState } from "react";
+import Image from "next/image";
+
+const DURATION_OPTIONS = [
+  { value: 1200, label: "20 minutes" },
+  { value: 21600, label: "6 hours" },
+  { value: 43200, label: "12 hours" },
+  { value: 86400, label: "24 hours" },
+];
+
+export default function LoginPage() {
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [duration, setDuration] = useState(43200);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password.trim()) {
+      setError("Password is required");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const res = await fetch("/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, duration }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "Login failed");
+        setLoading(false);
+        return;
+      }
+
+      // Redirect to the original page or home (validate to prevent open redirect)
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get("redirect") || "/";
+      const decoded = decodeURIComponent(raw);
+      const safe = decoded.startsWith("/") && !decoded.startsWith("//") && !decoded.includes(":") && !decoded.includes("\\");
+      window.location.href = safe ? decoded : "/";
+    } catch {
+      setError("Connection failed");
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "var(--bg-deep)" }}>
+      <div className="w-full max-w-[380px]">
+        <div className="card-surface rounded-2xl p-8">
+          <div className="flex flex-col items-center gap-3 mb-6">
+            <Image
+              src="/clawbox-crab.png"
+              alt="ClawBox"
+              width={80}
+              height={80}
+              className="w-[80px] h-[80px] object-contain"
+              priority
+            />
+            <h1 className="text-xl font-bold font-display text-[var(--text-primary)]">
+              ClawBox
+            </h1>
+            <p className="text-sm text-[var(--text-muted)]">
+              Enter your password to continue
+            </p>
+          </div>
+
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            <div>
+              <label
+                htmlFor="login-password"
+                className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+              >
+                Password
+              </label>
+              <div className="relative">
+                <input
+                  id="login-password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="System password"
+                  autoFocus
+                  autoComplete="current-password"
+                  className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
+                    {showPassword ? "visibility_off" : "visibility"}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="login-duration"
+                className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+              >
+                Stay logged in for
+              </label>
+              <select
+                id="login-duration"
+                value={duration}
+                onChange={(e) => setDuration(Number(e.target.value))}
+                className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors cursor-pointer appearance-none"
+                style={{
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%236b7280'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: "no-repeat",
+                  backgroundPosition: "right 12px center",
+                }}
+              >
+                {DURATION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {error && (
+              <div className="px-3.5 py-2.5 rounded-lg text-xs bg-red-500/10 text-red-400 border border-red-500/20">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading || !password.trim()}
+              className="w-full py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
+            >
+              {loading ? "Logging in..." : "Log In"}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}

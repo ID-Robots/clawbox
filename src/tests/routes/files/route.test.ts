@@ -17,7 +17,7 @@ function createRequest(pathname: string, options?: RequestInit): NextRequest {
 }
 
 beforeAll(async () => {
-  process.env.CLAWBOX_ROOT = TEST_ROOT;
+  process.env.FILES_ROOT = TEST_ROOT;
   await fsp.mkdir(TEST_ROOT, { recursive: true });
   vi.resetModules();
   ({ GET: filesGet, POST: filesPost } = await import("@/app/setup-api/files/route"));
@@ -30,7 +30,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.CLAWBOX_ROOT;
+  delete process.env.FILES_ROOT;
   await fsp.rm(TEST_ROOT, { recursive: true, force: true });
 });
 

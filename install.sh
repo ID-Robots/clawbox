@@ -567,48 +567,9 @@ step_claude_code_install() {
 }
 
 step_vnc_install() {
-  # Install x11vnc, Xvfb (virtual framebuffer fallback), and websockify
-  apt-get install -y x11vnc xvfb websockify dbus-x11
+  # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
+  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm
 
-  # Create the VNC startup script — detects physical display or starts virtual one
-  cat > "$PROJECT_DIR/scripts/start-vnc.sh" <<'VNCSH'
-#!/bin/bash
-# Mirrors the physical GNOME desktop if a monitor is connected,
-# otherwise starts a virtual GNOME session on a framebuffer.
-
-DISPLAY_NUM=0
-XAUTH="/run/user/$(id -u)/gdm/Xauthority"
-
-# Check if physical display :0 is available
-if xdpyinfo -display :0 >/dev/null 2>&1; then
-  echo "[vnc] Physical display :0 detected — mirroring"
-  exec x11vnc -display :0 -auth "$XAUTH" -forever -shared -nopw -localhost -noxdamage
-fi
-
-# No physical display — start a virtual framebuffer + GNOME session
-echo "[vnc] No physical display — starting virtual desktop on :99"
-DISPLAY_NUM=99
-
-# Start Xvfb if not already running
-if ! xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; then
-  Xvfb :${DISPLAY_NUM} -screen 0 1920x1080x24 &
-  sleep 1
-fi
-
-export DISPLAY=:${DISPLAY_NUM}
-export DBUS_SESSION_BUS_ADDRESS=""
-
-# Start a GNOME session (or fallback to xfce/openbox)
-if command -v gnome-session &>/dev/null; then
-  gnome-session --session=ubuntu &
-elif command -v startxfce4 &>/dev/null; then
-  startxfce4 &
-fi
-sleep 2
-
-# Mirror the virtual display
-exec x11vnc -display :${DISPLAY_NUM} -forever -shared -nopw -localhost -noxdamage
-VNCSH
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
 
@@ -647,6 +608,10 @@ RestartSec=5
 WantedBy=multi-user.target
 WSSVC
 
+  # Browser CDP service (launched on demand, not auto-started)
+  chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
+  cp "$PROJECT_DIR/config/clawbox-browser.service" /etc/systemd/system/
+
   systemctl daemon-reload
   systemctl enable clawbox-vnc.service clawbox-websockify.service
   systemctl start clawbox-vnc.service clawbox-websockify.service || true
@@ -679,6 +644,11 @@ step_rebuild_reboot() {
   reboot
 }
 
+step_browser_launch() {
+  # Launch Chromium with CDP remote debugging — runs as root then drops to clawbox via runuser
+  DISPLAY=:99 bash "$PROJECT_DIR/scripts/launch-browser.sh"
+}
+
 # ── Single-step mode (used by clawbox-root-update@.service) ──────────────────
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
@@ -687,7 +657,7 @@ DISPATCH_STEPS=(
   chromium_install code_server_install claude_code_install vnc_install openclaw_install openclaw_patch openclaw_config openclaw_models
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
-  fix_git_perms
+  fix_git_perms browser_launch
 )
 
 if [ "${1:-}" = "--step" ]; then
@@ -760,6 +730,9 @@ step_captive_portal_dns
 
 log "Setting up directories and permissions..."
 step_directories_permissions
+
+# Clean up default NVIDIA desktop shortcuts
+rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
 
 log "Installing systemd services..."
 step_systemd_services

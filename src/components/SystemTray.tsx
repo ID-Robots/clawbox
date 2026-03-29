@@ -236,24 +236,36 @@ export default function SystemTray({
           </div>
 
           {/* Bottom actions */}
-          <div className="p-4 grid grid-cols-2 gap-2">
+          <div className="p-4 flex flex-col gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => handlePower("restart")}
+                className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
+                  confirmAction === "restart" ? "bg-yellow-500/30 hover:bg-yellow-500/40" : "bg-white/10 hover:bg-white/15"
+                }`}
+              >
+                <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>restart_alt</span>
+                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "restart" ? "Confirm?" : "Restart"}</span>
+              </button>
+              <button
+                onClick={() => handlePower("shutdown")}
+                className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
+                  confirmAction === "shutdown" ? "bg-red-500/30 hover:bg-red-500/40" : "bg-white/10 hover:bg-white/15"
+                }`}
+              >
+                <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>power_settings_new</span>
+                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? "Confirm?" : "Shut Down"}</span>
+              </button>
+            </div>
             <button
-              onClick={() => handlePower("restart")}
-              className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
-                confirmAction === "restart" ? "bg-yellow-500/30 hover:bg-yellow-500/40" : "bg-white/10 hover:bg-white/15"
-              }`}
+              onClick={async () => {
+                await fetch("/login-api/logout", { method: "POST" }).catch(() => {});
+                window.location.href = "/login";
+              }}
+              className="flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer bg-white/10 hover:bg-white/15 w-full"
             >
-              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>restart_alt</span>
-              <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "restart" ? "Confirm?" : "Restart"}</span>
-            </button>
-            <button
-              onClick={() => handlePower("shutdown")}
-              className={`flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer ${
-                confirmAction === "shutdown" ? "bg-red-500/30 hover:bg-red-500/40" : "bg-white/10 hover:bg-white/15"
-              }`}
-            >
-              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>power_settings_new</span>
-              <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? "Confirm?" : "Shut Down"}</span>
+              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>lock</span>
+              <span className="text-sm text-white/80">Lock</span>
             </button>
           </div>
         </div>

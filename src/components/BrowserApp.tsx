@@ -13,8 +13,9 @@ const BRAND_ORANGE_LIGHT = "#ff8b1a";
 
 interface BrowserStatus {
   chromium: { installed: boolean; path?: string; version?: string };
-  browser: { running: boolean; pid?: number };
+  browser: { running: boolean; pid?: number; cdpReady?: boolean };
   enabled: boolean;
+  cdpPort?: number;
 }
 
 interface BrowserAppProps {
@@ -29,15 +30,23 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const actionErrorRef = useRef(false);
+  const lastStatusJson = useRef("");
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/browser/manage");
       if (!res.ok) throw new Error("Failed to fetch status");
       const data: BrowserStatus = await res.json();
-      setStatus(data);
-      setError(null);
+      // Only update state if data actually changed to avoid unnecessary re-renders
+      const json = JSON.stringify(data);
+      if (json !== lastStatusJson.current) {
+        lastStatusJson.current = json;
+        setStatus(data);
+      }
+      if (!actionErrorRef.current) setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect");
+      if (!actionErrorRef.current) setError(err instanceof Error ? err.message : "Failed to connect");
     } finally {
       setLoading(false);
     }
@@ -53,6 +62,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     setActionLoading(loadingLabel);
     setError(null);
     setSuccessMsg(null);
+    actionErrorRef.current = false;
     try {
       const res = await fetch("/setup-api/browser/manage", {
         method: "POST",
@@ -67,6 +77,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
       }
       await fetchStatus();
     } catch (err) {
+      actionErrorRef.current = true;
       setError(err instanceof Error ? err.message : "Action failed");
     } finally {
       setActionLoading(null);
@@ -183,10 +194,14 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   : "Connect the browser to OpenClaw so your AI assistant can use it for web browsing, research, and automation."}
               </p>
               {isEnabled && (
-                <div className="mt-2 flex items-center gap-4">
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
-                    <span className="text-xs text-white/40">computer_use tool enabled</span>
+                    <span className="text-xs text-white/40">tools profile: full</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>bug_report</span>
+                    <span className="text-xs text-white/30 font-mono">CDP port {status?.cdpPort ?? 18800}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>folder</span>
@@ -232,32 +247,53 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   ? "Chromium is running on the desktop. OpenClaw can interact with it in real time."
                   : "Launch a real Chromium window on the desktop that OpenClaw can control."}
               </p>
-              {browserRunning && status?.browser?.pid && (
-                <div className="mt-2 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                  <span className="text-xs text-white/40">Running (PID {status.browser.pid})</span>
+              {browserRunning && (
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                    <span className="text-xs text-white/40">PID {status?.browser?.pid ?? "?"}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${status?.browser?.cdpReady ? "bg-green-400" : "bg-yellow-400"}`} />
+                    <span className="text-xs text-white/40 font-mono">
+                      CDP :{status?.cdpPort ?? 18800} {status?.browser?.cdpReady ? "ready" : "starting..."}
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
             <div className="flex gap-2 shrink-0">
               {browserRunning ? (
-                <button
-                  onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
-                  disabled={!!actionLoading}
-                  className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {actionLoading === "Closing..." ? (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                      Closing...
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
-                      Close Browser
-                    </span>
+                <>
+                  {onOpenApp && (
+                    <button
+                      onClick={() => onOpenApp("vnc")}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
+                        Preview
+                      </span>
+                    </button>
                   )}
-                </button>
+                  <button
+                    onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
+                    disabled={!!actionLoading}
+                    className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {actionLoading === "Closing..." ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                        Closing...
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+                        Close Browser
+                      </span>
+                    )}
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={() => doAction("open-browser", "Opening...", "Browser launched")}
@@ -278,36 +314,6 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   )}
                 </button>
               )}
-              {onOpenApp && (
-                <button
-                  onClick={() => onOpenApp("vnc")}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
-                    Preview
-                  </span>
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Info card */}
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
-          <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">How it works</h3>
-          <div className="space-y-3">
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>download</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Install</span> — Sets up Chromium with a dedicated ClawBox profile for persistent sessions and logins.</p>
-            </div>
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>link</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Enable</span> — Configures OpenClaw&apos;s computer_use tool to control the browser. Your AI can navigate, click, type, and read pages.</p>
-            </div>
-            <div className="flex gap-3">
-              <span className="material-symbols-rounded text-white/30 shrink-0" style={{ fontSize: 18 }}>desktop_windows</span>
-              <p className="text-xs text-white/50"><span className="text-white/70">Open/Close</span> — Launches or stops the real Chromium window on your desktop. The browser keeps its profile between sessions.</p>
             </div>
           </div>
         </div>

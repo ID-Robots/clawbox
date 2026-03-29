@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 
-export default function VSCodeApp() {
+export default function VSCodeApp({ filePath }: { filePath?: string }) {
   const [status, setStatus] = useState<"checking" | "running" | "not-running">("checking");
   const [port, setPort] = useState(8080);
 
@@ -106,9 +106,20 @@ cert: false`}
   // code-server doesn't set X-Frame-Options or frame-ancestors
   const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
 
+  // If filePath is provided, open the file's parent folder and goto the file
+  const baseUrl = `http://${hostname}:${port}`;
+  let src: string;
+  if (filePath) {
+    const lastSlash = filePath.lastIndexOf("/");
+    const folder = lastSlash > 0 ? filePath.substring(0, lastSlash) : "/home";
+    src = `${baseUrl}?folder=${encodeURIComponent(folder)}&goto=${encodeURIComponent(filePath)}`;
+  } else {
+    src = `${baseUrl}?folder=/home`;
+  }
+
   return (
     <iframe
-      src={`http://${hostname}:${port}?folder=/home`}
+      src={src}
       className="w-full h-full border-0"
       title="VS Code"
       allow="clipboard-read; clipboard-write"

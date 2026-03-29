@@ -5,9 +5,9 @@ import { promisify } from "util";
 
 const exec = promisify(execFile);
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
-const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
+export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 
-interface OpenClawConfig {
+export interface OpenClawConfig {
   [key: string]: unknown;
   channels?: {
     [name: string]: {
@@ -17,9 +17,19 @@ interface OpenClawConfig {
       [key: string]: unknown;
     };
   };
+  tools?: {
+    profile?: string;
+    web?: { search?: { enabled?: boolean } };
+  };
+  auth?: {
+    profiles?: Record<string, { provider?: string; mode?: string }>;
+  };
+  agents?: {
+    defaults?: { model?: { primary?: string } };
+  };
 }
 
-async function readConfig(): Promise<OpenClawConfig> {
+export async function readConfig(): Promise<OpenClawConfig> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf-8");
     return JSON.parse(raw);

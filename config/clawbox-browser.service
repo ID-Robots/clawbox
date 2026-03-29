@@ -1,0 +1,15 @@
+[Unit]
+Description=ClawBox Browser (Chromium with CDP)
+Requires=clawbox-vnc.service
+After=clawbox-vnc.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:99
+Environment=CDP_PORT=18800
+ExecStart=/home/clawbox/clawbox/scripts/launch-browser.sh
+Restart=no
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -14,6 +14,25 @@ const WebSocket = require("ws");
 const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
 const IS_DEV = process.env.NODE_ENV === "development";
 
+// ─── Session secret ───
+// Generate or load a persistent secret for signing session cookies.
+// Must be set before Next.js server starts so middleware can access it.
+const SESSION_SECRET_PATH = path.join(__dirname, "data", ".session-secret");
+try {
+  let sessionSecret;
+  try {
+    sessionSecret = fs.readFileSync(SESSION_SECRET_PATH, "utf-8").trim();
+  } catch {}
+  if (!sessionSecret || sessionSecret.length < 32) {
+    sessionSecret = require("crypto").randomBytes(32).toString("hex");
+    fs.mkdirSync(path.dirname(SESSION_SECRET_PATH), { recursive: true });
+    fs.writeFileSync(SESSION_SECRET_PATH, sessionSecret, { mode: 0o600 });
+  }
+  process.env.SESSION_SECRET = sessionSecret;
+} catch (err) {
+  console.warn("[production-server] Failed to set up session secret:", err.message);
+}
+
 // HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server)
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {

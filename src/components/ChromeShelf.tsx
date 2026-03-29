@@ -23,6 +23,8 @@ interface ChromeShelfProps {
   onCloseApp?: (id: string) => void;
   onShelfSettings?: () => void;
   onPowerClick?: () => void;
+  onChatClick?: () => void;
+  showChatButton?: boolean;
   time: string;
 }
 
@@ -37,6 +39,8 @@ export default function ChromeShelf({
   onCloseApp,
   onShelfSettings,
   onPowerClick,
+  onChatClick,
+  showChatButton,
   time,
 }: ChromeShelfProps) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -192,6 +196,16 @@ export default function ChromeShelf({
 
         {/* Right side: system tray */}
         <div className="absolute right-2 flex items-center gap-1">
+          {showChatButton && (
+            <button
+              onClick={onChatClick}
+              className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+              title="Chat"
+              aria-label="Chat"
+            >
+              <span className="material-symbols-rounded text-[#f97316]" style={{ fontSize: 20 }}>chat_bubble</span>
+            </button>
+          )}
           <button
             onClick={onTrayClick}
             className="flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
