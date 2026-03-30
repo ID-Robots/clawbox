@@ -208,6 +208,16 @@ step_openclaw_install() {
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
   fi
+  # Ensure ~/.npm-global/bin is in PATH for interactive shells
+  local BASHRC="$CLAWBOX_HOME/.bashrc"
+  if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
+    cat >> "$BASHRC" <<'PATHEOF'
+
+# npm global binaries (openclaw)
+export PATH="$HOME/.npm-global/bin:$PATH"
+PATHEOF
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
+  fi
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
 }
 
