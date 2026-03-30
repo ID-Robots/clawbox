@@ -11,6 +11,7 @@ import * as kv from '@/lib/client-kv'
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
 const RETRY_DELAY = 3000
+const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 function saveMascotSnippet(text: string) {
   if (!text || text.length < 10) return
   const sentences = text
@@ -285,7 +286,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
-          loadHistory()
+          // If a skill was just installed/uninstalled, start fresh session
+          if (skillInstalledRef.current) {
+            skillInstalledRef.current = false
+            setMessages([])
+            greetedRef.current = true // prevent auto-greet
+            const evt = skillEventRef.current
+            skillEventRef.current = null
+            // Build context message about the skill change
+            let contextMsg = 'My skills were just updated. What skills do you have available now?'
+            if (evt?.action === 'install' && evt.name) {
+              contextMsg = `[System: A new skill "${evt.name}" was just installed and your session was refreshed.] Hi! I just installed the "${evt.name}" skill. Can you confirm you have it and briefly tell me what it does?`
+            } else if (evt?.action === 'uninstall' && evt.id) {
+              contextMsg = `[System: The skill "${evt.id}" was just uninstalled and your session was refreshed.] I just removed the "${evt.id}" skill. Can you confirm it's gone?`
+            } else if (evt?.action === 'enable' && evt.id) {
+              contextMsg = `[System: The skill "${evt.id}" was just re-enabled and your session was refreshed.] I just enabled the "${evt.id}" skill. Can you confirm you have it?`
+            } else if (evt?.action === 'disable' && evt.id) {
+              contextMsg = `[System: The skill "${evt.id}" was just disabled and your session was refreshed.] I just disabled the "${evt.id}" skill. Can you confirm it's no longer active?`
+            }
+            // Complete the progress bar
+            if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
+            setReloadProgress(100)
+            // Small delay to show 100%, then switch to sending dots
+            setTimeout(() => {
+              setReloadingSkill(false)
+              setSending(true)
+              setMessages([{ role: 'user', text: contextMsg.replace(/\[System:.*?\]\s*/g, ''), timestamp: Date.now() }])
+              wsRequest('chat.send', {
+                sessionKey: mainSessionKey,
+                message: contextMsg,
+                idempotencyKey: uuid(),
+              }).catch((err) => { console.warn('[chat] skill reload send failed:', err); setSending(false) })
+            }, 500)
+          } else {
+            loadHistory()
+          }
         },
         reject: (err: Error) => {
           setStatus('error')
@@ -356,7 +391,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
           if (state === 'delta') {
             const text = extractText(msg)
-            if (text) setStreaming(text)
+            if (text) { setStreaming(text); setReloadingSkill(false) }
           } else if (state === 'final') {
             const text = extractText(msg)
             if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
@@ -386,17 +421,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
     const onClose = () => {
       wsRef.current = null
-      if (!connectedOnceRef.current) {
-        // Auto-retry if gateway isn't ready yet
-        if (retryCountRef.current < MAX_RETRIES) {
-          retryCountRef.current++
-          if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
-          retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
-          return
-        }
-        setStatus('error')
-        setErrorMsg('Could not connect to gateway')
+      if (retryCountRef.current < MAX_RETRIES) {
+        retryCountRef.current++
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
+        return
       }
+      setStatus('error')
+      setErrorMsg('Could not connect to gateway')
     }
 
     // Create WebSocket AFTER all handlers are defined to avoid race conditions
@@ -525,6 +557,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     return () => window.removeEventListener('keydown', onKey)
   }, [isOpen, onClose])
 
+  // Listen for skill installs — flag for /new after reconnect
+  const skillInstalledRef = useRef(false)
+  const skillEventRef = useRef<{ action: string; name?: string; id?: string } | null>(null)
+  const [reloadingSkill, setReloadingSkill] = useState(false)
+  const [reloadProgress, setReloadProgress] = useState(0)
+  const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail || {}
+      skillInstalledRef.current = true
+      skillEventRef.current = detail
+      setReloadingSkill(true)
+      setReloadProgress(0)
+      retryCountRef.current = 0
+      if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
+      let progress = 0
+      reloadTimerRef.current = setInterval(() => {
+        progress += (90 - progress) * 0.08
+        const rounded = Math.min(Math.round(progress), 90)
+        setReloadProgress(rounded)
+        if (rounded >= 90 && reloadTimerRef.current) {
+          clearInterval(reloadTimerRef.current)
+          reloadTimerRef.current = null
+        }
+      }, 200)
+    }
+    window.addEventListener('clawbox-skill-installed', handler)
+    return () => {
+      window.removeEventListener('clawbox-skill-installed', handler)
+      if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
+    }
+  }, [])
+
   // Notify parent of thinking state
   useEffect(() => { onThinkingChange?.(sending) }, [sending, onThinkingChange])
 
@@ -637,14 +702,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       <div style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
         display: 'flex', flexDirection: 'column', gap: 10,
+        userSelect: 'text',
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
-        {status === 'connecting' && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
-            <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-            <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-            Connecting to gateway...
+        {(status === 'connecting' || reloadingSkill) && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
+            <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } }`}</style>
+            {reloadingSkill ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
+                <div style={SPINNER_STYLE} />
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
+                  <span>Reloading skills...</span>
+                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                    <div style={{
+                      height: '100%', borderRadius: 2, background: '#f97316',
+                      transition: 'width 0.3s ease-out',
+                      width: `${reloadProgress}%`,
+                    }} />
+                  </div>
+                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>This may take up to 30 seconds</span>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={SPINNER_STYLE} />
+                Connecting to gateway...
+              </>
+            )}
           </div>
         )}
 
@@ -663,14 +748,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           </div>
         )}
 
-        {status === 'connected' && messages.length === 0 && !streaming && (
+        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, opacity: 0.4 }} />
             <span>Say something!</span>
           </div>
         )}
 
-        {messages.map((msg, i) => (
+        {!reloadingSkill && messages.map((msg, i) => (
           <div key={i} style={{
             display: 'flex',
             justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
@@ -695,7 +780,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         ))}
 
         {/* Streaming message */}
-        {streaming && (
+        {!reloadingSkill && streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
               maxWidth: '85%', padding: '8px 14px',
