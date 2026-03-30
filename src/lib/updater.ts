@@ -136,8 +136,7 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   await execShell(
     `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout ${local}` +
-    ` && ${gitCmd} reset --hard ${upstream}`,
+    ` && ${gitCmd} checkout -B ${local} ${upstream}`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);
