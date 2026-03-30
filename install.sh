@@ -373,7 +373,7 @@ step_directories_permissions() {
 }
 
 step_systemd_services() {
-  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service")
+  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service)
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"

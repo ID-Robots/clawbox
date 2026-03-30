@@ -7,9 +7,12 @@ After=clawbox-vnc.service
 Type=simple
 Environment=DISPLAY=:99
 Environment=CDP_PORT=18800
+Environment=HOME=/home/clawbox
 ExecStart=/home/clawbox/clawbox/scripts/launch-browser.sh
+ExecStopPost=/bin/bash -c 'kill -9 $(pgrep -f "chrome_crashpad|chrome.*18800|dbus-launch.*autolaunch" 2>/dev/null) 2>/dev/null || true'
 Restart=no
 TimeoutStartSec=30
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target
