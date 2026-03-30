@@ -9,7 +9,7 @@
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
     "build": "next build",
-    "postbuild": "SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); [ -n \"$SRVJS\" ] && SDIR=$(dirname \"$SRVJS\") && cp -r .next/static \"$SDIR/.next/static\" && cp -r public \"$SDIR/public\" && ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js",
+    "postbuild": "SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); [ -n \"$SRVJS\" ] && SDIR=$(dirname \"$SRVJS\") && cp -r .next/static \"$SDIR/.next/static\" && cp -r public \"$SDIR/public\" && [ \"$SRVJS\" != \".next/standalone/server.js\" ] && ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js || true",
     "start": "PORT=80 HOSTNAME=0.0.0.0 bun run production-server.js",
     "lint": "eslint",
     "test": "vitest run",
