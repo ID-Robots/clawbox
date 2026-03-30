@@ -127,13 +127,22 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     };
   }, [startPolling, stopPolling]);
 
-  const triggerUpdate = async () => {
+  const triggerUpdate = async (branch?: string) => {
     actionControllerRef.current?.abort();
     const controller = new AbortController();
     actionControllerRef.current = controller;
     setStarting(true);
     setFetchError(false);
     try {
+      if (branch) {
+        const branchRes = await fetch("/setup-api/system/update-branch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ branch }),
+          signal: controller.signal,
+        });
+        if (!branchRes.ok) throw new Error(`Failed to set update branch (${branchRes.status})`);
+      }
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         signal: controller.signal,
@@ -174,7 +183,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={triggerUpdate}
+              onClick={() => triggerUpdate()}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
               Retry
@@ -232,10 +241,17 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={triggerUpdate}
+              onClick={() => triggerUpdate()}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
               Start Update
+            </button>
+            <button
+              type="button"
+              onClick={() => triggerUpdate("beta")}
+              className="px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-purple-600/25 cursor-pointer"
+            >
+              Update to Beta
             </button>
             <button
               type="button"
@@ -345,7 +361,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               <>
                 <button
                   type="button"
-                  onClick={triggerUpdate}
+                  onClick={() => triggerUpdate()}
                   className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                 >
                   Retry

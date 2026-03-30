@@ -410,6 +410,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
   const [branchInput, setBranchInput] = useState("");
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  const [betaConfirm, setBetaConfirm] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetStep, setResetStep] = useState(0);
@@ -640,11 +641,22 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
     }
   };
 
-  const triggerUpdate = async () => {
+  const triggerUpdate = async (branch?: string) => {
     setUpdateStarted(true);
     setUpdateError(null);
     setUpdateState(null);
     try {
+      if (branch) {
+        const branchRes = await fetch("/setup-api/system/update-branch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ branch }),
+        });
+        if (!branchRes.ok) {
+          setUpdateError("Failed to set update branch");
+          return;
+        }
+      }
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1221,6 +1233,15 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
           </button>
           <button
             type="button"
+            onClick={() => setBetaConfirm(true)}
+            disabled={isUpdateRunning}
+            className="py-3 bg-purple-600 text-white rounded-xl text-sm font-semibold hover:bg-purple-500 hover:scale-105 transition-all cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2 shadow-lg shadow-purple-600/25"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v20"/><path d="m17 5-5-3-5 3"/><path d="m17 19-5 3-5-3"/><path d="M2 12h20"/></svg>
+            Beta Update
+          </button>
+          <button
+            type="button"
             onClick={() => setResetConfirm(true)}
             className="py-3 bg-red-500/10 text-red-400 rounded-xl text-sm font-semibold hover:bg-red-500/20 hover:scale-105 transition-all cursor-pointer flex items-center justify-center gap-2 border border-red-500/20"
           >
@@ -1383,6 +1404,40 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
         </div>
       )}
 
+      {/* Beta update confirmation */}
+      {betaConfirm && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="text-lg font-bold text-purple-400 mb-2">Beta Update</h3>
+            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+              <p className="text-sm text-yellow-300 font-semibold mb-1">Warning</p>
+              <p className="text-xs text-yellow-200/80 leading-relaxed">
+                Beta software may be unstable and could cause unexpected behavior, data loss, or system issues. ID Robots assumes no responsibility for any damage to your device or data resulting from installing beta updates.
+              </p>
+            </div>
+            <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
+              By proceeding, you acknowledge that this version is experimental and you accept all associated risks.
+            </p>
+            <div className="flex items-center gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setBetaConfirm(false)}
+                className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => { setBetaConfirm(false); triggerUpdate("beta"); }}
+                className="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-purple-500 transition-colors"
+              >
+                I Understand, Update
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* System Update Progress */}
       {updateStarted && (
         <div className="mb-4 card-surface rounded-xl p-5">
@@ -1403,7 +1458,7 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
             </div>
           )}
           {updateState?.phase === "failed" && (
-            <button type="button" onClick={triggerUpdate} className={`mt-3 ${SAVE_BUTTON_CLASS} text-xs`}>Retry Update</button>
+            <button type="button" onClick={() => triggerUpdate()} className={`mt-3 ${SAVE_BUTTON_CLASS} text-xs`}>Retry Update</button>
           )}
         </div>
       )}
