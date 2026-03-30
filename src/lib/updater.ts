@@ -135,8 +135,8 @@ async function updateClawBoxAndReboot(): Promise<void> {
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
 
   await execShell(
-    `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout -B ${local} ${upstream}`,
+    `${gitCmd} fetch origin ${local}` +
+    ` && ${gitCmd} checkout -B ${local} FETCH_HEAD`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);
