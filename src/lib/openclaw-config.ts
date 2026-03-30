@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -25,7 +26,7 @@ export interface OpenClawConfig {
     profiles?: Record<string, { provider?: string; mode?: string }>;
   };
   agents?: {
-    defaults?: { model?: { primary?: string } };
+    defaults?: { model?: { primary?: string }; workspace?: string };
   };
 }
 
@@ -72,4 +73,35 @@ export async function restartGateway(): Promise<void> {
     );
     throw err;
   }
+}
+
+/** Send SIGUSR1 to the gateway process so it hot-reloads skills without a full restart. */
+export async function reloadGateway(): Promise<void> {
+  try {
+    const { stdout } = await exec("pgrep", ["-f", "openclaw-gateway"], { timeout: 5_000 });
+    const pidStr = stdout.trim().split("\n")[0];
+    const pid = parseInt(pidStr, 10);
+    if (Number.isFinite(pid) && pid > 0) {
+      process.kill(pid, "SIGUSR1");
+    }
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH") {
+      console.warn("[openclaw-config] reloadGateway failed:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+/** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
+export function getSkillsDir(): string {
+  const home = process.env.HOME || "/home/clawbox";
+  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+  try {
+    const config = JSON.parse(fsSync.readFileSync(openclawConfig, "utf-8"));
+    const workspace = config?.agents?.defaults?.workspace;
+    if (typeof workspace === "string" && workspace) return workspace;
+  } catch {}
+  const openclawWorkspace = path.join(home, ".openclaw", "workspace");
+  if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
+  return path.join(home, "clawd");
 }

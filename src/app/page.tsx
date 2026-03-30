@@ -313,6 +313,13 @@ export default function ChromeDesktop() {
   const [chatOpen, setChatOpen] = useState(false);
   const [mascotX, setMascotX] = useState(85);
 
+  // Open chat when a skill is installed/uninstalled/toggled
+  useEffect(() => {
+    const handler = () => setChatOpen(true);
+    window.addEventListener('clawbox-skill-installed', handler);
+    return () => window.removeEventListener('clawbox-skill-installed', handler);
+  }, []);
+
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
   useEffect(() => {
@@ -741,9 +748,23 @@ export default function ChromeDesktop() {
     setUninstallConfirm(appId);
   }, []);
 
-  const confirmUninstallApp = useCallback(() => {
+  const confirmUninstallApp = useCallback(async () => {
     if (!uninstallConfirm) return;
     const appId = uninstallConfirm;
+    // Remove skill files and reload gateway
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      await fetch("/setup-api/apps/uninstall", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appId }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+    } catch (err) {
+      console.warn("[uninstall] Failed to uninstall skill:", err);
+    }
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
     setOpenWindows((prev) => prev.filter((w) => w.appId !== `installed-${appId}`));
     setIconPositions((prev) => {
@@ -752,6 +773,8 @@ export default function ChromeDesktop() {
       return next;
     });
     setUninstallConfirm(null);
+    // Refresh agent session with updated skills
+    window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'uninstall', id: appId } }));
   }, [uninstallConfirm]);
 
   // Get all apps including installed ones
@@ -994,6 +1017,7 @@ export default function ChromeDesktop() {
             appId={app.storeApp.id}
             storeApp={app.storeApp}
             icon={<InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-12 h-12" />}
+            onUninstall={requestUninstallApp}
           />
         ) : null;
       case "files":

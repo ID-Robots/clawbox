@@ -4,6 +4,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, CONFIG_ROOT } from "@/lib/config-store";
+import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
@@ -36,24 +37,12 @@ function findClawhub(): string {
   return "clawhub"; // fallback to PATH
 }
 
-// Skills directory — same as OpenClaw workspace
-function getSkillsDir(): string {
-  const home = process.env.HOME || "/home/clawbox";
-  // Check OpenClaw workspace config
-  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
-  try {
-    const config = JSON.parse(require("fs").readFileSync(openclawConfig, "utf-8"));
-    const workspace = config?.agents?.defaults?.workspace;
-    if (workspace) return workspace;
-  } catch {}
-  return path.join(home, "clawd");
-}
 
 export async function POST(req: Request) {
   try {
     const { appId } = await req.json();
-    if (!appId || typeof appId !== "string") {
-      return NextResponse.json({ error: "appId is required" }, { status: 400 });
+    if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
+      return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 
     // Ensure icons directory exists
@@ -96,6 +85,11 @@ export async function POST(req: Request) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[apps/install] clawhub install ${appId} failed:`, msg);
       clawhubResult = { success: false, error: msg };
+    }
+
+    // Reload the OpenClaw gateway so it picks up the new skill
+    if (clawhubResult.success) {
+      await reloadGateway();
     }
 
     return NextResponse.json({
