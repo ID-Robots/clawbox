@@ -87,6 +87,47 @@ function TerminalInner() {
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon());
 
+      // Clipboard helper: works over plain HTTP (navigator.clipboard needs HTTPS)
+      function copyText(text: string) {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        } else {
+          fallbackCopy(text);
+        }
+      }
+      function fallbackCopy(text: string) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        try {
+          ta.focus();
+          ta.setSelectionRange(0, ta.value.length);
+          document.execCommand("copy");
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+
+      // Clipboard key handler at xterm level.
+      // - Ctrl+Shift+C: copy selection
+      // - Ctrl+Shift+V and Ctrl+V: let the event pass through to the browser
+      //   so it fires a native "paste" event on xterm's hidden textarea (the
+      //   only way to read the clipboard over plain HTTP).
+      term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+        if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && ev.type === "keydown") {
+          const sel = term.getSelection();
+          if (sel) copyText(sel);
+          return false;
+        }
+        // Let Ctrl+Shift+V AND Ctrl+V bubble to the browser natively
+        if (ev.ctrlKey && (ev.key === "v" || ev.key === "V") && ev.type === "keydown") {
+          return false;
+        }
+        return true;
+      });
+
       termRef.current = term;
       fitAddonRef.current = fitAddon;
 
@@ -229,27 +270,9 @@ function TerminalInner() {
     };
   }, []);
 
-  // Keyboard handler: shortcuts + fallback input forwarding
+  // Fallback keyboard handler — copy/paste is handled at the xterm level
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // Ctrl+Shift+C to copy
-    if (e.ctrlKey && e.shiftKey && e.key === "C") {
-      e.preventDefault();
-      const sel = termRef.current?.getSelection();
-      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-      return;
-    }
-    // Ctrl+Shift+V to paste
-    if (e.ctrlKey && e.shiftKey && e.key === "V") {
-      e.preventDefault();
-      navigator.clipboard.readText().then((text) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: "input", data: text }));
-        }
-      }).catch(() => {});
-      return;
-    }
-
-    // Fallback: if xterm's textarea doesn't have focus, forward key to PTY directly
+    // If xterm's textarea doesn't have focus, forward key to PTY directly
     const xtermTextarea = containerRef.current?.querySelector("textarea.xterm-helper-textarea");
     if (xtermTextarea && document.activeElement !== xtermTextarea) {
       // Try to focus xterm first
@@ -336,7 +359,7 @@ function TerminalInner() {
           </button>
         )}
         <span className="text-xs font-mono" style={{ color: "#4b5563" }}>
-          Ctrl+Shift+C/V to copy/paste
+          Ctrl+Shift+C copy · Ctrl+V paste
         </span>
       </div>
 

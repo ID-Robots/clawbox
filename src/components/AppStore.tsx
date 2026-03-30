@@ -133,6 +133,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   const [loading, setLoading] = useState(true);
   const [totalApps, setTotalApps] = useState(0);
   const [selectedApp, setSelectedApp] = useState<StoreApp | null>(null);
+  const [confirmInstall, setConfirmInstall] = useState<StoreApp | null>(null);
 
   useEffect(() => {
     if (category === "Installed") return;
@@ -161,7 +162,12 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     return () => { clearTimeout(timer); controller.abort(); };
   }, [category, search]);
 
+  const requestInstall = useCallback((app: StoreApp) => {
+    setConfirmInstall(app);
+  }, []);
+
   const handleInstall = useCallback(async (app: StoreApp) => {
+    setConfirmInstall(null);
     setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "installing" } }));
     try {
       const res = await fetch("/setup-api/apps/install", {
@@ -178,6 +184,8 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       }
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
       onInstall(app);
+      // Notify chat to refresh agent skills
+      window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'install', name: app.name, id: app.id } }));
       setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
@@ -243,7 +251,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           <span className="text-xs text-red-400 line-clamp-1" title={progress.message}>
             {progress.message}
           </span>
-          <button onClick={(e) => { e.stopPropagation(); handleInstall(app); }}
+          <button onClick={(e) => { e.stopPropagation(); requestInstall(app); }}
             className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer shrink-0">
             Retry
           </button>
@@ -251,7 +259,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       );
     }
     return (
-      <button onClick={(e) => { e.stopPropagation(); handleInstall(app); }}
+      <button onClick={(e) => { e.stopPropagation(); requestInstall(app); }}
         className={`rounded-md font-medium transition-colors cursor-pointer ${compact ? "px-3 py-1 text-xs" : "px-6 py-2 text-sm"}`}
         style={{ backgroundColor: `${BRAND_ORANGE}1a`, color: BRAND_ORANGE_LIGHT }}
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = `${BRAND_ORANGE}33`)}
@@ -261,12 +269,53 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     );
   };
 
+  // Install confirmation modal — shared across all views
+  const confirmModal = confirmInstall && (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={() => setConfirmInstall(null)}
+      onKeyDown={e => { if (e.key === 'Escape') setConfirmInstall(null); }}
+      role="dialog" aria-modal="true" aria-labelledby="confirm-install-title">
+      <div className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
+            <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }}>download</span>
+          </div>
+          <h3 id="confirm-install-title" className="text-lg font-semibold">Install {confirmInstall.name}?</h3>
+        </div>
+        <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
+          <div className="flex gap-2">
+            <span className="material-symbols-rounded text-yellow-400 shrink-0" style={{ fontSize: 18 }}>warning</span>
+            <p className="text-sm text-yellow-200/80">
+              Installing a skill will <strong>restart the current chat session</strong>. Any unsaved conversation context will be lost. Ask the agent to save important info to <code className="bg-white/10 px-1 rounded text-xs">MEMORY.md</code> before proceeding.
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={() => setConfirmInstall(null)}
+            className="px-4 py-2 rounded-lg text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => handleInstall(confirmInstall)}
+            className="px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors cursor-pointer"
+            style={{ backgroundColor: BRAND_ORANGE }}
+          >
+            Install Anyway
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   // Detail view
   if (selectedApp) {
     const isInstalled = installedAppIds.includes(selectedApp.id);
     const catName = categories.find(c => c.id === selectedApp.category)?.name || selectedApp.category;
     return (
       <div className="h-full flex flex-col bg-[#0f1219] text-white">
+        {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
           <button onClick={() => setSelectedApp(null)}
@@ -363,6 +412,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
   return (
     <div className="h-full flex flex-col bg-[#0f1219] text-white">
+      {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
         <div className="flex items-center gap-3 mb-3">
