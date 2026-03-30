@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
+import { get, set } from "@/lib/config-store";
 import { verifyPassword, createSessionCookie, getOrCreateSecret } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -41,10 +41,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
   }
 
-  // If password not configured, skip auth
+  // If password not configured, check if this is an upgrade from a pre-auth version
   const configured = await get("password_configured");
   if (!configured) {
-    return NextResponse.json({ error: "Password not configured. Complete setup first." }, { status: 400 });
+    const setupComplete = await get("setup_complete");
+    if (setupComplete) {
+      // Auto-migrate: user completed setup before auth was added
+      await set("password_configured", true);
+      await set("password_configured_at", new Date().toISOString());
+    } else {
+      return NextResponse.json({ error: "Password not configured. Complete setup first." }, { status: 400 });
+    }
   }
 
   let body: { password?: string; duration?: number };
