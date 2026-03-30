@@ -46,7 +46,8 @@ fi
 as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 
 # Run a command as the clawbox user with login environment
-as_clawbox_login() { su - "$CLAWBOX_USER" -c "$*"; }
+# Explicit PATH ensures bun/node are found even inside systemd services
+as_clawbox_login() { su - "$CLAWBOX_USER" -c "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"; }
 
 # Stop the setup service, clear cache, reinstall, and rebuild
 do_rebuild() {
