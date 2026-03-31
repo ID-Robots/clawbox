@@ -6,6 +6,8 @@ import SignalBars from "./SignalBars";
 import StatusMessage from "./StatusMessage";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
+import { useT, LANGUAGES } from "@/lib/i18n";
+import type { Locale } from "@/lib/i18n";
 
 interface WifiStepProps {
   onNext: () => void;
@@ -86,6 +88,7 @@ function flag(code: string): string {
 }
 
 export default function WifiStep({ onNext }: WifiStepProps) {
+  const { locale, setLocale, t } = useT();
   const [showWifiList, setShowWifiList] = useState(false);
   const [networks, setNetworks] = useState<WifiNetwork[] | null>(null);
   const [loadingNetworks, setLoadingNetworks] = useState(false);
@@ -108,6 +111,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [countryOpen, setCountryOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Language picker state
+  const [langOpen, setLangOpen] = useState(false);
+  const langDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch("/setup-api/wifi/ethernet")
@@ -132,6 +139,18 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [countryOpen]);
 
+  // Close language dropdown on outside click
+  useEffect(() => {
+    if (!langOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (langDropdownRef.current && !langDropdownRef.current.contains(e.target as Node)) {
+        setLangOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [langOpen]);
+
   const filteredCountries = useMemo(() => {
     if (!countrySearch.trim()) return COUNTRIES;
     const q = countrySearch.toLowerCase();
@@ -139,6 +158,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   }, [countrySearch]);
 
   const countryObj = COUNTRIES.find((c) => c.code === selectedCountry);
+  const currentLang = LANGUAGES.find((l) => l.code === locale) ?? LANGUAGES[0];
 
   const saveCountry = () => {
     if (!selectedCountry) return;
@@ -202,7 +222,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       setConnecting(false);
       setStatus({
         type: "success",
-        message: "Connected! Reconnect to your home WiFi and visit http://clawbox.local to continue.",
+        message: t("wifi.connectedMessage"),
       });
       saveCountry();
       setTimeout(() => onNext(), 3000);
@@ -212,13 +232,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         setConnecting(false);
         setStatus({
           type: "error",
-          message: "Lost connection to ClawBox. If WiFi switched successfully, reconnect to your home WiFi and visit http://clawbox.local to continue.",
+          message: t("wifi.lostConnection"),
         });
         return;
       }
       setStatus({
         type: "error",
-        message: `Connection failed: ${err instanceof Error ? err.message : err}`,
+        message: t("wifi.connectionFailed", { error: err instanceof Error ? err.message : String(err) }),
       });
     } finally {
       if (!controller.signal.aborted) setConnecting(false);
@@ -250,19 +270,64 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             priority
           />
           <h1 className="text-2xl font-bold font-display text-center">
-            Welcome to ClawBox
+            {t("wifi.welcome")}
           </h1>
           <p className="text-xs text-[var(--text-muted)] text-center">
-            Your Own AI, Running 24/7
+            {t("wifi.subtitle")}
           </p>
         </div>
 
-        {/* Country selector — shown on initial choice screen */}
+        {/* Country & Language selectors — shown on initial choice screen */}
         {!showForm && !showWifiList && (
           <>
+            {/* Language selector */}
+            <div ref={langDropdownRef} className="relative mb-3">
+              <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+                {t("wifi.language")}
+              </label>
+              <button
+                type="button"
+                onClick={() => setLangOpen((v) => !v)}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-left cursor-pointer hover:border-[var(--coral-bright)] transition-colors"
+              >
+                <span className="text-base leading-none">{currentLang.flag}</span>
+                <span className="flex-1 text-gray-200">{currentLang.label}</span>
+                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
+                  {langOpen ? "expand_less" : "expand_more"}
+                </span>
+              </button>
+
+              {langOpen && (
+                <div className="absolute z-20 left-0 right-0 mt-1 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl overflow-hidden">
+                  <div className="max-h-[240px] overflow-y-auto">
+                    {LANGUAGES.map((lang) => (
+                      <button
+                        key={lang.code}
+                        type="button"
+                        onClick={() => {
+                          setLocale(lang.code as Locale);
+                          setLangOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left border-none cursor-pointer transition-colors text-sm ${
+                          locale === lang.code ? "bg-orange-500/10 text-gray-200" : "bg-transparent text-gray-300 hover:bg-[var(--bg-deep)]"
+                        }`}
+                      >
+                        <span className="text-base leading-none">{lang.flag}</span>
+                        <span className="flex-1">{lang.label}</span>
+                        {locale === lang.code && (
+                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Country selector */}
             <div ref={dropdownRef} className="relative mb-5">
               <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                Country / Region
+                {t("wifi.countryRegion")}
               </label>
               <button
                 type="button"
@@ -275,7 +340,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                     <span className="flex-1 text-gray-200">{countryObj.name}</span>
                   </>
                 ) : (
-                  <span className="flex-1 text-gray-500">Select your country...</span>
+                  <span className="flex-1 text-gray-500">{t("wifi.selectCountry")}</span>
                 )}
                 <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
                   {countryOpen ? "expand_less" : "expand_more"}
@@ -293,7 +358,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                         type="text"
                         value={countrySearch}
                         onChange={(e) => setCountrySearch(e.target.value)}
-                        placeholder="Search..."
+                        placeholder={t("search")}
                         autoComplete="off"
                         autoFocus
                         className="w-full pl-8 pr-3 py-2 bg-[var(--bg-deep)] border border-gray-700 rounded-md text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
@@ -321,7 +386,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                         )}
                       </button>
                     )) : (
-                      <div className="px-4 py-4 text-center text-xs text-[var(--text-muted)]">No results</div>
+                      <div className="px-4 py-4 text-center text-xs text-[var(--text-muted)]">{t("noResults")}</div>
                     )}
                   </div>
                 </div>
@@ -334,7 +399,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
                   <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc] animate-pulse" />
                 </span>
-                <span className="text-sm text-[#00e5cc]">Ethernet cable detected</span>
+                <span className="text-sm text-[#00e5cc]">{t("wifi.ethernetDetected")}</span>
               </div>
             )}
             <div className="flex flex-col sm:flex-row gap-3 mt-2 mb-2">
@@ -345,16 +410,16 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               >
                 <span className="flex items-center gap-1.5">
                   <span className={`inline-block w-2 h-2 rounded-full ${ethDetected ? "bg-[#00e5cc]" : "bg-gray-400"}`} />
-                  Ethernet
+                  {t("wifi.ethernet")}
                 </span>
-                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">Recommended</span>
+                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
               <button
                 type="button"
                 onClick={() => { setShowWifiList(true); fetchNetworks(); }}
                 className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
               >
-                Connect to WiFi
+                {t("wifi.connectWifi")}
               </button>
             </div>
           </>
@@ -367,17 +432,17 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               <div className="border border-[var(--border-subtle)] rounded-lg overflow-hidden mb-3">
                 <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border-subtle)]/30">
                   <span className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wide">
-                    Available Networks
+                    {t("wifi.availableNetworks")}
                   </span>
                   <button
                     type="button"
                     onClick={rescan}
                     disabled={rescanning}
-                    aria-label="Refresh networks"
+                    aria-label={t("wifi.refresh")}
                     className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-1 disabled:opacity-50 transition-colors"
                   >
                     <span className={`material-symbols-rounded ${rescanning ? "animate-spin" : ""}`} style={{ fontSize: 16 }}>refresh</span>
-                    {rescanning ? "Scanning..." : "Refresh"}
+                    {rescanning ? t("wifi.scanning") : t("wifi.refresh")}
                   </button>
                 </div>
                 <div className="max-h-[240px] overflow-y-auto">
@@ -399,7 +464,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               </div>
             ) : (
               <div className="flex items-center justify-between mb-3">
-                <p className="text-sm text-[var(--text-muted)]">No networks found.</p>
+                <p className="text-sm text-[var(--text-muted)]">{t("wifi.noNetworks")}</p>
                 <button
                   type="button"
                   onClick={rescan}
@@ -407,7 +472,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   className="flex items-center gap-1.5 text-xs text-[#fb923c] hover:text-orange-300 bg-transparent border-none cursor-pointer p-1 disabled:opacity-50 transition-colors"
                 >
                   <span className={`material-symbols-rounded ${rescanning ? "animate-spin" : ""}`} style={{ fontSize: 16 }}>refresh</span>
-                  {rescanning ? "Scanning..." : "Scan now"}
+                  {rescanning ? t("wifi.scanning") : t("wifi.scanNow")}
                 </button>
               </div>
             )}
@@ -418,7 +483,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               className="w-full flex items-center gap-3 px-4 py-3 text-left bg-transparent border border-[var(--border-subtle)] rounded-lg cursor-pointer hover:bg-[var(--bg-surface)]/50 transition-colors"
             >
               <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>edit</span>
-              <span className="text-sm text-[var(--text-secondary)]">Other network...</span>
+              <span className="text-sm text-[var(--text-secondary)]">{t("wifi.otherNetwork")}</span>
             </button>
 
             <button
@@ -426,7 +491,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               onClick={() => { setShowWifiList(false); setNetworks(null); }}
               className="bg-transparent border-none text-[#fb923c] text-sm underline cursor-pointer p-1 mt-2"
             >
-              Back
+              {t("back")}
             </button>
           </>
         )}
@@ -434,7 +499,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         {/* Loading spinner */}
         {showWifiList && loadingNetworks && (
           <div className="flex items-center justify-center gap-2.5 py-6 text-[var(--text-secondary)] text-sm">
-            <div className="spinner !w-5 !h-5 !border-2" /> Finding networks...
+            <div className="spinner !w-5 !h-5 !border-2" /> {t("wifi.findingNetworks")}
           </div>
         )}
 
@@ -444,12 +509,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             <div className="flex flex-col gap-4">
               {manualMode && (
                 <div>
-                  <label htmlFor="wifi-ssid" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Network Name (SSID)</label>
+                  <label htmlFor="wifi-ssid" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">{t("wifi.networkName")}</label>
                   <input
                     id="wifi-ssid" type="text" value={ssid}
                     onChange={(e) => setSsid(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") connectWifi(); }}
-                    placeholder="Enter WiFi network name" autoComplete="off" autoFocus
+                    placeholder={t("wifi.enterNetworkName")} autoComplete="off" autoFocus
                     className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
                   />
                 </div>
@@ -464,13 +529,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 </div>
               )}
               <div>
-                <label htmlFor="wifi-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">Password</label>
+                <label htmlFor="wifi-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">{t("wifi.password")}</label>
                 <div className="relative">
                   <input
                     id="wifi-password" type={showPassword ? "text" : "password"} value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") connectWifi(); }}
-                    placeholder="Enter WiFi password (leave empty if open)" autoComplete="off" autoFocus={!manualMode}
+                    placeholder={t("wifi.enterPassword")} autoComplete="off" autoFocus={!manualMode}
                     className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
                   />
                   <button
@@ -489,8 +554,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             )}
 
             <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
-              <span className="font-semibold">Note:</span> Connecting to WiFi will stop the ClawBox-Setup hotspot.
-              You will lose this connection and need to join your home WiFi to continue setup at{" "}
+              <span className="font-semibold">{t("wifi.wifiNotePrefix")}</span> {t("wifi.wifiNote")}{" "}
               <span className="font-semibold">http://clawbox.local</span>.
             </p>
 
@@ -499,14 +563,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 type="button" onClick={connectWifi} disabled={connecting || !activeSsid}
                 className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
               >
-                {connecting ? "Connecting..." : "Connect"}
+                {connecting ? t("connecting") : t("wifi.connect")}
               </button>
               <button
                 type="button"
                 onClick={() => { setSelectedNetwork(null); setManualMode(false); setStatus(null); setPassword(""); }}
                 className="bg-transparent border-none text-[#fb923c] text-sm underline cursor-pointer p-1"
               >
-                Back
+                {t("back")}
               </button>
             </div>
           </>

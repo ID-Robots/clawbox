@@ -6,6 +6,7 @@ import OllamaModelPanel from "./OllamaModelPanel";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
+import { useT } from "@/lib/i18n";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -43,27 +44,29 @@ const PROVIDER_ICONS: Record<string, string> = {
   ollama: "🦙",
 };
 
-const CONFIGURING_STEPS = [
-  { label: "Credentials verified", delay: 0 },
-  { label: "Updating AI configuration", delay: 2000 },
-  { label: "Restarting gateway service", delay: 5000 },
-  { label: "Warming up models", delay: 12000 },
-  { label: "Almost ready", delay: 22000 },
-];
+const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
-function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: () => void }) {
+function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone: () => void; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [phase, setPhase] = useState(0);
   const [dots, setDots] = useState("");
   const providerName = PROVIDERS.find((p) => p.id === provider)?.name ?? "AI";
   const icon = PROVIDER_ICONS[provider] ?? "🤖";
 
+  const CONFIGURING_STEPS = [
+    { label: t("ai.credentialsVerified"), delay: 0 },
+    { label: t("ai.updatingConfig"), delay: 2000 },
+    { label: t("ai.restartingGateway"), delay: 5000 },
+    { label: t("ai.warmingUp"), delay: 12000 },
+    { label: t("ai.almostReady"), delay: 22000 },
+  ];
+
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const timers = CONFIGURING_STEPS.map((step, i) =>
-      i > 0 ? setTimeout(() => setPhase(i), step.delay) : null
+    const timers = CONFIGURING_STEP_DELAYS.map((delay, i) =>
+      i > 0 ? setTimeout(() => setPhase(i), delay) : null
     );
-    const lastDelay = CONFIGURING_STEPS[CONFIGURING_STEPS.length - 1].delay;
+    const lastDelay = CONFIGURING_STEP_DELAYS[CONFIGURING_STEP_DELAYS.length - 1];
     const done = setTimeout(onDone, lastDelay + 10000);
     // Trap focus inside overlay
     overlayRef.current?.focus();
@@ -117,12 +120,12 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
       {/* Provider name */}
       <div className="text-center aimodels-fade-in" style={{ animationDelay: "0.3s" }}>
         <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
-          {phase === 0 ? "Connected!" : `Setting up ${providerName}`}
+          {phase === 0 ? t("connected") : t("ai.settingUp", { provider: providerName })}
         </h2>
         <p className="text-sm text-[var(--text-muted)]">
           {phase === 0
-            ? "Credentials verified successfully"
-            : `Configuring your AI assistant${dots}`}
+            ? t("ai.credentialsVerifiedDesc")
+            : `${t("ai.configuringAssistant")}${dots}`}
         </p>
       </div>
 
@@ -159,7 +162,7 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
       {/* Reassuring footer */}
       {phase >= 1 && (
         <p className="text-xs text-[var(--text-muted)] text-center mt-2 aimodels-step-enter">
-          This takes about 30 seconds. Please don&apos;t close this page.
+          {t("ai.pleaseDontClose")}
         </p>
       )}
     </div>
@@ -276,19 +279,9 @@ const PROVIDERS: Provider[] = [
 // Providers that use device code flow instead of redirect-based OAuth
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
-const DEVICE_AUTH_LABELS: Record<string, {
-  description: string;
-  button: string;
-  success: string;
-}> = {
-  openai: {
-    description: "Connect your ChatGPT Plus or Pro subscription. You\u2019ll get a code to enter on OpenAI\u2019s website.",
-    button: "Connect to GPT",
-    success: "GPT subscription connected! Continuing...",
-  },
-};
 
 export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
+  const { t } = useT();
   const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
   const [authMode, setAuthMode] = useState<AuthMode>("local");
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
@@ -458,17 +451,17 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   };
 
   const saveModel = async () => {
-    if (!selectedProvider) return showError("Please select a provider");
-    if (!apiKey.trim()) return showError("Please enter your key or token");
+    if (!selectedProvider) return showError(t("ai.selectProvider"));
+    if (!apiKey.trim()) return showError(t("ai.enterKey"));
     await saveProviderConfig(
       { provider: selectedProvider, apiKey: apiKey.trim(), authMode },
-      "AI model configured! Continuing...",
+      t("ai.configured"),
     );
   };
 
   const saveClawAI = async () => {
     setSelectedProvider("clawai");
-    await saveProviderConfig({ provider: "clawai" }, "ClawAI configured! Continuing...");
+    await saveProviderConfig({ provider: "clawai" }, t("ai.clawaiConfigured"));
   };
 
   // Save token received from any OAuth flow (device or redirect)
@@ -511,7 +504,18 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
 
   // --- Device auth flow (OpenAI, Google) ---
 
-  const currentDevice = DEVICE_AUTH_LABELS[selectedProvider ?? "openai"] ?? DEVICE_AUTH_LABELS.openai;
+  const deviceAuthLabels: Record<string, {
+    description: string;
+    button: string;
+    success: string;
+  }> = {
+    openai: {
+      description: t("ai.openaiConnectDesc"),
+      button: t("ai.openaiConnect"),
+      success: t("ai.openaiSuccess"),
+    },
+  };
+  const currentDevice = deviceAuthLabels[selectedProvider ?? "openai"] ?? deviceAuthLabels.openai;
 
   const pollDeviceAuth = useCallback(async (interval: number) => {
     pollControllerRef.current?.abort();
@@ -539,7 +543,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
       if (data.status === "complete" && data.access_token) {
         stopPolling();
         setDeviceSaving(true);
-        const successMsg = DEVICE_AUTH_LABELS[selectedProvider ?? "openai"]?.success
+        const successMsg = deviceAuthLabels[selectedProvider ?? "openai"]?.success
           ?? "Subscription connected! Continuing...";
         await saveOAuthToken(data, successMsg);
         return;
@@ -633,7 +637,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   };
 
   const exchangeCode = async () => {
-    if (!authCode.trim()) return showError(`Please paste the ${currentOAuth.inputLabel.toLowerCase()}`);
+    if (!authCode.trim()) return showError(t("ai.enterKey"));
 
     const parsedCode = parseAuthInput(authCode);
     if (!parsedCode) return showError("Could not extract authorization code from input");
@@ -667,6 +671,15 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     }
   };
 
+  const providerDesc: Record<string, string> = {
+    clawai: t("ai.clawaiDesc"),
+    anthropic: t("ai.claudeModels"),
+    openai: t("ai.gptModels"),
+    google: t("ai.geminiModels"),
+    openrouter: t("ai.multiProvider"),
+    ollama: t("ai.runLocally"),
+  };
+
   const selected = PROVIDERS.find((p) => p.id === selectedProvider);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
   const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
@@ -690,43 +703,28 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     inputPlaceholder: string;
   }> = {
     anthropic: {
-      button: "Connect with Claude",
-      description:
-        "Connect your Claude Pro or Max subscription. This will open claude.ai where you can authorize ClawBox to use your account.",
-      success: "Claude subscription connected! Continuing...",
-      steps: [
-        "Authorize in the browser tab that just opened.",
-        "Copy the authorization code shown after approval.",
-        "Paste it below.",
-      ],
-      inputLabel: "Authorization Code",
-      inputPlaceholder: "Paste code here...",
+      button: t("ai.anthropicConnect"),
+      description: t("ai.anthropicConnectDesc"),
+      success: t("ai.anthropicSuccess"),
+      steps: [t("ai.anthropicStep1"), t("ai.anthropicStep2"), t("ai.anthropicStep3")],
+      inputLabel: t("ai.anthropicInputLabel"),
+      inputPlaceholder: t("ai.anthropicInputPlaceholder"),
     },
     openai: {
-      button: "Connect to GPT",
-      description:
-        "Connect your ChatGPT Plus or Pro subscription. This will open OpenAI where you can authorize ClawBox to use your account.",
-      success: "GPT subscription connected! Continuing...",
-      steps: [
-        "Sign in and authorize in the browser tab that just opened.",
-        "After approval, the page will redirect to a URL that won\u2019t load \u2014 this is expected.",
-        "Copy the full URL from your browser\u2019s address bar and paste it below.",
-      ],
-      inputLabel: "Callback URL",
-      inputPlaceholder: "Paste the full URL here...",
+      button: t("ai.openaiConnect"),
+      description: t("ai.openaiConnectDesc"),
+      success: t("ai.openaiSuccess"),
+      steps: [t("ai.openaiStep1"), t("ai.openaiStep2"), t("ai.openaiStep3")],
+      inputLabel: t("ai.openaiInputLabel"),
+      inputPlaceholder: t("ai.openaiInputPlaceholder"),
     },
     google: {
-      button: "Connect to Gemini",
-      description:
-        "Connect your Google Gemini subscription. This will open Google where you can authorize ClawBox to use your account.",
-      success: "Gemini subscription connected! Continuing...",
-      steps: [
-        "Sign in with your Google account in the tab that just opened.",
-        "Copy the authorization code shown after approval.",
-        "Paste it below.",
-      ],
-      inputLabel: "Authorization Code",
-      inputPlaceholder: "Paste code here...",
+      button: t("ai.googleConnect"),
+      description: t("ai.googleConnectDesc"),
+      success: t("ai.googleSuccess"),
+      steps: [t("ai.googleStep1"), t("ai.googleStep2"), t("ai.googleStep3")],
+      inputLabel: t("ai.googleInputLabel"),
+      inputPlaceholder: t("ai.googleInputPlaceholder"),
     },
   };
   const DEFAULT_OAUTH_PROVIDER = "anthropic";
@@ -752,7 +750,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
         <div>
           <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
             <p className="text-xs text-[var(--text-secondary)] mb-2">
-              Open this URL:
+              {t("ai.openThisUrl")}
             </p>
             <a
               href={deviceUrl!}
@@ -769,7 +767,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
             >
               {deviceUrl}
             </a>
-            <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
             <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
               <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
                 {deviceCode}
@@ -787,24 +785,24 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                     document.execCommand("copy");
                     document.body.removeChild(ta);
                     const btn = document.getElementById("copy-code-btn");
-                    if (btn) { btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = "Copy"; }, 1500); }
+                    if (btn) { btn.textContent = t("copied"); setTimeout(() => { btn.textContent = t("copy"); }, 1500); }
                   } catch { /* ignore */ }
                 }}
                 id="copy-code-btn"
                 className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
               >
-                Copy
+                {t("copy")}
               </button>
             </div>
             <p className="mt-2 text-xs text-[var(--text-muted)]">
-              Code expires in 15 minutes
+              {t("ai.codeExpires")}
             </p>
           </div>
 
           {(devicePolling || deviceSaving) && (
             <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
               <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
-              {deviceSaving ? "Authorized! Connecting..." : "Waiting for authorization..."}
+              {deviceSaving ? t("ai.authorizedConnecting") : t("ai.waitingAuth")}
             </div>
           )}
 
@@ -813,7 +811,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
             onClick={startDeviceAuth}
             className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
           >
-            Get a new code
+            {t("ai.getNewCode")}
           </button>
         </div>
       )}
@@ -872,7 +870,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
             onClick={startOAuth}
             className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
           >
-            Restart authorization
+            {t("ai.restartAuth")}
           </button>
         </div>
       )}
@@ -887,15 +885,15 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     <div className="w-full max-w-[520px]">
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
         {configuring && (
-          <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} />
+          <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} t={t} />
         )}
         {/* Hide form content when configuring overlay is shown */}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         <h1 className="text-2xl font-bold font-display mb-2">
-          Connect AI Model
+          {t("ai.title")}
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
-          Select your AI provider and enter your API key or subscription token.
+          {t("ai.description")}
         </p>
 
         <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
@@ -934,11 +932,11 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
                     {provider.id === "clawai" && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
                     )}
                   </span>
                   <span className="block text-xs text-[var(--text-muted)]">
-                    {provider.description}
+                    {providerDesc[provider.id] ?? provider.description}
                   </span>
                 </div>
               </label>
@@ -949,7 +947,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
         {selected?.id === "clawai" && (
           <div className="mt-5">
             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              ClawAI is free and pre-configured. Just click below to get started — no API key or account needed.
+              {t("ai.clawaiHint")}
             </p>
           </div>
         )}
@@ -1004,9 +1002,9 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                         : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
                     }`}
                   >
-                    {opt.label}
+                    {opt.mode === "token" ? t("ai.apiKey") : opt.mode === "subscription" ? t("ai.subscription") : opt.mode === "local" && selected?.id === "clawai" ? t("ai.free") : opt.mode === "local" ? t("ai.local") : opt.label}
                     {opt.mode === "subscription" && selectedProvider === "anthropic" && (
-                      <span className="ml-1 px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
+                      <span className="ml-1 px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
                     )}
                   </button>
                 ))}
@@ -1025,7 +1023,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 transition-colors"
                   >
-                    {activeAuth.tokenUrlLabel || "Get Token"}
+                    {activeAuth.tokenUrlLabel === "Get API Key" ? t("ai.getApiKey") : t("ai.getToken")}
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
                   </a>
                 )}
@@ -1078,7 +1076,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
             >
               {saving && ButtonSpinner}
-              {saving ? "Configuring..." : embedded ? "Save" : "Use ClawAI"}
+              {saving ? t("ai.configuring") : embedded ? t("save") : t("ai.useClawai")}
             </button>
           ) : selected?.id === "ollama" ? (
             null /* Ollama has its own buttons above */
@@ -1095,7 +1093,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                   className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
                 >
                   {exchanging && ButtonSpinner}
-                  {exchanging ? "Connecting..." : embedded ? "Save" : "Save & Continue"}
+                  {exchanging ? t("connecting") : embedded ? t("save") : t("ai.saveAndContinue")}
                 </button>
               )
             )
@@ -1106,7 +1104,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               disabled={saving || !selectedProvider}
               className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
-              {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
+              {saving ? t("saving") : embedded ? t("save") : t("ai.saveAndContinue")}
             </button>
           )}
         </div>
@@ -1118,7 +1116,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               disabled={saving}
               className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
             >
-              Skip — use ClawAI for free
+              {t("ai.skipClawai")}
             </button>
           </div>
         )}

@@ -80,8 +80,8 @@ const nextConfig: NextConfig = {
               "img-src 'self' data: blob:",
               "font-src 'self'",
               "connect-src 'self' ws: wss:",
-              // Allow code-server iframe (same hostname, different port)
-              `frame-src 'self' http://*:${process.env.CODE_SERVER_PORT || "8080"}`,
+              // Allow code-server iframe and webapp iframes (same origin)
+              `frame-src 'self' http://*:${process.env.CODE_SERVER_PORT || "8080"} blob:`,
               "frame-ancestors 'self'",
             ].join("; "),
           },

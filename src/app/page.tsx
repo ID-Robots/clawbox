@@ -30,7 +30,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode" | "webapp";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -781,17 +781,19 @@ export default function ChromeDesktop() {
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
-      const meta = installedMeta[appId];
+      const meta = installedMeta[appId] as Record<string, string> | undefined;
       if (meta) {
+        const isWebapp = !!meta.webappUrl;
         const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
         installedAppDefs.push({
           id: `installed-${appId}`,
           name: meta.name,
           color: meta.color,
-          type: "installed",
+          type: isWebapp ? "webapp" : "installed",
+          url: isWebapp ? meta.webappUrl : undefined,
           pinned: false,
-          defaultWidth: 600,
-          defaultHeight: 400,
+          defaultWidth: isWebapp ? 800 : 600,
+          defaultHeight: isWebapp ? 600 : 400,
           storeApp,
         });
       }
@@ -905,6 +907,53 @@ export default function ChromeDesktop() {
     };
     window.addEventListener("clawbox:open-in-vscode", handler);
     return () => window.removeEventListener("clawbox:open-in-vscode", handler);
+  }, []);
+
+  // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
+  const openAppRef = useRef(openApp);
+  openAppRef.current = openApp;
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const res = await fetch("/setup-api/kv?key=ui:pending-action");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.value) {
+            // Clear the action immediately
+            fetch("/setup-api/kv", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key: "ui:pending-action", delete: true }),
+            }).catch(() => {});
+            try {
+              const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+              if (action.type === "open_app" && action.appId) {
+                openAppRef.current(action.appId);
+              } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
+                // Register a new custom webapp on the desktop
+                setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
+                setInstalledMeta(prev => ({
+                  ...prev,
+                  [action.appId]: {
+                    name: action.name,
+                    color: action.color || "#f97316",
+                    iconUrl: action.iconUrl || "",
+                    webappUrl: action.url,
+                  },
+                }));
+                setHiddenInstalledApps(prev => prev.filter(id => id !== action.appId));
+              } else if (action.type === "notify" && action.message) {
+                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+    };
+    const id = setInterval(poll, 2000);
+    return () => { active = false; clearInterval(id); };
   }, []);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
@@ -1028,6 +1077,15 @@ export default function ChromeDesktop() {
         return <VNCApp />;
       case "vscode":
         return <VSCodeApp filePath={meta?.filePath} />;
+      case "webapp":
+        return (
+          <iframe
+            src={app.url || "about:blank"}
+            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
+            sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+            title={app.name}
+          />
+        );
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
