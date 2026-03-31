@@ -1075,7 +1075,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               type="button"
               onClick={saveClawAI}
               disabled={saving}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2"
+              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
             >
               {saving && ButtonSpinner}
               {saving ? "Configuring..." : embedded ? "Save" : "Use ClawAI"}
@@ -1092,7 +1092,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                   type="button"
                   onClick={exchangeCode}
                   disabled={exchanging || !authCode.trim()}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2"
+                  className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
                 >
                   {exchanging && ButtonSpinner}
                   {exchanging ? "Connecting..." : embedded ? "Save" : "Save & Continue"}
@@ -1104,7 +1104,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               type="button"
               onClick={saveModel}
               disabled={saving || !selectedProvider}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
               {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
             </button>

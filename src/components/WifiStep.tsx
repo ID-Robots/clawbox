@@ -26,9 +26,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     type: "success" | "error";
     message: string;
   } | null>(null);
+  const [ethDetected, setEthDetected] = useState<boolean | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    // Check for ethernet on mount
+    fetch("/setup-api/wifi/ethernet")
+      .then((r) => r.json())
+      .then((data) => setEthDetected(data.connected === true))
+      .catch(() => setEthDetected(false));
     return () => {
       controllerRef.current?.abort();
     };
@@ -122,6 +128,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
   };
 
+  const skipEthernet = () => {
+    fetch("/setup-api/wifi/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skip: true }),
+    }).catch(() => {});
+    onNext();
+  };
+
   const showForm = selectedNetwork || manualMode;
 
   return (
@@ -137,38 +152,50 @@ export default function WifiStep({ onNext }: WifiStepProps) {
             priority
           />
           <h1 className="text-2xl font-bold font-display text-center">
-            Welcome
+            Welcome to ClawBox
           </h1>
+          <p className="text-xs text-[var(--text-muted)] text-center">
+            Your Own AI, Running 24/7
+          </p>
         </div>
         <p className="text-[var(--text-secondary)] mb-6 leading-relaxed text-center">
-          Connect ClawBox to the internet.
+          Connect to the internet to sync your messaging apps and download the latest updates.
         </p>
 
         {/* Initial choice: Ethernet or WiFi */}
         {!showForm && !showWifiList && (
-          <div className="flex flex-col sm:flex-row gap-3 mt-3">
-            <button
-              type="button"
-              onClick={() => {
-                fetch("/setup-api/wifi/connect", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ skip: true }),
-                }).catch(() => {});
-                onNext();
-              }}
-              className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-            >
-              Ethernet <span className="ml-1.5 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide rounded bg-white/15 text-white/80 leading-none">Recommended</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => { setShowWifiList(true); fetchNetworks(); }}
-              className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 transition"
-            >
-              Connect to WiFi
-            </button>
-          </div>
+          <>
+            {/* Auto-detected ethernet banner */}
+            {ethDetected && (
+              <div className="flex items-center gap-3 px-4 py-3 mb-4 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc] animate-pulse" />
+                </span>
+                <span className="text-sm text-[#00e5cc]">Ethernet cable detected</span>
+              </div>
+            )}
+            <div className="flex flex-col sm:flex-row gap-3 mt-3">
+              <button
+                type="button"
+                onClick={skipEthernet}
+                className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2"
+              >
+                <span className="flex items-center gap-1.5">
+                  {/* Status dot */}
+                  <span className={`inline-block w-2 h-2 rounded-full ${ethDetected ? "bg-[#00e5cc]" : "bg-gray-400"}`} />
+                  Ethernet
+                </span>
+                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">Recommended</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowWifiList(true); fetchNetworks(); }}
+                className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
+              >
+                Connect to WiFi
+              </button>
+            </div>
+          </>
         )}
 
         {/* Network list (shown after clicking Connect to WiFi) */}
@@ -378,7 +405,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 type="button"
                 onClick={connectWifi}
                 disabled={connecting || !activeSsid}
-                className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
+                className="px-7 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-105 active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
               >
                 {connecting ? "Connecting..." : "Connect"}
               </button>

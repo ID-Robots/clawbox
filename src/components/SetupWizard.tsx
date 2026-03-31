@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import ProgressBar from "./ProgressBar";
@@ -41,6 +41,133 @@ function applyStatusData(
   }
 }
 
+/* ── Power menu ── */
+
+function PowerMenu({ onClose }: { onClose: () => void }) {
+  const [confirming, setConfirming] = useState<"restart" | "shutdown" | null>(null);
+  const [acting, setActing] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  const execute = async (action: "restart" | "shutdown") => {
+    setActing(true);
+    try {
+      await fetch("/setup-api/system/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    } catch {}
+  };
+
+  return (
+    <div ref={ref} className="absolute right-0 top-full mt-1 min-w-[160px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 overflow-hidden">
+      {acting ? (
+        <div className="flex items-center gap-2 px-4 py-3 text-xs text-[var(--text-secondary)]">
+          <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+          {confirming === "shutdown" ? "Shutting down..." : "Restarting..."}
+        </div>
+      ) : confirming ? (
+        <div className="p-3">
+          <p className="text-xs text-[var(--text-secondary)] mb-2">
+            {confirming === "shutdown" ? "Shut down device?" : "Restart device?"}
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => execute(confirming)}
+              className="flex-1 px-3 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded text-xs font-semibold cursor-pointer hover:bg-red-500/30 transition-colors"
+            >
+              Confirm
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(null)}
+              className="flex-1 px-3 py-1.5 bg-[var(--bg-deep)] text-[var(--text-secondary)] border border-[var(--border-subtle)] rounded text-xs cursor-pointer hover:bg-[var(--bg-surface)] transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => setConfirming("restart")}
+            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs text-[var(--text-secondary)] bg-transparent border-none cursor-pointer hover:bg-[var(--bg-deep)] transition-colors text-left"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>restart_alt</span>
+            Restart
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming("shutdown")}
+            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs text-red-400 bg-transparent border-none cursor-pointer hover:bg-[var(--bg-deep)] transition-colors text-left"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>power_settings_new</span>
+            Shut Down
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── Help popover ── */
+
+function HelpPopover({ step, onClose }: { step: number; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  const tips: Record<number, { title: string; body: string }> = {
+    1: {
+      title: "Connecting to the Internet",
+      body: "Plug in an Ethernet cable for the easiest setup — ClawBox will detect it automatically. Or choose WiFi to scan for nearby networks. If your network doesn't appear, tap \"Other network\" to enter the name manually.",
+    },
+    2: {
+      title: "System Update",
+      body: "ClawBox is checking for the latest software. This runs automatically — just wait for it to finish. If it fails, check your internet connection and try again.",
+    },
+    3: {
+      title: "Device Security",
+      body: "Set a password to protect your ClawBox dashboard. You'll need this password to access ClawBox from your browser. Choose something memorable but secure.",
+    },
+    4: {
+      title: "AI Model Setup",
+      body: "Choose an AI provider to power your assistant. ClawAI is free and works instantly. Other providers require an API key or subscription from their website.",
+    },
+    5: {
+      title: "Telegram Bot",
+      body: "Connect a Telegram bot to chat with your AI assistant from anywhere. Open Telegram, find @BotFather, create a new bot, and paste the token here.",
+    },
+  };
+
+  const tip = tips[step] ?? tips[1];
+
+  return (
+    <div ref={ref} className="absolute right-0 top-full mt-1 w-[280px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 p-4">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1.5">{tip.title}</h3>
+      <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{tip.body}</p>
+    </div>
+  );
+}
+
+/* ── Main wizard ── */
+
 interface SetupWizardProps {
   onComplete?: () => void;
 }
@@ -50,6 +177,8 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
   const [isLoading, setIsLoading] = useState(true);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [showPower, setShowPower] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -120,6 +249,30 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
           </div>
         </Link>
         <ProgressBar currentStep={currentStep} />
+        <div className="flex items-center gap-1 shrink-0">
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => { setShowHelp((v) => !v); setShowPower(false); }}
+              aria-label="Need help?"
+              className="flex items-center justify-center w-8 h-8 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help_outline</span>
+            </button>
+            {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} />}
+          </div>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => { setShowPower((v) => !v); setShowHelp(false); }}
+              aria-label="Power options"
+              className="flex items-center justify-center w-8 h-8 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
+            </button>
+            {showPower && <PowerMenu onClose={() => setShowPower(false)} />}
+          </div>
+        </div>
       </header>
 
       <main
