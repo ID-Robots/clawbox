@@ -366,6 +366,31 @@ export async function restartAP(): Promise<void> {
   await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
 }
 
+/** Check if any Ethernet interface has a physical link (cable plugged in). */
+export async function getEthernetStatus(): Promise<{ connected: boolean; iface: string | null }> {
+  try {
+    const { stdout } = await exec("nmcli", [
+      "-t", "-f", "DEVICE,TYPE,STATE",
+      "device", "status",
+    ], { timeout: NETWORK_TIMEOUT });
+    for (const line of stdout.split("\n")) {
+      const [dev, type, state] = line.split(":");
+      if (type === "ethernet" && state?.includes("connected")) {
+        return { connected: true, iface: dev };
+      }
+    }
+    // Check for physical link even if not connected
+    const { stdout: links } = await exec("ip", ["link", "show"], { timeout: NETWORK_TIMEOUT });
+    const ethMatch = links.match(/\d+:\s+(eth\w+|enp\w+|eno\w+).*state UP/);
+    if (ethMatch) {
+      return { connected: true, iface: ethMatch[1] };
+    }
+    return { connected: false, iface: null };
+  } catch {
+    return { connected: false, iface: null };
+  }
+}
+
 export async function getWifiStatus(): Promise<Record<string, string>> {
   try {
     const { stdout } = await exec("nmcli", [

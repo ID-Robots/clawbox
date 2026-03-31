@@ -413,7 +413,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           borderBottom: '1px solid rgba(249,115,22,0.15)',
           flexShrink: 0,
         }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, opacity: 0.7 }} />
+          <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, objectFit: 'contain', opacity: 0.7 }} />
           <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>Chat</span>
           {status === 'connecting' && (
             <div style={{
@@ -473,7 +473,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
         {status === 'connected' && messages.length === 0 && !streaming && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
-            <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, opacity: 0.4 }} />
+            <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
             <span>Say something!</span>
           </div>
         )}

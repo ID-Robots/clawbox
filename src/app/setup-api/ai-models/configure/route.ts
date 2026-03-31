@@ -21,6 +21,10 @@ const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const OLLAMA_CONTEXT_WINDOW = 16384;
 const OLLAMA_MAX_TOKENS = 8192;
 
+const CLAWAI_API_KEY = "sk-d79a8071b0634ff7a809b1abe3d963f3";
+const CLAWAI_CONTEXT_WINDOW = 65536;
+const CLAWAI_MAX_TOKENS = 8192;
+
 interface ProviderConfig {
   defaultModel: string;
   profileKey: string;
@@ -29,6 +33,10 @@ interface ProviderConfig {
 }
 
 const PROVIDERS: Record<string, ProviderConfig> = {
+  clawai: {
+    defaultModel: "deepseek/deepseek-chat",
+    profileKey: "deepseek:default",
+  },
   anthropic: {
     defaultModel: "anthropic/claude-opus-4-6",
     profileKey: "anthropic:default",
@@ -128,9 +136,10 @@ export async function POST(request: Request) {
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
-    if (!provider || (!apiKey && !isOllama)) {
+    const isClawAI = provider === "clawai";
+    if (!provider || (!apiKey && !isOllama && !isClawAI)) {
       return NextResponse.json(
-        { error: "Provider is required; API key required for non-Ollama providers" },
+        { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
       );
     }
@@ -168,7 +177,14 @@ export async function POST(request: Request) {
       } catch {
         authProfiles = { version: 1, profiles: {} };
       }
-      if (isOllama) {
+      if (isClawAI) {
+        // ClawAI uses a pre-configured DeepSeek API key
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: ocProvider,
+          key: CLAWAI_API_KEY,
+        };
+      } else if (isOllama) {
         // Ollama runs locally — use a dummy api_key entry
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
@@ -213,23 +229,23 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile in main config
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      `auth.profiles.${config.profileKey}`,
-      JSON.stringify(isOllama
-        ? { provider: ocProvider, mode: "api_key" }
-        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
-      "--json",
-    ]);
-
-    // 4. Set primary model
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.model.primary",
-      config.defaultModel,
+    // 3. Set auth profile and primary model in parallel
+    await Promise.all([
+      runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        `auth.profiles.${config.profileKey}`,
+        JSON.stringify((isOllama || isClawAI)
+          ? { provider: ocProvider, mode: "api_key" }
+          : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+        "--json",
+      ]),
+      runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "agents.defaults.model.primary",
+        config.defaultModel,
+      ]),
     ]);
 
     // 4c. Local device gateway setup: disable gateway auth (no HTTPS for browser
@@ -261,11 +277,33 @@ export async function POST(request: Request) {
       ai_model_configured_at: new Date().toISOString(),
     });
 
-    // 7. For Ollama, define the model in openclaw.json with a capped contextWindow
-    // and set models.mode=replace so the gateway uses our definition instead of
-    // auto-detecting the native context length from Ollama (which would be 128K).
-    // Also ensure the Ollama systemd service is optimized for 8GB RAM.
-    if (isOllama) {
+    // 7. For ClawAI (DeepSeek) or Ollama, define a custom provider in openclaw.json
+    // and set models.mode=replace so the gateway uses our definition.
+    if (isClawAI) {
+      const providerDef = JSON.stringify({
+        baseUrl: "https://api.deepseek.com",
+        api: "openai-completions",
+        apiKey: CLAWAI_API_KEY,
+        models: [{
+          id: "deepseek-chat",
+          name: "DeepSeek V3",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: CLAWAI_CONTEXT_WINDOW,
+          maxTokens: CLAWAI_MAX_TOKENS,
+        }],
+      });
+      await Promise.all([
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.providers.deepseek", providerDef, "--json",
+        ]),
+        runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "replace",
+        ]),
+      ]);
+      console.log(`[AI Config] Set ClawAI (DeepSeek) provider in openclaw.json (context=${CLAWAI_CONTEXT_WINDOW}, mode=replace)`);
+    } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
         baseUrl: "http://127.0.0.1:11434",
@@ -298,7 +336,7 @@ export async function POST(request: Request) {
       }
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else {
-      // Switching away from Ollama — reset models.mode so cloud providers
+      // Switching away from Ollama/ClawAI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
       try {
         await runCommand(OPENCLAW_BIN, [

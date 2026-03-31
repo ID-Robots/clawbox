@@ -35,6 +35,7 @@ const ButtonSpinner = (
 );
 
 const PROVIDER_ICONS: Record<string, string> = {
+  clawai: "🐾",
   anthropic: "🧠",
   openai: "⚡",
   google: "✨",
@@ -167,6 +168,19 @@ function ConfiguringOverlay({ provider, onDone }: { provider: string; onDone: ()
 
 const PROVIDERS: Provider[] = [
   {
+    id: "clawai",
+    name: "ClawAI",
+    description: "Powered by DeepSeek — free, no setup needed",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Free",
+        placeholder: "",
+        hint: "Pre-configured and ready to use. No API key or account needed.",
+      },
+    ],
+  },
+  {
     id: "anthropic",
     name: "Anthropic Claude",
     description: "Claude models by Anthropic",
@@ -275,8 +289,8 @@ const DEVICE_AUTH_LABELS: Record<string, {
 };
 
 export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
-  const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
-  const [authMode, setAuthMode] = useState<AuthMode>("subscription");
+  const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
+  const [authMode, setAuthMode] = useState<AuthMode>("local");
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -412,10 +426,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     if (id === "ollama") checkOllamaStatus();
   };
 
-  const saveModel = async () => {
-    if (!selectedProvider) return showError("Please select a provider");
-    if (!apiKey.trim()) return showError("Please enter your key or token");
-
+  const saveProviderConfig = async (payload: Record<string, unknown>, successMessage: string) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -426,7 +437,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: selectedProvider, apiKey: apiKey.trim(), authMode }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -434,7 +445,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        showSuccessAndContinue("AI model configured! Continuing...");
+        showSuccessAndContinue(successMessage);
       } else {
         showError(data.error || "Failed to configure");
       }
@@ -444,6 +455,20 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     } finally {
       if (!controller.signal.aborted) setSaving(false);
     }
+  };
+
+  const saveModel = async () => {
+    if (!selectedProvider) return showError("Please select a provider");
+    if (!apiKey.trim()) return showError("Please enter your key or token");
+    await saveProviderConfig(
+      { provider: selectedProvider, apiKey: apiKey.trim(), authMode },
+      "AI model configured! Continuing...",
+    );
+  };
+
+  const saveClawAI = async () => {
+    setSelectedProvider("clawai");
+    await saveProviderConfig({ provider: "clawai" }, "ClawAI configured! Continuing...");
   };
 
   // Save token received from any OAuth flow (device or redirect)
@@ -908,7 +933,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "anthropic" && (
+                    {provider.id === "clawai" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
                     )}
                   </span>
@@ -920,6 +945,14 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
             );
           })}
         </div>
+
+        {selected?.id === "clawai" && (
+          <div className="mt-5">
+            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+              ClawAI is free and pre-configured. Just click below to get started — no API key or account needed.
+            </p>
+          </div>
+        )}
 
         {selected?.id === "ollama" && (
           <div className="mt-5 space-y-4">
@@ -946,7 +979,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
           </div>
         )}
 
-        {selected && selected.id !== "ollama" && activeAuth && (
+        {selected && selected.id !== "ollama" && selected.id !== "clawai" && activeAuth && (
           <div className="mt-5">
             {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -1037,7 +1070,17 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
         )}
 
         <div className="flex items-center gap-3 mt-5">
-          {selected?.id === "ollama" ? (
+          {selected?.id === "clawai" ? (
+            <button
+              type="button"
+              onClick={saveClawAI}
+              disabled={saving}
+              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+            >
+              {saving && ButtonSpinner}
+              {saving ? "Configuring..." : embedded ? "Save" : "Use ClawAI"}
+            </button>
+          ) : selected?.id === "ollama" ? (
             null /* Ollama has its own buttons above */
           ) : isSubscription ? (
             useDeviceAuth ? (
@@ -1049,7 +1092,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                   type="button"
                   onClick={exchangeCode}
                   disabled={exchanging || !authCode.trim()}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2"
+                  className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
                 >
                   {exchanging && ButtonSpinner}
                   {exchanging ? "Connecting..." : embedded ? "Save" : "Save & Continue"}
@@ -1061,12 +1104,24 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               type="button"
               onClick={saveModel}
               disabled={saving || !selectedProvider}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
               {saving ? "Saving..." : embedded ? "Save" : "Save & Continue"}
             </button>
           )}
         </div>
+        {!embedded && selectedProvider !== "clawai" && (
+          <div className="mt-3 text-center">
+            <button
+              type="button"
+              onClick={saveClawAI}
+              disabled={saving}
+              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
+            >
+              Skip — use ClawAI for free
+            </button>
+          </div>
+        )}
         </div>
       </div>
     </div>
