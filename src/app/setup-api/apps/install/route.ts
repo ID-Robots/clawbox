@@ -88,8 +88,14 @@ export async function POST(req: Request) {
     }
 
     // Reload the OpenClaw gateway so it picks up the new skill
+    let reloadError: string | undefined;
     if (clawhubResult.success) {
-      await reloadGateway();
+      try {
+        await reloadGateway();
+      } catch (err) {
+        reloadError = err instanceof Error ? err.message : "Gateway reload failed";
+        console.warn("[apps/install] Gateway reload failed after successful install:", reloadError);
+      }
     }
 
     return NextResponse.json({
@@ -98,8 +104,10 @@ export async function POST(req: Request) {
       iconSaved,
       iconPath: iconSaved ? `/setup-api/apps/icon/${appId}` : null,
       clawhub: clawhubResult,
+      reloadError,
     });
-  } catch {
+  } catch (err) {
+    console.error("[apps/install] Install failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Install failed" }, { status: 500 });
   }
 }

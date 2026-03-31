@@ -20,19 +20,18 @@ export async function POST(req: Request) {
     if (!skillDir.startsWith(skillRoot + path.sep)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
-    try {
-      await fs.rm(skillDir, { recursive: true, force: true });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: `Failed to remove skill: ${msg}` }, { status: 500 });
-    }
+    await fs.rm(skillDir, { recursive: true, force: true });
 
     // Remove cached icon
     const iconPath = path.join(HOME, "clawbox", "data", "icons", `${appId}.png`);
     await fs.rm(iconPath, { force: true }).catch(() => {});
 
     // Reload gateway so agent drops the skill
-    await reloadGateway();
+    try {
+      await reloadGateway();
+    } catch (err) {
+      console.warn("[uninstall] reloadGateway failed:", err instanceof Error ? err.message : err);
+    }
 
     return NextResponse.json({ ok: true, appId });
   } catch (err) {

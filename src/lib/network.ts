@@ -1,5 +1,7 @@
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
+import fs from "fs";
+import path from "path";
 
 const exec = promisify(execFile);
 const IFACE = process.env.NETWORK_INTERFACE || "wlP1p1s0";
@@ -21,11 +23,109 @@ const SCAN_CACHE_TTL = 30_000; // 30 seconds
 // Background scan state
 let scanInProgress = false;
 
-export interface WifiNetwork {
-  ssid: string;
-  signal: number;
-  security: string;
-  freq: string;
+export type { WifiNetwork } from "./wifi-utils";
+import type { WifiNetwork } from "./wifi-utils";
+
+/** Deduplicate networks by SSID, keeping the strongest signal for each. */
+function deduplicateNetworks(networks: WifiNetwork[]): WifiNetwork[] {
+  const deduped = new Map<string, WifiNetwork>();
+  for (const n of networks) {
+    if (!n.ssid) continue;
+    if (!deduped.has(n.ssid) || deduped.get(n.ssid)!.signal < n.signal) {
+      deduped.set(n.ssid, n);
+    }
+  }
+  return Array.from(deduped.values()).sort((a, b) => b.signal - a.signal);
+}
+
+const SCAN_CACHE_PATH = path.join(
+  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+  "data",
+  "wifi-scan-cache.json"
+);
+
+let cachedFileScan: { networks: WifiNetwork[]; mtime: number } | null = null;
+
+/** Read the pre-AP scan cache written by start-ap.sh */
+export function getCachedScan(): WifiNetwork[] {
+  try {
+    const stat = fs.statSync(SCAN_CACHE_PATH);
+    const mtime = stat.mtimeMs;
+    if (cachedFileScan && cachedFileScan.mtime === mtime) {
+      return cachedFileScan.networks;
+    }
+    const raw = fs.readFileSync(SCAN_CACHE_PATH, "utf-8");
+    const networks = deduplicateNetworks(JSON.parse(raw));
+    cachedFileScan = { networks, mtime };
+    return networks;
+  } catch {
+    return [];
+  }
+}
+
+/** Scan using `iw scan` — works even in AP mode without tearing down the hotspot. */
+export async function scanWifiLive(): Promise<WifiNetwork[]> {
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      const proc = spawn("/usr/sbin/iw", ["dev", IFACE, "scan"]);
+      let out = "";
+      let err = "";
+      const timer = setTimeout(() => { proc.kill(); reject(new Error("iw scan timed out")); }, NETWORK_TIMEOUT);
+      proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+      proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0 && !out) reject(new Error(`iw scan exited ${code}: ${err}`));
+        else resolve(out);
+      });
+      proc.on("error", (e) => { clearTimeout(timer); reject(e); });
+    });
+
+    const networks: WifiNetwork[] = [];
+    let current: Partial<WifiNetwork> = {};
+
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("BSS ")) {
+        // New BSS entry — push the previous one if valid
+        if (current.ssid) {
+          networks.push({
+            ssid: current.ssid,
+            signal: current.signal ?? 0,
+            security: current.security ?? "",
+            freq: current.freq ?? "",
+          });
+        }
+        current = { security: "" };
+      }
+      const trimmed = line.trim();
+      if (trimmed.startsWith("SSID: ")) {
+        current.ssid = trimmed.slice(6);
+      } else if (trimmed.startsWith("signal: ")) {
+        // "signal: -45.00 dBm" → convert to 0-100 scale
+        const dbm = parseFloat(trimmed.slice(8));
+        current.signal = Math.max(0, Math.min(100, 2 * (dbm + 100)));
+      } else if (trimmed.startsWith("freq: ")) {
+        const f = parseInt(trimmed.slice(6), 10);
+        current.freq = f >= 5000 ? "5 GHz" : "2.4 GHz";
+      } else if (trimmed.startsWith("RSN:") || trimmed.startsWith("WPA:")) {
+        current.security = current.security || "WPA2";
+      }
+    }
+    // Push last entry
+    if (current.ssid) {
+      networks.push({
+        ssid: current.ssid,
+        signal: current.signal ?? 0,
+        security: current.security ?? "",
+        freq: current.freq ?? "",
+      });
+    }
+
+    return deduplicateNetworks(networks.filter((n) => n.ssid && n.ssid !== "ClawBox-Setup"));
+  } catch (err) {
+    console.error("[WiFi] iw scan failed:", err instanceof Error ? err.message : err);
+    return [];
+  }
 }
 
 async function isAPMode(): Promise<boolean> {
@@ -169,15 +269,7 @@ async function doScan(): Promise<WifiNetwork[]> {
         (n): n is WifiNetwork => n !== null && n.ssid !== "ClawBox-Setup"
       );
 
-    // Deduplicate by SSID, keep strongest signal
-    const deduped = new Map<string, WifiNetwork>();
-    for (const n of networks) {
-      if (!deduped.has(n.ssid) || deduped.get(n.ssid)!.signal < n.signal) {
-        deduped.set(n.ssid, n);
-      }
-    }
-
-    return Array.from(deduped.values()).sort((a, b) => b.signal - a.signal);
+    return deduplicateNetworks(networks);
   } finally {
     if (wasAP) {
       try {
@@ -203,12 +295,31 @@ export async function switchToClient(
     ? ["device", "wifi", "connect", ssid, "password", password, "ifname", IFACE]
     : ["device", "wifi", "connect", ssid, "ifname", IFACE];
 
-  try {
-    const { stdout } = await exec("nmcli", args, { timeout: NETWORK_TIMEOUT });
-    console.log(`[WiFi] Connected: ${stdout.trim()}`);
-    return { message: stdout.trim() };
-  } catch (err) {
-    console.error("[WiFi] Connection failed, restoring AP:", err instanceof Error ? err.message : err);
+  // After leaving AP mode the interface needs time to discover nearby networks.
+  // Retry the connect with rescans in between — the first attempt often fails
+  // because the SSID hasn't been discovered yet.
+  const CONNECT_RETRIES = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= CONNECT_RETRIES; attempt++) {
+    await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    try {
+      const { stdout } = await exec("nmcli", args, { timeout: NETWORK_TIMEOUT });
+      console.log(`[WiFi] Connected on attempt ${attempt}: ${stdout.trim()}`);
+      return { message: stdout.trim() };
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[WiFi] Connect attempt ${attempt}/${CONNECT_RETRIES} failed: ${msg}`);
+      if (attempt < CONNECT_RETRIES) {
+        // Wait a bit longer before next retry
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+  }
+
+  console.error("[WiFi] All connect attempts failed, restoring AP:", lastErr instanceof Error ? lastErr.message : lastErr);
 
     const AP_RESTORE_RETRIES = 3;
     const AP_RESTORE_BACKOFF = 3000;
@@ -247,8 +358,7 @@ export async function switchToClient(
       }
     }
 
-    throw err;
-  }
+    throw lastErr;
 }
 
 export async function restartAP(): Promise<void> {

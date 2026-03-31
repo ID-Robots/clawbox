@@ -73,6 +73,45 @@ wait_for_interface() {
   return 1
 }
 
+# ─── Pre-AP WiFi scan ────────────────────────────────────────────────────────
+# The interface is free right now (not in AP mode), so scan for nearby networks
+# and cache the results. The setup wizard uses this cached list so users can
+# pick their network from a list instead of typing the SSID manually.
+SCAN_CACHE="/home/clawbox/clawbox/data/wifi-scan-cache.json"
+echo "[AP] Scanning for nearby WiFi networks before starting AP..."
+nmcli device wifi rescan ifname "$IFACE" 2>/dev/null || true
+sleep 2
+SCAN_OUTPUT=$(nmcli -t -f SSID,SIGNAL,SECURITY,FREQ device wifi list ifname "$IFACE" 2>/dev/null || true)
+if [ -n "$SCAN_OUTPUT" ]; then
+  # Parse nmcli terse output into JSON array
+  echo "$SCAN_OUTPUT" | awk -F: '
+    BEGIN { printf "[" }
+    {
+      # Fields from right: FREQ, SECURITY, SIGNAL, rest is SSID
+      n = split($0, a, ":")
+      if (n < 4) next
+      freq = a[n]
+      sec = a[n-1]
+      sig = a[n-2]
+      ssid = a[1]
+      for (i = 2; i <= n-3; i++) ssid = ssid ":" a[i]
+      if (ssid == "" || ssid == "ClawBox-Setup") next
+      if (sig+0 != sig) next
+      if (count++) printf ","
+      # Escape JSON special chars in SSID
+      gsub(/\\/, "\\\\", ssid)
+      gsub(/"/, "\\\"", ssid)
+      printf "{\"ssid\":\"%s\",\"signal\":%s,\"security\":\"%s\",\"freq\":\"%s\"}", ssid, sig, sec, freq
+    }
+    END { print "]" }
+  ' > "$SCAN_CACHE"
+  NETWORK_COUNT=$(grep -o '"ssid"' "$SCAN_CACHE" 2>/dev/null | wc -l)
+  echo "[AP] Cached $NETWORK_COUNT networks to $SCAN_CACHE"
+else
+  echo "[]" > "$SCAN_CACHE"
+  echo "[AP] No networks found during pre-scan"
+fi
+
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
 nmcli connection delete "$CON_NAME" 2>/dev/null || true

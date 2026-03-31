@@ -58,7 +58,13 @@ export async function POST(req: Request) {
     // Write config file for the skill
     const writer = CONFIG_WRITERS[appId];
     if (writer) {
-      await writer(settings as Record<string, string | boolean>);
+      const sanitized: Record<string, string | boolean> = {};
+      for (const [k, v] of Object.entries(settings)) {
+        if (typeof v === "string" || typeof v === "boolean") sanitized[k] = v;
+        else if (typeof v === "number") sanitized[k] = String(v);
+        else return NextResponse.json({ error: `Invalid value type for key "${k}"` }, { status: 400 });
+      }
+      await writer(sanitized);
       return NextResponse.json({ ok: true, configWritten: true });
     }
 

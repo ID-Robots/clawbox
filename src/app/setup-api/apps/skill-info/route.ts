@@ -23,10 +23,17 @@ interface SkillInfo {
 
 let cachedSkills: SkillInfo[] | null = null;
 let cacheTime = 0;
+let inFlightLoad: Promise<SkillInfo[]> | null = null;
 const CACHE_TTL = 30_000;
 
 async function loadSkills(): Promise<SkillInfo[]> {
   if (cachedSkills && Date.now() - cacheTime < CACHE_TTL) return cachedSkills;
+  if (inFlightLoad) return inFlightLoad;
+  inFlightLoad = doLoadSkills().finally(() => { inFlightLoad = null; });
+  return inFlightLoad;
+}
+
+async function doLoadSkills(): Promise<SkillInfo[]> {
   try {
     const { stdout } = await execFileAsync(OPENCLAW_BIN, ["skills", "list", "--json"], {
       timeout: 15_000,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
 
 const DURATION_OPTIONS = [
@@ -16,6 +16,21 @@ export default function LoginPage() {
   const [duration, setDuration] = useState(43200);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  // If setup isn't complete, redirect to /setup instead of showing login
+  useEffect(() => {
+    fetch("/setup-api/setup/status")
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data && !data.setup_complete) {
+          window.location.href = "/setup";
+          return;
+        }
+        setReady(true);
+      })
+      .catch(() => setReady(true));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,6 +67,14 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-deep)" }}>
+        <div className="spinner" role="status" aria-label="Loading" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "var(--bg-deep)" }}>

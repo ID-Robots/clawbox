@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import StatusMessage from "./StatusMessage";
+import SignalBars from "./SignalBars";
+import type { WifiNetwork } from "@/lib/wifi-utils";
+import { signalToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
@@ -207,6 +210,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [wifiConnecting, setWifiConnecting] = useState(false);
   const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
+
+  const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[] | null>(null);
+  const [wifiScanning, setWifiScanning] = useState(false);
+  const [showManualWifi, setShowManualWifi] = useState(false);
+
+  const scanWifiNetworks = async () => {
+    setWifiScanning(true);
+    try {
+      const res = await fetch("/setup-api/wifi/scan?live=1", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setWifiNetworks(data.networks?.length > 0 ? data.networks : []);
+      }
+    } catch { /* ignored */ }
+    setWifiScanning(false);
+  };
+
+  const selectNetwork = (net: { ssid: string }) => {
+    setSsid(net.ssid);
+    setShowManualWifi(false);
+    setWifiPass("");
+    setWifiStatus(null);
+  };
 
   /* ── Hotspot ── */
   const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
@@ -604,57 +630,124 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
                 <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Connect to Network</label>
               </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Network Name (SSID)</label>
-                  <div className="relative">
-                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>router</span>
-                    <input
-                      type="text" value={ssid} onChange={e => setSsid(e.target.value)}
-                      placeholder="Enter WiFi network name"
-                      className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Password</label>
-                  <div className="relative">
-                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>lock</span>
-                    <input
-                      type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
-                      placeholder="Enter WiFi password"
-                      className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
-                      onKeyDown={e => e.key === "Enter" && connectWifi()}
-                    />
-                  </div>
-                </div>
-                {/* Hotspot warning */}
-                <div className="flex items-start gap-2.5 bg-amber-500/[0.07] border border-amber-500/15 rounded-xl px-3.5 py-3">
-                  <span className="material-symbols-rounded text-amber-400 shrink-0 mt-0.5" style={{ fontSize: 16 }}>warning</span>
-                  <p className="text-xs text-amber-300/70 leading-relaxed">
-                    Connecting to a WiFi network will <span className="text-amber-300 font-medium">stop the ClawBox-Setup hotspot</span>. Make sure you can reach the device on the new network before connecting.
-                  </p>
-                </div>
 
+              {/* Network list */}
+              {wifiNetworks === null && !ssid && (
                 <button
-                  onClick={connectWifi}
-                  disabled={wifiConnecting || !ssid.trim()}
-                  className="w-full py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  onClick={scanWifiNetworks}
+                  disabled={wifiScanning}
+                  className="w-full py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[var(--text-primary)] rounded-xl text-sm font-medium cursor-pointer transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  {wifiConnecting ? (
-                    <>
-                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
-                      Connecting...
-                    </>
+                  {wifiScanning ? (
+                    <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> Scanning...</>
                   ) : (
-                    <>
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
-                      Connect
-                    </>
+                    <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>wifi_find</span> Scan for Networks</>
                   )}
                 </button>
-                {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
-              </div>
+              )}
+
+              {wifiNetworks !== null && !ssid && (
+                <>
+                  <div className="border border-white/[0.08] rounded-xl overflow-hidden mb-3">
+                    <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06]">
+                      <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Available Networks</span>
+                      <button
+                        onClick={scanWifiNetworks}
+                        disabled={wifiScanning}
+                        className="flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5 disabled:opacity-50 transition-colors"
+                      >
+                        <span className={`material-symbols-rounded ${wifiScanning ? "animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
+                        {wifiScanning ? "Scanning..." : "Refresh"}
+                      </button>
+                    </div>
+                    {wifiNetworks.length > 0 ? (
+                      <div className="max-h-[200px] overflow-y-auto">
+                        {wifiNetworks.map((net) => (
+                          <button
+                            key={net.ssid}
+                            onClick={() => selectNetwork(net)}
+                            className="w-full flex items-center gap-3 px-3.5 py-2.5 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
+                          >
+                            <SignalBars level={signalToLevel(net.signal)} />
+                            <span className="flex-1 text-sm text-[var(--text-primary)] truncate">{net.ssid}</span>
+                            {net.security && net.security !== "--" && (
+                              <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 14 }}>lock</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[var(--text-muted)] px-3.5 py-3">No networks found.</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setShowManualWifi(true)}
+                    className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left bg-transparent border border-white/[0.08] rounded-xl cursor-pointer hover:bg-white/[0.04] transition-colors"
+                  >
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 16 }}>edit</span>
+                    <span className="text-sm text-[var(--text-secondary)]">Other network...</span>
+                  </button>
+                </>
+              )}
+
+              {/* Connect form (shown after selecting a network or manual entry) */}
+              {(ssid !== "" || showManualWifi) && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Network Name (SSID)</label>
+                    <div className="relative">
+                      <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>router</span>
+                      <input
+                        type="text" value={ssid} onChange={e => setSsid(e.target.value)}
+                        placeholder="Enter WiFi network name"
+                        readOnly={!showManualWifi && wifiNetworks !== null}
+                        className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Password</label>
+                    <div className="relative">
+                      <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>lock</span>
+                      <input
+                        type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
+                        placeholder="Enter WiFi password"
+                        autoFocus
+                        className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                        onKeyDown={e => e.key === "Enter" && connectWifi()}
+                      />
+                    </div>
+                  </div>
+                  {/* Hotspot warning */}
+                  <div className="flex items-start gap-2.5 bg-amber-500/[0.07] border border-amber-500/15 rounded-xl px-3.5 py-3">
+                    <span className="material-symbols-rounded text-amber-400 shrink-0 mt-0.5" style={{ fontSize: 16 }}>warning</span>
+                    <p className="text-xs text-amber-300/70 leading-relaxed">
+                      Connecting to a WiFi network will <span className="text-amber-300 font-medium">stop the ClawBox-Setup hotspot</span>. Make sure you can reach the device on the new network before connecting.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={connectWifi}
+                      disabled={wifiConnecting || !ssid.trim()}
+                      className="flex-1 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                    >
+                      {wifiConnecting ? (
+                        <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> Connecting...</>
+                      ) : (
+                        <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span> Connect</>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => { setSsid(""); setWifiPass(""); setWifiStatus(null); setShowManualWifi(false); }}
+                      className="py-2.5 px-4 bg-transparent border border-white/[0.08] text-[var(--text-secondary)] rounded-xl text-sm cursor-pointer hover:bg-white/[0.04] transition-all"
+                    >
+                      Back
+                    </button>
+                  </div>
+                  {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+                </div>
+              )}
             </div>
 
           </div>

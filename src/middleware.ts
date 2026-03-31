@@ -51,6 +51,8 @@ const PUBLIC_EXACT = new Set([
   "/favicon.svg",
   "/favicon-32.png",
   "/clawbox-crab.png",
+  "/clawbox-icon.png",
+  "/clawbox-logo.png",
 ]);
 
 function isPublicPath(pathname: string): boolean {
