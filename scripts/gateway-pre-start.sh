@@ -38,3 +38,8 @@ fi
 "$OPENCLAW_BIN" config set gateway.bind lan 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.token clawbox 2>/dev/null || true
+
+# Register ClawBox MCP server (only if not already set)
+if ! python3 -c "import json; c=json.load(open('$OPENCLAW_CONFIG')); assert c.get('mcp',{}).get('servers',{}).get('clawbox',{}).get('command')" 2>/dev/null; then
+  "$OPENCLAW_BIN" config set mcp.servers.clawbox '{"command":"/home/clawbox/.bun/bin/bun","args":["run","/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],"env":{"CLAWBOX_API_BASE":"http://127.0.0.1:80"}}' --json 2>/dev/null || true
+fi
