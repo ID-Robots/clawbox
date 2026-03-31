@@ -170,7 +170,7 @@ const PROVIDERS: Provider[] = [
   {
     id: "clawai",
     name: "ClawAI",
-    description: "Powered by DeepSeek — free, no setup needed",
+    description: "Free, no setup needed",
     authOptions: [
       {
         mode: "local" as AuthMode,
