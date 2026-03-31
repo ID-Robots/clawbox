@@ -136,7 +136,7 @@ function HelpPopover({ step, onClose }: { step: number; onClose: () => void }) {
   const tips: Record<number, { title: string; body: string }> = {
     1: {
       title: "Connecting to the Internet",
-      body: "Plug in an Ethernet cable for the easiest setup — ClawBox will detect it automatically. Or choose WiFi to scan for nearby networks. If your network doesn't appear, tap \"Other network\" to enter the name manually.",
+      body: "Select your country, then plug in an Ethernet cable for the easiest setup — ClawBox will detect it automatically. Or choose WiFi to scan for nearby networks. If your network doesn't appear, tap \"Other network\" to enter the name manually.",
     },
     2: {
       title: "System Update",

@@ -213,6 +213,16 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // Idle state — show trigger button or "up to date"
   const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
 
+  // Auto-advance if already up to date — show brief flash then continue
+  const autoAdvancedRef = useRef(false);
+  useEffect(() => {
+    if (isIdle && !starting && isUpToDate && !autoAdvancedRef.current) {
+      autoAdvancedRef.current = true;
+      const timer = setTimeout(() => onNext(), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [isIdle, starting, isUpToDate, onNext]);
+
   if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]">
