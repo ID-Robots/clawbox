@@ -167,14 +167,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           <>
             {/* Auto-detected ethernet banner */}
             {ethDetected && (
-              <div className="flex items-center gap-3 px-4 py-3 mb-4 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
+              <div className="flex items-center gap-3 px-4 py-3 mt-2 mb-4 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
                   <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc] animate-pulse" />
                 </span>
                 <span className="text-sm text-[#00e5cc]">Ethernet cable detected</span>
               </div>
             )}
-            <div className="flex flex-col sm:flex-row gap-3 mt-3">
+            <div className="flex flex-col sm:flex-row gap-3 mt-4 mb-2">
               <button
                 type="button"
                 onClick={skipEthernet}
