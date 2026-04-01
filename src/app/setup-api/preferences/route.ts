@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
+import fs from "fs/promises";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,21 @@ export async function POST(req: Request) {
     }
     if (Object.keys(entries).length > 0) {
       await config.setMany(entries);
+    }
+    // When language changes, update OpenClaw agent instruction
+    if (body.ui_language && typeof body.ui_language === "string") {
+      const LANG_NAMES: Record<string, string> = {
+        en: "English", bg: "Български", de: "Deutsch", es: "Español",
+        fr: "Français", it: "Italiano", ja: "日本語", nl: "Nederlands",
+        sv: "Svenska", zh: "中文",
+      };
+      const lang = body.ui_language;
+      const langName = LANG_NAMES[lang] ?? "English";
+      const instruction = lang === "en"
+        ? "Respond in English."
+        : `IMPORTANT: Always respond in ${langName} (${lang}). The user's preferred language is ${langName}. All your messages, explanations, and tool output summaries must be in ${langName}.`;
+      const langFile = "/home/clawbox/.openclaw/workspace/LANGUAGE.md";
+      fs.writeFile(langFile, `# Language Preference\n\n${instruction}\n`, "utf-8").catch(() => {});
     }
     return NextResponse.json({ ok: true });
   } catch {
