@@ -218,9 +218,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const scanWifiNetworks = async () => {
     setWifiScanning(true);
     try {
+      // Try live scan first, fall back to cached scan (live fails in AP mode)
       const res = await fetch("/setup-api/wifi/scan?live=1", { method: "POST" });
       if (res.ok) {
         const data = await res.json();
+        if (data.networks?.length > 0) {
+          setWifiNetworks(data.networks);
+          setWifiScanning(false);
+          return;
+        }
+      }
+      const cached = await fetch("/setup-api/wifi/scan");
+      if (cached.ok) {
+        const data = await cached.json();
         setWifiNetworks(data.networks?.length > 0 ? data.networks : []);
       }
     } catch { /* ignored */ }
