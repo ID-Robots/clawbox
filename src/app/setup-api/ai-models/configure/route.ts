@@ -5,9 +5,9 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { setMany } from "@/lib/config-store";
-import { restartGateway } from "@/lib/openclaw-config";
+import { restartGateway, findOpenclawBin } from "@/lib/openclaw-config";
 
-const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;

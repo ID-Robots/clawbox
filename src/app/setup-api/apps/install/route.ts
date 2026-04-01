@@ -4,38 +4,13 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, CONFIG_ROOT } from "@/lib/config-store";
-import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
+import { reloadGateway, getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 const ICONS_DIR = path.join(DATA_DIR, "icons");
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
-
-// Find clawhub binary — check common locations including nvm
-function findClawhub(): string {
-  const existsSync = require("fs").existsSync;
-  const nodeDir = path.dirname(process.execPath);
-  const home = process.env.HOME || "/home/clawbox";
-  const candidates = [
-    path.join(nodeDir, "clawhub"),
-    path.join(home, ".npm-global", "bin", "clawhub"),
-    "/usr/local/bin/clawhub",
-    "/usr/bin/clawhub",
-  ];
-  // Also check all nvm node versions
-  const nvmDir = path.join(home, ".nvm", "versions", "node");
-  try {
-    const versions = require("fs").readdirSync(nvmDir) as string[];
-    for (const v of versions.sort().reverse()) {
-      candidates.push(path.join(nvmDir, v, "bin", "clawhub"));
-    }
-  } catch {}
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-  return "clawhub"; // fallback to PATH
-}
 
 
 export async function POST(req: Request) {
@@ -64,26 +39,24 @@ export async function POST(req: Request) {
       console.warn(`[apps/install] Failed to download icon for ${appId}:`, err);
     }
 
-    // Run clawhub install
-    const clawhubBin = findClawhub();
+    // Run openclaw skills install
+    const openclawBin = findOpenclawBin();
     const skillsDir = getSkillsDir();
     await fs.mkdir(path.join(skillsDir, "skills"), { recursive: true });
 
     let clawhubResult: { success: boolean; output?: string; error?: string } = { success: false };
     try {
-      const { stdout, stderr } = await execFileAsync(clawhubBin, [
-        "install", appId,
-        "--workdir", skillsDir,
-        "--no-input",
+      const { stdout, stderr } = await execFileAsync(openclawBin, [
+        "skills", "install", appId,
         "--force",
       ], {
         timeout: 60_000,
-        env: { ...process.env, PATH: `${path.dirname(clawhubBin)}:${process.env.PATH}` },
+        env: { ...process.env, PATH: `${path.dirname(openclawBin)}:${process.env.PATH}` },
       });
       clawhubResult = { success: true, output: stdout || stderr };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[apps/install] clawhub install ${appId} failed:`, msg);
+      console.warn(`[apps/install] openclaw skills install ${appId} failed:`, msg);
       clawhubResult = { success: false, error: msg };
     }
 

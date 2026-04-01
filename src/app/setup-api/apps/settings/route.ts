@@ -3,12 +3,13 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
+import { findOpenclawBin } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 const HOME = process.env.HOME || "/home/clawbox";
-const OPENCLAW_BIN = path.join(HOME, ".npm-global", "bin", "openclaw");
+const OPENCLAW_BIN = findOpenclawBin();
 
 /**
  * Maps app settings from the UI to the config files that skills actually read.

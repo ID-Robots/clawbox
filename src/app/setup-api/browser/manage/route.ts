@@ -5,7 +5,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { readConfig } from "@/lib/openclaw-config";
+import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -14,19 +14,6 @@ const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
 const CDP_PORT = 18800;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function findOpenClaw(): Promise<string> {
-  const candidates = [
-    path.join(HOME, ".npm-global", "bin", "openclaw"),
-    path.join(path.dirname(process.execPath), "openclaw"),
-    "/usr/local/bin/openclaw",
-    "/usr/bin/openclaw",
-  ];
-  for (const p of candidates) {
-    try { await fs.access(p); return p; } catch {}
-  }
-  return "openclaw";
-}
 
 async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
   // Check all candidates in parallel
@@ -147,7 +134,7 @@ export async function POST(req: Request) {
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
 
-        const openclawBin = await findOpenClaw();
+        const openclawBin = findOpenclawBin();
         try {
           await Promise.all([
             exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 }),
@@ -169,7 +156,7 @@ export async function POST(req: Request) {
       }
 
       case "disable": {
-        const openclawBin = await findOpenClaw();
+        const openclawBin = findOpenclawBin();
         try {
           await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 10000 });
         } catch (err) {

@@ -3,6 +3,7 @@ import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
+import { findOpenclawBin } from "./openclaw-config";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -222,7 +223,7 @@ let cachedTargetVersion: string | null = null;
 let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
 
-const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 
 interface VersionInfo {

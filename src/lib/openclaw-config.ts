@@ -92,6 +92,34 @@ export async function reloadGateway(): Promise<void> {
   }
 }
 
+/** Find the openclaw binary — checks common locations including nvm, caches result. */
+let _openclawBinCache: string | null = null;
+export function findOpenclawBin(): string {
+  if (_openclawBinCache) return _openclawBinCache;
+  const nodeDir = path.dirname(process.execPath);
+  const home = process.env.HOME || "/home/clawbox";
+  const candidates = [
+    path.join(nodeDir, "openclaw"),
+    path.join(home, ".npm-global", "bin", "openclaw"),
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw",
+  ];
+  const nvmDir = path.join(home, ".nvm", "versions", "node");
+  try {
+    const versions = fsSync.readdirSync(nvmDir) as string[];
+    for (const v of versions.sort().reverse()) {
+      candidates.push(path.join(nvmDir, v, "bin", "openclaw"));
+    }
+  } catch {}
+  for (const p of candidates) {
+    if (fsSync.existsSync(p)) {
+      _openclawBinCache = p;
+      return p;
+    }
+  }
+  return "openclaw";
+}
+
 /** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
 export function getSkillsDir(): string {
   const home = process.env.HOME || "/home/clawbox";

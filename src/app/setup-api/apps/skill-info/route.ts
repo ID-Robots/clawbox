@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
+import { findOpenclawBin } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 const HOME = process.env.HOME || "/home/clawbox";
-const OPENCLAW_BIN = path.join(HOME, ".npm-global", "bin", "openclaw");
+const OPENCLAW_BIN = findOpenclawBin();
 
 interface SkillInfo {
   name: string;
