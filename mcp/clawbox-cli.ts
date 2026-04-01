@@ -15,6 +15,7 @@
  */
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
+const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
 
 async function api(path: string, options?: RequestInit) {
   const res = await fetch(`${API_BASE}${path}`, options);
@@ -87,7 +88,7 @@ async function main() {
     });
 
     // 3. Wait for UI to pick up, then open
-    await new Promise(r => setTimeout(r, 2500));
+    await new Promise(r => setTimeout(r, UI_PICKUP_DELAY_MS));
     await apiPost("/setup-api/kv", {
       key: "ui:pending-action",
       value: JSON.stringify({ type: "open_app", appId: `installed-${appId}`, ts: Date.now() }),

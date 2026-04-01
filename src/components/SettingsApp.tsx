@@ -6,6 +6,7 @@ import SignalBars from "./SignalBars";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
+import { I18nProvider } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 
@@ -798,7 +799,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
-            <AIModelsStep embedded />
+            <I18nProvider><AIModelsStep embedded /></I18nProvider>
           </div>
         )}
 

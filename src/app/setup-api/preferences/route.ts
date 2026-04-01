@@ -67,7 +67,8 @@ export async function POST(req: Request) {
         ? "Respond in English."
         : `IMPORTANT: Always respond in ${langName} (${lang}). The user's preferred language is ${langName}. All your messages, explanations, and tool output summaries must be in ${langName}.`;
       const langFile = "/home/clawbox/.openclaw/workspace/LANGUAGE.md";
-      fs.writeFile(langFile, `# Language Preference\n\n${instruction}\n`, "utf-8").catch(() => {});
+      fs.writeFile(langFile, `# Language Preference\n\n${instruction}\n`, "utf-8")
+        .catch((err) => console.error(`[preferences] Failed to write ${langFile}:`, err instanceof Error ? err.message : err));
     }
     return NextResponse.json({ ok: true });
   } catch {

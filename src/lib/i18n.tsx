@@ -87,7 +87,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       let str = translations?.[key] ?? key;
       if (params) {
         for (const [k, v] of Object.entries(params)) {
-          str = str.replace(`{${k}}`, String(v));
+          str = str.replaceAll(`{${k}}`, String(v));
         }
       }
       return str;

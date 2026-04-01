@@ -169,20 +169,9 @@ function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone:
   );
 }
 
+const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]);
+
 const PROVIDERS: Provider[] = [
-  {
-    id: "clawai",
-    name: "ClawAI",
-    description: "Free, no setup needed",
-    authOptions: [
-      {
-        mode: "local" as AuthMode,
-        label: "Free",
-        placeholder: "",
-        hint: "Pre-configured and ready to use. No API key or account needed.",
-      },
-    ],
-  },
   {
     id: "anthropic",
     name: "Anthropic Claude",
@@ -247,6 +236,19 @@ const PROVIDERS: Provider[] = [
     ],
   },
   {
+    id: "clawai",
+    name: "ClawAI",
+    description: "Free, no setup needed",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Free",
+        placeholder: "",
+        hint: "Pre-configured and ready to use. No API key or account needed.",
+      },
+    ],
+  },
+  {
     id: "openrouter",
     name: "OpenRouter",
     description: "Multi-provider AI gateway",
@@ -282,8 +284,9 @@ const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
 export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
   const { t } = useT();
-  const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
-  const [authMode, setAuthMode] = useState<AuthMode>("local");
+  const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
+  const [authMode, setAuthMode] = useState<AuthMode>("subscription");
+  const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -897,7 +900,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
         </p>
 
         <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
-          {PROVIDERS.map((provider) => {
+          {PROVIDERS.filter((p) => PRIMARY_PROVIDER_IDS.has(p.id) || showMoreProviders || selectedProvider === p.id).map((provider) => {
             const isSelected = selectedProvider === provider.id;
             return (
               <label
@@ -931,7 +934,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "clawai" && (
+                    {provider.id === "anthropic" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
                     )}
                   </span>
@@ -942,6 +945,15 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
               </label>
             );
           })}
+          {!showMoreProviders && (
+            <button
+              type="button"
+              onClick={() => setShowMoreProviders(true)}
+              className="w-full px-4 py-2.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer hover:bg-[var(--bg-surface)]/50 transition-colors text-left"
+            >
+              {t("ai.showMore")}
+            </button>
+          )}
         </div>
 
         {selected?.id === "clawai" && (

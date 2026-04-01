@@ -914,43 +914,48 @@ export default function ChromeDesktop() {
   openAppRef.current = openApp;
   useEffect(() => {
     let active = true;
+    let lastProcessedTs = 0;
+    let polling = false;
     const poll = async () => {
-      if (!active) return;
+      if (!active || polling) return;
+      polling = true;
       try {
         const res = await fetch("/setup-api/kv?key=ui:pending-action");
         if (res.ok) {
           const data = await res.json();
           if (data.value) {
-            // Clear the action immediately
-            fetch("/setup-api/kv", {
+            const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+            const ts = action.ts ?? 0;
+            // Skip if already processed
+            if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
+            lastProcessedTs = ts;
+            // Delete before processing to prevent re-reads
+            await fetch("/setup-api/kv", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ key: "ui:pending-action", delete: true }),
             }).catch(() => {});
-            try {
-              const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
-              if (action.type === "open_app" && action.appId) {
-                openAppRef.current(action.appId);
-              } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
-                // Register a new custom webapp on the desktop
-                setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
-                setInstalledMeta(prev => ({
-                  ...prev,
-                  [action.appId]: {
-                    name: action.name,
-                    color: action.color || "#f97316",
-                    iconUrl: action.iconUrl || "",
-                    webappUrl: action.url,
-                  },
-                }));
-                setHiddenInstalledApps(prev => prev.filter(id => id !== action.appId));
-              } else if (action.type === "notify" && action.message) {
-                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
-              }
-            } catch {}
+            if (action.type === "open_app" && action.appId) {
+              openAppRef.current(action.appId);
+            } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
+              setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
+              setInstalledMeta(prev => ({
+                ...prev,
+                [action.appId]: {
+                  name: action.name,
+                  color: action.color || "#f97316",
+                  iconUrl: action.iconUrl || "",
+                  webappUrl: action.url,
+                },
+              }));
+              setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
+            } else if (action.type === "notify" && action.message) {
+              window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+            }
           }
         }
       } catch {}
+      polling = false;
     };
     const id = setInterval(poll, 2000);
     return () => { active = false; clearInterval(id); };
@@ -1077,15 +1082,18 @@ export default function ChromeDesktop() {
         return <VNCApp />;
       case "vscode":
         return <VSCodeApp filePath={meta?.filePath} />;
-      case "webapp":
+      case "webapp": {
+        let webappSrc = "about:blank";
+        try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
         return (
           <iframe
-            src={app.url || "about:blank"}
+            src={webappSrc}
             style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
             sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
             title={app.name}
           />
         );
+      }
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">

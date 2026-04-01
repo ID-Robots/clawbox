@@ -45,6 +45,9 @@ export async function POST(request: NextRequest) {
     if (!html || typeof html !== "string") {
       return NextResponse.json({ error: "HTML content required" }, { status: 400 });
     }
+    if (Buffer.byteLength(html, "utf-8") > 1_048_576) {
+      return NextResponse.json({ error: "HTML content too large (max 1MB)" }, { status: 413 });
+    }
 
     const appDir = path.join(WEBAPPS_DIR, appId);
     await fs.mkdir(appDir, { recursive: true });

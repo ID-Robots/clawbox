@@ -10,12 +10,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { execFile, spawn } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 
-const exec = promisify(execFile);
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const COMMAND_TIMEOUT = 30_000;
+const UI_PICKUP_DELAY_MS = 2500;
 
 // ── Helpers ──
 
@@ -36,6 +35,8 @@ async function apiPost(path: string, body: Record<string, unknown>) {
   });
 }
 
+// Spawns an unrestricted shell — intended only for authorized MCP agents on a
+// trusted local network. COMMAND_TIMEOUT and explicit cwd/HOME mitigate runaways.
 async function runShell(command: string, timeoutMs = COMMAND_TIMEOUT): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     const child = spawn("bash", ["-c", command], {
@@ -88,7 +89,7 @@ server.tool(
   "Restart or shut down the ClawBox device",
   { action: z.enum(["restart", "shutdown"]).describe("Power action to perform") },
   async ({ action }) => {
-    const result = await apiPost("/setup-api/system/power", { action });
+    await apiPost("/setup-api/system/power", { action });
     return { content: [{ type: "text", text: `Power action '${action}' initiated.` }] };
   }
 );
@@ -345,7 +346,7 @@ server.tool(
     appId: z.string().describe("App ID to install (from app_search results)"),
   },
   async ({ appId }) => {
-    const result = await apiPost("/setup-api/apps/install", { appId });
+    await apiPost("/setup-api/apps/install", { appId });
     return { content: [{ type: "text", text: `App '${appId}' installed successfully.` }] };
   }
 );
@@ -357,7 +358,7 @@ server.tool(
     appId: z.string().describe("App ID to uninstall"),
   },
   async ({ appId }) => {
-    const result = await apiPost("/setup-api/apps/uninstall", { appId });
+    await apiPost("/setup-api/apps/uninstall", { appId });
     return { content: [{ type: "text", text: `App '${appId}' uninstalled.` }] };
   }
 );
@@ -539,7 +540,7 @@ GUIDELINES:
 
     // 3. Wait a moment for UI to pick up registration, then open
     if (openAfterCreate !== false) {
-      await new Promise(r => setTimeout(r, 2500));
+      await new Promise(r => setTimeout(r, UI_PICKUP_DELAY_MS));
       await apiPost("/setup-api/kv", {
         key: "ui:pending-action",
         value: JSON.stringify({ type: "open_app", appId: `installed-${appId}`, ts: Date.now() }),
