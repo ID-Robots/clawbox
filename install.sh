@@ -80,7 +80,23 @@ step_ensure_user() {
   fi
 }
 
+wait_for_apt() {
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    if [ $waited -eq 0 ]; then
+      echo "  Waiting for apt lock (another update is running)..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+    if [ $waited -ge 300 ]; then
+      echo "  Warning: apt lock held for 5+ minutes, proceeding anyway"
+      break
+    fi
+  done
+}
+
 step_apt_update() {
+  wait_for_apt
   apt-get update -qq
   apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip gh
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
@@ -429,6 +445,7 @@ step_start_services() {
 # ── Update-only steps (called from dashboard System Update) ──────────────────
 
 step_nvidia_jetpack() {
+  wait_for_apt
   apt-get install -y nvidia-jetpack
 }
 
