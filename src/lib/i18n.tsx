@@ -33,10 +33,12 @@ interface I18nContextValue {
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
+const fallbackT = (key: string) => key;
+const fallbackCtx: I18nContextValue = { locale: "en", setLocale: () => {}, t: fallbackT };
+
 export function useT() {
   const ctx = useContext(I18nContext);
-  if (!ctx) throw new Error("useT must be used within I18nProvider");
-  return ctx;
+  return ctx ?? fallbackCtx;
 }
 
 function detectLocale(): Locale {
