@@ -60,18 +60,41 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
   const currentLang = LANGUAGES.find((l) => l.code === locale) ?? LANGUAGES[0];
 
+  const [hasScanned, setHasScanned] = useState(false);
+
   const fetchNetworks = async () => {
     setLoadingNetworks(true);
     try {
       const res = await fetch("/setup-api/wifi/scan");
       if (res.ok) {
         const data = await res.json();
-        setNetworks(data?.networks?.length > 0 ? data.networks : []);
+        if (data?.networks?.length > 0) {
+          setNetworks(data.networks);
+          setHasScanned(true);
+        } else {
+          // No cached results — trigger a live scan
+          setNetworks(null);
+          setLoadingNetworks(true);
+          try {
+            const liveRes = await fetch("/setup-api/wifi/scan?live=1", { method: "POST" });
+            if (liveRes.ok) {
+              const liveData = await liveRes.json();
+              setNetworks(liveData?.networks?.length > 0 ? liveData.networks : []);
+            } else {
+              setNetworks([]);
+            }
+          } catch {
+            setNetworks([]);
+          }
+          setHasScanned(true);
+        }
       } else {
         setNetworks([]);
+        setHasScanned(true);
       }
     } catch {
       setNetworks([]);
+      setHasScanned(true);
     } finally {
       setLoadingNetworks(false);
     }
@@ -246,7 +269,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         )}
 
         {/* Network list (shown after clicking Connect to WiFi) */}
-        {!showForm && showWifiList && !loadingNetworks && networks !== null && (
+        {!showForm && showWifiList && !loadingNetworks && hasScanned && networks !== null && (
           <>
             {networks.length > 0 ? (
               <div className="border border-[var(--border-subtle)] rounded-lg overflow-hidden mb-3">
@@ -283,15 +306,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 </div>
               </div>
             ) : (
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-col items-center gap-3 mb-3 py-4">
                 <p className="text-sm text-[var(--text-muted)]">{t("wifi.noNetworks")}</p>
                 <button
                   type="button"
                   onClick={rescan}
                   disabled={rescanning}
-                  className="flex items-center gap-1.5 text-xs text-[#fb923c] hover:text-orange-300 bg-transparent border-none cursor-pointer p-1 disabled:opacity-50 transition-colors"
+                  className="flex items-center gap-2 px-5 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer disabled:opacity-50 transition transform hover:scale-105 active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)]"
                 >
-                  <span className={`material-symbols-rounded ${rescanning ? "animate-spin" : ""}`} style={{ fontSize: 16 }}>refresh</span>
+                  <span className={`material-symbols-rounded ${rescanning ? "animate-spin" : ""}`} style={{ fontSize: 18 }}>refresh</span>
                   {rescanning ? t("wifi.scanning") : t("wifi.scanNow")}
                 </button>
               </div>
