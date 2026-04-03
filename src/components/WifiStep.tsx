@@ -74,7 +74,6 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         } else {
           // No cached results — trigger a live scan
           setNetworks(null);
-          setLoadingNetworks(true);
           try {
             const liveRes = await fetch("/setup-api/wifi/scan?live=1", { method: "POST" });
             if (liveRes.ok) {

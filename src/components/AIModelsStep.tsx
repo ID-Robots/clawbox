@@ -284,8 +284,8 @@ const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
 export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
   const { t } = useT();
-  const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
-  const [authMode, setAuthMode] = useState<AuthMode>("subscription");
+  const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
+  const [authMode, setAuthMode] = useState<AuthMode>("local");
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");

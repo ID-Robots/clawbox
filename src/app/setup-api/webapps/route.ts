@@ -3,33 +3,57 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+import { WEBAPPS_DIR, APP_ID_RE } from "@/lib/code-projects";
 
-const WEBAPPS_DIR = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "webapps"
-);
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
 
-const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-
-/** GET /setup-api/webapps?app=<appId> — serve the webapp HTML */
+/**
+ * GET /setup-api/webapps?app=<appId>           — serve index.html
+ * GET /setup-api/webapps?app=<appId>&file=x.js — serve asset file
+ */
 export async function GET(request: NextRequest) {
   const appId = request.nextUrl.searchParams.get("app");
   if (!appId || !APP_ID_RE.test(appId)) {
     return NextResponse.json({ error: "Invalid app ID" }, { status: 400 });
   }
 
-  const htmlPath = path.join(WEBAPPS_DIR, appId, "index.html");
+  const file = request.nextUrl.searchParams.get("file") || "index.html";
+
+  // Prevent path traversal
+  const appDir = path.join(WEBAPPS_DIR, appId);
+  const filePath = path.resolve(appDir, file);
+  if (!filePath.startsWith(appDir + path.sep) && filePath !== appDir) {
+    return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
+  }
+
   try {
-    const html = await fs.readFile(htmlPath, "utf-8");
-    return new NextResponse(html, {
+    const content = await fs.readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || "application/octet-stream";
+
+    return new NextResponse(content, {
       headers: {
-        "Content-Type": "text/html; charset=utf-8",
+        "Content-Type": contentType,
         "Cache-Control": "no-cache",
       },
     });
   } catch {
-    return NextResponse.json({ error: "App not found" }, { status: 404 });
+    return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
 }
 

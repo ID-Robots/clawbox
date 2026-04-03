@@ -13,3 +13,5 @@ next-env.d.ts
 !.env.example
 !.env.template
 .update-branch
+claude-code-source-code/
+code-source-code/

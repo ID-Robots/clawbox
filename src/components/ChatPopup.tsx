@@ -231,7 +231,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
-      if (config.model) setModelName(config.model.replace(/^.*\//, ''))
+      if (config.model) {
+        const raw = config.model as string
+        setModelName(raw.startsWith('deepseek/') ? 'ClawAI' : raw.replace(/^.*\//, ''))
+      }
     } catch {
       // Auto-retry if gateway config not ready yet
       if (retryCountRef.current < MAX_RETRIES) {
