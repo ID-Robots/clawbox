@@ -95,7 +95,7 @@ export default function SetupWizard() {
               ClawBox
             </span>
             <span className="text-[10px] text-green-400 -mt-1">
-              {process.env.NEXT_PUBLIC_APP_VERSION}
+              {process.env.NEXT_PUBLIC_APP_VERSION?.match(/^(v\d+\.\d+\.\d+)/)?.[1] ?? process.env.NEXT_PUBLIC_APP_VERSION}
             </span>
           </div>
         </Link>

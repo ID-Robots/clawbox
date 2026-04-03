@@ -16,6 +16,8 @@ function stepTextClass(status: StepStatus): string {
   }
 }
 
+const BTN_PRIMARY = "px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer";
+
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "running") {
     return <div className="spinner !w-5 !h-5 !border-2" />;
@@ -39,7 +41,6 @@ function StepIcon({ status }: { status: StepStatus }) {
 
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
-  const [targetVersion, setTargetVersion] = useState<string | null>(null);
   const [versions, setVersions] = useState<{
     clawbox: { current: string; target: string | null };
     openclaw: { current: string | null; target: string | null };
@@ -109,7 +110,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         const data = await res.json();
         if (controller.signal.aborted) return;
         setState(data);
-        if (data.targetVersion) setTargetVersion(data.targetVersion);
         if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
@@ -127,22 +127,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     };
   }, [startPolling, stopPolling]);
 
-  const triggerUpdate = async (branch?: string) => {
+  const triggerUpdate = async () => {
     actionControllerRef.current?.abort();
     const controller = new AbortController();
     actionControllerRef.current = controller;
     setStarting(true);
     setFetchError(false);
     try {
-      if (branch) {
-        const branchRes = await fetch("/setup-api/system/update-branch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ branch }),
-          signal: controller.signal,
-        });
-        if (!branchRes.ok) throw new Error(`Failed to set update branch (${branchRes.status})`);
-      }
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         signal: controller.signal,
@@ -180,22 +171,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <p className="text-red-400 text-sm mb-5">
             Failed to check update status.
           </p>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => triggerUpdate()}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-            >
-              Retry
-            </button>
-            <button
-              type="button"
-              onClick={onNext}
-              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-            >
-              Skip updates
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => triggerUpdate()}
+            className={BTN_PRIMARY}
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
@@ -238,29 +220,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               )}
             </div>
           )}
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => triggerUpdate()}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-            >
-              Start Update
-            </button>
-            <button
-              type="button"
-              onClick={() => triggerUpdate("beta")}
-              className="px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-purple-600/25 cursor-pointer"
-            >
-              Update to Beta
-            </button>
-            <button
-              type="button"
-              onClick={onNext}
-              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-            >
-              Skip
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => triggerUpdate()}
+            className={BTN_PRIMARY}
+          >
+            Start Update
+          </button>
         </div>
       </div>
     );
@@ -346,36 +312,23 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             ))}
 
         {/* Action buttons */}
-        {!isRunning && (
-          <div className="flex items-center gap-3 mt-5">
-            {isDone && (
-              <button
-                type="button"
-                onClick={onNext}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-              >
-                Continue
-              </button>
-            )}
-            {isFailed && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => triggerUpdate()}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-                >
-                  Retry
-                </button>
-                <button
-                  type="button"
-                  onClick={onNext}
-                  className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-                >
-                  Skip updates
-                </button>
-              </>
-            )}
-          </div>
+        {isDone && (
+          <button
+            type="button"
+            onClick={onNext}
+            className={`mt-5 ${BTN_PRIMARY}`}
+          >
+            Continue
+          </button>
+        )}
+        {isFailed && !isRunning && (
+          <button
+            type="button"
+            onClick={() => triggerUpdate()}
+            className={`mt-5 ${BTN_PRIMARY}`}
+          >
+            Retry
+          </button>
         )}
       </div>
     </div>

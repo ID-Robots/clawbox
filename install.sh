@@ -94,7 +94,8 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
+  apt-get install -y -qq apt-utils git curl network-manager avahi-daemon iptables iw python3-pip
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
