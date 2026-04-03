@@ -1544,7 +1544,14 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                   <span aria-hidden="true" className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${isSelected ? "border-[var(--coral-bright)]" : "border-gray-600"}`}>
                     {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />}
                   </span>
-                  <span className="text-sm font-medium text-gray-200">{provider.name}</span>
+                  <span className="text-sm font-medium text-gray-200">
+                    {provider.name}
+                    {provider.id === "anthropic" && (
+                      <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-[var(--coral-bright)]/20 text-[var(--coral-bright)]">
+                        Recommended
+                      </span>
+                    )}
+                  </span>
                 </label>
               );
             })}
@@ -1595,6 +1602,11 @@ export default function DoneStep({ setupComplete = false }: DoneStepProps) {
                   }`}
                 >
                   {mode === "subscription" ? "Subscription" : "API Key"}
+                  {mode === "subscription" && aiProvider === "anthropic" && (
+                    <span className="ml-1 inline-block px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide rounded bg-[var(--coral-bright)]/20 text-[var(--coral-bright)]">
+                      Recommended
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

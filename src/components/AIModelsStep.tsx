@@ -751,6 +751,11 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                 <div>
                   <span className="block text-sm font-medium text-gray-200">
                     {provider.name}
+                    {provider.id === "anthropic" && (
+                      <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-[var(--coral-bright)]/20 text-[var(--coral-bright)]">
+                        Recommended
+                      </span>
+                    )}
                   </span>
                   <span className="block text-xs text-[var(--text-muted)]">
                     {provider.description}
@@ -812,6 +817,11 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
                     }`}
                   >
                     {opt.label}
+                    {opt.mode === "subscription" && selected?.id === "anthropic" && (
+                      <span className="ml-1 inline-block px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide rounded bg-[var(--coral-bright)]/20 text-[var(--coral-bright)]">
+                        Recommended
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>

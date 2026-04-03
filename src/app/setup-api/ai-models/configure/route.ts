@@ -30,7 +30,7 @@ interface ProviderConfig {
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-4-5-20250929",
+    defaultModel: "anthropic/claude-sonnet-4-6",
     profileKey: "anthropic:default",
   },
   openai: {
@@ -233,16 +233,14 @@ export async function POST(request: Request) {
     // token exchange) and disable device identity checks (no secure context for
     // browser crypto key-pair). The gateway is only reachable via local proxy.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
-    await Promise.all([
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.auth.mode", "none",
-      ]),
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-      ]),
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
-      ]),
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.auth.mode", "none",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
     ]);
 
     // 5. Ensure openclaw config files are owned by clawbox
@@ -278,13 +276,11 @@ export async function POST(request: Request) {
           maxTokens: OLLAMA_MAX_TOKENS,
         }],
       });
-      await Promise.all([
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.providers.ollama", providerDef, "--json",
-        ]),
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "replace",
-        ]),
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.ollama", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "replace",
       ]);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {

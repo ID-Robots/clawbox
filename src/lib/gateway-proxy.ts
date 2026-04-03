@@ -74,19 +74,22 @@ export async function serveGatewayHTML(
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : "";
-    const tokenScript = safeToken
-      ? `<script id="clawbox-token" type="application/json">${safeToken}</script>
+    const tokenScript = `<script id="clawbox-token" type="application/json">${safeToken || '""'}</script>
 <script>
 (function(){
   var KEY="openclaw.control.settings.v1";
   try{
-    var t=JSON.parse(document.getElementById("clawbox-token").textContent);
+    var t=${safeToken ? 'JSON.parse(document.getElementById("clawbox-token").textContent)' : '""'};
+    var p=location.protocol==="https:"?"wss:":"ws:";
+    var u=p+"//"+location.host;
     var s=JSON.parse(localStorage.getItem(KEY)||"{}");
-    if(s.token!==t){s.token=t;localStorage.setItem(KEY,JSON.stringify(s))}
+    var changed=false;
+    if(s.gatewayUrl!==u){s.gatewayUrl=u;changed=true}
+    if(t&&s.token!==t){s.token=t;changed=true}
+    if(changed)localStorage.setItem(KEY,JSON.stringify(s));
   }catch(e){}
 })();
-</script>`
-      : "";
+</script>`;
 
     html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${tokenScript}`);
     return new NextResponse(html, {
