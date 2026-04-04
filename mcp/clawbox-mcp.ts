@@ -12,7 +12,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, spawnSync, type ChildProcess } from "child_process";
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir, unlink } from "fs/promises";
 import { resolve, relative, dirname, extname, join, basename } from "path";
 
@@ -785,10 +785,17 @@ Use this for finding files by name. For searching file *contents*, use grep.`,
       return { content: [{ type: "text", text: `No files match "${pattern}" in ${dir}${suggestion}` }] };
     }
 
-    // Sort by mtime (newest first) and limit — use printf to safely pass filenames
-    const sortCmd = `printf '%s\\0' ${result.stdout.trim().split("\n").map(shellEscape).join(" ")} | xargs -0 ls -t 2>/dev/null | head -${GLOB_RESULT_LIMIT}`;
-    const sorted = await runShell(sortCmd, 5_000, dir);
-    const raw = sorted.exitCode === 0 && sorted.stdout.trim() ? sorted.stdout : result.stdout;
+    // Sort by mtime (newest first) — pipe filenames via stdin to avoid arg-length limits
+    const fileList = result.stdout.trim();
+    const sortResult = spawnSync("xargs", ["-0", "ls", "-t"], {
+      input: fileList.split("\n").join("\0"),
+      cwd: dir,
+      timeout: 5_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, HOME },
+    });
+    const sortedOut = (sortResult.stdout || "").toString().trim();
+    const raw = sortResult.status === 0 && sortedOut ? sortedOut.split("\n").slice(0, GLOB_RESULT_LIMIT).join("\n") : result.stdout;
 
     const files = raw.trim().split("\n").filter(Boolean)
       .slice(0, GLOB_RESULT_LIMIT)
@@ -840,10 +847,13 @@ Supports regex, context lines, case-insensitive, multiline, file type filtering.
     const mode = output_mode || "content";
 
     const hasRg = (await runShell("which rg 2>/dev/null", 3000)).exitCode === 0;
-    let cmd: string;
+
+    let exe: string;
+    let args: string[];
 
     if (hasRg) {
-      const args = ["rg", "--no-heading", "--with-filename"];
+      exe = "rg";
+      args = ["--no-heading", "--with-filename"];
       if (mode === "files_with_matches") args.push("-l");
       else if (mode === "count") args.push("-c");
       else args.push("-n");
@@ -855,9 +865,9 @@ Supports regex, context lines, case-insensitive, multiline, file type filtering.
       if (fileType) args.push("--type", fileType);
       if (multiline) args.push("-U", "--multiline-dotall");
       args.push("--", pattern, dir);
-      cmd = args.map(shellEscape).join(" ");
     } else {
-      const args = ["grep", "-rn"];
+      exe = "grep";
+      args = ["-rn"];
       if (mode === "files_with_matches") args.push("-l");
       else if (mode === "count") args.push("-c");
       if (case_sensitive === false) args.push("-i");
@@ -867,14 +877,25 @@ Supports regex, context lines, case-insensitive, multiline, file type filtering.
       if (include) args.push(`--include=${include}`);
       if (multiline) args.push("-Pz");
       args.push("-e", pattern, dir);
-      cmd = args.map(shellEscape).join(" ");
     }
 
-    cmd += ` 2>/dev/null`;
-    if (skip > 0) cmd += ` | tail -n +${skip + 1}`;
-    cmd += ` | head -${limit}`;
+    // Use spawnSync to avoid shell interpolation of user-controlled pattern/dir
+    const spawnResult = spawnSync(exe, args, {
+      cwd: dir,
+      timeout: 15_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, HOME },
+    });
 
-    const result = await runShell(cmd, 15_000, dir);
+    const stdout = (spawnResult.stdout || "").toString();
+    const stderr = (spawnResult.stderr || "").toString();
+
+    // Apply skip/limit in JS instead of shell pipes
+    let outputLines = stdout.split("\n");
+    if (skip > 0) outputLines = outputLines.slice(skip);
+    outputLines = outputLines.slice(0, limit);
+
+    const result = { stdout: outputLines.join("\n"), stderr, exitCode: spawnResult.status ?? 1 };
 
     if (!result.stdout.trim()) {
       return { content: [{ type: "text", text: `No matches for "${pattern}" in ${dir}` }] };
@@ -1150,7 +1171,7 @@ Returns a task ID — check progress with task_status.`,
     const workDir = cwd || HOME;
     // Chain commands with && so failure stops execution, wrap in a subshell
     const chainedCmd = commands.split("\n").filter((c: string) => c.trim()).map((c: string) => c.trim()).join(" && ");
-    const wrappedCmd = `cd ${JSON.stringify(workDir)} && ${chainedCmd}`;
+    const wrappedCmd = `cd ${shellEscape(workDir)} && ${chainedCmd}`;
     const task = spawnBackground(wrappedCmd, MAX_COMMAND_TIMEOUT, description);
     return {
       content: [{

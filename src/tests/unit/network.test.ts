@@ -335,4 +335,59 @@ describe("network", () => {
       // no-colon-line is ignored
     });
   });
+
+  describe("getEthernetStatus", () => {
+    it("returns connected when ethernet device found", async () => {
+      setupExecFileMock({
+        "nmcli": { stdout: "eth0:ethernet:connected\n", stderr: "" },
+      });
+      network = await import("@/lib/network");
+      const status = await network.getEthernetStatus();
+      expect(status.connected).toBe(true);
+      expect(status.iface).toBe("eth0");
+    });
+
+    it("returns disconnected when no ethernet found", async () => {
+      setupExecFileMock({
+        "nmcli -t -f DEVICE,TYPE,STATE device status": { stdout: "wlan0:wifi:connected\n", stderr: "" },
+        "ip link show": { stdout: "1: lo: <LOOPBACK> state UNKNOWN\n", stderr: "" },
+      });
+      network = await import("@/lib/network");
+      const status = await network.getEthernetStatus();
+      expect(status.connected).toBe(false);
+    });
+
+    it("returns disconnected on error", async () => {
+      setupExecFileMock({
+        "nmcli": new Error("command not found"),
+      });
+      network = await import("@/lib/network");
+      const status = await network.getEthernetStatus();
+      expect(status.connected).toBe(false);
+    });
+  });
+
+  describe("restartAP", () => {
+    it("calls the AP start script", async () => {
+      setupExecFileMock({
+        "bash": { stdout: "", stderr: "" },
+      });
+      network = await import("@/lib/network");
+      await network.restartAP();
+      expect(mockExecFile).toHaveBeenCalled();
+      const [cmd, args] = mockExecFile.mock.calls[0];
+      expect(cmd).toBe("bash");
+      expect(args).toEqual(expect.arrayContaining([expect.stringContaining("start-ap.sh")]));
+    });
+  });
+
+  describe("getCachedScan", () => {
+    it("returns empty array when cache doesn't exist", async () => {
+      setupExecFileMock({});
+      network = await import("@/lib/network");
+      // getCachedScan reads a file that doesn't exist in test env
+      const result = network.getCachedScan();
+      expect(result).toEqual([]);
+    });
+  });
 });
