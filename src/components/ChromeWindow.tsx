@@ -20,6 +20,7 @@ interface ChromeWindowProps {
   onMinimize: () => void;
   onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
+  rightInset?: number;
 }
 
 function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
@@ -34,8 +35,8 @@ type SnapZone = "left" | "right" | "top" | "top-left" | "top-right" | "bottom-le
 const SNAP_THRESHOLD = 12; // pixels from edge to trigger snap
 const SHELF_HEIGHT = 56;
 
-function getSnapZone(clientX: number, clientY: number): SnapZone {
-  const w = window.innerWidth;
+function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
+  const w = window.innerWidth - rInset;
   const h = window.innerHeight - SHELF_HEIGHT;
   const nearLeft = clientX <= SNAP_THRESHOLD;
   const nearRight = clientX >= w - SNAP_THRESHOLD;
@@ -52,9 +53,9 @@ function getSnapZone(clientX: number, clientY: number): SnapZone {
   return null;
 }
 
-function getSnapRect(zone: SnapZone): { x: number; y: number; width: number; height: number } | null {
+function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width: number; height: number } | null {
   if (!zone) return null;
-  const w = window.innerWidth;
+  const w = window.innerWidth - rInset;
   const h = window.innerHeight - SHELF_HEIGHT;
   switch (zone) {
     case "left": return { x: 0, y: 0, width: w / 2, height: h };
@@ -94,6 +95,7 @@ export default function ChromeWindow({
   onMinimize,
   onGeometryChange,
   minimized = false,
+  rightInset = 0,
 }: ChromeWindowProps) {
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
   const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height));
@@ -120,6 +122,8 @@ export default function ChromeWindow({
   const currentSizeRef = useRef({ width: defaultWidth, height: defaultHeight });
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
+  const rightInsetRef = useRef(rightInset);
+  rightInsetRef.current = rightInset;
   const MIN_WIDTH = 300;
   const MIN_HEIGHT = 200;
 
@@ -243,7 +247,7 @@ export default function ChromeWindow({
         x: dragRef.current.startPosX + dx,
         y: Math.max(0, dragRef.current.startPosY + dy),
       });
-      setSnapPreview(getSnapZone(clientX, clientY));
+      setSnapPreview(getSnapZone(clientX, clientY, rightInsetRef.current));
     };
 
     const notifyGeometry = () => {
@@ -271,11 +275,11 @@ export default function ChromeWindow({
 
       const clientX = "changedTouches" in e ? e.changedTouches[0].clientX : (e as MouseEvent).clientX;
       const clientY = "changedTouches" in e ? e.changedTouches[0].clientY : (e as MouseEvent).clientY;
-      const zone = getSnapZone(clientX, clientY);
+      const zone = getSnapZone(clientX, clientY, rightInsetRef.current);
       setSnapPreview(null);
 
       if (zone) {
-        const rect = getSnapRect(zone)!;
+        const rect = getSnapRect(zone, rightInsetRef.current)!;
         const cur = currentSizeRef.current;
         const pos = currentPosRef.current;
         prevSizeRef.current = { width: cur.width, height: cur.height, x: pos.x, y: pos.y };
@@ -335,7 +339,7 @@ export default function ChromeWindow({
   if (minimized && !restoring) return null;
 
   const windowStyle = maximized
-    ? { left: 0, top: 0, width: "100%", height: `calc(100vh - ${SHELF_HEIGHT}px)` }
+    ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px)` }
     : { left: position.x, top: position.y, width: size.width, height: size.height };
 
   return (
@@ -431,15 +435,15 @@ export default function ChromeWindow({
 
       {/* Snap preview overlay */}
       {snapPreview && createPortal(
-        <SnapPreviewOverlay zone={snapPreview} />,
+        <SnapPreviewOverlay zone={snapPreview} rightInset={rightInset} />,
         document.body
       )}
     </div>
   );
 }
 
-function SnapPreviewOverlay({ zone }: { zone: SnapZone }) {
-  const rect = getSnapRect(zone);
+function SnapPreviewOverlay({ zone, rightInset = 0 }: { zone: SnapZone; rightInset?: number }) {
+  const rect = getSnapRect(zone, rightInset);
   if (!rect) return null;
   return (
     <div

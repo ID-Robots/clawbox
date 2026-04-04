@@ -157,27 +157,28 @@ h6 {
   z-index: 0;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar — thin, translucent */
 html {
   scrollbar-width: thin;
-  scrollbar-color: #4b5563 var(--bg-deep);
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-deep);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #4b5563;
-  border-radius: 4px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
+  background: rgba(255,255,255,0.2);
 }
 
 /* Selection color */

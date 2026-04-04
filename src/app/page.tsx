@@ -311,7 +311,9 @@ export default function ChromeDesktop() {
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
+  const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
   // Open chat when a skill is installed/uninstalled/toggled
   useEffect(() => {
@@ -1382,7 +1384,7 @@ export default function ChromeDesktop() {
 
       {/* Mascot - tapping toggles chat popup */}
       <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onPanelModeChange={handleChatPanelModeChange} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1475,6 +1477,7 @@ export default function ChromeDesktop() {
               onMinimize={() => minimizeWindow(window.id)}
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
+              rightInset={chatPanelWidth}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>
@@ -1588,6 +1591,7 @@ export default function ChromeDesktop() {
         onChatClick={() => setChatOpen(prev => !prev)}
         showChatButton={mascotHidden}
         time={time}
+        rightInset={chatPanelWidth}
       />
 
 
