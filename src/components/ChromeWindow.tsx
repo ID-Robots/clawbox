@@ -69,10 +69,10 @@ function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width:
   }
 }
 
-// Calculate initial centered position
-function getInitialPosition(width: number, height: number) {
+// Calculate initial centered position within available space
+function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
-  const maxWidth = window.innerWidth;
+  const maxWidth = window.innerWidth - rInset;
   const maxHeight = window.innerHeight - SHELF_HEIGHT;
   return {
     x: Math.max(20, (maxWidth - width) / 2),
@@ -98,7 +98,7 @@ export default function ChromeWindow({
   rightInset = 0,
 }: ChromeWindowProps) {
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
-  const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height));
+  const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
   const [maximized, setMaximized] = useState(false);
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);

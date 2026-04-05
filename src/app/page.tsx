@@ -266,6 +266,13 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
+        // Chat panel dock state
+        if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
+          setChatPanelWidth(Number(data.ui_chat_panel_width));
+          setChatOpen(true);
+        } else if (data.ui_chat_open) {
+          setChatOpen(true);
+        }
         // Auto-open chat once after fresh install (no saved preferences yet)
         if (!data.desktop_apps && !data.wp_id && !kv.get('clawbox-chat-greeted')) {
           kv.set('clawbox-chat-greeted', '1');
@@ -379,11 +386,13 @@ export default function ChromeDesktop() {
           icon_grid: iconPositions,
           desktop_open_windows: openWindows.map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
           ui_mascot_hidden: mascotHidden ? 1 : 0,
+          ui_chat_panel_width: chatPanelWidth || 0,
+          ui_chat_open: chatOpen ? 1 : 0,
         }),
       }).catch(() => {});
     }, 500);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden]);
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden, chatPanelWidth, chatOpen]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -1156,12 +1165,79 @@ export default function ChromeDesktop() {
     setShowSplash(false);
   }, []);
 
+  // ─── Global drag-and-drop file upload ───
+  const [desktopDragOver, setDesktopDragOver] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const dragCountRef = useRef(0);
+
+  const handleDesktopDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.types.includes("Files")) {
+      dragCountRef.current++;
+      setDesktopDragOver(true);
+    }
+  }, []);
+  const handleDesktopDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); }, []);
+  const handleDesktopDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCountRef.current--;
+    if (dragCountRef.current <= 0) { dragCountRef.current = 0; setDesktopDragOver(false); }
+  }, []);
+  const handleDesktopDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCountRef.current = 0;
+    setDesktopDragOver(false);
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const dir = "/home/clawbox/Downloads";
+    setUploadStatus(`Uploading ${files.length} file(s)...`);
+    let ok = 0;
+    for (const file of Array.from(files)) {
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`, { method: "POST", body: form });
+        if (res.ok) ok++;
+      } catch { /* ignore */ }
+    }
+    setUploadStatus(`Uploaded ${ok}/${files.length} file(s)`);
+    setTimeout(() => setUploadStatus(null), 3000);
+  }, []);
+
   if (!setupChecked) {
     return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
   }
 
   return (
-    <div className="relative overflow-hidden select-none" style={{ height: '100dvh' }}>
+    <div
+      className="relative overflow-hidden select-none"
+      style={{ height: '100dvh' }}
+      onContextMenu={(e) => {
+        const tag = (e.target as HTMLElement).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) return;
+        e.preventDefault();
+      }}
+      onDragEnter={handleDesktopDragEnter}
+      onDragOver={handleDesktopDragOver}
+      onDragLeave={handleDesktopDragLeave}
+      onDrop={handleDesktopDrop}
+    >
+      {/* Drop overlay */}
+      {desktopDragOver && (
+        <div className="fixed inset-0 z-[99998] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
+            <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
+            <span className="text-lg font-semibold text-white">Drop files to upload</span>
+            <span className="text-sm text-white/50">Files will be saved to Downloads</span>
+          </div>
+        </div>
+      )}
+      {/* Upload status toast */}
+      {uploadStatus && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] px-4 py-2 rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg">
+          {uploadStatus}
+        </div>
+      )}
       {/* Mobile fullscreen splash */}
       {showSplash && (
         <div
@@ -1382,9 +1458,11 @@ export default function ChromeDesktop() {
         )}
       </div>
 
-      {/* Mascot - tapping toggles chat popup */}
-      <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onPanelModeChange={handleChatPanelModeChange} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel */}
+      {chatPanelWidth === 0 && (
+        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+      )}
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1591,7 +1669,6 @@ export default function ChromeDesktop() {
         onChatClick={() => setChatOpen(prev => !prev)}
         showChatButton={mascotHidden}
         time={time}
-        rightInset={chatPanelWidth}
       />
 
 

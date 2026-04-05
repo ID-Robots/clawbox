@@ -26,7 +26,6 @@ interface ChromeShelfProps {
   onChatClick?: () => void;
   showChatButton?: boolean;
   time: string;
-  rightInset?: number;
 }
 
 export default function ChromeShelf({
@@ -43,7 +42,6 @@ export default function ChromeShelf({
   onChatClick,
   showChatButton,
   time,
-  rightInset = 0,
 }: ChromeShelfProps) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
@@ -140,16 +138,14 @@ export default function ChromeShelf({
   return (
     <>
       <div
-        className="fixed bottom-0 left-0 flex items-center justify-center px-2 z-[10000]"
+        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2 z-[10000]"
         style={{
-          right: rightInset > 0 ? rightInset : 0,
           height: "calc(56px + env(safe-area-inset-bottom))",
           paddingBottom: "env(safe-area-inset-bottom)",
           background: "rgba(17, 24, 39, 0.55)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
           borderTop: "1px solid rgba(255, 255, 255, 0.1)",
-          transition: "right 0.2s ease",
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -207,7 +203,7 @@ export default function ChromeShelf({
               title="Chat"
               aria-label="Chat"
             >
-              <span className="material-symbols-rounded text-[#f97316]" style={{ fontSize: 20 }}>chat_bubble</span>
+              <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
             </button>
           )}
           <button

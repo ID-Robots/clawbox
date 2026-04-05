@@ -4,6 +4,14 @@ import path from "path";
 
 export const dynamic = "force-dynamic";
 
+const MIME_TYPES: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+  webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+  pdf: 'application/pdf', txt: 'text/plain', html: 'text/html', css: 'text/css',
+  js: 'text/javascript', json: 'application/json', md: 'text/markdown',
+  mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
+};
+
 const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 
 function safePath(segments: string[]): string | null {
@@ -27,10 +35,13 @@ export async function GET(_req: NextRequest, { params }: Params) {
 
   const buffer = fs.readFileSync(abs);
   const filename = path.basename(abs);
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+  const isInline = contentType.startsWith('image/') || contentType === 'application/pdf';
   return new NextResponse(buffer, {
     headers: {
-      "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
-      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(filename)}"`,
+      "Content-Type": contentType,
       "Content-Length": String(buffer.length),
     },
   });

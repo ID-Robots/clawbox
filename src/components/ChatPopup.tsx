@@ -41,6 +41,7 @@ interface ChatPopupProps {
   onOpenFull?: () => void
   onThinkingChange?: (thinking: boolean) => void
   onPanelModeChange?: (panelWidth: number) => void
+  initialPanelWidth?: number
   mascotX?: number
   mobile?: boolean
   trayMode?: boolean
@@ -96,8 +97,8 @@ function uuid(): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
-  const [panelWidth, setPanelWidth] = useState<number | null>(null)
+function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+  const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   const panelMode = panelWidth !== null
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
@@ -116,6 +117,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
 
   // Reset position and size when reopened
   useEffect(() => { if (isOpen) { setPos(null); setSize(DEFAULT_SIZE) } }, [isOpen])
+
+  // Sync panel width from parent (handles async preferences load after mount)
+  useEffect(() => {
+    if (initialPanelWidth && initialPanelWidth > 0 && panelWidth === null) {
+      setPanelWidth(initialPanelWidth)
+    }
+  }, [initialPanelWidth]) // eslint-disable-line react-hooks/exhaustive-deps -- panelWidth excluded: one-way sync from parent, must not re-trigger on local resize
 
   // Exit panel mode when closed
   useEffect(() => { if (!isOpen && panelMode) { setPanelWidth(null); onPanelModeChange?.(0) } }, [isOpen, panelMode, onPanelModeChange])
@@ -634,7 +642,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
   // Default position: above mascot (desktop only)
   const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - 416))
   const posStyle: React.CSSProperties = panelMode
-    ? { right: 0, top: 0, bottom: 0 }
+    ? { right: 0, top: 0, bottom: 56 }
     : mobile
       ? { left: 0, top: 0, right: 0, bottom: 220 }
       : pos
@@ -650,7 +658,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, height: '100%', maxHeight: 'none', borderRadius: 0 }
+          ? { width: panelWidth, height: 'auto', maxHeight: 'none', borderRadius: 0 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
             : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
