@@ -1619,46 +1619,69 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {updateStarted && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(13, 17, 23, 1)" }}>
-          <div className="flex flex-col items-center gap-6 max-w-md w-full text-center px-6">
-            {updateState?.phase === "completed" ? (
-              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
-                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
-              </div>
-            ) : updateError || updateState?.phase === "failed" ? (
-              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-red-500/20">
-                <span className="material-symbols-rounded text-red-400" style={{ fontSize: 32 }}>error</span>
-              </div>
-            ) : (
-              <div className="w-16 h-16 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
-            )}
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+          <style>{`
+            @keyframes update-pulse { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.15; transform: scale(1.3); } }
+            @keyframes update-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+          `}</style>
+          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
+            {/* Mascot with animated ring */}
+            <div className="relative w-28 h-28 flex items-center justify-center">
+              {/* Pulse rings */}
+              {!(updateError || updateState?.phase === "failed") && updateState?.phase !== "completed" && (
+                <>
+                  <div className="absolute inset-0 rounded-full border-2 border-[#f97316]/20" style={{ animation: "update-pulse 2.5s ease-in-out infinite" }} />
+                  <div className="absolute inset-3 rounded-full border border-[#f97316]/10" style={{ animation: "update-pulse 2.5s ease-in-out infinite 0.5s" }} />
+                </>
+              )}
+              {/* Completed ring */}
+              {updateState?.phase === "completed" && (
+                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/30" />
+              )}
+              {/* Error ring */}
+              {(updateError || updateState?.phase === "failed") && (
+                <div className="absolute inset-0 rounded-full border-2 border-red-500/30" />
+              )}
+              {/* Logo */}
+              <img
+                src="/clawbox-logo.png"
+                alt="ClawBox"
+                className="w-20 h-20 rounded-3xl shadow-2xl relative z-10"
+                style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
+              />
+            </div>
 
-            <h2 className="text-xl font-semibold text-white">
-              {updateState?.phase === "completed" ? "Update Complete" : updateError || updateState?.phase === "failed" ? "Update Failed" : "Updating System"}
-            </h2>
+            <div>
+              <h2 className="text-2xl font-bold text-white mb-2">
+                {updateState?.phase === "completed" ? "Update Complete!" : updateError || updateState?.phase === "failed" ? "Update Failed" : "Updating ClawBox"}
+              </h2>
+              <p className="text-sm text-white/40">
+                {updateState?.phase === "completed" ? "Restarting device..." : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
+              </p>
+            </div>
 
             {updateState && updateState.steps.length > 0 && (
-              <div className="w-full max-w-xs space-y-2.5 text-left">
+              <div className="w-full max-w-xs space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
                 {updateState.steps.map((step) => (
-                  <div key={step.id} className="flex items-center gap-2.5 text-sm">
+                  <div key={step.id} className="flex items-center gap-3 text-sm">
                     {step.status === "completed" ? (
                       <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M5 12l5 5L19 7" /></svg>
                       </span>
                     ) : step.status === "running" ? (
                       <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                        <span className="w-3.5 h-3.5 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
+                        <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
                       </span>
                     ) : step.status === "failed" ? (
                       <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 shrink-0">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                       </span>
                     ) : (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-white/20" />
                       </span>
                     )}
-                    <span className={step.status === "running" ? "text-white" : step.status === "completed" ? "text-emerald-400/80" : step.status === "failed" ? "text-red-400" : "text-white/30"}>
+                    <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : step.status === "failed" ? "text-red-400" : "text-white/25"}>
                       {step.label}
                     </span>
                   </div>
@@ -1667,17 +1690,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             )}
 
             {!updateState && !updateError && (
-              <p className="text-sm text-white/50">Starting update...</p>
-            )}
-            {updateState?.phase === "completed" && (
-              <p className="text-sm text-white/50">Restarting device...</p>
+              <div className="flex items-center gap-2 text-sm text-white/40">
+                <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
+                Connecting...
+              </div>
             )}
             {(updateError || updateState?.phase === "failed") && (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
                 <button
                   onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
-                  className="px-5 py-2.5 bg-white/10 text-white rounded-lg text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
+                  className="px-6 py-2.5 bg-white/10 text-white rounded-xl text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
                 >
                   Dismiss
                 </button>
