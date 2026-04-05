@@ -175,7 +175,7 @@ const PROVIDERS: Provider[] = [
   {
     id: "openai",
     name: "OpenAI GPT",
-    description: "GPT models by OpenAI",
+    description: "Best for business",
     authOptions: [
       {
         mode: "subscription",
@@ -226,7 +226,7 @@ const PROVIDERS: Provider[] = [
   {
     id: "clawai",
     name: "ClawBox AI",
-    description: "Free, no setup needed",
+    description: "Most affordable — start for free",
     authOptions: [
       {
         mode: "local" as AuthMode,

@@ -338,6 +338,26 @@ export async function POST(request: Request) {
       } catch {
         // Non-fatal: merge is the default behavior anyway
       }
+
+      // Always configure ClawBox AI (DeepSeek) as backup provider alongside
+      // the primary, so the agent has a fallback if the primary provider fails.
+      try {
+        // Add DeepSeek backup to the auth-profiles file
+        const rawProfiles = await fs.readFile(AUTH_PROFILES_PATH, "utf-8").catch(() => '{"version":1,"profiles":{}}');
+        const profiles = JSON.parse(rawProfiles);
+        profiles.profiles["deepseek:default"] = { type: "api_key", provider: "deepseek", key: CLAWAI_API_KEY };
+        await fs.writeFile(AUTH_PROFILES_PATH, JSON.stringify(profiles, null, 2));
+        await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "auth.profiles.deepseek:default",
+          JSON.stringify({ provider: "deepseek", mode: "api_key" }),
+          "--json",
+        ]);
+        console.log("[AI Config] Configured ClawBox AI (DeepSeek) as backup provider");
+      } catch (err) {
+        // Non-fatal: backup is a nice-to-have
+        console.warn("[AI Config] Failed to configure backup provider:", err instanceof Error ? err.message : err);
+      }
     }
 
     // 8. Restart OpenClaw gateway so it picks up the new auth profile and model
