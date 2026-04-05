@@ -41,10 +41,21 @@ function StepIcon({ status }: { status: StepStatus }) {
 // Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
 const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
 
+function compareVersions(a: string, b: string): number {
+  const pa = cleanVersion(a).replace(/^v/, '').split('.').map(Number);
+  const pb = cleanVersion(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0, nb = pb[i] ?? 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
+}
+
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const { t } = useT();
   const [state, setState] = useState<UpdateState | null>(null);
-  const [, setTargetVersion] = useState<string | null>(null);
+
   const [versions, setVersions] = useState<{
     clawbox: { current: string; target: string | null };
     openclaw: { current: string | null; target: string | null };
@@ -115,7 +126,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         const data = await res.json();
         if (controller.signal.aborted) return;
         setState(data);
-        if (data.targetVersion) setTargetVersion(data.targetVersion);
         if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
@@ -227,6 +237,10 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // Idle state — show trigger button or "up to date"
   const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
 
+  const isDowngrade = versions?.clawbox.target
+    ? compareVersions(versions.clawbox.current, versions.clawbox.target) > 0
+    : false;
+
   if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]">
@@ -279,13 +293,24 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 {t("continue")}
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={triggerUpdate}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-              >
-                {t("update.startUpdate")}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={triggerUpdate}
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                >
+                  {t("update.startUpdate")}
+                </button>
+                {isDowngrade && (
+                  <button
+                    type="button"
+                    onClick={onNext}
+                    className="px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  >
+                    {t("skip")}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>

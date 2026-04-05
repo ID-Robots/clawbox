@@ -4,7 +4,7 @@ import { readConfig } from "@/lib/openclaw-config";
 export const dynamic = "force-dynamic";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  deepseek: "ClawAI",
+  deepseek: "ClawBox AI",
   anthropic: "Anthropic Claude",
   openai: "OpenAI GPT",
   google: "Google Gemini",

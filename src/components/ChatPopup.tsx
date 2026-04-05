@@ -280,7 +280,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
       gatewayTokenRef.current = token
       if (config.model) {
         const raw = config.model as string
-        setModelName(raw.startsWith('deepseek/') ? 'ClawAI' : raw.replace(/^.*\//, ''))
+        setModelName(raw.startsWith('deepseek/') ? 'ClawBox AI' : raw.replace(/^.*\//, ''))
       }
     } catch {
       // Auto-retry if gateway config not ready yet

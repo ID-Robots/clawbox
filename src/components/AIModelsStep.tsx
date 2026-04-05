@@ -173,27 +173,6 @@ const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]
 
 const PROVIDERS: Provider[] = [
   {
-    id: "anthropic",
-    name: "Anthropic Claude",
-    description: "Claude models by Anthropic",
-    authOptions: [
-      {
-        mode: "subscription",
-        label: "Subscription",
-        placeholder: "",
-        hint: "Connect your Claude Pro/Max subscription via OAuth.",
-      },
-      {
-        mode: "token",
-        label: "API Key",
-        placeholder: "sk-ant-api03-...",
-        hint: "Get your API key from console.anthropic.com",
-        tokenUrl: "https://console.anthropic.com/settings/keys",
-        tokenUrlLabel: "Get API Key",
-      },
-    ],
-  },
-  {
     id: "openai",
     name: "OpenAI GPT",
     description: "GPT models by OpenAI",
@@ -215,16 +194,25 @@ const PROVIDERS: Provider[] = [
     ],
   },
   {
+    id: "anthropic",
+    name: "Anthropic Claude",
+    description: "Claude models by Anthropic",
+    authOptions: [
+      {
+        mode: "token",
+        label: "API Key",
+        placeholder: "sk-ant-api03-...",
+        hint: "Get your API key from console.anthropic.com",
+        tokenUrl: "https://console.anthropic.com/settings/keys",
+        tokenUrlLabel: "Get API Key",
+      },
+    ],
+  },
+  {
     id: "google",
     name: "Google Gemini",
     description: "Gemini models by Google",
     authOptions: [
-      {
-        mode: "subscription",
-        label: "Subscription",
-        placeholder: "",
-        hint: "Connect your Google One AI Premium subscription via OAuth.",
-      },
       {
         mode: "token",
         label: "API Key",
@@ -237,7 +225,7 @@ const PROVIDERS: Provider[] = [
   },
   {
     id: "clawai",
-    name: "ClawAI",
+    name: "ClawBox AI",
     description: "Free, no setup needed",
     authOptions: [
       {
@@ -934,7 +922,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "anthropic" && (
+                    {provider.id === "openai" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
                     )}
                   </span>
@@ -1015,7 +1003,7 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
                     }`}
                   >
                     {opt.mode === "token" ? t("ai.apiKey") : opt.mode === "subscription" ? t("ai.subscription") : opt.mode === "local" && selected?.id === "clawai" ? t("ai.free") : opt.mode === "local" ? t("ai.local") : opt.label}
-                    {opt.mode === "subscription" && selectedProvider === "anthropic" && (
+                    {opt.mode === "subscription" && selectedProvider === "openai" && (
                       <span className="ml-1 px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
                     )}
                   </button>

@@ -88,7 +88,7 @@ Handles two concerns:
 - **`WifiStep.tsx`** — WiFi scan, network selection, password entry, Ethernet detection
 - **`CredentialsStep.tsx`** — system password + WiFi hotspot configuration
 - **`UpdateStep.tsx`** — system update progress tracking
-- **`AIModelsStep.tsx`** — AI provider selection with OAuth flows (ClawAI, Claude, GPT, Gemini, OpenRouter, Ollama)
+- **`AIModelsStep.tsx`** — AI provider selection with OAuth flows (ClawBox AI, Claude, GPT, Gemini, OpenRouter, Ollama)
 - **`TelegramStep.tsx`** — bot token input and validation
 - **`DoneStep.tsx`** — system dashboard, factory reset
 

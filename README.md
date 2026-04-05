@@ -64,7 +64,7 @@ On first boot (or after factory reset), the OS presents a 7-step wizard:
 2. **Security** — Device password + WiFi hotspot credentials
 3. **WiFi** — Connect to your home/office network (or use Ethernet)
 4. **Update** — Pull latest system updates
-5. **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawAI, or local Ollama
+5. **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
 6. **Telegram** — Optional bot token for remote messaging
 7. **Done** — System status dashboard and factory reset option
 
