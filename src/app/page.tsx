@@ -30,7 +30,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode" | "webapp";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -266,6 +266,13 @@ export default function ChromeDesktop() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
+        // Chat panel dock state
+        if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
+          setChatPanelWidth(Number(data.ui_chat_panel_width));
+          setChatOpen(true);
+        } else if (data.ui_chat_open) {
+          setChatOpen(true);
+        }
         // Auto-open chat once after fresh install (no saved preferences yet)
         if (!data.desktop_apps && !data.wp_id && !kv.get('clawbox-chat-greeted')) {
           kv.set('clawbox-chat-greeted', '1');
@@ -311,7 +318,9 @@ export default function ChromeDesktop() {
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
+  const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
   // Open chat when a skill is installed/uninstalled/toggled
   useEffect(() => {
@@ -377,11 +386,13 @@ export default function ChromeDesktop() {
           icon_grid: iconPositions,
           desktop_open_windows: openWindows.map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
           ui_mascot_hidden: mascotHidden ? 1 : 0,
+          ui_chat_panel_width: chatPanelWidth || 0,
+          ui_chat_open: chatOpen ? 1 : 0,
         }),
       }).catch(() => {});
     }, 500);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden]);
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden, chatPanelWidth, chatOpen]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -781,17 +792,19 @@ export default function ChromeDesktop() {
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
-      const meta = installedMeta[appId];
+      const meta = installedMeta[appId] as Record<string, string> | undefined;
       if (meta) {
+        const isWebapp = !!meta.webappUrl;
         const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
         installedAppDefs.push({
           id: `installed-${appId}`,
           name: meta.name,
           color: meta.color,
-          type: "installed",
+          type: isWebapp ? "webapp" : "installed",
+          url: isWebapp ? meta.webappUrl : undefined,
           pinned: false,
-          defaultWidth: 600,
-          defaultHeight: 400,
+          defaultWidth: isWebapp ? 800 : 600,
+          defaultHeight: isWebapp ? 600 : 400,
           storeApp,
         });
       }
@@ -905,6 +918,58 @@ export default function ChromeDesktop() {
     };
     window.addEventListener("clawbox:open-in-vscode", handler);
     return () => window.removeEventListener("clawbox:open-in-vscode", handler);
+  }, []);
+
+  // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
+  const openAppRef = useRef(openApp);
+  openAppRef.current = openApp;
+  useEffect(() => {
+    let active = true;
+    let lastProcessedTs = 0;
+    let polling = false;
+    const poll = async () => {
+      if (!active || polling) return;
+      polling = true;
+      try {
+        const res = await fetch("/setup-api/kv?key=ui:pending-action");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.value) {
+            const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+            const ts = action.ts ?? 0;
+            // Skip if already processed
+            if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
+            lastProcessedTs = ts;
+            // Delete before processing to prevent re-reads
+            await fetch("/setup-api/kv", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key: "ui:pending-action", delete: true }),
+            }).catch(() => {});
+            if (action.type === "open_app" && action.appId) {
+              openAppRef.current(action.appId);
+            } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
+              setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
+              setInstalledMeta(prev => ({
+                ...prev,
+                [action.appId]: {
+                  name: action.name,
+                  color: action.color || "#f97316",
+                  iconUrl: action.iconUrl || "",
+                  webappUrl: action.url,
+                },
+              }));
+              setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
+            } else if (action.type === "notify" && action.message) {
+              window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+            }
+          }
+        }
+      } catch {}
+      polling = false;
+    };
+    const id = setInterval(poll, 2000);
+    return () => { active = false; clearInterval(id); };
   }, []);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
@@ -1028,6 +1093,18 @@ export default function ChromeDesktop() {
         return <VNCApp />;
       case "vscode":
         return <VSCodeApp filePath={meta?.filePath} />;
+      case "webapp": {
+        let webappSrc = "about:blank";
+        try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
+        return (
+          <iframe
+            src={webappSrc}
+            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
+            sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+            title={app.name}
+          />
+        );
+      }
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -1088,12 +1165,79 @@ export default function ChromeDesktop() {
     setShowSplash(false);
   }, []);
 
+  // ─── Global drag-and-drop file upload ───
+  const [desktopDragOver, setDesktopDragOver] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const dragCountRef = useRef(0);
+
+  const handleDesktopDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.types.includes("Files")) {
+      dragCountRef.current++;
+      setDesktopDragOver(true);
+    }
+  }, []);
+  const handleDesktopDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); }, []);
+  const handleDesktopDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCountRef.current--;
+    if (dragCountRef.current <= 0) { dragCountRef.current = 0; setDesktopDragOver(false); }
+  }, []);
+  const handleDesktopDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCountRef.current = 0;
+    setDesktopDragOver(false);
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const dir = "/home/clawbox/Downloads";
+    setUploadStatus(`Uploading ${files.length} file(s)...`);
+    let ok = 0;
+    for (const file of Array.from(files)) {
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`, { method: "POST", body: form });
+        if (res.ok) ok++;
+      } catch { /* ignore */ }
+    }
+    setUploadStatus(`Uploaded ${ok}/${files.length} file(s)`);
+    setTimeout(() => setUploadStatus(null), 3000);
+  }, []);
+
   if (!setupChecked) {
     return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
   }
 
   return (
-    <div className="relative overflow-hidden select-none" style={{ height: '100dvh' }}>
+    <div
+      className="relative overflow-hidden select-none"
+      style={{ height: '100dvh' }}
+      onContextMenu={(e) => {
+        const tag = (e.target as HTMLElement).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) return;
+        e.preventDefault();
+      }}
+      onDragEnter={handleDesktopDragEnter}
+      onDragOver={handleDesktopDragOver}
+      onDragLeave={handleDesktopDragLeave}
+      onDrop={handleDesktopDrop}
+    >
+      {/* Drop overlay */}
+      {desktopDragOver && (
+        <div className="fixed inset-0 z-[99998] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
+            <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
+            <span className="text-lg font-semibold text-white">Drop files to upload</span>
+            <span className="text-sm text-white/50">Files will be saved to Downloads</span>
+          </div>
+        </div>
+      )}
+      {/* Upload status toast */}
+      {uploadStatus && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] px-4 py-2 rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg">
+          {uploadStatus}
+        </div>
+      )}
       {/* Mobile fullscreen splash */}
       {showSplash && (
         <div
@@ -1314,9 +1458,11 @@ export default function ChromeDesktop() {
         )}
       </div>
 
-      {/* Mascot - tapping toggles chat popup */}
-      <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel */}
+      {chatPanelWidth === 0 && (
+        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+      )}
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1409,6 +1555,7 @@ export default function ChromeDesktop() {
               onMinimize={() => minimizeWindow(window.id)}
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
+              rightInset={chatPanelWidth}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>

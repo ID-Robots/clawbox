@@ -2,12 +2,14 @@
 
 import { useState, useEffect, useRef } from "react";
 import StatusMessage from "./StatusMessage";
+import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
   onNext: () => void;
 }
 
 export default function CredentialsStep({ onNext }: CredentialsStepProps) {
+  const { t } = useT();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -52,40 +54,40 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     setTouched(true);
     // Validate system password (required)
     if (!password) {
-      setStatus({ type: "error", message: "System password is required" });
+      setStatus({ type: "error", message: t("credentials.passwordRequired") });
       return;
     }
     if (password.length < 8) {
       setStatus({
         type: "error",
-        message: "System password must be at least 8 characters",
+        message: t("credentials.passwordMinLength"),
       });
       return;
     }
     if (password !== confirmPassword) {
-      setStatus({ type: "error", message: "System passwords do not match" });
+      setStatus({ type: "error", message: t("credentials.passwordsDontMatch") });
       return;
     }
 
     // Validate hotspot fields (only when enabled)
     if (hotspotEnabled) {
       if (!hotspotName.trim()) {
-        setStatus({ type: "error", message: "Hotspot name is required" });
+        setStatus({ type: "error", message: t("credentials.hotspotNameRequired") });
         return;
       }
       if (!hotspotPassword) {
-        setStatus({ type: "error", message: "Hotspot password is required" });
+        setStatus({ type: "error", message: t("credentials.hotspotPasswordRequired") });
         return;
       }
       if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
-          message: "Hotspot password must be at least 8 characters",
+          message: t("credentials.hotspotPasswordMinLength"),
         });
         return;
       }
       if (hotspotPassword !== confirmHotspotPassword) {
-        setStatus({ type: "error", message: "Hotspot passwords do not match" });
+        setStatus({ type: "error", message: t("credentials.hotspotPasswordsDontMatch") });
         return;
       }
     }
@@ -110,7 +112,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           const data = await res.json().catch(() => ({}));
           setStatus({
             type: "error",
-            message: data.error || "Failed to set system password",
+            message: data.error || t("credentials.failedSetPassword"),
           });
           return;
         }
@@ -132,14 +134,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         const data = await hotspotRes.json().catch(() => ({}));
         setStatus({
           type: "error",
-          message: data.error || "Failed to save hotspot settings",
+          message: data.error || t("credentials.failedSaveHotspot"),
         });
         return;
       }
 
       setStatus({
         type: "success",
-        message: "Settings saved! Continuing...",
+        message: t("credentials.settingsSaved"),
       });
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       timeoutRef.current = setTimeout(() => onNext(), 1500);
@@ -169,18 +171,18 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     <div className="w-full max-w-[520px]">
       <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
-          Security
+          {t("credentials.title")}
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
-          Set a system password and configure your hotspot.
+          {t("credentials.description")}
         </p>
 
         {/* System Password */}
-        <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">System Password</h2>
+        <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("credentials.systemPassword")}</h2>
 
         <div className="mb-4">
           <label htmlFor="cred-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-            New Password
+            {t("credentials.newPassword")}
           </label>
           <div className="relative">
             <input
@@ -191,7 +193,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               onKeyDown={(e) => {
                 if (e.key === "Enter") save();
               }}
-              placeholder="Minimum 8 characters"
+              placeholder={t("credentials.minChars")}
               autoComplete="new-password"
               className={`${inputBase} ${inputBorder(touched && !password)}`}
             />
@@ -208,7 +210,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
         <div className="mb-5">
           <label htmlFor="cred-confirm" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-            Confirm Password
+            {t("credentials.confirmPassword")}
           </label>
           <div className="relative">
             <input
@@ -219,7 +221,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               onKeyDown={(e) => {
                 if (e.key === "Enter") save();
               }}
-              placeholder="Re-enter password"
+              placeholder={t("credentials.reenterPassword")}
               autoComplete="new-password"
               className={`${inputBase} ${inputBorder(touched && !confirmPassword)}`}
             />
@@ -237,7 +239,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         {/* Hotspot Settings */}
         <div className="border-t border-[var(--border-subtle)] pt-5 mb-1">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Hotspot Settings</h2>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">{t("credentials.hotspotSettings")}</h2>
             <button
               type="button"
               role="switch"
@@ -257,15 +259,15 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           </div>
           <p className="text-[var(--text-muted)] text-xs mb-3">
             {hotspotEnabled
-              ? "Changes apply next time the hotspot starts."
-              : "Hotspot will not start automatically."}
+              ? t("credentials.hotspotChangesApply")
+              : t("credentials.hotspotDisabled")}
           </p>
 
           {hotspotEnabled && (
             <>
               <div className="mb-4">
                 <label htmlFor="hotspot-name" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                  Hotspot Name
+                  {t("credentials.hotspotName")}
                 </label>
                 <input
                   id="hotspot-name"
@@ -282,7 +284,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
               <div className="mb-4">
                 <label htmlFor="hotspot-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                  Hotspot Password
+                  {t("credentials.hotspotPassword")}
                 </label>
                 <div className="relative">
                   <input
@@ -293,7 +295,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     onKeyDown={(e) => {
                       if (e.key === "Enter") save();
                     }}
-                    placeholder="Minimum 8 characters"
+                    placeholder={t("credentials.minChars")}
                     className={`${inputBase} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
                   />
                   <button
@@ -309,7 +311,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
               <div>
                 <label htmlFor="hotspot-confirm" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                  Confirm Hotspot Password
+                  {t("credentials.confirmHotspotPassword")}
                 </label>
                 <div className="relative">
                   <input
@@ -320,7 +322,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     onKeyDown={(e) => {
                       if (e.key === "Enter") save();
                     }}
-                    placeholder="Re-enter hotspot password"
+                    placeholder={t("credentials.reenterHotspot")}
                     className={`${inputBase} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
                   />
                   <button
@@ -348,7 +350,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             disabled={saving || !password || !confirmPassword || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
-            {saving ? "Saving..." : "Save"}
+            {saving ? t("saving") : t("save")}
           </button>
         </div>
       </div>

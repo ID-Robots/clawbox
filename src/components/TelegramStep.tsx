@@ -3,16 +3,17 @@
 import { useState, useEffect, useRef } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import StatusMessage from "./StatusMessage";
+import { useT } from "@/lib/i18n";
 
-const CONFIGURING_STEPS = [
-  { label: "Token verified" },
-  { label: "Connecting to Telegram" },
-  { label: "Restarting gateway" },
-  { label: "Waiting for gateway" },
-  { label: "Ready to chat" },
-];
+function ConfiguringOverlay({ onDone, t }: { onDone: () => void; t: (key: string) => string }) {
+  const CONFIGURING_STEPS = [
+    { label: t("telegram.tokenVerified") },
+    { label: t("telegram.connectingTelegram") },
+    { label: t("telegram.restartingGateway") },
+    { label: t("telegram.waitingGateway") },
+    { label: t("telegram.readyToChat") },
+  ];
 
-function ConfiguringOverlay({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState(0);
   const [dots, setDots] = useState("");
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -124,14 +125,14 @@ function ConfiguringOverlay({ onDone }: { onDone: () => void }) {
       {/* Status text */}
       <div className="text-center tg-fade-in" style={{ animationDelay: "0.3s" }}>
         <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
-          {phase === 0 ? "Connected!" : phase === 4 ? "All set!" : "Setting up Telegram"}
+          {phase === 0 ? t("connected") : phase === 4 ? t("telegram.allSet") : t("telegram.settingUpTelegram")}
         </h2>
         <p className="text-sm text-[var(--text-muted)]">
           {phase === 0
-            ? "Bot token verified successfully"
+            ? t("telegram.botTokenVerified")
             : phase === 4
-            ? "Telegram bot is ready"
-            : `Configuring your Telegram bot${dots}`}
+            ? t("telegram.botReady")
+            : `${t("telegram.configuringBot")}${dots}`}
         </p>
       </div>
 
@@ -167,7 +168,7 @@ function ConfiguringOverlay({ onDone }: { onDone: () => void }) {
 
       {phase >= 1 && phase < 4 && (
         <p className="text-xs text-[var(--text-muted)] text-center mt-2 tg-step-enter">
-          Please wait while the gateway restarts{dots}
+          {t("telegram.pleaseWait")}{dots}
         </p>
       )}
     </div>
@@ -179,6 +180,7 @@ interface TelegramStepProps {
 }
 
 export default function TelegramStep({ onNext }: TelegramStepProps) {
+  const { t } = useT();
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -197,7 +199,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
 
   const saveTelegram = async () => {
     if (!token.trim()) {
-      setStatus({ type: "error", message: "Please enter a bot token" });
+      setStatus({ type: "error", message: t("telegram.enterToken") });
       return;
     }
     saveControllerRef.current?.abort();
@@ -248,15 +250,15 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
     <div className="w-full max-w-[520px]">
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
         {configuring && (
-          <ConfiguringOverlay onDone={onNext} />
+          <ConfiguringOverlay onDone={onNext} t={t} />
         )}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         <h1 className="text-2xl font-bold font-display mb-2 flex items-center gap-2.5">
-          Connect Telegram
-          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">Recommended</span>
+          {t("telegram.title")}
+          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
-          Link a Telegram bot so you can chat with your ClawBox from your phone.
+          {t("telegram.description")}
         </p>
 
         <div className="flex gap-5 items-start mb-5">
@@ -271,7 +273,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
           </div>
           <ol className="ml-0 pl-5 leading-[1.8] text-sm text-[var(--text-primary)] list-decimal">
             <li>
-              Scan the QR code or search{" "}
+              {t("telegram.step1")}{" "}
               <a
                 href="https://t.me/BotFather"
                 target="_blank"
@@ -280,22 +282,24 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
               >
                 @BotFather
               </a>{" "}
-              in Telegram
+              {t("telegram.step1Suffix")}
             </li>
             <li>
-              Send{" "}
+              {t("telegram.step2")}{" "}
               <code className="bg-[var(--bg-surface)] px-1.5 py-0.5 rounded text-xs text-[var(--coral-bright)]">
                 /newbot
               </code>{" "}
-              and follow the prompts
+              {t("telegram.step2Suffix")}
             </li>
             <li>
-              Copy the <strong>Bot Token</strong> and paste it below
+              {t("telegram.step3prefix")}{" "}
+              <strong>{t("telegram.step3bold")}</strong>{" "}
+              {t("telegram.step3suffix")}
             </li>
           </ol>
         </div>
         <label htmlFor="telegram-bot-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5 mt-4">
-          Bot Token
+          {t("telegram.botToken")}
         </label>
         <div className="relative">
           <input
@@ -329,14 +333,14 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             disabled={saving}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
-            {saving ? "Saving..." : "Save & Continue"}
+            {saving ? t("saving") : t("telegram.saveAndContinue")}
           </button>
           <button
             type="button"
             onClick={onNext}
             className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
           >
-            Skip for now
+            {t("telegram.skipForNow")}
           </button>
         </div>
         </div>

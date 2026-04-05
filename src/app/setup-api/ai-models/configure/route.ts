@@ -38,30 +38,23 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "deepseek:default",
   },
   anthropic: {
-    defaultModel: "anthropic/claude-opus-4-6",
+    defaultModel: "anthropic/claude-sonnet-4-6",
     profileKey: "anthropic:default",
-    subscriptionOverride: {
-      defaultModel: "anthropic/claude-sonnet-4-6",
-    },
   },
   openai: {
-    defaultModel: "openai/gpt-4o",
+    defaultModel: "openai/gpt-5.4",
     profileKey: "openai:default",
     subscriptionOverride: {
-      defaultModel: "openai-codex/gpt-5.3-codex",
+      defaultModel: "openai-codex/gpt-5.4",
       profileKey: "openai-codex:default",
     },
   },
   google: {
     defaultModel: "google/gemini-2.0-flash",
     profileKey: "google:default",
-    subscriptionOverride: {
-      defaultModel: "google-gemini-cli/gemini-2.5-flash",
-      profileKey: "google-gemini-cli:default",
-    },
   },
   openrouter: {
-    defaultModel: "openrouter/anthropic/claude-sonnet-4.5",
+    defaultModel: "openrouter/moonshotai/kimi-k2.5",
     profileKey: "openrouter:default",
   },
   ollama: {
@@ -178,7 +171,7 @@ export async function POST(request: Request) {
         authProfiles = { version: 1, profiles: {} };
       }
       if (isClawAI) {
-        // ClawAI uses a pre-configured DeepSeek API key
+        // ClawBox AI uses a pre-configured DeepSeek API key
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
@@ -277,7 +270,7 @@ export async function POST(request: Request) {
       ai_model_configured_at: new Date().toISOString(),
     });
 
-    // 7. For ClawAI (DeepSeek) or Ollama, define a custom provider in openclaw.json
+    // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
       const providerDef = JSON.stringify({
@@ -302,7 +295,7 @@ export async function POST(request: Request) {
           "config", "set", "models.mode", "replace",
         ]),
       ]);
-      console.log(`[AI Config] Set ClawAI (DeepSeek) provider in openclaw.json (context=${CLAWAI_CONTEXT_WINDOW}, mode=replace)`);
+      console.log(`[AI Config] Set ClawBox AI (DeepSeek) provider in openclaw.json (context=${CLAWAI_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
@@ -336,7 +329,7 @@ export async function POST(request: Request) {
       }
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else {
-      // Switching away from Ollama/ClawAI — reset models.mode so cloud providers
+      // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
       try {
         await runCommand(OPENCLAW_BIN, [
@@ -344,6 +337,26 @@ export async function POST(request: Request) {
         ]);
       } catch {
         // Non-fatal: merge is the default behavior anyway
+      }
+
+      // Always configure ClawBox AI (DeepSeek) as backup provider alongside
+      // the primary, so the agent has a fallback if the primary provider fails.
+      try {
+        // Add DeepSeek backup to the auth-profiles file
+        const rawProfiles = await fs.readFile(AUTH_PROFILES_PATH, "utf-8").catch(() => '{"version":1,"profiles":{}}');
+        const profiles = JSON.parse(rawProfiles);
+        profiles.profiles["deepseek:default"] = { type: "api_key", provider: "deepseek", key: CLAWAI_API_KEY };
+        await fs.writeFile(AUTH_PROFILES_PATH, JSON.stringify(profiles, null, 2));
+        await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "auth.profiles.deepseek:default",
+          JSON.stringify({ provider: "deepseek", mode: "api_key" }),
+          "--json",
+        ]);
+        console.log("[AI Config] Configured ClawBox AI (DeepSeek) as backup provider");
+      } catch (err) {
+        // Non-fatal: backup is a nice-to-have
+        console.warn("[AI Config] Failed to configure backup provider:", err instanceof Error ? err.message : err);
       }
     }
 

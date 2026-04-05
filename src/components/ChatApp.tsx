@@ -13,27 +13,7 @@ interface ChatMessage {
   images?: string[] // data URLs for display
 }
 
-// Simple markdown-ish rendering: bold, italic, code, links
-function renderText(text: string) {
-  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g)
-  return parts.map((part, i) => {
-    if (part.startsWith('```') && part.endsWith('```')) {
-      const code = part.slice(3, -3).replace(/^\w*\n/, '')
-      return <pre key={i} style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px', margin: '6px 0', fontSize: 12, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{code}</pre>
-    }
-    if (part.startsWith('`') && part.endsWith('`')) {
-      return <code key={i} style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 4, padding: '1px 5px', fontSize: '0.9em' }}>{part.slice(1, -1)}</code>
-    }
-    const inlined = part.split(/(\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g)
-    return inlined.map((seg, j) => {
-      if (seg.startsWith('**') && seg.endsWith('**')) return <strong key={`${i}-${j}`}>{seg.slice(2, -2)}</strong>
-      if (seg.startsWith('*') && seg.endsWith('*')) return <em key={`${i}-${j}`}>{seg.slice(1, -1)}</em>
-      const linkMatch = seg.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
-      if (linkMatch) return <a key={`${i}-${j}`} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" style={{ color: '#f97316', textDecoration: 'underline' }}>{linkMatch[1]}</a>
-      return <span key={`${i}-${j}`}>{seg}</span>
-    })
-  })
-}
+import { renderText } from '@/lib/chat-markdown'
 
 function extractText(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return ''

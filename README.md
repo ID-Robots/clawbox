@@ -2,8 +2,10 @@
   <img src="public/clawbox-logo.png" alt="ClawBox" width="180" />
 </p>
 
+<h3 align="center">OpenClaw OS</h3>
+
 <p align="center">
-  Setup wizard and dashboard for <a href="https://openclawhardware.dev/">OpenClaw Hardware</a> — a private AI assistant running on NVIDIA Jetson.
+  The operating system for <a href="https://openclawhardware.dev/">OpenClaw Hardware</a> — a private AI assistant you own, running on NVIDIA Jetson.
 </p>
 
 <p align="center">
@@ -16,7 +18,15 @@
 
 ---
 
-ClawBox turns a bare Jetson device into a ready-to-use [OpenClaw](https://openclawhardware.dev/) AI assistant. Connect to the device's WiFi hotspot, open `http://clawbox.local/`, and walk through the guided setup — WiFi, system updates, AI provider credentials, and Telegram integration. Once configured, the same URL serves the OpenClaw Control UI with a ClawBox navigation bar.
+## What is ClawBox?
+
+ClawBox **is** OpenClaw OS — the system software that turns a bare NVIDIA Jetson board into a fully functional private AI device. It handles everything from first-boot provisioning to the desktop you interact with daily:
+
+1. **First boot** — The Jetson broadcasts a WiFi hotspot (`ClawBox-Setup`). You connect from any phone or laptop and walk through guided setup at `http://clawbox.local/`.
+2. **Configuration** — A 7-step wizard configures WiFi, security credentials, system updates, AI provider keys (Claude, GPT, Gemini, Ollama, etc.), and optional Telegram integration.
+3. **Daily use** — After setup the same URL serves a full desktop environment with windowed apps, a taskbar, and system tray. The AI agent (OpenClaw) runs locally and can control the entire device through MCP tools.
+
+Everything runs on the device. No cloud dependency, no subscription, no data leaving your network unless you choose to connect an external AI provider.
 
 ## Quick Start
 
@@ -28,19 +38,111 @@ Connect to the **ClawBox-Setup** WiFi network (open, no password) and navigate t
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
-## Setup Wizard
+## How It Works
 
-The wizard guides you through 7 steps:
+### Layer 1 — System Bootstrap
 
-1. **Welcome** — Introduction
-2. **Security** — Set device password
-3. **WiFi** — Connect to your home/office network
-4. **Update** — System packages, JetPack, OpenClaw
-5. **AI Models** — API key or subscription (OAuth) for Claude, GPT, Gemini, or OpenRouter
-6. **Telegram** — Optional bot integration
-7. **Done** — System dashboard with status and factory reset
+The installer (`install.sh`) provisions the Jetson from scratch:
+- Installs system packages, Node.js 22, Bun runtime
+- Sets hostname to `clawbox`, enables mDNS discovery
+- Builds the web OS, installs the OpenClaw gateway
+- Configures systemd services and captive-portal DNS
+- Creates the WiFi access point for first-boot setup
 
-After setup completes, the root URL serves the OpenClaw gateway Control UI.
+Two systemd services run the OS:
+
+| Service | Role |
+|---|---|
+| `clawbox-ap` | WiFi access point (SSID: ClawBox-Setup, IP: 10.42.0.1) |
+| `clawbox-setup` | Web server on port 80 (Next.js + WebSocket proxy) |
+
+### Layer 2 — Setup Wizard
+
+On first boot (or after factory reset), the OS presents a 7-step wizard:
+
+1. **Welcome** — Language selection (10 languages supported)
+2. **Security** — Device password + WiFi hotspot credentials
+3. **WiFi** — Connect to your home/office network (or use Ethernet)
+4. **Update** — Pull latest system updates
+5. **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
+6. **Telegram** — Optional bot token for remote messaging
+7. **Done** — System status dashboard and factory reset option
+
+### Layer 3 — Desktop Environment
+
+After setup, ClawBox serves a Chrome OS-style desktop accessible from any browser:
+
+- **AI Chat** — Full-window and floating popup chat via the OpenClaw gateway
+- **Terminal** — xterm.js shell with WebSocket PTY
+- **File Manager** — Browse, upload, rename, delete files on the device
+- **Browser Automation** — Visual Chromium control via DevTools Protocol
+- **Remote Desktop** — NoVNC viewer for VNC sessions
+- **VS Code** — Integrated code-server IDE
+- **App Store** — Discover and install skills from openclawhardware.dev
+- **Settings** — WiFi, AI provider, appearance, Telegram, system management
+- **Ollama Models** — Pull, search, and manage local AI models
+- **Mascot** — Animated crab companion with personality states
+
+The desktop features draggable/resizable windows, a taskbar with system tray, and a responsive mobile layout for phone access.
+
+### Layer 4 — AI Agent Integration (MCP)
+
+The OpenClaw AI agent controls the device through an MCP (Model Context Protocol) server. This is what makes ClawBox an *OS* rather than just a dashboard — the AI can operate the device autonomously.
+
+**Device control tools:**
+
+```text
+system_stats / system_info / system_power   — monitor and manage the device
+run_command                                  — execute any shell command
+file_list / file_read / file_write           — file operations
+wifi_scan / wifi_status                      — network management
+ui_open_app / ui_notify                      — control the desktop UI
+```
+
+**Browser automation tools:**
+
+```text
+browser_launch / browser_navigate / browser_click / browser_type
+browser_scroll / browser_screenshot / browser_keypress / browser_close
+```
+
+**App management tools:**
+
+```text
+app_search / app_install / app_uninstall     — app store operations
+webapp_create / webapp_update                — create desktop apps from HTML
+preferences_get / preferences_set            — user preferences
+```
+
+**Code assistant tools** (for building new desktop webapps):
+
+```text
+code_project_init    — scaffold a new multi-file webapp project
+code_project_list    — list all projects
+code_file_write      — create or overwrite a project file
+code_file_read       — read a project file
+code_file_edit       — surgical string-replacement edits
+code_file_delete     — remove a file
+code_file_list       — recursive project tree
+code_search          — grep across project files
+code_project_build   — bundle CSS/JS into HTML, deploy to desktop, open the app
+code_project_delete  — remove a project
+```
+
+The code assistant enables the AI to iteratively build, test, and deploy new desktop apps — write code across multiple files, make precise edits, search the codebase, then build a self-contained webapp that appears on the user's desktop.
+
+**CLI wrapper** (`clawbox` command):
+```bash
+clawbox webapp create <appId> <name> [color] < file.html
+clawbox app open <appId>
+clawbox app list
+clawbox notify <message>
+clawbox system stats
+clawbox code init <projectId> <name> [template] [color]
+clawbox code build <projectId>
+clawbox code files <projectId>
+clawbox code search <projectId> <pattern>
+```
 
 ## Architecture
 
@@ -49,83 +151,65 @@ Browser (http://clawbox.local)
   │
   ├── Port 80: Next.js (production-server.js)
   │     ├── /setup          → Setup wizard (React SPA)
-  │     ├── /setup-api/*    → Setup API routes
+  │     ├── /login          → Authentication
+  │     ├── /               → Desktop environment (post-setup)
+  │     ├── /setup-api/*    → 50+ API routes (system, files, code, browser, etc.)
   │     ├── /api/*          → Proxy to OpenClaw gateway
-  │     ├── /               → Gateway HTML + ClawBox bar
-  │     └── WebSocket       → Proxy to gateway (upgrade handler)
+  │     └── WebSocket       → Proxy to gateway + terminal PTY
   │
-  └── Port 18789: OpenClaw Gateway (localhost only)
-        ├── Control UI
-        ├── WebSocket (real-time)
-        └── REST API
+  ├── Port 3006: Terminal WebSocket PTY server
+  │
+  ├── Port 18789: OpenClaw Gateway (localhost only)
+  │     ├── AI Agent (MCP tools → controls the entire OS)
+  │     ├── Control UI
+  │     ├── WebSocket (real-time chat)
+  │     └── REST API
+  │
+  └── Port 18800: Chromium CDP (browser automation)
 ```
 
-Node.js is used instead of Bun for the production server because Bun doesn't fire `http.Server` upgrade events, which are required for WebSocket proxying.
+Node.js is used for the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying.
 
 ## Tech Stack
 
-- **Next.js 16** / React 19 / TypeScript 5
-- **Tailwind CSS 4**
+- **Next.js 16** / React 19 / TypeScript 5 — web OS frontend and API
+- **Tailwind CSS 4** — styling
 - **Bun** — package management and builds
 - **Node.js 22** — production runtime
-- **NetworkManager** — WiFi AP and client connections
-- **Avahi** — mDNS (`clawbox.local`)
+- **MCP SDK** — AI agent tool protocol
+- **xterm.js** / **node-pty** — terminal emulation
+- **NoVNC** — remote desktop
+- **NetworkManager** — WiFi AP and client management
+- **Avahi** — mDNS discovery (`clawbox.local`)
+- **Vitest** / **Playwright** — unit and E2E testing
 
 ## Project Structure
 
 ```text
-├── config/                 Systemd services, dnsmasq config
-├── scripts/                WiFi AP start/stop scripts
+├── config/                 Systemd services, captive-portal DNS
+├── mcp/                    MCP server + CLI (AI agent interface to the OS)
+├── scripts/                WiFi AP, terminal server, voice/TTS, Jetson tuning
 ├── src/
-│   ├── app/                Next.js App Router (pages + API routes)
-│   ├── components/         React components (setup steps)
-│   ├── lib/                Utilities (config store, network, updater, gateway proxy)
-│   └── middleware.ts       Captive portal detection
-├── production-server.js    Node.js wrapper with WebSocket proxy
-└── install.sh              Full installer script
-```
-
-## Installation Details
-
-The installer (`install.sh`) performs 13 steps:
-
-1. Verify `clawbox` system user exists
-2. Install system packages (git, curl, NetworkManager, avahi, iptables)
-3. Install Node.js 22 via NodeSource
-4. Set hostname to `clawbox`, configure mDNS
-5. Clone or update the repository
-6. Install Bun runtime
-7. Build the Next.js app (`bun install && bun run build`)
-8. Install OpenClaw via npm
-9. Patch OpenClaw gateway (insecure auth + scope preservation)
-10. Deploy captive portal DNS config
-11. Set up directories and permissions
-12. Install and enable systemd services
-13. Start services
-
-The script is idempotent — safe to run multiple times.
-
-## Services
-
-| Service | Description |
-|---|---|
-| `clawbox-ap` | WiFi access point (SSID: ClawBox-Setup, IP: 10.42.0.1) |
-| `clawbox-setup` | Web server on port 80 (Next.js + WebSocket proxy) |
-
-```bash
-sudo systemctl status clawbox-ap
-sudo systemctl status clawbox-setup
-sudo systemctl restart clawbox-setup
+│   ├── app/                Next.js App Router (pages + 50+ API routes)
+│   │   └── setup-api/      WiFi, AI models, Ollama, apps, files, browser, code, system
+│   ├── components/         Setup wizard, desktop environment, built-in apps
+│   ├── hooks/              Window manager, Ollama model management
+│   ├── lib/                Config, network, auth, OAuth, i18n, updater, code-projects
+│   ├── tests/              Unit + API route tests
+│   └── middleware.ts       Captive portal detection + session auth
+├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
+└── install.sh              Full system installer (idempotent)
 ```
 
 ## Development
 
 ```bash
 bun install
-bun run dev           # Port 3000
-bun run dev:privileged # Port 80 (requires root)
+bun run dev              # Port 3000
+bun run dev:privileged   # Port 80 (requires root)
 bun run build
 bun run lint
+bun run test             # Unit tests (Vitest)
 ```
 
 ## Environment Variables
@@ -137,11 +221,17 @@ bun run lint
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
 | `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,localhost` | Trusted hostnames |
-| `ALLOW_INSECURE_CONTROL_UI` | `true` | Allow HTTP proxy to gateway control UI |
+| `SESSION_SECRET` | Auto-generated | Session cookie signing key |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
+| `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
+
+## Internationalization
+
+10 languages: English, German, Spanish, French, Italian, Japanese, Dutch, Swedish, Chinese, Bulgarian. Auto-detected from browser, changeable in settings.
 
 ## License
 
-ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). You're free to use, modify, and redistribute it for **personal, non-commercial purposes**. Commercial use (selling devices, offering hosted services, bundling with commercial products) requires a separate license from [IDRobots Ltd.](https://openclawhardware.dev/) — reach out at yanko@idrobots.com.
+ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://openclawhardware.dev/) — contact yanko@idrobots.com.
 
 ---
 

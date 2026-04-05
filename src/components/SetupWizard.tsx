@@ -9,6 +9,7 @@ import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
 import TelegramStep from "./TelegramStep";
+import { useT, I18nProvider } from "@/lib/i18n";
 
 async function completeSetup(onComplete?: () => void) {
   try {
@@ -43,7 +44,7 @@ function applyStatusData(
 
 /* ── Power menu ── */
 
-function PowerMenu({ onClose }: { onClose: () => void }) {
+function PowerMenu({ onClose, t }: { onClose: () => void; t: (key: string) => string }) {
   const [confirming, setConfirming] = useState<"restart" | "shutdown" | null>(null);
   const [acting, setActing] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -72,12 +73,12 @@ function PowerMenu({ onClose }: { onClose: () => void }) {
       {acting ? (
         <div className="flex items-center gap-2 px-4 py-3 text-xs text-[var(--text-secondary)]">
           <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
-          {confirming === "shutdown" ? "Shutting down..." : "Restarting..."}
+          {confirming === "shutdown" ? t("wizard.shuttingDown") : t("wizard.restarting")}
         </div>
       ) : confirming ? (
         <div className="p-3">
           <p className="text-xs text-[var(--text-secondary)] mb-2">
-            {confirming === "shutdown" ? "Shut down device?" : "Restart device?"}
+            {confirming === "shutdown" ? t("wizard.shutdownConfirm") : t("wizard.restartConfirm")}
           </p>
           <div className="flex gap-2">
             <button
@@ -85,14 +86,14 @@ function PowerMenu({ onClose }: { onClose: () => void }) {
               onClick={() => execute(confirming)}
               className="flex-1 px-3 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded text-xs font-semibold cursor-pointer hover:bg-red-500/30 transition-colors"
             >
-              Confirm
+              {t("confirm")}
             </button>
             <button
               type="button"
               onClick={() => setConfirming(null)}
               className="flex-1 px-3 py-1.5 bg-[var(--bg-deep)] text-[var(--text-secondary)] border border-[var(--border-subtle)] rounded text-xs cursor-pointer hover:bg-[var(--bg-surface)] transition-colors"
             >
-              Cancel
+              {t("cancel")}
             </button>
           </div>
         </div>
@@ -104,7 +105,7 @@ function PowerMenu({ onClose }: { onClose: () => void }) {
             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs text-[var(--text-secondary)] bg-transparent border-none cursor-pointer hover:bg-[var(--bg-deep)] transition-colors text-left"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }}>restart_alt</span>
-            Restart
+            {t("wizard.restart")}
           </button>
           <button
             type="button"
@@ -112,7 +113,7 @@ function PowerMenu({ onClose }: { onClose: () => void }) {
             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs text-red-400 bg-transparent border-none cursor-pointer hover:bg-[var(--bg-deep)] transition-colors text-left"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }}>power_settings_new</span>
-            Shut Down
+            {t("wizard.shutdown")}
           </button>
         </>
       )}
@@ -122,7 +123,7 @@ function PowerMenu({ onClose }: { onClose: () => void }) {
 
 /* ── Help popover ── */
 
-function HelpPopover({ step, onClose }: { step: number; onClose: () => void }) {
+function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; t: (key: string) => string }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -135,24 +136,24 @@ function HelpPopover({ step, onClose }: { step: number; onClose: () => void }) {
 
   const tips: Record<number, { title: string; body: string }> = {
     1: {
-      title: "Connecting to the Internet",
-      body: "Select your country, then plug in an Ethernet cable for the easiest setup — ClawBox will detect it automatically. Or choose WiFi to scan for nearby networks. If your network doesn't appear, tap \"Other network\" to enter the name manually.",
+      title: t("wizard.help1Title"),
+      body: t("wizard.help1Body"),
     },
     2: {
-      title: "System Update",
-      body: "ClawBox is checking for the latest software. This runs automatically — just wait for it to finish. If it fails, check your internet connection and try again.",
+      title: t("wizard.help2Title"),
+      body: t("wizard.help2Body"),
     },
     3: {
-      title: "Device Security",
-      body: "Set a password to protect your ClawBox dashboard. You'll need this password to access ClawBox from your browser. Choose something memorable but secure.",
+      title: t("wizard.help3Title"),
+      body: t("wizard.help3Body"),
     },
     4: {
-      title: "AI Model Setup",
-      body: "Choose an AI provider to power your assistant. ClawAI is free and works instantly. Other providers require an API key or subscription from their website.",
+      title: t("wizard.help4Title"),
+      body: t("wizard.help4Body"),
     },
     5: {
-      title: "Telegram Bot",
-      body: "Connect a Telegram bot to chat with your AI assistant from anywhere. Open Telegram, find @BotFather, create a new bot, and paste the token here.",
+      title: t("wizard.help5Title"),
+      body: t("wizard.help5Body"),
     },
   };
 
@@ -172,7 +173,8 @@ interface SetupWizardProps {
   onComplete?: () => void;
 }
 
-export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
+function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
+  const { t } = useT();
   const [currentStep, setCurrentStep] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -220,7 +222,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
             onClick={() => setRetryCount((c) => c + 1)}
             className="px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105"
           >
-            Retry
+            {t("retry")}
           </button>
         </div>
       </div>
@@ -259,7 +261,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help_outline</span>
             </button>
-            {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} />}
+            {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} t={t} />}
           </div>
           <div className="relative">
             <button
@@ -270,7 +272,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
             </button>
-            {showPower && <PowerMenu onClose={() => setShowPower(false)} />}
+            {showPower && <PowerMenu onClose={() => setShowPower(false)} t={t} />}
           </div>
         </div>
       </header>
@@ -318,5 +320,13 @@ export default function SetupWizard({ onComplete }: SetupWizardProps = {}) {
         </a>
       </footer>
     </>
+  );
+}
+
+export default function SetupWizard(props: SetupWizardProps = {}) {
+  return (
+    <I18nProvider>
+      <SetupWizardInner {...props} />
+    </I18nProvider>
   );
 }

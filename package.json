@@ -4,6 +4,7 @@
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
+    "mcp": "bun run mcp/clawbox-mcp.ts",
     "terminal-server": "bun run scripts/terminal-server.ts",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
@@ -21,6 +22,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@novnc/novnc": "^1.6.0",
     "@types/ws": "^8.18.1",
     "@xterm/addon-fit": "^0.11.0",

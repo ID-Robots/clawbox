@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
+import { useT } from "@/lib/i18n";
 
 interface UpdateStepProps {
   onNext: () => void;
@@ -40,9 +41,21 @@ function StepIcon({ status }: { status: StepStatus }) {
 // Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
 const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
 
+function compareVersions(a: string, b: string): number {
+  const pa = cleanVersion(a).replace(/^v/, '').split('.').map(Number);
+  const pb = cleanVersion(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0, nb = pb[i] ?? 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
+}
+
 export default function UpdateStep({ onNext }: UpdateStepProps) {
+  const { t } = useT();
   const [state, setState] = useState<UpdateState | null>(null);
-  const [, setTargetVersion] = useState<string | null>(null);
+
   const [versions, setVersions] = useState<{
     clawbox: { current: string; target: string | null };
     openclaw: { current: string | null; target: string | null };
@@ -113,7 +126,6 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         const data = await res.json();
         if (controller.signal.aborted) return;
         setState(data);
-        if (data.targetVersion) setTargetVersion(data.targetVersion);
         if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
@@ -184,7 +196,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       <div className="w-full max-w-[520px]">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
-            <div className="spinner" /> Checking for updates...
+            <div className="spinner" /> {t("update.checkingUpdates")}
           </div>
         </div>
       </div>
@@ -196,10 +208,10 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       <div className="w-full max-w-[520px]">
         <div className="card-surface rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
-            System Update
+            {t("update.title")}
           </h1>
           <p className="text-red-400 text-sm mb-5">
-            Failed to check update status.
+            {t("update.failedToCheck")}
           </p>
           <div className="flex items-center gap-3">
             <button
@@ -207,14 +219,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               onClick={triggerUpdate}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
-              Retry
+              {t("retry")}
             </button>
             <button
               type="button"
               onClick={onNext}
               className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
             >
-              Skip updates
+              {t("update.skipUpdates")}
             </button>
           </div>
         </div>
@@ -225,6 +237,10 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // Idle state — show trigger button or "up to date"
   const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
 
+  const isDowngrade = versions?.clawbox.target
+    ? compareVersions(versions.clawbox.current, versions.clawbox.target) > 0
+    : false;
+
   if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]">
@@ -232,14 +248,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <h1 className="text-2xl font-bold font-display mb-2">
             {isUpToDate ? (
               <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-                System Up to Date
+                {t("update.upToDate")}
               </span>
-            ) : "System Update"}
+            ) : t("update.title")}
           </h1>
           <p className="text-[var(--text-secondary)] mb-4 leading-relaxed">
             {isUpToDate
-              ? "Your ClawBox is running the latest version."
-              : "Update your ClawBox with the latest software, drivers, and AI models."}
+              ? t("update.latestVersion")
+              : t("update.updateDescription")}
           </p>
           {versions && (
             <div className="mb-6 space-y-1.5 text-sm">
@@ -274,16 +290,27 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 onClick={onNext}
                 className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
               >
-                Continue
+                {t("continue")}
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={triggerUpdate}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-              >
-                Start Update
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={triggerUpdate}
+                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                >
+                  {t("update.startUpdate")}
+                </button>
+                {isDowngrade && (
+                  <button
+                    type="button"
+                    onClick={onNext}
+                    className="px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  >
+                    {t("skip")}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -297,7 +324,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       <div className="w-full max-w-[520px]">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
-            <div className="spinner" /> Preparing update...
+            <div className="spinner" /> {t("update.preparingUpdate")}
           </div>
         </div>
       </div>
@@ -310,18 +337,18 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         <h1 className="text-2xl font-bold font-display mb-2">
           {isDone ? (
             <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-              Update Complete
+              {t("update.updateComplete")}
             </span>
           ) : (
-            "System Update"
+            t("update.title")
           )}
         </h1>
         <p className="text-[var(--text-secondary)] mb-6 leading-relaxed">
           {isDone
-            ? "All updates have been applied successfully."
+            ? t("update.allUpdatesApplied")
             : isFailed
-              ? "The update process encountered an error."
-              : "Updating your ClawBox with the latest software..."}
+              ? t("update.updateError")
+              : t("update.updatingDescription")}
         </p>
 
         {/* Internet error (no steps shown) */}
@@ -379,7 +406,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 onClick={onNext}
                 className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
               >
-                Continue
+                {t("continue")}
               </button>
             )}
             {isFailed && (
@@ -389,14 +416,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                   onClick={triggerUpdate}
                   className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                 >
-                  Retry
+                  {t("retry")}
                 </button>
                 <button
                   type="button"
                   onClick={onNext}
                   className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
                 >
-                  Skip updates
+                  {t("update.skipUpdates")}
                 </button>
               </>
             )}

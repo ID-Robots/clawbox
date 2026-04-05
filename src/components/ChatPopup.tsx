@@ -40,6 +40,8 @@ interface ChatPopupProps {
   onClose: () => void
   onOpenFull?: () => void
   onThinkingChange?: (thinking: boolean) => void
+  onPanelModeChange?: (panelWidth: number) => void
+  initialPanelWidth?: number
   mascotX?: number
   mobile?: boolean
   trayMode?: boolean
@@ -51,29 +53,7 @@ interface ChatMessage {
   timestamp: number
 }
 
-// Simple markdown-ish rendering: bold, italic, code, links
-function renderText(text: string) {
-  // Split into code blocks vs rest
-  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g)
-  return parts.map((part, i) => {
-    if (part.startsWith('```') && part.endsWith('```')) {
-      const code = part.slice(3, -3).replace(/^\w*\n/, '') // strip language hint
-      return <pre key={i} style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px', margin: '6px 0', fontSize: 12, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{code}</pre>
-    }
-    if (part.startsWith('`') && part.endsWith('`')) {
-      return <code key={i} style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 4, padding: '1px 5px', fontSize: '0.9em' }}>{part.slice(1, -1)}</code>
-    }
-    // Inline: bold, italic, links
-    const inlined = part.split(/(\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g)
-    return inlined.map((seg, j) => {
-      if (seg.startsWith('**') && seg.endsWith('**')) return <strong key={`${i}-${j}`}>{seg.slice(2, -2)}</strong>
-      if (seg.startsWith('*') && seg.endsWith('*')) return <em key={`${i}-${j}`}>{seg.slice(1, -1)}</em>
-      const linkMatch = seg.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
-      if (linkMatch) return <a key={`${i}-${j}`} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" style={{ color: '#f97316', textDecoration: 'underline' }}>{linkMatch[1]}</a>
-      return <span key={`${i}-${j}`}>{seg}</span>
-    })
-  })
-}
+import { renderText } from '@/lib/chat-markdown'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -115,8 +95,11 @@ function uuid(): string {
 }
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
+const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+  const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
+  const panelMode = panelWidth !== null
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -134,6 +117,56 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
   // Reset position and size when reopened
   useEffect(() => { if (isOpen) { setPos(null); setSize(DEFAULT_SIZE) } }, [isOpen])
+
+  // Sync panel width from parent (handles async preferences load after mount)
+  useEffect(() => {
+    if (initialPanelWidth && initialPanelWidth > 0 && panelWidth === null) {
+      setPanelWidth(initialPanelWidth)
+    }
+  }, [initialPanelWidth]) // eslint-disable-line react-hooks/exhaustive-deps -- panelWidth excluded: one-way sync from parent, must not re-trigger on local resize
+
+  // Exit panel mode when closed
+  useEffect(() => { if (!isOpen && panelMode) { setPanelWidth(null); onPanelModeChange?.(0) } }, [isOpen, panelMode, onPanelModeChange])
+
+  const togglePanelMode = useCallback(() => {
+    if (panelMode) {
+      setPanelWidth(null)
+      onPanelModeChange?.(0)
+    } else {
+      setPanelWidth(DEFAULT_PANEL_WIDTH)
+      onPanelModeChange?.(DEFAULT_PANEL_WIDTH)
+    }
+    setPos(null)
+    setSize(DEFAULT_SIZE)
+  }, [panelMode, onPanelModeChange])
+
+  const handlePanelResizeStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = 'touches' in e ? e.touches[0].clientX : e.clientX
+    const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
+    const onMove = (ev: MouseEvent | TouchEvent) => {
+      const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
+      const newW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      // Direct DOM update during drag — no React re-renders
+      if (popupRef.current) popupRef.current.style.width = newW + 'px'
+    }
+    const onUp = (ev: MouseEvent | TouchEvent) => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('touchmove', onMove)
+      window.removeEventListener('touchend', onUp)
+      // Commit final width to React state + notify parent
+      const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
+      const finalW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      setPanelWidth(finalW)
+      onPanelModeChange?.(finalW)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('touchmove', onMove)
+    window.addEventListener('touchend', onUp)
+  }, [onPanelModeChange])
 
   const onDragStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
@@ -253,7 +286,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
-      if (config.model) setModelName(config.model.replace(/^.*\//, ''))
+      if (config.model) {
+        const raw = config.model as string
+        setModelName(raw.startsWith('deepseek/') ? 'ClawBox AI' : raw.replace(/^.*\//, ''))
+      }
     } catch {
       // Auto-retry if gateway config not ready yet
       if (retryCountRef.current < MAX_RETRIES) {
@@ -605,13 +641,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
 
   // Default position: above mascot (desktop only)
   const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - 416))
-  const posStyle: React.CSSProperties = mobile
-    ? { left: 0, top: 0, right: 0, bottom: 220 }
-    : pos
-      ? { left: pos.x, top: pos.y, bottom: 'auto' }
-      : trayMode
-        ? { right: 8, bottom: 65 }
-        : { left: defaultLeft, bottom: 170 }
+  const posStyle: React.CSSProperties = panelMode
+    ? { right: 0, top: 0, bottom: 56 }
+    : mobile
+      ? { left: 0, top: 0, right: 0, bottom: 220 }
+      : pos
+        ? { left: pos.x, top: pos.y, bottom: 'auto' }
+        : trayMode
+          ? { right: 8, bottom: 65 }
+          : { left: defaultLeft, bottom: 170 }
 
   return (
     <div
@@ -619,10 +657,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
       style={{
         position: 'fixed',
         ...posStyle,
-        ...(mobile ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 } : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
+        ...(panelMode
+          ? { width: panelWidth, height: 'auto', maxHeight: 'none', borderRadius: 0 }
+          : mobile
+            ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
+            : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
         zIndex: 10010,
         overflow: 'hidden',
-        boxShadow: mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
+        boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
@@ -634,7 +676,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
     >
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
       <div
-        onPointerDown={mobile ? undefined : onDragStart}
+        onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -644,7 +686,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           borderBottom: '1px solid rgba(249,115,22,0.2)',
           flexShrink: 0,
           userSelect: 'none',
-          cursor: mobile ? 'default' : 'grab',
+          cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
         {modelName && status === 'connected' && (
@@ -679,6 +721,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" />
+            </svg>
+          </button>
+        )}
+        {!mobile && (
+          <button
+            onClick={togglePanelMode}
+            title={panelMode ? "Undock panel" : "Dock to right"}
+            style={{
+              background: panelMode ? 'rgba(249,115,22,0.2)' : 'none',
+              border: 'none',
+              color: panelMode ? '#f97316' : 'rgba(255,255,255,0.4)',
+              cursor: 'pointer', padding: 4, borderRadius: 6,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = panelMode ? '#f97316' : '#fff'; e.currentTarget.style.background = panelMode ? 'rgba(249,115,22,0.3)' : 'rgba(255,255,255,0.1)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = panelMode ? '#f97316' : 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = panelMode ? 'rgba(249,115,22,0.2)' : 'none' }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <line x1="15" y1="3" x2="15" y2="21" />
             </svg>
           </button>
         )}
@@ -884,8 +946,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, mascotX, mob
         )}
       </div>
 
-      {/* Resize edges — desktop only */}
-      {!mobile && <>
+      {/* Left-edge resize for panel mode */}
+      {!mobile && panelMode && (
+        <div className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-orange-500/30 transition-colors" onMouseDown={handlePanelResizeStart} onTouchStart={handlePanelResizeStart} />
+      )}
+
+      {/* Resize edges — desktop only, not in panel mode */}
+      {!mobile && !panelMode && <>
         <div className="absolute top-0 left-2 right-2 h-1 cursor-n-resize" onMouseDown={(e) => handleResizeStart("t", e)} onTouchStart={(e) => handleResizeStart("t", e)} />
         <div className="absolute bottom-0 left-2 right-2 h-1 cursor-s-resize" onMouseDown={(e) => handleResizeStart("b", e)} onTouchStart={(e) => handleResizeStart("b", e)} />
         <div className="absolute left-0 top-2 bottom-2 w-1 cursor-w-resize" onMouseDown={(e) => handleResizeStart("l", e)} onTouchStart={(e) => handleResizeStart("l", e)} />

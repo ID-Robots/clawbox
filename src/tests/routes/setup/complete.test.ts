@@ -76,4 +76,13 @@ describe("POST /setup-api/setup/complete", () => {
     const config = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
     expect(config.setup_complete).toBe(true);
   });
+
+  it("returns success even without session secret", async () => {
+    const res = await completePost();
+    expect(res.status).toBe(200);
+    // The cookie may or may not be set depending on whether getOrCreateSecret works
+    // but the response should always be success
+    const body = await res.json();
+    expect(body.success).toBe(true);
+  });
 });

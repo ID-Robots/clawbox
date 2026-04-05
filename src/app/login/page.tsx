@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Image from "next/image";
+import ClawIcon from "@/components/ClawIcon";
 
 const DURATION_OPTIONS = [
   { value: 1200, label: "20 minutes" },
@@ -81,14 +81,7 @@ export default function LoginPage() {
       <div className="w-full max-w-[380px]">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex flex-col items-center gap-3 mb-6">
-            <Image
-              src="/clawbox-crab.png"
-              alt="ClawBox"
-              width={80}
-              height={80}
-              className="w-[80px] h-[80px] object-contain"
-              priority
-            />
+            <ClawIcon size={80} />
             <h1 className="text-xl font-bold font-display text-[var(--text-primary)]">
               ClawBox
             </h1>

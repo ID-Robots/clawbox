@@ -7,12 +7,14 @@ describe("middleware", () => {
   beforeEach(async () => {
     vi.resetModules();
     delete process.env.PORTAL_URL;
+    delete process.env.SESSION_SECRET;
     const mod = await import("@/middleware");
     middleware = mod.middleware;
   });
 
   afterEach(() => {
     delete process.env.PORTAL_URL;
+    delete process.env.SESSION_SECRET;
   });
 
   function createRequest(pathname: string): NextRequest {
@@ -20,17 +22,17 @@ describe("middleware", () => {
   }
 
   describe("Android captive portal", () => {
-    it("redirects /generate_204 to portal", () => {
+    it("redirects /generate_204 to portal", async () => {
       const request = createRequest("/generate_204");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
     });
 
-    it("redirects /gen_204 to portal", () => {
+    it("redirects /gen_204 to portal", async () => {
       const request = createRequest("/gen_204");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -38,25 +40,25 @@ describe("middleware", () => {
   });
 
   describe("Windows NCSI", () => {
-    it("redirects /connecttest.txt to portal", () => {
+    it("redirects /connecttest.txt to portal", async () => {
       const request = createRequest("/connecttest.txt");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
     });
 
-    it("redirects /redirect to portal", () => {
+    it("redirects /redirect to portal", async () => {
       const request = createRequest("/redirect");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
     });
 
-    it("redirects /ncsi.txt to portal", () => {
+    it("redirects /ncsi.txt to portal", async () => {
       const request = createRequest("/ncsi.txt");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -64,17 +66,17 @@ describe("middleware", () => {
   });
 
   describe("Firefox captive portal", () => {
-    it("redirects /canonical.html to portal", () => {
+    it("redirects /canonical.html to portal", async () => {
       const request = createRequest("/canonical.html");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
     });
 
-    it("redirects /success.txt to portal", () => {
+    it("redirects /success.txt to portal", async () => {
       const request = createRequest("/success.txt");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -84,7 +86,7 @@ describe("middleware", () => {
   describe("Apple captive portal", () => {
     it("returns HTML response for /hotspot-detect.html", async () => {
       const request = createRequest("/hotspot-detect.html");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -96,7 +98,7 @@ describe("middleware", () => {
 
     it("returns HTML response for /library/test/success.html", async () => {
       const request = createRequest("/library/test/success.html");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -104,33 +106,33 @@ describe("middleware", () => {
   });
 
   describe("non-captive portal paths", () => {
-    it("passes through other paths", () => {
+    it("passes through other paths", async () => {
       const request = createRequest("/setup");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       // NextResponse.next() returns a response that continues to the route
       expect(response.status).toBe(200);
     });
 
-    it("passes through API paths", () => {
+    it("passes through API paths", async () => {
       const request = createRequest("/setup-api/wifi/scan");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(200);
     });
   });
 
   describe("case insensitivity", () => {
-    it("handles uppercase paths", () => {
+    it("handles uppercase paths", async () => {
       const request = createRequest("/GENERATE_204");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(302);
     });
 
-    it("handles mixed case paths", () => {
+    it("handles mixed case paths", async () => {
       const request = createRequest("/Hotspot-Detect.html");
-      const response = middleware(request);
+      const response = await middleware(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -144,7 +146,7 @@ describe("middleware", () => {
       const mod = await import("@/middleware");
 
       const request = createRequest("/generate_204");
-      const response = mod.middleware(request);
+      const response = await mod.middleware(request);
 
       expect(response.headers.get("Location")).toBe("http://192.168.1.1/setup");
     });
@@ -156,7 +158,7 @@ describe("middleware", () => {
       const mod = await import("@/middleware");
 
       const request = createRequest("/generate_204");
-      const response = mod.middleware(request);
+      const response = await mod.middleware(request);
 
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
       expect(consoleSpy).toHaveBeenCalled();
@@ -165,14 +167,80 @@ describe("middleware", () => {
     });
   });
 
+  describe("authentication", () => {
+    it("allows public paths without auth", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/login");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("allows requests when no session secret configured", async () => {
+      delete process.env.SESSION_SECRET;
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/some-page");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("redirects unauthenticated page requests to login", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/dashboard");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("returns 401 for unauthenticated API requests", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/api/data"), {
+        headers: { accept: "application/json" },
+      });
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(401);
+    });
+
+    it.each(["/login", "/setup", "/setup-api/test", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico"])("allows public path %s", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest(p);
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("rejects invalid session cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: "clawbox_session=invalid.cookie" },
+      });
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+    });
+  });
+
   describe("config export", () => {
     it("exports matcher config", async () => {
       const mod = await import("@/middleware");
 
       expect(mod.config).toBeDefined();
-      expect(mod.config.matcher).toContain("/generate_204");
-      expect(mod.config.matcher).toContain("/hotspot-detect.html");
-      expect(mod.config.matcher.length).toBe(9);
+      expect(mod.config.matcher).toBeDefined();
+      expect(mod.config.matcher.length).toBeGreaterThan(0);
     });
   });
 });

@@ -6,6 +6,7 @@ import SignalBars from "./SignalBars";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
+import { I18nProvider } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 
@@ -808,7 +809,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
-            <AIModelsStep embedded />
+            <I18nProvider><AIModelsStep embedded /></I18nProvider>
           </div>
         )}
 
@@ -1345,7 +1346,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
       {/* Factory Reset full-screen overlay */}
       {resetting && resetPhase && (
-        <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             {resetPhase === "done" ? (
               <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
@@ -1511,7 +1512,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
       {/* Factory Reset full-screen overlay */}
       {resetting && resetPhase && (
-        <div className="fixed inset-0 z-[99999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             {resetPhase === "done" ? (
               <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">

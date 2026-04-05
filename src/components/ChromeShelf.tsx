@@ -203,7 +203,7 @@ export default function ChromeShelf({
               title="Chat"
               aria-label="Chat"
             >
-              <span className="material-symbols-rounded text-[#f97316]" style={{ fontSize: 20 }}>chat_bubble</span>
+              <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
             </button>
           )}
           <button

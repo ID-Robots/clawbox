@@ -450,7 +450,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     if (!didDragRef.current) {
       setPhysicsActive(false)
       // Open chat on tap — works even when sleeping
-      if (onTap) onTap(boxXRef.current)
+      if (onTap) onTap(xRef.current)
       if (!isSleepingRef.current) {
         const sl = sassLinesRef.current; say(sl[Math.floor(Math.random() * sl.length)], 3000)
         // Restart the action loop so mascot doesn't freeze after tap
@@ -941,10 +941,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   useEffect(() => {
     frozenRef.current = !!frozen
     if (frozen) {
-      // Stop all movement — stay in place with power-up glow (don't teleport to box)
+      // Stop all movement — stay in place (don't teleport to box)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-      setCrabOnBox(true)
       setBoxGlow(true)
       setState('idle')
       setSpeech('')

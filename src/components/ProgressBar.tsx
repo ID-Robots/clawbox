@@ -1,8 +1,8 @@
+import { useT } from "@/lib/i18n";
+
 interface ProgressBarProps {
   currentStep: number;
 }
-
-const STEP_LABELS = ["WiFi", "Update", "Security", "AI Model", "Telegram"];
 
 function stepColors(isDone: boolean, isActive: boolean): string {
   if (isDone) return "text-[#00e5cc] bg-[rgba(0,229,204,0.1)]";
@@ -17,6 +17,9 @@ function badgeColor(isDone: boolean, isActive: boolean): string {
 }
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
+  const { t } = useT();
+  const STEP_LABELS = [t("progress.wifi"), t("progress.update"), t("progress.security"), t("progress.aiModel"), t("progress.telegram")];
+
   return (
     <div
       className="flex items-center justify-center gap-1"
@@ -24,7 +27,7 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
       aria-valuemin={1}
       aria-valuemax={STEP_LABELS.length}
       aria-valuenow={currentStep}
-      aria-label={`Setup progress: step ${currentStep} of ${STEP_LABELS.length}`}
+      aria-label={t("progress.label", { current: currentStep, total: STEP_LABELS.length })}
     >
       {STEP_LABELS.map((label, i) => {
         const num = i + 1;
