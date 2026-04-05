@@ -1,6 +1,7 @@
 "use client";
 
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
+import { useT } from "@/lib/i18n";
 
 interface ShelfApp {
   id: string;
@@ -10,6 +11,7 @@ interface ShelfApp {
   isActive: boolean;
   isPinned?: boolean;
   windowCount?: number;
+  url?: string;
 }
 
 interface ChromeShelfProps {
@@ -43,6 +45,7 @@ export default function ChromeShelf({
   showChatButton,
   time,
 }: ChromeShelfProps) {
+  const { t } = useT();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
@@ -158,7 +161,7 @@ export default function ChromeShelf({
           <button
             onClick={onLauncherClick}
             className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title="App Launcher"
+            title={t("shelf.appLauncher")}
           >
             <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
               <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
@@ -172,7 +175,7 @@ export default function ChromeShelf({
           <button
             onClick={onLauncherClick}
             className="w-11 h-11 hidden sm:flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title="App Launcher"
+            title={t("shelf.appLauncher")}
           >
             <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
               <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
@@ -200,8 +203,8 @@ export default function ChromeShelf({
             <button
               onClick={onChatClick}
               className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-              title="Chat"
-              aria-label="Chat"
+              title={t("shelf.chat")}
+              aria-label={t("shelf.chat")}
             >
               <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
             </button>
@@ -209,7 +212,7 @@ export default function ChromeShelf({
           <button
             onClick={onTrayClick}
             className="flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title="System Settings"
+            title={t("shelf.systemSettings")}
           >
             <span className="text-sm text-white/80 font-medium hidden sm:inline">{time}</span>
           </button>
@@ -217,7 +220,7 @@ export default function ChromeShelf({
             <button
               onClick={toggleFullscreen}
               className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-              title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+              title={isFullscreen ? t("shelf.exitFullscreen") : t("shelf.fullscreen")}
             >
               <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>
                 {isFullscreen ? "fullscreen_exit" : "fullscreen"}
@@ -227,7 +230,7 @@ export default function ChromeShelf({
           <button
             onClick={onPowerClick}
             className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title="Power"
+            title={t("shelf.power")}
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>power_settings_new</span>
           </button>
@@ -256,7 +259,7 @@ export default function ChromeShelf({
             onClick={() => { onAppClick(ctxMenu.app.id); setCtxMenu(null); }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
-            <span className="text-base">▶️</span> {ctxMenu.app.isOpen ? "Focus" : "Open"}
+            <span className="text-base">▶️</span> {ctxMenu.app.isOpen ? t("shelf.focus") : t("shelf.open")}
           </button>
 
           {/* New Window — only if app is already open */}
@@ -265,9 +268,17 @@ export default function ChromeShelf({
               onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">🪟</span> New Window
+              <span className="text-base">🪟</span> {t("shelf.newWindow")}
             </button>
           )}
+
+          {/* Open in new tab */}
+          <button
+            onClick={() => { window.open(`/app/${encodeURIComponent(ctxMenu.app.id)}`, "_blank"); setCtxMenu(null); }}
+            className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
+          </button>
 
           {/* Pin / Unpin */}
           {ctxMenu.app.isPinned ? (
@@ -275,14 +286,14 @@ export default function ChromeShelf({
               onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">📌</span> Unpin from shelf
+              <span className="text-base">📌</span> {t("shelf.unpinFromShelf")}
             </button>
           ) : (
             <button
               onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">📌</span> Pin to shelf
+              <span className="text-base">📌</span> {t("shelf.pinToShelf")}
             </button>
           )}
 
@@ -294,7 +305,7 @@ export default function ChromeShelf({
                 onClick={() => { onCloseApp(ctxMenu.app.id); setCtxMenu(null); }}
                 className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
               >
-                <span className="text-base">✕</span> Close
+                <span className="text-base">✕</span> {t("shelf.close")}
               </button>
             </>
           )}
@@ -317,7 +328,7 @@ export default function ChromeShelf({
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>settings</span>
-            Shelf Settings
+            {t("shelf.shelfSettings")}
           </button>
         </div>
       )}

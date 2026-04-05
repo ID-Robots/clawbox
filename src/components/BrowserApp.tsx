@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useT } from "@/lib/i18n";
 
 const BRAND_ORANGE = "#fe6e00";
 const BRAND_ORANGE_LIGHT = "#ff8b1a";
@@ -23,6 +24,7 @@ interface BrowserAppProps {
 }
 
 export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
+  const { t } = useT();
   const [status, setStatus] = useState<BrowserStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -88,7 +90,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-[#0f1219] text-white/70 gap-4">
         <div className="w-8 h-8 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
-        <p className="text-sm">Checking browser status...</p>
+        <p className="text-sm">{t("browser.checkingStatus")}</p>
       </div>
     );
   }
@@ -112,8 +114,8 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
             </svg>
           </div>
           <div>
-            <h1 className="text-lg font-semibold">Browser Integration</h1>
-            <p className="text-xs text-white/50">Real Chromium browser for OpenClaw AI</p>
+            <h1 className="text-lg font-semibold">{t("browser.title")}</h1>
+            <p className="text-xs text-white/50">{t("browser.subtitle")}</p>
           </div>
         </div>
       </div>
@@ -143,7 +145,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               ) : "1"}
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">Chromium Browser</h3>
+              <h3 className="font-medium text-sm">{t("browser.chromiumBrowser")}</h3>
               {chromiumInstalled ? (
                 <div className="mt-1">
                   <p className="text-xs text-white/50">
@@ -155,7 +157,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 </div>
               ) : (
                 <p className="text-xs text-white/50 mt-1">
-                  Chromium is required for browser integration. Click install to set it up.
+                  {t("browser.chromiumRequired")}
                 </p>
               )}
             </div>
@@ -169,9 +171,9 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 {actionLoading === "Installing Chromium..." ? (
                   <span className="flex items-center gap-1.5">
                     <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                    Installing...
+                    {t("browser.installing")}
                   </span>
-                ) : "Install Chromium"}
+                ) : t("browser.installChromium")}
               </button>
             )}
           </div>
@@ -187,11 +189,11 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               ) : "2"}
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">OpenClaw Integration</h3>
+              <h3 className="font-medium text-sm">{t("browser.openclawIntegration")}</h3>
               <p className="text-xs text-white/50 mt-1">
                 {isEnabled
-                  ? "Browser is connected to OpenClaw. Your AI can browse the web, fill forms, and interact with pages using a persistent profile."
-                  : "Connect the browser to OpenClaw so your AI assistant can use it for web browsing, research, and automation."}
+                  ? t("browser.enabledMessage")
+                  : t("browser.disabledMessage")}
               </p>
               {isEnabled && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -224,9 +226,9 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               {actionLoading === "Enabling..." || actionLoading === "Disabling..." ? (
                 <span className="flex items-center gap-1.5">
                   <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                  {actionLoading}
+                  {actionLoading === "Enabling..." ? t("browser.enabling") : t("browser.disabling")}
                 </span>
-              ) : isEnabled ? "Disable" : "Enable"}
+              ) : isEnabled ? t("browser.disable") : t("browser.enable")}
             </button>
           </div>
         </div>
@@ -241,11 +243,11 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               ) : "3"}
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">Desktop Browser</h3>
+              <h3 className="font-medium text-sm">{t("browser.desktopBrowser")}</h3>
               <p className="text-xs text-white/50 mt-1">
                 {browserRunning
-                  ? "Chromium is running on the desktop. OpenClaw can interact with it in real time."
-                  : "Launch a real Chromium window on the desktop that OpenClaw can control."}
+                  ? t("browser.runningMessage")
+                  : t("browser.launchMessage")}
               </p>
               {browserRunning && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -256,7 +258,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   <div className="flex items-center gap-1.5">
                     <span className={`w-2 h-2 rounded-full ${status?.browser?.cdpReady ? "bg-green-400" : "bg-yellow-400"}`} />
                     <span className="text-xs text-white/40 font-mono">
-                      CDP :{status?.cdpPort ?? 18800} {status?.browser?.cdpReady ? "ready" : "starting..."}
+                      CDP :{status?.cdpPort ?? 18800} {status?.browser?.cdpReady ? t("browser.ready") : t("browser.starting")}
                     </span>
                   </div>
                 </div>
@@ -265,17 +267,16 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
             <div className="flex gap-2 shrink-0">
               {browserRunning ? (
                 <>
-                  {onOpenApp && (
-                    <button
-                      onClick={() => onOpenApp("vnc")}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
-                        Preview
-                      </span>
-                    </button>
-                  )}
+                  <button
+                    onClick={() => onOpenApp ? onOpenApp("vnc") : window.open("/app/vnc", "_blank")}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
+                    style={{ backgroundColor: BRAND_ORANGE }}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
+                      {t("browser.openInVNC")}
+                    </span>
+                  </button>
                   <button
                     onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
                     disabled={!!actionLoading}
@@ -284,12 +285,12 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                     {actionLoading === "Closing..." ? (
                       <span className="flex items-center gap-1.5">
                         <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                        Closing...
+                        {t("browser.closing")}
                       </span>
                     ) : (
                       <span className="flex items-center gap-1.5">
                         <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
-                        Close Browser
+                        {t("browser.closeBrowser")}
                       </span>
                     )}
                   </button>
@@ -304,12 +305,12 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                   {actionLoading === "Opening..." ? (
                     <span className="flex items-center gap-1.5">
                       <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                      Opening...
+                      {t("browser.opening")}
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
                       <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
-                      Open Browser
+                      {t("browser.openBrowser")}
                     </span>
                   )}
                 </button>

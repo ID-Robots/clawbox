@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import { useT } from "@/lib/i18n";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 export default function VNCApp() {
+  const { t } = useT();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -145,7 +147,7 @@ export default function VNCApp() {
           onClick={handleReconnect}
           className="mt-2 px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer"
         >
-          Retry Connection
+          {t("vnc.retryConnection")}
         </button>
       </div>
     );
@@ -166,17 +168,17 @@ export default function VNCApp() {
           {status === "connecting" ? (
             <>
               <span className="material-symbols-rounded animate-spin" style={{ fontSize: 48 }}>progress_activity</span>
-              <p className="text-sm">Connecting to remote desktop...</p>
+              <p className="text-sm">{t("vnc.connectingDesktop")}</p>
             </>
           ) : (
             <>
               <span className="material-symbols-rounded text-red-400" style={{ fontSize: 48 }}>link_off</span>
-              <p className="text-sm">{error || "Disconnected"}</p>
+              <p className="text-sm">{error || t("vnc.disconnected")}</p>
               <button
                 onClick={handleReconnect}
                 className="mt-2 px-4 py-2 btn-gradient rounded-lg text-sm text-white cursor-pointer"
               >
-                Reconnect
+                {t("vnc.reconnect")}
               </button>
             </>
           )}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useT } from "@/lib/i18n";
 
 const STORE_API = "/setup-api/apps/store";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
@@ -125,6 +126,7 @@ interface AppStoreProps {
 }
 
 export default function AppStore({ installedAppIds, onInstall, onUninstall }: AppStoreProps) {
+  const { t } = useT();
   const [search, setSearch] = useState("");
   const [installProgress, setInstallProgress] = useState<Record<string, InstallProgress>>({});
   const [category, setCategory] = useState<string>("All");
@@ -223,14 +225,14 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       return (
         <button onClick={(e) => { e.stopPropagation(); onUninstall(app.id); }}
           className="px-3 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer">
-          Uninstall
+          {t("store.uninstall")}
         </button>
       );
     }
     if (isInstalling) {
       return (
         <div className="flex items-center gap-2 flex-1">
-          <span className="text-xs text-white/50 shrink-0">Installing...</span>
+          <span className="text-xs text-white/50 shrink-0">{t("store.installing")}</span>
           <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden min-w-[60px]">
             <div className="h-full rounded-full" style={{ backgroundColor: BRAND_ORANGE, animation: "indeterminate 1.5s ease-in-out infinite" }} />
           </div>
@@ -241,7 +243,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       return (
         <span className="flex items-center gap-1 text-xs font-medium" style={{ color: BRAND_ORANGE_LIGHT }}>
           <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
-          Installed
+          {t("store.installed")}
         </span>
       );
     }
@@ -253,7 +255,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           </span>
           <button onClick={(e) => { e.stopPropagation(); requestInstall(app); }}
             className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer shrink-0">
-            Retry
+            {t("store.retry")}
           </button>
         </div>
       );
@@ -264,7 +266,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         style={{ backgroundColor: `${BRAND_ORANGE}1a`, color: BRAND_ORANGE_LIGHT }}
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = `${BRAND_ORANGE}33`)}
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = `${BRAND_ORANGE}1a`)}>
-        Install
+        {t("store.install")}
       </button>
     );
   };
@@ -280,13 +282,13 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
             <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }}>download</span>
           </div>
-          <h3 id="confirm-install-title" className="text-lg font-semibold">Install {confirmInstall.name}?</h3>
+          <h3 id="confirm-install-title" className="text-lg font-semibold">{t("store.confirmTitle", { name: confirmInstall.name })}</h3>
         </div>
         <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
           <div className="flex gap-2">
             <span className="material-symbols-rounded text-yellow-400 shrink-0" style={{ fontSize: 18 }}>warning</span>
             <p className="text-sm text-yellow-200/80">
-              Installing a skill will <strong>restart the current chat session</strong>. Any unsaved conversation context will be lost. Ask the agent to save important info to <code className="bg-white/10 px-1 rounded text-xs">MEMORY.md</code> before proceeding.
+              {t("store.confirmMessage")}
             </p>
           </div>
         </div>
@@ -295,14 +297,14 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             onClick={() => setConfirmInstall(null)}
             className="px-4 py-2 rounded-lg text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
-            Cancel
+            {t("cancel")}
           </button>
           <button
             onClick={() => handleInstall(confirmInstall)}
             className="px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors cursor-pointer"
             style={{ backgroundColor: BRAND_ORANGE }}
           >
-            Install Anyway
+            {t("store.installAnyway")}
           </button>
         </div>
       </div>
@@ -322,7 +324,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors cursor-pointer">
             <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>arrow_back</span>
           </button>
-          <span className="text-sm font-medium text-white/70">App Store</span>
+          <span className="text-sm font-medium text-white/70">{t("store.appStore")}</span>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
@@ -331,14 +333,14 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             <StoreAppIcon appId={selectedApp.id} name={selectedApp.name} color={selectedApp.color} size="w-20 h-20" />
             <div className="flex-1 min-w-0">
               <h2 className="text-xl font-bold">{selectedApp.name}</h2>
-              <p className="text-sm text-white/50">{selectedApp.developer || "Unknown developer"}</p>
+              <p className="text-sm text-white/50">{selectedApp.developer || t("store.unknownDeveloper")}</p>
               <div className="flex items-center gap-3 mt-2">
                 <div className="flex items-center gap-1 text-yellow-400 text-sm">
                   <span>★</span>
                   <span className="font-semibold">{selectedApp.rating}</span>
                 </div>
                 {selectedApp.installs && (
-                  <span className="text-xs text-white/40">{selectedApp.installs} installs</span>
+                  <span className="text-xs text-white/40">{t("store.installs", { count: selectedApp.installs })}</span>
                 )}
                 {selectedApp.version && (
                   <span className="text-xs text-white/30">v{selectedApp.version}</span>
@@ -349,7 +351,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                 {isInstalled && (
                   <span className="flex items-center gap-1 text-xs" style={{ color: BRAND_ORANGE_LIGHT }}>
                     <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
-                    Installed
+                    {t("store.installed")}
                   </span>
                 )}
               </div>
@@ -358,26 +360,26 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
           {/* Description */}
           <div className="mb-6">
-            <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">About</h3>
+            <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">{t("store.about")}</h3>
             <p className="text-sm text-white/70 leading-relaxed whitespace-pre-line">{selectedApp.description}</p>
           </div>
 
           {/* Info grid */}
           <div className="grid grid-cols-2 gap-3 mb-6">
             <div className="bg-white/5 rounded-lg p-3">
-              <span className="text-xs text-white/40">Category</span>
+              <span className="text-xs text-white/40">{t("store.category")}</span>
               <div className="text-sm text-white/80 mt-0.5">{catName}</div>
             </div>
             <div className="bg-white/5 rounded-lg p-3">
-              <span className="text-xs text-white/40">Developer</span>
+              <span className="text-xs text-white/40">{t("store.developer")}</span>
               <div className="text-sm text-white/80 mt-0.5">{selectedApp.developer || "—"}</div>
             </div>
             <div className="bg-white/5 rounded-lg p-3">
-              <span className="text-xs text-white/40">Downloads</span>
+              <span className="text-xs text-white/40">{t("store.downloads")}</span>
               <div className="text-sm text-white/80 mt-0.5">{selectedApp.installs || "—"}</div>
             </div>
             <div className="bg-white/5 rounded-lg p-3">
-              <span className="text-xs text-white/40">Version</span>
+              <span className="text-xs text-white/40">{t("store.version")}</span>
               <div className="text-sm text-white/80 mt-0.5">{selectedApp.version || "—"}</div>
             </div>
           </div>
@@ -385,7 +387,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           {/* Tags */}
           {selectedApp.tags && selectedApp.tags.length > 0 && (
             <div className="mb-6">
-              <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Tags</h3>
+              <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">{t("store.tags")}</h3>
               <div className="flex flex-wrap gap-1.5">
                 {selectedApp.tags.map(tag => (
                   <span key={tag} className="px-2.5 py-1 rounded-full text-xs bg-white/5 text-white/60">
@@ -401,7 +403,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             <a href={selectedApp.url} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs transition-colors"
               style={{ color: BRAND_ORANGE_LIGHT }}>
-              View on ClawHub
+              {t("store.viewOnHub")}
               <span className="material-symbols-rounded" style={{ fontSize: 12 }}>open_in_new</span>
             </a>
           )}
@@ -420,8 +422,8 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }}>storefront</span>
           </div>
           <div>
-            <h1 className="text-lg font-semibold">ClawBox App Store</h1>
-            <p className="text-xs text-white/50">Powered by ClawHub — {totalApps || "500+"}  AI Skills</p>
+            <h1 className="text-lg font-semibold">{t("store.title")}</h1>
+            <p className="text-xs text-white/50">{t("store.poweredBy", { count: totalApps || "500+" })}</p>
           </div>
         </div>
 
@@ -429,7 +431,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
           <input
             type="text"
-            placeholder="Search apps..."
+            placeholder={t("store.searchApps")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full h-9 pl-9 pr-3 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none"
@@ -451,7 +453,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               }`}
               style={activeCategoryLabel === cat ? { backgroundColor: BRAND_ORANGE } : undefined}
             >
-              {cat}
+              {cat === "All" ? t("store.all") : cat === "Installed" ? t("store.installed") : cat}
             </button>
           ))}
         </div>
@@ -515,7 +517,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
         {!loading && displayApps.length === 0 && (
           <div className="text-center py-12 text-white/40">
-            <p className="text-sm">No apps found</p>
+            <p className="text-sm">{t("store.noAppsFound")}</p>
           </div>
         )}
       </div>

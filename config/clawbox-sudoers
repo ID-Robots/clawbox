@@ -13,3 +13,6 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop clawbox-ap.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop clawbox-browser.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get update *
+clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get install *
+clawbox ALL=(root) NOPASSWD: /usr/bin/snap install chromium

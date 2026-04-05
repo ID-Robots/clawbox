@@ -39,11 +39,46 @@ fi
 export DISPLAY=":${VDISPLAY}"
 export DBUS_SESSION_BUS_ADDRESS=""
 
-# Minimal WM — just enough to render and manage app windows
+# Set dark background matching ClawBox UI (#0a0f1a)
+xsetroot -solid "#0a0f1a" 2>/dev/null || true
+
+# Minimal WM with right-click menu disabled
 if command -v openbox &>/dev/null; then
-  openbox &
-elif command -v xterm &>/dev/null; then
-  xterm -geometry 100x30+0+0 &
+  OB_CONFIG_DIR="$HOME/.config/openbox"
+  mkdir -p "$OB_CONFIG_DIR"
+
+  # Openbox config: disable desktop right-click menu, dark theme
+  cat > "$OB_CONFIG_DIR/rc.xml" <<'OBXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout>NLIMC</titleLayout>
+  </theme>
+  <desktops><number>1</number></desktops>
+  <mouse>
+    <context name="Root">
+      <!-- Disabled: no desktop menu on right-click -->
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
+    </context>
+    <context name="Frame">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+  </mouse>
+</openbox_config>
+OBXML
+
+  # Empty menu so even keyboard shortcut shows nothing
+  cat > "$OB_CONFIG_DIR/menu.xml" <<'OBMENU'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu"></openbox_menu>
+OBMENU
+
+  openbox --config-file "$OB_CONFIG_DIR/rc.xml" &
 fi
 sleep 1
 

@@ -17,7 +17,7 @@ PW_CHROME=$(find "$HOME/.cache/ms-playwright" -name "chrome" -path "*/chrome-lin
 
 # 2. Non-snap system binaries
 if [ -z "$CHROMIUM" ]; then
-  for bin in google-chrome-stable google-chrome chromium; do
+  for bin in chromium-browser google-chrome-stable google-chrome chromium; do
     p=$(which "$bin" 2>/dev/null) || true
     if [ -n "$p" ] && [[ "$p" != /snap/* ]]; then
       CHROMIUM="$p" && break
@@ -49,7 +49,7 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --user-data-dir="$PROFILE" \
   --no-first-run \
   --no-default-browser-check \
-  --headless=new \
+  --start-maximized \
   --disable-gpu \
   --disable-gpu-sandbox \
   --disable-software-rasterizer \

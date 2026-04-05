@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useT } from "@/lib/i18n";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,10 +29,10 @@ type ContextMenuState = {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const FAVORITES = [
-  { label: "Home", icon: "home", path: "" },
-  { label: "Documents", icon: "description", path: "Documents" },
-  { label: "Downloads", icon: "download", path: "Downloads" },
-  { label: "Desktop", icon: "desktop_windows", path: "Desktop" },
+  { labelKey: "files.home", icon: "home", path: "" },
+  { labelKey: "files.documents", icon: "description", path: "Documents" },
+  { labelKey: "files.downloads", icon: "download", path: "Downloads" },
+  { labelKey: "files.desktop", icon: "desktop_windows", path: "Desktop" },
 ];
 
 function formatSize(bytes: number | null): string {
@@ -116,6 +117,7 @@ function Icon({ name, size = 20, color, className = "", ariaLabel }: { name: str
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FilesApp() {
+  const { t } = useT();
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -159,7 +161,7 @@ export default function FilesApp() {
 
   // ─── Breadcrumbs ────────────────────────────────────────────────────────────
 
-  const breadcrumbs = ["Home", ...currentPath.split("/").filter(Boolean)];
+  const breadcrumbs = [t("files.home"), ...currentPath.split("/").filter(Boolean)];
 
   const navigateBreadcrumb = (idx: number) => {
     if (idx === 0) { load(""); return; }
@@ -368,7 +370,7 @@ export default function FilesApp() {
           />
           <aside className="flex flex-col py-4 overflow-y-auto absolute md:relative z-[6] h-full w-[200px] shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)]">
             <div className="px-4 pb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-              Favorites
+              {t("files.favorites")}
             </div>
             {FAVORITES.map((fav) => {
               const active = currentPath === fav.path;
@@ -383,7 +385,7 @@ export default function FilesApp() {
                   }`}
                 >
                   <Icon name={fav.icon} size={18} color={active ? "var(--coral-bright)" : "var(--text-muted)"} />
-                  <span>{fav.label}</span>
+                  <span>{t(fav.labelKey)}</span>
                 </button>
               );
             })}
@@ -394,7 +396,7 @@ export default function FilesApp() {
                 className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-colors bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] border border-[var(--coral-bright)]/30 hover:bg-[var(--coral-bright)]/25 cursor-pointer"
               >
                 <Icon name="upload" size={16} />
-                Upload
+                {t("files.upload")}
               </button>
             </div>
           </aside>
@@ -422,7 +424,7 @@ export default function FilesApp() {
             }}
             disabled={!currentPath}
             className="p-1.5 rounded-md transition-colors cursor-pointer disabled:opacity-25 disabled:cursor-default text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06]"
-            title="Go up"
+            title={t("files.goUp")}
           >
             <Icon name="chevron_left" size={18} />
           </button>
@@ -449,22 +451,22 @@ export default function FilesApp() {
             <button
               onClick={() => setDialog({ type: "mkdir", value: "" })}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.1] cursor-pointer"
-              title="New Folder"
+              title={t("files.newFolder")}
             >
               <Icon name="create_new_folder" size={16} />
-              <span className="hidden sm:inline">New Folder</span>
+              <span className="hidden sm:inline">{t("files.newFolder")}</span>
             </button>
             <button
               onClick={() => load(currentPath)}
               className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
-              title="Refresh"
+              title={t("files.refresh")}
             >
               <Icon name="refresh" size={18} />
             </button>
             <button
               onClick={() => setViewMode(v => v === "grid" ? "list" : "grid")}
               className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
-              title={viewMode === "grid" ? "Switch to list" : "Switch to grid"}
+              title={viewMode === "grid" ? t("files.switchToList") : t("files.switchToGrid")}
             >
               <Icon name={viewMode === "grid" ? "view_list" : "grid_view"} size={18} />
             </button>
@@ -483,7 +485,7 @@ export default function FilesApp() {
             <div className="absolute inset-2 z-20 flex items-center justify-center pointer-events-none rounded-xl border-2 border-dashed border-[var(--coral-bright)]/50">
               <div className="text-center text-[var(--coral-bright)]">
                 <Icon name="upload_file" size={48} className="mb-2" />
-                <div className="text-sm font-medium">Drop files to upload</div>
+                <div className="text-sm font-medium">{t("files.dropToUpload")}</div>
               </div>
             </div>
           )}
@@ -491,19 +493,19 @@ export default function FilesApp() {
           {loading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
               <Icon name="progress_activity" size={24} className="animate-spin mr-2" />
-              Loading...
+              {t("files.loading")}
             </div>
           ) : error ? (
             <div className="flex items-center justify-center h-full flex-col gap-2 text-red-400">
               <Icon name="error" size={40} />
               <span className="text-sm">{error}</span>
-              <button onClick={() => load(currentPath)} className="text-xs underline mt-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer">Retry</button>
+              <button onClick={() => load(currentPath)} className="text-xs underline mt-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer">{t("files.retry")}</button>
             </div>
           ) : files.length === 0 ? (
             <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
               <Icon name="folder_open" size={56} color="var(--border-subtle)" />
-              <span className="text-sm">Empty folder</span>
-              <span className="text-xs">Drop files here or click Upload</span>
+              <span className="text-sm">{t("files.emptyFolder")}</span>
+              <span className="text-xs">{t("files.dropOrUpload")}</span>
             </div>
           ) : viewMode === "grid" ? (
             <GridView
@@ -630,14 +632,15 @@ function ListView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu
   onLongPressStart: (e: React.TouchEvent, entry: FileEntry) => void;
   onLongPressEnd: () => void;
 }) {
+  const { t } = useT();
   return (
     <div className="w-full" onClick={() => onSelect(null)}>
       {/* Header */}
       <div className="grid px-4 py-2 text-xs font-medium sticky top-0 border-b border-[var(--border-subtle)] bg-[var(--bg-deep)] text-[var(--text-muted)]"
         style={{ gridTemplateColumns: "1fr 80px 160px" }}>
-        <span>Name</span>
-        <span className="text-right">Size</span>
-        <span className="text-right">Modified</span>
+        <span>{t("files.name")}</span>
+        <span className="text-right">{t("files.size")}</span>
+        <span className="text-right">{t("files.modified")}</span>
       </div>
       {files.map((entry) => {
         const isSelected = selected === entry.name;
@@ -698,16 +701,17 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onOpenInVSCode, onRename
     }
   }, [x, y]);
 
+  const { t } = useT();
   const items: { icon: string; label: string; onClick: () => void; danger?: boolean; color?: string }[] = [];
 
   if (entry.type === "directory") {
-    items.push({ icon: "folder_open", label: "Open", onClick: onOpen });
+    items.push({ icon: "folder_open", label: t("files.open"), onClick: onOpen });
   } else {
-    items.push({ icon: "download", label: "Download", onClick: onDownload });
+    items.push({ icon: "download", label: t("files.download"), onClick: onDownload });
   }
-  items.push({ icon: "code", label: "Open in VS Code", onClick: onOpenInVSCode, color: "#007acc" });
-  items.push({ icon: "edit", label: "Rename", onClick: onRename });
-  items.push({ icon: "delete", label: "Delete", onClick: onDelete, danger: true });
+  items.push({ icon: "code", label: t("files.openInVSCode"), onClick: onOpenInVSCode, color: "#007acc" });
+  items.push({ icon: "edit", label: t("files.rename"), onClick: onRename });
+  items.push({ icon: "delete", label: t("files.delete"), onClick: onDelete, danger: true });
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     switch (e.key) {
@@ -777,12 +781,13 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
   onCancel: () => void;
   onSubmit: () => void;
 }) {
+  const { t } = useT();
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (dialog.type !== "delete") inputRef.current?.select(); }, [dialog.type]);
 
   const isDelete = dialog.type === "delete";
-  const title = dialog.type === "mkdir" ? "New Folder"
-    : dialog.type === "rename" ? "Rename"
+  const title = dialog.type === "mkdir" ? t("files.newFolderTitle")
+    : dialog.type === "rename" ? t("files.renameTitle")
     : `Delete "${dialog.entry?.name}"?`;
 
   return (
@@ -802,7 +807,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
         </h3>
         {isDelete ? (
           <p className="text-sm mb-5 text-[var(--text-secondary)]">
-            This action cannot be undone. {dialog.entry?.type === "directory" ? "All contents will be deleted." : ""}
+            This action cannot be undone. {dialog.entry?.type === "directory" ? t("files.deleteConfirm") : ""}
           </p>
         ) : (
           <input
@@ -812,7 +817,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") onSubmit(); if (e.key === "Escape") onCancel(); }}
             className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500 mb-5"
-            placeholder={dialog.type === "mkdir" ? "Folder name" : "New name"}
+            placeholder={dialog.type === "mkdir" ? t("files.folderName") : t("files.newName")}
           />
         )}
         <div className="flex gap-2 justify-end">
@@ -820,7 +825,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
             onClick={onCancel}
             className="px-4 py-2 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-secondary)] hover:bg-white/[0.1] hover:text-[var(--text-primary)] cursor-pointer"
           >
-            Cancel
+            {t("cancel")}
           </button>
           <button
             onClick={onSubmit}
@@ -830,7 +835,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
                 : "btn-gradient hover:opacity-90"
             }`}
           >
-            {isDelete ? "Delete" : "OK"}
+            {isDelete ? t("files.delete") : t("files.ok")}
           </button>
         </div>
       </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useT } from "@/lib/i18n";
 
 const BRAND_ORANGE = "#fe6e00";
 
@@ -24,6 +25,7 @@ export default function SystemTray({
   date,
   time,
 }: SystemTrayProps) {
+  const { t } = useT();
   const [closing, setClosing] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [rebootState, setRebootState] = useState<RebootState>(null);
@@ -146,12 +148,12 @@ export default function SystemTray({
           {rebootState.phase === "waiting" && (
             <>
               <h2 className="text-xl font-semibold text-white">
-                {rebootState.action === "shutdown" ? "Shutting down" : "Restarting"}{dots}
+                {rebootState.action === "shutdown" ? t("tray.shuttingDown") : t("tray.restarting")}{dots}
               </h2>
               <p className="text-sm text-white/50">
                 {rebootState.action === "shutdown"
-                  ? "Your device is shutting down. Please wait."
-                  : "Please wait while your device restarts. This may take a minute."}
+                  ? t("tray.shutdownMessage")
+                  : t("tray.restartMessage")}
               </p>
             </>
           )}
@@ -159,14 +161,14 @@ export default function SystemTray({
           {rebootState.phase === "shutdown" && (
             <>
               <h2 className="text-xl font-semibold text-white">
-                ClawBox has been shut down
+                {t("tray.shutdownComplete")}
               </h2>
               <p className="text-sm text-white/50">
-                Your device has been powered off.
+                {t("tray.devicePoweredOff")}
               </p>
               <div className="mt-2 px-4 py-3 rounded-lg bg-white/5 border border-white/10">
                 <p className="text-sm text-white/70">
-                  To start your ClawBox again, unplug the power cable and plug it back in.
+                  {t("tray.restartInstructions")}
                 </p>
               </div>
             </>
@@ -175,10 +177,10 @@ export default function SystemTray({
           {rebootState.phase === "reconnecting" && (
             <>
               <h2 className="text-xl font-semibold text-white">
-                Reconnecting
+                {t("tray.reconnecting")}
               </h2>
               <p className="text-sm text-white/50">
-                Waiting for device to come back online
+                {t("tray.waitingOnline")}
               </p>
             </>
           )}
@@ -186,10 +188,10 @@ export default function SystemTray({
           {rebootState.phase === "restoring" && (
             <>
               <h2 className="text-xl font-semibold text-white">
-                Device is back online
+                {t("tray.backOnline")}
               </h2>
               <p className="text-sm text-white/50">
-                Restoring your session...
+                {t("tray.restoringSession")}
               </p>
             </>
           )}
@@ -245,7 +247,7 @@ export default function SystemTray({
                 }`}
               >
                 <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>restart_alt</span>
-                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "restart" ? "Confirm?" : "Restart"}</span>
+                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "restart" ? t("tray.confirm") : t("tray.restart")}</span>
               </button>
               <button
                 onClick={() => handlePower("shutdown")}
@@ -254,7 +256,7 @@ export default function SystemTray({
                 }`}
               >
                 <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>power_settings_new</span>
-                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? "Confirm?" : "Shut Down"}</span>
+                <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? t("tray.confirm") : t("tray.shutDown")}</span>
               </button>
             </div>
             <button
@@ -265,7 +267,7 @@ export default function SystemTray({
               className="flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer bg-white/10 hover:bg-white/15 w-full"
             >
               <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>lock</span>
-              <span className="text-sm text-white/80">Lock</span>
+              <span className="text-sm text-white/80">{t("tray.lock")}</span>
             </button>
           </div>
         </div>

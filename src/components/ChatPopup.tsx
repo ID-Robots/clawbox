@@ -54,6 +54,7 @@ interface ChatMessage {
 }
 
 import { renderText } from '@/lib/chat-markdown'
+import { useT } from '@/lib/i18n'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -98,6 +99,7 @@ const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+  const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   const panelMode = panelWidth !== null
   const [visible, setVisible] = useState(false)
@@ -789,7 +791,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
             ) : (
               <>
                 <div style={SPINNER_STYLE} />
-                Connecting to gateway...
+                {t("chat.connectingGateway")}
               </>
             )}
           </div>
@@ -798,7 +800,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         {status === 'error' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
-            <span>{errorMsg || 'Connection failed'}</span>
+            <span>{errorMsg || t("chat.connectionFailed")}</span>
             <button
               onClick={() => { retryCountRef.current = 0; connect() }}
               style={{
@@ -806,14 +808,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
                 color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
                 fontSize: 13, fontWeight: 500,
               }}
-            >Retry</button>
+            >{t("chat.retry")}</button>
           </div>
         )}
 
         {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
-            <span>Say something!</span>
+            <span>{t("chat.saySomething")}</span>
           </div>
         )}
 
@@ -893,7 +895,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={status === 'connected' ? 'Type a message...' : 'Connecting...'}
+          placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
           disabled={status !== 'connected'}
           rows={1}
           style={{
@@ -911,7 +913,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         {sending ? (
           <button
             onClick={abort}
-            title="Stop"
+            title={t("chat.stop")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: 'rgba(239,68,68,0.2)', color: '#ef4444',
@@ -929,7 +931,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           <button
             onClick={sendMessage}
             disabled={!input.trim() || status !== 'connected'}
-            title="Send"
+            title={t("chat.send")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: input.trim() ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',

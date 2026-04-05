@@ -8,7 +8,6 @@ import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SettingsApp from "@/components/SettingsApp";
-import type { UISettings } from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
 import type { StoreApp } from "@/components/AppStore";
@@ -18,12 +17,10 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import VSCodeApp from "@/components/VSCodeApp";
 import ChatPopup from "@/components/ChatPopup";
+import { I18nProvider, useT } from "@/lib/i18n";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
-
-// Preference keys (stored in SQLite via /setup-api/preferences)
-const INSTALLED_APPS_KEY = "installed_apps";
 
 // App definitions
 interface AppDef {
@@ -39,14 +36,14 @@ interface AppDef {
 }
 
 const apps: AppDef[] = [
-  { id: "settings", name: "Settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "openclaw", name: "OpenClaw", color: "#0a0f1a", type: "external", url: "http://clawbox.local/chat", pinned: true },
-  { id: "terminal", name: "Terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
-  { id: "files", name: "Files", color: "#f97316", type: "files", pinned: true },
-  { id: "store", name: "Store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "browser", name: "Browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vnc", name: "Remote Desktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vscode", name: "VS Code", color: "#007acc", type: "vscode", pinned: false, defaultWidth: 1100, defaultHeight: 750 },
+  { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
+  { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "http://clawbox.local/chat", pinned: true },
+  { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
+  { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
+  { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
+  { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "vscode", name: "app.vscode", color: "#007acc", type: "vscode", pinned: false, defaultWidth: 1100, defaultHeight: 750 },
 ];
 const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
 
@@ -156,7 +153,9 @@ function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?
 }
 
 
-export default function ChromeDesktop() {
+function ChromeDesktopInner() {
+  const { t } = useT();
+  const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
 
   // Check if setup is complete — redirect to /setup if not
@@ -188,13 +187,10 @@ export default function ChromeDesktop() {
   const [date, setDate] = useState("");
   const [installedApps, setInstalledApps] = useState<string[]>([]);
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
-  const INSTALLED_META_KEY = "installed_meta";
   const [installedMeta, setInstalledMeta] = useState<Record<string, { name: string; color: string; iconUrl: string }>>({});
 
   // ─── Desktop shortcuts for built-in apps ───
-  const DESKTOP_APPS_KEY = "desktop_apps";
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
-  const HIDDEN_INSTALLED_KEY = "hidden_installed";
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
   const handleAddToDesktop = useCallback((appId: string) => {
     // Also unhide installed apps when adding to desktop
@@ -204,7 +200,6 @@ export default function ChromeDesktop() {
   }, []);
 
   // ─── Dynamic pin state ───
-  const PINNED_KEY = "pinned_apps";
   const [pinnedOverrides, setPinnedOverrides] = useState<Record<string, boolean>>({});
   const isAppPinned = useCallback((appId: string) => {
     if (appId in pinnedOverrides) return pinnedOverrides[appId];
@@ -221,19 +216,15 @@ export default function ChromeDesktop() {
   }, []);
 
   // ─── Wallpapers ───
-  const WALLPAPER_KEY = "clawbox-wallpaper";
   const wallpapers = [
     { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
     { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
   ] as const;
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
-  const WP_FIT_KEY = "clawbox-wallpaper-fit";
   type WpFit = "fill" | "fit" | "center";
   const [wpFit, setWpFit] = useState<WpFit>("fill");
-  const WP_BG_COLOR_KEY = "clawbox-wallpaper-bg-color";
   const [wpBgColor, setWpBgColor] = useState("#000000");
-  const WP_OPACITY_KEY = "clawbox-wallpaper-opacity";
   const [wpOpacity, setWpOpacity] = useState(50);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
@@ -357,7 +348,6 @@ export default function ChromeDesktop() {
   const GRID_ROWS = 6;
   const CELL_W = gridDims.cellW;
   const CELL_H = 110; // px
-  const ICON_GRID_KEY = "icon_grid";
   const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -923,6 +913,7 @@ export default function ChromeDesktop() {
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);
   openAppRef.current = openApp;
+
   useEffect(() => {
     let active = true;
     let lastProcessedTs = 0;
@@ -1088,7 +1079,7 @@ export default function ChromeDesktop() {
       case "files":
         return <FilesApp />;
       case "browser":
-        return <BrowserApp />;
+        return <BrowserApp onOpenApp={openApp} />;
       case "vnc":
         return <VNCApp />;
       case "vscode":
@@ -1101,7 +1092,7 @@ export default function ChromeDesktop() {
             src={webappSrc}
             style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
             sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
-            title={app.name}
+            title={resolveAppName(app)}
           />
         );
       }
@@ -1116,7 +1107,7 @@ export default function ChromeDesktop() {
             </div>
             <div className="text-center">
               <h2 className="text-xl font-medium text-white/80 mb-1">
-                {app.name}
+                {resolveAppName(app)}
               </h2>
               <p className="text-sm">Coming Soon</p>
             </div>
@@ -1462,7 +1453,7 @@ export default function ChromeDesktop() {
                   <AppIcon id={app.id} size="w-7 h-7" />
                 </div>
                 <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
-                  {app.name}
+                  {resolveAppName(app)}
                 </span>
               </button>
             </div>
@@ -1556,7 +1547,7 @@ export default function ChromeDesktop() {
                     ? <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
                     : <AppIcon id={app.id} size="w-3 h-3" />}
                 </div>
-                <span className="text-sm font-medium text-white/80 truncate flex-1">{app.name}</span>
+                <span className="text-sm font-medium text-white/80 truncate flex-1">{resolveAppName(app)}</span>
                 {visible.length > 1 && (
                   <button
                     onClick={() => minimizeWindow(top.id)}
@@ -1604,7 +1595,7 @@ export default function ChromeDesktop() {
           return (
             <ChromeWindow
               key={window.id}
-              title={app.name}
+              title={resolveAppName(app)}
               icon={renderWindowIcon()}
               appId={window.appId}
               defaultWidth={app.defaultWidth}
@@ -1632,7 +1623,7 @@ export default function ChromeDesktop() {
           if (app.type === "installed" && app.storeApp) {
             return {
               id: app.id,
-              name: app.name,
+              name: resolveAppName(app),
               color: app.color,
               icon: <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />,
               isPinned: isAppPinned(app.id),
@@ -1640,7 +1631,7 @@ export default function ChromeDesktop() {
           }
           return {
             id: app.id,
-            name: app.name,
+            name: resolveAppName(app),
             color: app.color,
             icon: <AppIcon id={app.id} />,
             isPinned: isAppPinned(app.id),
@@ -1696,12 +1687,13 @@ export default function ChromeDesktop() {
             };
             return {
               id: app.id,
-              name: app.name,
+              name: resolveAppName(app),
               icon: renderIcon(),
               isOpen: appWindows.length > 0,
               isActive: topWin?.id === activeWindowId && !topWin?.minimized,
               isPinned: pinnedIds.has(app.id),
               windowCount: appWindows.length,
+              url: app.url,
             };
           };
 
@@ -1805,6 +1797,11 @@ export default function ChromeDesktop() {
                   <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> New Window
                 </button>
               )}
+              <button onClick={() => {
+                window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
+              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open in new tab
+              </button>
               <div className="border-t border-white/10 my-1" />
               {isAppPinned(resolvedAppId) ? (
                 <button onClick={() => handleUnpinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
@@ -1908,5 +1905,13 @@ export default function ChromeDesktop() {
         );
       })()}
     </div>
+  );
+}
+
+export default function ChromeDesktop() {
+  return (
+    <I18nProvider>
+      <ChromeDesktopInner />
+    </I18nProvider>
   );
 }

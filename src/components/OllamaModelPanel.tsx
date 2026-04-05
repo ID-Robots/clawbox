@@ -2,6 +2,7 @@
 
 import type { OllamaModel, OllamaSearchResult } from "@/hooks/useOllamaModels";
 import type { ReactNode } from "react";
+import { useT } from "@/lib/i18n";
 
 const PRESET_MODELS = [
   { id: "llama3.2:3b", label: "Llama 3.2 3B" },
@@ -65,10 +66,11 @@ export default function OllamaModelPanel({
   buttonClassName = DEFAULT_BUTTON_CLASS,
   buttonSpinner = DEFAULT_SPINNER,
 }: OllamaModelPanelProps) {
+  const { t } = useT();
   if (!ollamaRunning) {
     return (
       <p className="text-xs text-yellow-400">
-        Ollama is not running. Make sure it is installed and started on this device.
+        {t("ollama.notRunning")}
       </p>
     );
   }
@@ -77,7 +79,7 @@ export default function OllamaModelPanel({
     <>
       {ollamaModels.length > 0 && (
         <div>
-          <p className="text-xs text-[var(--text-secondary)] mb-2">Installed models:</p>
+          <p className="text-xs text-[var(--text-secondary)] mb-2">{t("ollama.installedModels")}</p>
           {ollamaModels.map((m) => (
             <div
               key={m.name}
@@ -99,7 +101,7 @@ export default function OllamaModelPanel({
                   {ollamaSaving === m.name && (
                     <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   )}
-                  {ollamaSaving === m.name ? "Saving..." : "Use"}
+                  {ollamaSaving === m.name ? t("ollama.saving") : t("ollama.use")}
                 </button>
                 <button
                   type="button"
@@ -117,7 +119,7 @@ export default function OllamaModelPanel({
       )}
       <div>
         <h4 className="text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-          Download a model
+          {t("ollama.downloadModel")}
         </h4>
         <div role="radiogroup" aria-label="Download a model" className="space-y-1">
           {PRESET_MODELS.map((m) => (
@@ -152,14 +154,14 @@ export default function OllamaModelPanel({
         {/* Search for more models */}
         <div className="mt-3 pt-3 border-t border-gray-800">
           <p className="text-xs text-[var(--text-muted)] mb-1.5">
-            Or search for more models (filtered for 8GB RAM)
+            {t("ollama.searchLabel")}
           </p>
           <div className="relative">
             <input
               type="text"
               value={ollamaSearch}
               onChange={(e) => handleOllamaSearchChange(e.target.value)}
-              placeholder="Search Ollama models..."
+              placeholder={t("ollama.searchPlaceholder")}
               spellCheck={false}
               autoComplete="off"
               className={inputClassName}
@@ -213,7 +215,7 @@ export default function OllamaModelPanel({
                         }}
                         className="px-2 py-1 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
                       >
-                        Select
+                        {t("ollama.select")}
                       </button>
                     )}
                   </div>
@@ -223,7 +225,7 @@ export default function OllamaModelPanel({
           )}
           {ollamaSearch && !ollamaSearching && ollamaSearchResults.length === 0 && (
             <p className="mt-1 text-xs text-[var(--text-muted)]">
-              No models found matching &quot;{ollamaSearch}&quot; for 8GB devices
+              {t("ollama.noModelsFound", { query: ollamaSearch })}
             </p>
           )}
         </div>
@@ -232,7 +234,7 @@ export default function OllamaModelPanel({
         {!PRESET_MODELS.some((m) => m.id === selectedOllamaModel) && (
           <div className="mt-2 px-3 py-2 bg-orange-500/10 rounded-lg">
             <span className="text-sm text-gray-200">
-              Selected: <strong>{selectedOllamaModel}</strong>
+              {t("ollama.selected")} <strong>{selectedOllamaModel}</strong>
             </span>
           </div>
         )}
@@ -271,7 +273,7 @@ export default function OllamaModelPanel({
           className={buttonClassName}
         >
           {(ollamaPulling || !!ollamaSaving) && buttonSpinner}
-          {ollamaPulling ? "Downloading..." : ollamaSaving ? "Configuring..." : "Download & Configure"}
+          {ollamaPulling ? t("ollama.downloading") : ollamaSaving ? t("ollama.configuring") : t("ollama.downloadAndConfigure")}
         </button>
       </div>
     </>

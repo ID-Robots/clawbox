@@ -110,14 +110,14 @@ export async function POST(req: Request) {
     switch (action) {
       case "install-chromium": {
         try {
-          await exec("sudo", ["apt-get", "update", "-qq"], { timeout: 30000 });
-          await exec("sudo", ["apt-get", "install", "-y", "-qq", "chromium-browser"], { timeout: 120000 });
+          await exec("/usr/bin/sudo", ["apt-get", "update", "-qq"], { timeout: 30000 });
+          await exec("/usr/bin/sudo", ["apt-get", "install", "-y", "-qq", "chromium-browser"], { timeout: 120000 });
         } catch {
           try {
-            await exec("sudo", ["snap", "install", "chromium"], { timeout: 120000 });
+            await exec("/usr/bin/sudo", ["snap", "install", "chromium"], { timeout: 120000 });
           } catch (snapErr) {
             try {
-              await exec("sudo", ["apt-get", "install", "-y", "-qq", "chromium"], { timeout: 120000 });
+              await exec("/usr/bin/sudo", ["apt-get", "install", "-y", "-qq", "chromium"], { timeout: 120000 });
             } catch {
               throw new Error(`Failed to install Chromium: ${snapErr instanceof Error ? snapErr.message : "unknown error"}`);
             }
@@ -146,7 +146,7 @@ export async function POST(req: Request) {
 
         let enableRestartOk = true;
         try {
-          await exec("sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           enableRestartOk = false;
@@ -165,7 +165,7 @@ export async function POST(req: Request) {
 
         let disableRestartOk = true;
         try {
-          await exec("sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           disableRestartOk = false;
@@ -193,7 +193,7 @@ export async function POST(req: Request) {
         try {
           console.log(`[browser] Starting clawbox-browser.service (CDP port ${CDP_PORT})`);
           // Start dedicated service — runs as root, drops to clawbox via runuser
-          await exec("sudo", [
+          await exec("/usr/bin/sudo", [
             "/usr/bin/systemctl", "start", "clawbox-browser.service",
           ], { timeout: 5000 }).catch((err) => {
             console.error("[browser] systemctl start failed:", err);
@@ -229,7 +229,7 @@ export async function POST(req: Request) {
 
       case "close-browser": {
         try {
-          await exec("sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
+          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
         } catch {}
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });

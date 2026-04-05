@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, ReactNode, useCallback, useMemo } from "react";
+import { useT } from "@/lib/i18n";
 
 interface LauncherApp {
   id: string;
@@ -47,6 +48,7 @@ export default function ChromeLauncher({
   onPinApp,
   onUnpinApp,
 }: ChromeLauncherProps) {
+  const { t } = useT();
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
   const APPS_PER_PAGE = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
@@ -213,7 +215,7 @@ export default function ChromeLauncher({
               <input
                 ref={searchRef}
                 type="text"
-                placeholder="Search apps or store..."
+                placeholder={t("launcher.searchPlaceholder")}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => {
@@ -263,7 +265,7 @@ export default function ChromeLauncher({
 
             {filteredApps.length === 0 && (
               <div className="text-center py-8 text-white/40 text-sm">
-                No apps found
+                {t("launcher.noAppsFound")}
               </div>
             )}
           </div>
@@ -306,7 +308,7 @@ export default function ChromeLauncher({
             onClick={() => handleAppClick(ctxMenu.app.id)}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
-            <span className="text-base">▶️</span> Open
+            <span className="text-base">▶️</span> {t("launcher.open")}
           </button>
 
           {ctxMenu.app.isPinned ? (
@@ -314,14 +316,14 @@ export default function ChromeLauncher({
               onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">📌</span> Unpin from shelf
+              <span className="text-base">📌</span> {t("launcher.unpinFromShelf")}
             </button>
           ) : (
             <button
               onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">📌</span> Pin to shelf
+              <span className="text-base">📌</span> {t("launcher.pinToShelf")}
             </button>
           )}
 
@@ -330,7 +332,7 @@ export default function ChromeLauncher({
               onClick={() => { onAddToDesktop(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">🖥️</span> Add to desktop
+              <span className="text-base">🖥️</span> {t("launcher.addToDesktop")}
             </button>
           )}
         </div>

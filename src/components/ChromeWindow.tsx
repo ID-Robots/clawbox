@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } from "react";
+import { useT } from "@/lib/i18n";
 import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
 
@@ -97,6 +98,7 @@ export default function ChromeWindow({
   minimized = false,
   rightInset = 0,
 }: ChromeWindowProps) {
+  const { t } = useT();
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
   const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
   const [maximized, setMaximized] = useState(false);
@@ -389,7 +391,7 @@ export default function ChromeWindow({
           <button
             onClick={handleMinimize}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
-            title="Minimize"
+            title={t("window.minimize")}
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
           </button>
@@ -398,7 +400,7 @@ export default function ChromeWindow({
           <button
             onClick={handleMaximize}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
-            title={maximized ? "Restore" : "Maximize"}
+            title={maximized ? t("window.restore") : t("window.maximize")}
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
@@ -407,7 +409,7 @@ export default function ChromeWindow({
           <button
             onClick={handleClose}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-red-500/80 active:bg-red-600 transition-colors cursor-pointer group"
-            title="Close"
+            title={t("window.close")}
           >
             <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
           </button>

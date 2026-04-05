@@ -7,7 +7,7 @@ import SignalBars from "./SignalBars";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
-import { I18nProvider } from "@/lib/i18n";
+import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 
@@ -54,13 +54,13 @@ interface SystemStats {
 type Section = "appearance" | "wifi" | "ai" | "telegram" | "system" | "about";
 
 /* ── Sidebar nav items ── */
-const NAV_ITEMS: { id: Section; icon: string; label: string }[] = [
-  { id: "appearance", icon: "palette", label: "Appearance" },
-  { id: "wifi", icon: "wifi", label: "Network" },
-  { id: "ai", icon: "smart_toy", label: "AI Provider" },
-  { id: "telegram", icon: "send", label: "Telegram" },
-  { id: "system", icon: "monitor_heart", label: "System" },
-  { id: "about", icon: "info", label: "About" },
+const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
+  { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  { id: "wifi", icon: "wifi", labelKey: "settings.network" },
+  { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
+  { id: "telegram", icon: "send", labelKey: "settings.telegram" },
+  { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
+  { id: "about", icon: "info", labelKey: "settings.about" },
 ];
 
 /* ── Helpers ── */
@@ -94,6 +94,10 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
+  const { t, locale, setLocale } = useT();
+  const [langOpen, setLangOpen] = useState(false);
+  const langRef = useRef<HTMLDivElement>(null);
+  const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
   const [section, setSection] = useState<Section>("appearance");
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
@@ -104,6 +108,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     window.addEventListener("resize", check);
     return () => window.removeEventListener("resize", check);
   }, []);
+
+  // Close language dropdown on click outside
+  useEffect(() => {
+    if (!langOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (langRef.current && !langRef.current.contains(e.target as Node)) setLangOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [langOpen]);
 
   /* ── System stats (only poll when visible) ── */
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -179,27 +193,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
 
 
-  const openUpdateConfirm = async () => {
-    setVersionLoading(true);
-    setUpdateConfirm(true);
-    try {
-      const [statusRes, branchRes] = await Promise.all([
-        fetch("/setup-api/update/status"),
-        fetch("/setup-api/system/update-branch"),
-      ]);
-      if (statusRes.ok) { const data = await statusRes.json(); if (data.versions) setVersionInfo(data.versions); }
-      if (branchRes.ok) { const data = await branchRes.json(); setUpdateBranch(data.branch ?? null); setBranchInput(data.branch ?? ""); }
-    } catch {} finally { setVersionLoading(false); }
-  };
-
   const saveUpdateBranch = async (branch: string) => {
     setBranchSaving(true);
     setBranchError(null);
     try {
       const res = await fetch("/setup-api/system/update-branch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ branch: branch || null }) });
       const data = await res.json();
-      if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || "Failed to set branch"); }
-    } catch (err) { setBranchError(err instanceof Error ? err.message : "Failed to set branch"); } finally { setBranchSaving(false); }
+      if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || t("settings.failedSetBranch")); }
+    } catch (err) { setBranchError(err instanceof Error ? err.message : t("settings.failedSetBranch")); } finally { setBranchSaving(false); }
   };
 
   const toggleBeta = async (enable: boolean) => {
@@ -245,9 +246,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setUpdateState(null);
     try {
       const res = await fetch("/setup-api/update/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : "Failed to start update"); return; }
+      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
       startUpdatePolling();
-    } catch (err) { setUpdateError(err instanceof Error ? err.message : "Failed to start update"); }
+    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
   };
 
   /* ── WiFi ── */
@@ -332,12 +333,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: ssid.trim(), password: wifiPass }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setWifiStatus({ type: "success", message: `Connected to ${ssid}` });
+      setWifiStatus({ type: "success", message: t("settings.connectedTo", { ssid }) });
       setConnectedSSID(ssid.trim());
       setSsid("");
       setWifiPass("");
     } catch (err) {
-      setWifiStatus({ type: "error", message: err instanceof Error ? err.message : "Connection failed" });
+      setWifiStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.connectionFailed") });
     } finally {
       setWifiConnecting(false);
     }
@@ -368,7 +369,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
-      setTgStatus({ type: "error", message: "Please enter a bot token" });
+      setTgStatus({ type: "error", message: t("settings.enterToken") });
       return;
     }
     tgSaveControllerRef.current?.abort();
@@ -386,18 +387,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setTgStatus({ type: "error", message: data.error || "Failed to save" });
+        setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        setTgStatus({ type: "success", message: "Telegram bot configured successfully!" });
+        setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
       } else {
-        setTgStatus({ type: "error", message: data.error || "Failed to save" });
+        setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -462,13 +463,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── Appearance ─── */}
         {activeSection === "appearance" && (
           <div className="max-w-2xl space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Appearance</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.appearance")}</h2>
 
             {/* Wallpaper card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wallpaper</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Wallpaper</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.wallpaper")}</label>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                 {ui.wallpapers.map(wp => {
@@ -531,7 +532,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="rounded-xl aspect-video border-2 border-dashed border-[var(--border-subtle)] hover:border-orange-400/40 hover:bg-orange-500/5 flex flex-col items-center justify-center gap-1.5 text-[var(--text-muted)] opacity-60 hover:text-[var(--coral-bright)]/70 transition-all cursor-pointer"
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
-                  <span className="text-[10px] font-medium">Upload</span>
+                  <span className="text-[10px] font-medium">{t("settings.upload")}</span>
                 </button>
               </div>
             </div>
@@ -540,12 +541,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 space-y-5">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>tune</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Display</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.display")}</label>
               </div>
 
               {/* Fit mode */}
               <div>
-                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Fit Mode</label>
+                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.fitMode")}</label>
                 <div className="flex gap-1 bg-white/[0.04] rounded-xl p-1">
                   {(["fill", "fit", "center"] as const).map(mode => {
                     const icons = { fill: "zoom_out_map", fit: "fit_screen", center: "center_focus_strong" };
@@ -558,7 +559,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         }`}
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{icons[mode]}</span>
-                        {mode}
+                        {t(`settings.${mode}`)}
                       </button>
                     );
                   })}
@@ -568,7 +569,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {/* Opacity */}
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="text-[11px] font-medium text-white/35 uppercase tracking-wider">Opacity</label>
+                  <label className="text-[11px] font-medium text-white/35 uppercase tracking-wider">{t("settings.opacity")}</label>
                   <span className="text-xs font-mono text-[var(--coral-bright)]/80 bg-orange-500/10 px-2 py-0.5 rounded-md">{ui.wpOpacity}%</span>
                 </div>
                 <div className="relative h-6 flex items-center">
@@ -585,7 +586,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
               {/* Background color */}
               <div>
-                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Background Color</label>
+                <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.bgColor")}</label>
                 <div className="flex items-center gap-3">
                   <div className="relative">
                     <input
@@ -605,13 +606,56 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>auto_awesome</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Extras</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.extras")}</label>
               </div>
               <Toggle on={!ui.mascotHidden} onToggle={v => {
                 const hidden = !v;
                 ui.onMascotToggle(hidden);
                 window.dispatchEvent(new Event(hidden ? "clawbox-hide-mascot" : "clawbox-show-mascot"));
-              }} label="Show Mascot" />
+              }} label={t("settings.showMascot")} />
+            </div>
+
+            {/* Language card */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</label>
+              </div>
+              <div className="relative" ref={langRef}>
+                <button
+                  type="button"
+                  onClick={() => setLangOpen(v => !v)}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
+                >
+                  <span className="text-base leading-none">{currentLang.flag}</span>
+                  <span className="flex-1 text-left">{currentLang.label}</span>
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
+                    {langOpen ? "expand_less" : "expand_more"}
+                  </span>
+                </button>
+                {langOpen && (
+                  <div className="absolute z-50 mt-1 w-full bg-[#1a1f2e] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                    {LANGUAGES.map(lang => (
+                      <button
+                        key={lang.code}
+                        type="button"
+                        onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
+                          lang.code === locale
+                            ? "bg-orange-500/15 text-[var(--coral-bright)]"
+                            : "text-white/70 hover:bg-white/[0.06]"
+                        }`}
+                      >
+                        <span className="text-base leading-none">{lang.flag}</span>
+                        <span className="flex-1 text-left">{lang.label}</span>
+                        {lang.code === locale && (
+                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -619,13 +663,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── Network ─── */}
         {activeSection === "wifi" && (
           <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Network</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.network")}</h2>
 
             {/* Connection status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wifi</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Status</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {connectedSSID ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
@@ -636,7 +680,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <div className="text-sm text-[var(--text-primary)] font-medium truncate">{connectedSSID}</div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400/80">Connected</span>
+                      <span className="text-xs text-green-400/80">{t("settings.connected")}</span>
                     </div>
                   </div>
                 </div>
@@ -646,8 +690,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>wifi_off</span>
                   </div>
                   <div>
-                    <div className="text-sm text-[var(--text-muted)]">No WiFi connection</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Connect to a network below</div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.noWifiConnection")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.connectToNetwork")}</div>
                   </div>
                 </div>
               )}
@@ -661,7 +705,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className={`material-symbols-rounded ${hotspotEnabled ? "text-[var(--coral-bright)]" : "text-[var(--text-muted)] opacity-50"}`} style={{ fontSize: 22 }}>wifi_tethering</span>
                   </div>
                   <div>
-                    <div className="text-sm text-[var(--text-primary)] font-medium">Hotspot</div>
+                    <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.hotspot")}</div>
                     <div className="text-xs text-white/35 mt-0.5">{hotspotSSID}</div>
                   </div>
                 </div>
@@ -675,7 +719,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
               {hotspotEnabled && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
-                  The hotspot broadcasts <span className="text-[var(--text-muted)] font-medium">{hotspotSSID}</span> so you can connect to this device directly.
+                  {t("settings.hotspotDesc", { ssid: hotspotSSID })}
                 </p>
               )}
             </div>
@@ -684,7 +728,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Connect to Network</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.connectToNetworkBtn")}</label>
               </div>
 
               {/* Network list */}
@@ -695,9 +739,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="w-full py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[var(--text-primary)] rounded-xl text-sm font-medium cursor-pointer transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {wifiScanning ? (
-                    <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> Scanning...</>
+                    <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("settings.scanning")}</>
                   ) : (
-                    <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>wifi_find</span> Scan for Networks</>
+                    <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>wifi_find</span> {t("settings.availableNetworks")}</>
                   )}
                 </button>
               )}
@@ -706,14 +750,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <>
                   <div className="border border-white/[0.08] rounded-xl overflow-hidden mb-3">
                     <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06]">
-                      <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Available Networks</span>
+                      <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.availableNetworks")}</span>
                       <button
                         onClick={scanWifiNetworks}
                         disabled={wifiScanning}
                         className="flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5 disabled:opacity-50 transition-colors"
                       >
                         <span className={`material-symbols-rounded ${wifiScanning ? "animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
-                        {wifiScanning ? "Scanning..." : "Refresh"}
+                        {wifiScanning ? t("settings.scanning") : t("wifi.refresh")}
                       </button>
                     </div>
                     {wifiNetworks.length > 0 ? (
@@ -733,7 +777,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs text-[var(--text-muted)] px-3.5 py-3">No networks found.</p>
+                      <p className="text-xs text-[var(--text-muted)] px-3.5 py-3">{t("settings.noNetworks")}</p>
                     )}
                   </div>
                   <button
@@ -741,7 +785,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left bg-transparent border border-white/[0.08] rounded-xl cursor-pointer hover:bg-white/[0.04] transition-colors"
                   >
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 16 }}>edit</span>
-                    <span className="text-sm text-[var(--text-secondary)]">Other network...</span>
+                    <span className="text-sm text-[var(--text-secondary)]">{t("settings.otherNetwork")}</span>
                   </button>
                 </>
               )}
@@ -750,24 +794,24 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {(ssid !== "" || showManualWifi) && (
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Network Name (SSID)</label>
+                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.networkName")}</label>
                     <div className="relative">
                       <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>router</span>
                       <input
                         type="text" value={ssid} onChange={e => setSsid(e.target.value)}
-                        placeholder="Enter WiFi network name"
+                        placeholder={t("settings.enterNetworkName")}
                         readOnly={!showManualWifi && wifiNetworks !== null}
                         className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
                       />
                     </div>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Password</label>
+                    <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.password")}</label>
                     <div className="relative">
                       <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>lock</span>
                       <input
                         type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
-                        placeholder="Enter WiFi password"
+                        placeholder={t("settings.enterPassword")}
                         autoFocus
                         className="w-full pl-10 pr-4 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
                         onKeyDown={e => e.key === "Enter" && connectWifi()}
@@ -778,7 +822,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="flex items-start gap-2.5 bg-amber-500/[0.07] border border-amber-500/15 rounded-xl px-3.5 py-3">
                     <span className="material-symbols-rounded text-amber-400 shrink-0 mt-0.5" style={{ fontSize: 16 }}>warning</span>
                     <p className="text-xs text-amber-300/70 leading-relaxed">
-                      Connecting to a WiFi network will <span className="text-amber-300 font-medium">stop the ClawBox-Setup hotspot</span>. Make sure you can reach the device on the new network before connecting.
+                      {t("settings.wifiWarning")}
                     </p>
                   </div>
 
@@ -789,16 +833,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       className="flex-1 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                     >
                       {wifiConnecting ? (
-                        <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> Connecting...</>
+                        <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("connecting")}</>
                       ) : (
-                        <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span> Connect</>
+                        <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span> {t("settings.connect")}</>
                       )}
                     </button>
                     <button
                       onClick={() => { setSsid(""); setWifiPass(""); setWifiStatus(null); setShowManualWifi(false); }}
                       className="py-2.5 px-4 bg-transparent border border-white/[0.08] text-[var(--text-secondary)] rounded-xl text-sm cursor-pointer hover:bg-white/[0.04] transition-all"
                     >
-                      Back
+                      {t("settings.back")}
                     </button>
                   </div>
                   {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
@@ -812,18 +856,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── AI Provider ─── */}
         {activeSection === "ai" && (
           <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">AI Provider</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.aiProvider")}</h2>
 
             {/* Provider status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Status</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {aiProvider === null ? (
                 <div className="flex items-center gap-3 text-[var(--text-muted)] text-sm">
                   <div className="w-5 h-5 border-2 border-white/15 border-t-[var(--coral-bright)] rounded-full animate-spin" />
-                  Checking...
+                  {t("settings.checking")}
                 </div>
               ) : aiProvider.connected ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
@@ -835,7 +879,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
                       <span className="text-xs text-green-400/80">
-                        {aiProvider.model ? aiProvider.model.split("/").pop() : "Connected"}
+                        {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
                         {aiProvider.mode ? ` · ${aiProvider.mode}` : ""}
                       </span>
                     </div>
@@ -847,8 +891,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>link_off</span>
                   </div>
                   <div>
-                    <div className="text-sm text-[var(--text-muted)]">No provider connected</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Select a provider below</div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.noProviderConnected")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.selectProvider")}</div>
                   </div>
                 </div>
               )}
@@ -861,18 +905,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── Telegram ─── */}
         {activeSection === "telegram" && (
           <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Telegram</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.telegram")}</h2>
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="#f97316"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.96 6.504-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.492-1.302.48-.428-.012-1.252-.242-1.865-.44-.751-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Status</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {tgConfigured === null ? (
                 <div className="flex items-center gap-3 text-[var(--text-muted)] opacity-60 text-sm">
                   <div className="w-5 h-5 border-2 border-white/15 border-t-orange-400 rounded-full animate-spin" />
-                  Checking...
+                  {t("settings.checking")}
                 </div>
               ) : tgConfigured && !tgReconfigure ? (
                 <div>
@@ -881,10 +925,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm text-[var(--text-primary)] font-medium">Bot Connected</div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.botConnected")}</div>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400/80">Telegram channel active</span>
+                        <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
                       </div>
                     </div>
                   </div>
@@ -892,7 +936,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
                   >
-                    Reconfigure bot token
+                    {t("settings.reconfigureBot")}
                   </button>
                 </div>
               ) : (
@@ -901,8 +945,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
                   </div>
                   <div>
-                    <div className="text-sm text-[var(--text-muted)]">Not configured</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Set up a Telegram bot below</div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.setupBotBelow")}</div>
                   </div>
                 </div>
               )}
@@ -914,7 +958,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
                   <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
-                    {tgReconfigure ? "Reconfigure Bot" : "Setup Bot"}
+                    {tgReconfigure ? t("settings.reconfigureBot") : t("settings.setupBot")}
                   </label>
                 </div>
 
@@ -946,7 +990,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
                 {/* Token input */}
                 <div>
-                  <label htmlFor="settings-tg-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">Bot Token</label>
+                  <label htmlFor="settings-tg-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.botToken")}</label>
                   <div className="relative">
                     <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
                     <input
@@ -981,12 +1025,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     {tgSaving ? (
                       <>
                         <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
-                        Saving...
+                        {t("settings.saving")}
                       </>
                     ) : (
                       <>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>save</span>
-                        Save
+                        {t("settings.save")}
                       </>
                     )}
                   </button>
@@ -995,7 +1039,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       onClick={() => { setTgReconfigure(false); setTgStatus(null); setTgToken(""); }}
                       className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
                     >
-                      Cancel
+                      {t("cancel")}
                     </button>
                   )}
                 </div>
@@ -1006,12 +1050,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-3">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>info</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">How it works</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.howItWorks")}</label>
               </div>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                Once configured, you can chat with your ClawBox AI assistant directly from Telegram. 
-                Send messages to your bot and it will respond using the AI provider configured in the AI Provider settings.
-                Your conversations are private and processed on your device.
+                {t("settings.telegramDescription")}
               </p>
             </div>
           </div>
@@ -1020,7 +1062,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-2xl space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">System</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.system")}</h2>
 
             {stats ? (
               <>
@@ -1028,14 +1070,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>computer</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Device</label>
+                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.device")}</label>
                     <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">{stats.overview.uptime}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-                    <div className="flex justify-between"><span className="text-white/35">Hostname</span><span className="text-[var(--text-primary)] font-mono text-xs">{stats.overview.hostname}</span></div>
-                    <div className="flex justify-between"><span className="text-white/35">OS</span><span className="text-[var(--text-primary)] font-mono text-xs truncate ml-2">{stats.overview.os}</span></div>
-                    <div className="flex justify-between"><span className="text-white/35">Kernel</span><span className="text-[var(--text-primary)] font-mono text-xs truncate ml-2">{stats.overview.kernel}</span></div>
-                    <div className="flex justify-between"><span className="text-white/35">Arch</span><span className="text-[var(--text-primary)]">{stats.overview.arch}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">{t("settings.hostname")}</span><span className="text-[var(--text-primary)] font-mono text-xs">{stats.overview.hostname}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">{t("settings.os")}</span><span className="text-[var(--text-primary)] font-mono text-xs truncate ml-2">{stats.overview.os}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">{t("settings.kernel")}</span><span className="text-[var(--text-primary)] font-mono text-xs truncate ml-2">{stats.overview.kernel}</span></div>
+                    <div className="flex justify-between"><span className="text-white/35">{t("settings.arch")}</span><span className="text-[var(--text-primary)]">{stats.overview.arch}</span></div>
                   </div>
                 </div>
 
@@ -1043,13 +1085,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>speed</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Resources</label>
+                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</label>
                   </div>
 
                   {/* CPU bar */}
                   <div className="mb-4">
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-[var(--text-muted)]">CPU</span>
+                      <span className="text-xs text-[var(--text-muted)]">{t("settings.cpu")}</span>
                       <span className="text-xs font-mono font-semibold" style={{ color: barColor(stats.cpu.usage) }}>{stats.cpu.usage}%</span>
                     </div>
                     <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
@@ -1057,14 +1099,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center justify-between mt-1.5">
                       <span className="text-[10px] text-[var(--text-muted)] opacity-50 font-mono truncate max-w-[60%]">{stats.cpu.model}</span>
-                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} cores &middot; Load {stats.cpu.loadAvg[0]}</span>
+                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} {t("settings.cores")} &middot; Load {stats.cpu.loadAvg[0]}</span>
                     </div>
                   </div>
 
                   {/* Memory bar */}
                   <div className="mb-4">
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-[var(--text-muted)]">Memory</span>
+                      <span className="text-xs text-[var(--text-muted)]">{t("settings.memory")}</span>
                       <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.used)} / {formatBytes(stats.memory.total)}</span>
                     </div>
                     <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
@@ -1077,7 +1119,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   {stats.memory.swap.total > 0 && (
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-xs text-[var(--text-muted)]">Swap</span>
+                        <span className="text-xs text-[var(--text-muted)]">{t("settings.swap")}</span>
                         <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.swap.used)} / {formatBytes(stats.memory.swap.total)}</span>
                       </div>
                       <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
@@ -1091,7 +1133,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   {stats.gpu != null && (
                     <div className="mt-4">
                       <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-xs text-[var(--text-muted)]">GPU</span>
+                        <span className="text-xs text-[var(--text-muted)]">{t("settings.gpu")}</span>
                         <span className="text-xs font-mono font-semibold" style={{ color: barColor(stats.gpu.usage) }}>{stats.gpu.usage}%</span>
                       </div>
                       <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
@@ -1106,14 +1148,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>thermostat</span>
-                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Temperature</label>
+                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</label>
                     </div>
                     <div className="flex items-end gap-3">
                       <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
                         {stats.temperature.display}
                       </span>
                       <span className="text-xs text-[var(--text-muted)] opacity-50 mb-1.5">
-                        {stats.temperature.value > 80 ? "Critical" : stats.temperature.value > 60 ? "Warm" : "Normal"}
+                        {stats.temperature.value > 80 ? t("settings.critical") : stats.temperature.value > 60 ? t("settings.warm") : t("settings.normal")}
                       </span>
                     </div>
                     <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden mt-3">
@@ -1135,7 +1177,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>hard_drive</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Storage</label>
+                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</label>
                   </div>
                   <div className="space-y-3">
                     {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
@@ -1157,7 +1199,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             ) : (
               <div className="flex items-center justify-center py-12 text-[var(--text-muted)] opacity-60">
                 <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
-                <span className="text-sm">Loading system stats...</span>
+                <span className="text-sm">{t("settings.loadingStats")}</span>
               </div>
             )}
 
@@ -1167,28 +1209,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
           <div className="max-w-md space-y-6">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">About ClawBox</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
 
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
               <div className="flex items-center gap-4">
                 <img src="/icon-512.png" alt="ClawBox" className="w-14 h-14 rounded-2xl" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
                 <div>
                   <div className="text-lg font-bold text-[var(--text-primary)]">ClawBox</div>
-                  <div className="text-xs text-[var(--text-muted)]">Personal AI Assistant Device</div>
+                  <div className="text-xs text-[var(--text-muted)]">{t("settings.personalAI")}</div>
                 </div>
               </div>
 
               <div className="space-y-2 pt-2 border-t border-[var(--border-subtle)]">
                 <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">Version</span>
+                  <span className="text-[var(--text-muted)]">{t("settings.version")}</span>
                   <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">Runtime</span>
+                  <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">Platform</span>
+                  <span className="text-[var(--text-muted)]">{t("settings.platform")}</span>
                   <span className="text-[var(--text-primary)]">{stats ? `${stats.overview.arch} ${stats.overview.platform}` : "..."}</span>
                 </div>
               </div>
@@ -1201,7 +1243,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
-              Documentation
+              {t("settings.documentation")}
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
@@ -1212,7 +1254,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>support_agent</span>
-              Support
+              {t("settings.support")}
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
@@ -1223,7 +1265,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
-              Discord Community
+              {t("settings.discordCommunity")}
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
@@ -1233,8 +1275,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>science</span>
                   <div>
-                    <span className="text-sm text-[var(--text-primary)]">Beta Channel</span>
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">Get early access to new features</p>
+                    <span className="text-sm text-[var(--text-primary)]">{t("settings.betaChannel")}</span>
+                    <p className="text-xs text-[var(--text-muted)] mt-0.5">{t("settings.betaDesc")}</p>
                   </div>
                 </div>
                 <button
@@ -1249,7 +1291,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </button>
               </div>
               {betaEnabled && (
-                <p className="text-xs text-amber-400/60 mt-2">Updates will install from the beta branch</p>
+                <p className="text-xs text-amber-400/60 mt-2">{t("settings.betaInstallNote")}</p>
               )}
             </div>
 
@@ -1258,7 +1300,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               className="flex items-center gap-3 w-full bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
-              System Update
+              {t("settings.systemUpdate")}
             </button>
 
             <button
@@ -1266,7 +1308,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               className="flex items-center gap-3 w-full bg-red-500/5 rounded-xl px-4 py-3 text-sm text-red-400/60 hover:text-red-400 transition-colors cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>restart_alt</span>
-              Factory Reset
+              {t("settings.factoryReset")}
             </button>
           </div>
 
@@ -1276,15 +1318,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
                 <div className="flex items-center gap-3 mb-4">
                   <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 28 }}>warning</span>
-                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">Enable Beta Channel</h3>
+                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.enableBeta")}</h3>
                 </div>
                 <div className="space-y-3 mb-6">
                   <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-                    Beta software may contain bugs, incomplete features, and stability issues that can affect your device.
+                    {t("settings.betaWarning")}
                   </p>
                   <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
                     <p className="text-xs text-red-400 leading-relaxed">
-                      <strong>By enabling beta you acknowledge:</strong> Installing beta updates may break your system and cause data loss. IDRobots Ltd. is not responsible for any lost data, broken software, or hardware damage resulting from beta software.
+                      {t("settings.betaDisclaimer")}
                     </p>
                   </div>
                 </div>
@@ -1293,13 +1335,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onClick={() => setBetaConfirm(false)}
                     className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/15 text-[var(--text-secondary)] rounded-lg text-sm font-medium cursor-pointer transition-colors"
                   >
-                    Cancel
+                    {t("cancel")}
                   </button>
                   <button
                     onClick={confirmBeta}
                     className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors"
                   >
-                    Enable Beta
+                    {t("settings.enableBetaBtn")}
                   </button>
                 </div>
               </div>
@@ -1316,7 +1358,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {mobileSection === null ? (
           /* Nav list */
           <div className="flex-1 overflow-y-auto">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] px-5 pt-4 pb-2">Settings</h2>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)] px-5 pt-4 pb-2">{t("settings.title")}</h2>
             <nav className="flex flex-col">
               {NAV_ITEMS.map(item => (
                 <button
@@ -1325,7 +1367,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="flex items-center gap-3 px-5 py-3.5 text-sm border-none cursor-pointer transition-colors text-[var(--text-secondary)] hover:bg-white/[0.04] active:bg-white/[0.08]"
                 >
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }}>{item.icon}</span>
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="flex-1 text-left">{t(item.labelKey)}</span>
                   <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>chevron_right</span>
                 </button>
               ))}
@@ -1342,7 +1384,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
               </button>
               <span className="text-sm font-medium text-[var(--text-primary)]">
-                {NAV_ITEMS.find(i => i.id === mobileSection)?.label ?? "Settings"}
+                {(() => { const nav = NAV_ITEMS.find(i => i.id === mobileSection); return nav ? t(nav.labelKey) : t("settings.title"); })()}
               </span>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
@@ -1355,12 +1397,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {updateConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">System Update</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              This will pull the latest updates and restart the device. The process may take a few minutes.
+              {t("settings.updateDesc")}
             </p>
             {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">Checking versions...</div>
+              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
             ) : versionInfo && (
               <div className="mb-4 space-y-2 text-xs">
                 <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
@@ -1370,18 +1412,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     {versionInfo.clawbox.target ? (
                       <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
                     ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     )}
                   </span>
                 </div>
                 <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
                   <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
                   <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? "not installed"}
+                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
                     {versionInfo.openclaw.target ? (
                       <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
                     ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     ) : null}
                   </span>
                 </div>
@@ -1397,7 +1439,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     type="text"
                     value={branchInput}
                     onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder="main"
+                    placeholder={t("settings.main")}
                     className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
                   />
                   <button
@@ -1412,21 +1454,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
                 {updateBranch && (
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">Clear</button>
+                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
+                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
                   </div>
                 )}
                 {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">Leave empty to follow current branch or main</p>
+                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
                 )}
               </div>
             )}
             <div className="flex items-center gap-3 justify-end">
               <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                Cancel
+                {t("cancel")}
               </button>
               <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                Update
+                {t("settings.update")}
               </button>
             </div>
           </div>
@@ -1437,14 +1479,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {resetConfirm && !resetting && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Factory Reset?</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
             <div className="flex gap-3">
               <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                Cancel
+                {t("cancel")}
               </button>
               <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                Reset
+                {t("settings.reset")}
               </button>
             </div>
           </div>
@@ -1465,20 +1507,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             {resetPhase === "waiting" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Resetting{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">Erasing all settings and restarting. Please wait.</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.resetting")}{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.erasingSettings")}</p>
               </>
             )}
             {resetPhase === "reconnecting" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Reconnecting{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">Waiting for device to come back online.</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.reconnecting")}{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.waitingOnline")}</p>
               </>
             )}
             {resetPhase === "done" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Device is back online</h2>
-                <p className="text-sm text-[var(--text-muted)]">Starting setup wizard...</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.backOnline")}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.startingSetup")}</p>
               </>
             )}
           </div>
@@ -1506,7 +1548,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               }`}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 18, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
-              {item.label}
+              {t(item.labelKey)}
             </button>
           );
         })}
@@ -1522,12 +1564,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {updateConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">System Update</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              This will pull the latest updates and restart the device. The process may take a few minutes.
+              {t("settings.updateDesc")}
             </p>
             {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">Checking versions...</div>
+              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
             ) : versionInfo && (
               <div className="mb-4 space-y-2 text-xs">
                 <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
@@ -1537,18 +1579,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     {versionInfo.clawbox.target ? (
                       <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
                     ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     )}
                   </span>
                 </div>
                 <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
                   <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
                   <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? "not installed"}
+                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
                     {versionInfo.openclaw.target ? (
                       <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
                     ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">Latest</span>
+                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     ) : null}
                   </span>
                 </div>
@@ -1563,7 +1605,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     type="text"
                     value={branchInput}
                     onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder="main"
+                    placeholder={t("settings.main")}
                     className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
                   />
                   <button
@@ -1578,21 +1620,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
                 {updateBranch && (
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">Pinned: {updateBranch}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">Clear</button>
+                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
+                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
                   </div>
                 )}
                 {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">Leave empty to follow current branch or main</p>
+                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
                 )}
               </div>
             )}
             <div className="flex items-center gap-3 justify-end">
               <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                Cancel
+                {t("cancel")}
               </button>
               <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                Update
+                {t("settings.update")}
               </button>
             </div>
           </div>
@@ -1603,14 +1645,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {resetConfirm && !resetting && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Factory Reset?</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">This will erase all settings, credentials, and AI configuration. The setup wizard will restart.</p>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
             <div className="flex gap-3">
               <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                Cancel
+                {t("cancel")}
               </button>
               <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                Reset
+                {t("settings.reset")}
               </button>
             </div>
           </div>
@@ -1653,10 +1695,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             <div>
               <h2 className="text-2xl font-bold text-white mb-2">
-                {updateState?.phase === "completed" ? "Update Complete!" : updateError || updateState?.phase === "failed" ? "Update Failed" : "Updating ClawBox"}
+                {updateState?.phase === "completed" ? t("settings.updateComplete") : updateError || updateState?.phase === "failed" ? t("settings.updateFailed") : t("settings.updating")}
               </h2>
               <p className="text-sm text-white/40">
-                {updateState?.phase === "completed" ? "Restarting device..." : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
+                {updateState?.phase === "completed" ? t("settings.restartingDevice") : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
               </p>
             </div>
 
@@ -1725,20 +1767,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             {resetPhase === "waiting" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Resetting{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">Erasing all settings and restarting. Please wait.</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.resetting")}{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.erasingSettings")}</p>
               </>
             )}
             {resetPhase === "reconnecting" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Reconnecting{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">Waiting for device to come back online.</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.reconnecting")}{".".repeat(resetDots)}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.waitingOnline")}</p>
               </>
             )}
             {resetPhase === "done" && (
               <>
-                <h2 className="text-xl font-semibold text-white">Device is back online</h2>
-                <p className="text-sm text-[var(--text-muted)]">Starting setup wizard...</p>
+                <h2 className="text-xl font-semibold text-white">{t("settings.backOnline")}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t("settings.startingSetup")}</p>
               </>
             )}
           </div>

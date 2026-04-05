@@ -12,6 +12,7 @@ const path = require("path");
 const WebSocket = require("ws");
 
 const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
+const CODE_SERVER_PORT = parseInt(process.env.CODE_SERVER_PORT || "8080", 10);
 const IS_DEV = process.env.NODE_ENV === "development";
 
 // ─── Session secret ───
@@ -36,9 +37,14 @@ try {
 // HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server)
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
-    const upstream = net.connect(GATEWAY_PORT, "127.0.0.1", () => {
-      const localhost = `127.0.0.1:${GATEWAY_PORT}`;
-      let raw = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+    // Route code-server WebSocket to code-server port
+    const isCodeServer = req.url && req.url.startsWith("/code-server/");
+    const targetPort = isCodeServer ? CODE_SERVER_PORT : GATEWAY_PORT;
+    const upstream = net.connect(targetPort, "127.0.0.1", () => {
+      const localhost = `127.0.0.1:${targetPort}`;
+      // Strip /code-server prefix for code-server requests
+      const url = isCodeServer ? req.url.replace("/code-server", "") || "/" : req.url;
+      let raw = `${req.method} ${url} HTTP/${req.httpVersion}\r\n`;
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
         const lc = name.toLowerCase();

@@ -14,6 +14,7 @@ interface ChatMessage {
 }
 
 import { renderText } from '@/lib/chat-markdown'
+import { useT } from '@/lib/i18n'
 
 function extractText(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return ''
@@ -51,6 +52,7 @@ interface ChatAppProps {
 }
 
 function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
+  const { t } = useT()
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -394,7 +396,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           flexShrink: 0,
         }}>
           <img src="/clawbox-crab.png" alt="" style={{ width: 20, height: 20, objectFit: 'contain', opacity: 0.7 }} />
-          <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>Chat</span>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>{t("chat.title")}</span>
           {status === 'connecting' && (
             <div style={{
               width: 10, height: 10,
@@ -415,7 +417,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                 color: '#f97316', borderRadius: 6, padding: '2px 10px', cursor: 'pointer',
                 fontSize: 12, fontWeight: 500,
               }}
-            >Reconnect</button>
+            >{t("chat.reconnect")}</button>
           )}
         </div>
       )}
@@ -432,14 +434,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         {status === 'connecting' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
             <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite' }} />
-            Connecting to gateway...
+            {t("chat.connectingGateway")}
           </div>
         )}
 
         {status === 'error' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
-            <span>{errorMsg || 'Connection failed'}</span>
+            <span>{errorMsg || t("chat.connectionFailed")}</span>
             <button
               onClick={connect}
               style={{
@@ -447,14 +449,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                 color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
                 fontSize: 13, fontWeight: 500,
               }}
-            >Retry</button>
+            >{t("chat.retry")}</button>
           </div>
         )}
 
         {status === 'connected' && messages.length === 0 && !streaming && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
-            <span>Say something!</span>
+            <span>{t("chat.saySomething")}</span>
           </div>
         )}
 
@@ -567,7 +569,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
           <button
             onClick={() => fileInputRef.current?.click()}
-            title="Attach image"
+            title={t("chat.attachImage")}
             style={{
               width: 32, height: 32, borderRadius: 8, border: 'none',
               background: 'transparent', color: 'rgba(255,255,255,0.35)',
@@ -585,7 +587,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           </button>
           <button
             onClick={() => cameraInputRef.current?.click()}
-            title="Take photo"
+            title={t("chat.takePhoto")}
             style={{
               width: 32, height: 32, borderRadius: 8, border: 'none',
               background: 'transparent', color: 'rgba(255,255,255,0.35)',
@@ -606,7 +608,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={status === 'connected' ? 'Type a message...' : 'Connecting...'}
+          placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
           disabled={status !== 'connected'}
           rows={1}
           style={{
@@ -624,7 +626,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         {sending ? (
           <button
             onClick={abort}
-            title="Stop"
+            title={t("chat.stop")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: 'rgba(239,68,68,0.2)', color: '#ef4444',
@@ -642,7 +644,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           <button
             onClick={sendMessage}
             disabled={!input.trim() || status !== 'connected'}
-            title="Send"
+            title={t("chat.send")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: input.trim() ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',

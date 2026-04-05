@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useT } from "@/lib/i18n";
 
 export interface AppDefinition {
   id: string;
@@ -24,6 +25,7 @@ export function AppDrawer({
   onClose,
   onAppClick,
 }: AppDrawerProps) {
+  const { t } = useT();
   const [searchQuery, setSearchQuery] = useState("");
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -93,7 +95,7 @@ export function AppDrawer({
             <span className="material-symbols-rounded absolute left-4 top-1/2 -translate-y-1/2 text-white/50" style={{ fontSize: 20 }}>search</span>
             <input
               type="text"
-              placeholder="Search apps"
+              placeholder={t("drawer.searchApps")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full h-12 pl-12 pr-4 bg-white/10 rounded-full text-white placeholder-white/50 text-base outline-none focus:bg-white/15 transition-colors"
@@ -128,7 +130,7 @@ export function AppDrawer({
 
           {filteredApps.length === 0 && (
             <div className="text-center text-white/50 py-8">
-              No apps found for &ldquo;{searchQuery}&rdquo;
+              {t("drawer.noAppsFound", { query: searchQuery })}
             </div>
           )}
         </div>

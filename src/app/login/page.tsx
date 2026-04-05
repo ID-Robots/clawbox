@@ -2,15 +2,17 @@
 
 import { useState, useEffect } from "react";
 import ClawIcon from "@/components/ClawIcon";
+import { I18nProvider, useT } from "@/lib/i18n";
 
 const DURATION_OPTIONS = [
-  { value: 1200, label: "20 minutes" },
-  { value: 21600, label: "6 hours" },
-  { value: 43200, label: "12 hours" },
-  { value: 86400, label: "24 hours" },
+  { value: 1200, labelKey: "login.20min" },
+  { value: 21600, labelKey: "login.6h" },
+  { value: 43200, labelKey: "login.12h" },
+  { value: 86400, labelKey: "login.24h" },
 ];
 
-export default function LoginPage() {
+function LoginForm() {
+  const { t } = useT();
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [duration, setDuration] = useState(43200);
@@ -35,7 +37,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password.trim()) {
-      setError("Password is required");
+      setError(t("login.passwordRequired"));
       return;
     }
 
@@ -63,7 +65,7 @@ export default function LoginPage() {
       const safe = decoded.startsWith("/") && !decoded.startsWith("//") && !decoded.includes(":") && !decoded.includes("\\");
       window.location.href = safe ? decoded : "/";
     } catch {
-      setError("Connection failed");
+      setError(t("login.connectionFailed"));
       setLoading(false);
     }
   };
@@ -86,7 +88,7 @@ export default function LoginPage() {
               ClawBox
             </h1>
             <p className="text-sm text-[var(--text-muted)]">
-              Enter your password to continue
+              {t("login.subtitle")}
             </p>
           </div>
 
@@ -96,7 +98,7 @@ export default function LoginPage() {
                 htmlFor="login-password"
                 className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
               >
-                Password
+                {t("login.password")}
               </label>
               <div className="relative">
                 <input
@@ -104,7 +106,7 @@ export default function LoginPage() {
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="System password"
+                  placeholder={t("login.passwordPlaceholder")}
                   autoFocus
                   autoComplete="current-password"
                   className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
@@ -112,7 +114,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
@@ -127,7 +129,7 @@ export default function LoginPage() {
                 htmlFor="login-duration"
                 className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
               >
-                Stay logged in for
+                {t("login.duration")}
               </label>
               <select
                 id="login-duration"
@@ -142,7 +144,7 @@ export default function LoginPage() {
               >
                 {DURATION_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </option>
                 ))}
               </select>
@@ -159,11 +161,19 @@ export default function LoginPage() {
               disabled={loading || !password.trim()}
               className="w-full py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
             >
-              {loading ? "Logging in..." : "Log In"}
+              {loading ? t("login.loggingIn") : t("login.logIn")}
             </button>
           </form>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <I18nProvider>
+      <LoginForm />
+    </I18nProvider>
   );
 }
