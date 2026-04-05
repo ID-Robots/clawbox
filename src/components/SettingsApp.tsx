@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import type { WifiNetwork } from "@/lib/wifi-utils";
@@ -1253,7 +1254,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             <button
-              onClick={() => openUpdateConfirm()}
+              onClick={() => triggerUpdate()}
               className="flex items-center gap-3 w-full bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
@@ -1614,6 +1615,77 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* System Update full-screen overlay (portal to escape window stacking context) */}
+      {updateStarted && typeof document !== "undefined" && createPortal(
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(13, 17, 23, 1)" }}>
+          <div className="flex flex-col items-center gap-6 max-w-md w-full text-center px-6">
+            {updateState?.phase === "completed" ? (
+              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
+                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
+              </div>
+            ) : updateError || updateState?.phase === "failed" ? (
+              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-red-500/20">
+                <span className="material-symbols-rounded text-red-400" style={{ fontSize: 32 }}>error</span>
+              </div>
+            ) : (
+              <div className="w-16 h-16 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+            )}
+
+            <h2 className="text-xl font-semibold text-white">
+              {updateState?.phase === "completed" ? "Update Complete" : updateError || updateState?.phase === "failed" ? "Update Failed" : "Updating System"}
+            </h2>
+
+            {updateState && updateState.steps.length > 0 && (
+              <div className="w-full max-w-xs space-y-2.5 text-left">
+                {updateState.steps.map((step) => (
+                  <div key={step.id} className="flex items-center gap-2.5 text-sm">
+                    {step.status === "completed" ? (
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M5 12l5 5L19 7" /></svg>
+                      </span>
+                    ) : step.status === "running" ? (
+                      <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                        <span className="w-3.5 h-3.5 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
+                      </span>
+                    ) : step.status === "failed" ? (
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 shrink-0">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                      </span>
+                    ) : (
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                      </span>
+                    )}
+                    <span className={step.status === "running" ? "text-white" : step.status === "completed" ? "text-emerald-400/80" : step.status === "failed" ? "text-red-400" : "text-white/30"}>
+                      {step.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!updateState && !updateError && (
+              <p className="text-sm text-white/50">Starting update...</p>
+            )}
+            {updateState?.phase === "completed" && (
+              <p className="text-sm text-white/50">Restarting device...</p>
+            )}
+            {(updateError || updateState?.phase === "failed") && (
+              <div className="space-y-3">
+                <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
+                <button
+                  onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
+                  className="px-5 py-2.5 bg-white/10 text-white rounded-lg text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
       )}
 
       {/* Factory Reset full-screen overlay */}
