@@ -18,6 +18,7 @@ vi.mock("fs/promises", () => ({
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn().mockResolvedValue({ tools: { profile: "full" } }),
+  findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
 
 const mockFetch = vi.fn();

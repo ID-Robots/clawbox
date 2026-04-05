@@ -28,6 +28,7 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/openclaw-config", () => ({
   reloadGateway: vi.fn().mockResolvedValue(undefined),
   getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
+  findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
 
 const mockFetch = vi.fn();

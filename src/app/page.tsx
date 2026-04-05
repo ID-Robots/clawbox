@@ -1168,6 +1168,7 @@ export default function ChromeDesktop() {
   // ─── Global drag-and-drop file upload ───
   const [desktopDragOver, setDesktopDragOver] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const dragCountRef = useRef(0);
 
   const handleDesktopDragEnter = useCallback((e: React.DragEvent) => {
@@ -1183,6 +1184,38 @@ export default function ChromeDesktop() {
     dragCountRef.current--;
     if (dragCountRef.current <= 0) { dragCountRef.current = 0; setDesktopDragOver(false); }
   }, []);
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  };
+
+  const uploadFileWithProgress = useCallback((file: File, dir: string, onProgress: (pct: number) => void): Promise<{ ok: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", `/setup-api/files?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}`);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ ok: true });
+        } else {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            resolve({ ok: false, error: data.error });
+          } catch {
+            resolve({ ok: false, error: `Upload failed (${xhr.status})` });
+          }
+        }
+      };
+      xhr.onerror = () => resolve({ ok: false, error: "Network error" });
+      xhr.send(file);
+    });
+  }, []);
+
   const handleDesktopDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     dragCountRef.current = 0;
@@ -1190,19 +1223,44 @@ export default function ChromeDesktop() {
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
     const dir = "/home/clawbox/Downloads";
-    setUploadStatus(`Uploading ${files.length} file(s)...`);
+    const total = files.length;
+    const totalSize = Array.from(files).reduce((sum, f) => sum + f.size, 0);
+
+    // Check available disk space before uploading
+    try {
+      const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data.availableSpace === 'number' && totalSize > data.availableSpace) {
+          setUploadStatus(`Not enough disk space. Need ${formatBytes(totalSize)}, only ${formatBytes(data.availableSpace)} available.`);
+          setTimeout(() => setUploadStatus(null), 5000);
+          return;
+        }
+      }
+    } catch { /* proceed anyway */ }
+
     let ok = 0;
-    for (const file of Array.from(files)) {
-      const form = new FormData();
-      form.append("file", file);
-      try {
-        const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`, { method: "POST", body: form });
-        if (res.ok) ok++;
-      } catch { /* ignore */ }
+    setUploadProgress(0);
+    for (let i = 0; i < total; i++) {
+      const file = files[i];
+      setUploadStatus(`Uploading ${file.name} (${i + 1}/${total})...`);
+      const result = await uploadFileWithProgress(file, dir, (pct) => {
+        const overallPct = Math.round(((i + pct / 100) / total) * 100);
+        setUploadProgress(overallPct);
+      });
+      if (result.ok) {
+        ok++;
+      } else if (result.error) {
+        setUploadStatus(result.error);
+        setUploadProgress(0);
+        setTimeout(() => { setUploadStatus(null); }, 5000);
+        return;
+      }
     }
-    setUploadStatus(`Uploaded ${ok}/${files.length} file(s)`);
-    setTimeout(() => setUploadStatus(null), 3000);
-  }, []);
+    setUploadStatus(`Uploaded ${ok}/${total} file(s)`);
+    setUploadProgress(100);
+    setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
+  }, [uploadFileWithProgress]);
 
   if (!setupChecked) {
     return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
@@ -1234,8 +1292,13 @@ export default function ChromeDesktop() {
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] px-4 py-2 rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg">
-          {uploadStatus}
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] min-w-[220px] rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg overflow-hidden">
+          <div className="px-4 py-2">{uploadStatus}</div>
+          {uploadProgress < 100 && (
+            <div className="h-1 bg-white/5">
+              <div className="h-full bg-[var(--coral-bright)] transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+            </div>
+          )}
         </div>
       )}
       {/* Mobile fullscreen splash */}

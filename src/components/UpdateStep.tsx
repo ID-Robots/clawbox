@@ -42,8 +42,8 @@ function StepIcon({ status }: { status: StepStatus }) {
 const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
 
 function compareVersions(a: string, b: string): number {
-  const pa = cleanVersion(a).replace(/^v/, '').split('.').map(Number);
-  const pb = cleanVersion(b).replace(/^v/, '').split('.').map(Number);
+  const pa = cleanVersion(a).replace(/^v/, '').split('.').map(n => Number(n) || 0);
+  const pb = cleanVersion(b).replace(/^v/, '').split('.').map(n => Number(n) || 0);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const na = pa[i] ?? 0, nb = pb[i] ?? 0;
     if (na < nb) return -1;

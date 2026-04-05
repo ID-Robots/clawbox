@@ -18,7 +18,7 @@ describe("/setup-api/mascot-lines", () => {
   });
 
   it("returns empty lines when no data", async () => {
-    mockKvGet.mockReturnValue(undefined);
+    mockKvGet.mockReturnValue(null);
     const res = await GET();
     const body = await res.json();
     expect(body).toEqual({ lines: [] });

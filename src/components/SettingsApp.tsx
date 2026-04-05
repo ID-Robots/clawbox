@@ -125,6 +125,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [branchInput, setBranchInput] = useState("");
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  const [betaEnabled, setBetaEnabled] = useState(false);
+  const [betaConfirm, setBetaConfirm] = useState(false);
+  const [betaSaving, setBetaSaving] = useState(false);
   const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const updatePollControllerRef = useRef<AbortController | null>(null);
 
@@ -161,11 +164,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
 
-  // Load version info on mount
+  // Load version info and beta status on mount
   useEffect(() => {
     fetch("/setup-api/update/status")
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.versions) setVersionInfo(data.versions); })
+      .catch(() => {});
+    fetch("/setup-api/system/update-branch")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.branch === "beta") setBetaEnabled(true); })
       .catch(() => {});
   }, []);
 
@@ -192,6 +199,43 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       const data = await res.json();
       if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || "Failed to set branch"); }
     } catch (err) { setBranchError(err instanceof Error ? err.message : "Failed to set branch"); } finally { setBranchSaving(false); }
+  };
+
+  const toggleBeta = async (enable: boolean) => {
+    if (enable) {
+      setBetaConfirm(true);
+      return;
+    }
+    setBetaSaving(true);
+    try {
+      const res = await fetch("/setup-api/system/update-branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: null }),
+      });
+      if (res.ok) {
+        setBetaEnabled(false);
+        setUpdateBranch(null);
+        setBranchInput("");
+      }
+    } catch {} finally { setBetaSaving(false); }
+  };
+
+  const confirmBeta = async () => {
+    setBetaConfirm(false);
+    setBetaSaving(true);
+    try {
+      const res = await fetch("/setup-api/system/update-branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: "beta" }),
+      });
+      if (res.ok) {
+        setBetaEnabled(true);
+        setUpdateBranch("beta");
+        setBranchInput("beta");
+      }
+    } catch {} finally { setBetaSaving(false); }
   };
 
   const triggerUpdate = async () => {
@@ -1120,7 +1164,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── About ─── */}
-        {activeSection === "about" && (
+        {activeSection === "about" && (<>
           <div className="max-w-md space-y-6">
             <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">About ClawBox</h2>
 
@@ -1182,6 +1226,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
+            {/* Beta toggle */}
+            <div className="bg-white/5 rounded-xl px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>science</span>
+                  <div>
+                    <span className="text-sm text-[var(--text-primary)]">Beta Channel</span>
+                    <p className="text-xs text-[var(--text-muted)] mt-0.5">Get early access to new features</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => toggleBeta(!betaEnabled)}
+                  disabled={betaSaving}
+                  className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${betaEnabled ? "bg-amber-500" : "bg-white/15"} ${betaSaving ? "opacity-50" : ""}`}
+                >
+                  <span
+                    className="absolute w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200"
+                    style={{ left: 2, transform: betaEnabled ? "translateX(18px)" : "translateX(0)" }}
+                  />
+                </button>
+              </div>
+              {betaEnabled && (
+                <p className="text-xs text-amber-400/60 mt-2">Updates will install from the beta branch</p>
+              )}
+            </div>
+
             <button
               onClick={() => openUpdateConfirm()}
               className="flex items-center gap-3 w-full bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
@@ -1198,7 +1268,43 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               Factory Reset
             </button>
           </div>
-        )}
+
+          {/* Beta confirmation dialog */}
+          {betaConfirm && (
+            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+              <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
+                <div className="flex items-center gap-3 mb-4">
+                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 28 }}>warning</span>
+                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">Enable Beta Channel</h3>
+                </div>
+                <div className="space-y-3 mb-6">
+                  <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+                    Beta software may contain bugs, incomplete features, and stability issues that can affect your device.
+                  </p>
+                  <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <p className="text-xs text-red-400 leading-relaxed">
+                      <strong>By enabling beta you acknowledge:</strong> Installing beta updates may break your system and cause data loss. IDRobots Ltd. is not responsible for any lost data, broken software, or hardware damage resulting from beta software.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setBetaConfirm(false)}
+                    className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/15 text-[var(--text-secondary)] rounded-lg text-sm font-medium cursor-pointer transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmBeta}
+                    className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors"
+                  >
+                    Enable Beta
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>)}
     </>
   );
 

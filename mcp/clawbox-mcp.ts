@@ -82,6 +82,11 @@ function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+/** Check if a hostname matches a domain exactly or is a subdomain of it. */
+function hostMatchesDomain(host: string, domain: string): boolean {
+  return host === domain || host.endsWith("." + domain);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // DANGEROUS COMMAND DETECTION (bash security)
 // ══════════════════════════════════════════════════════════════════════
@@ -164,7 +169,7 @@ function evictStaleBgTasks() {
   }
 }
 
-function spawnBackground(command: string, timeoutMs: number, desc = ""): BgTask {
+function spawnBackground(command: string, timeoutMs: number, desc = "", workDir = HOME): BgTask {
   evictStaleBgTasks();
   const id = `bg-${++bgTaskSeq}`;
   const task: BgTask = {
@@ -175,7 +180,7 @@ function spawnBackground(command: string, timeoutMs: number, desc = ""): BgTask 
   bgTasks.set(id, task);
 
   const child = spawn("bash", ["-c", command], {
-    timeout: timeoutMs, cwd: HOME,
+    timeout: timeoutMs, cwd: workDir,
     env: { ...process.env, HOME },
   });
   task.process = child;
@@ -422,7 +427,7 @@ GIT SAFETY:
     const warningText = warnings.length ? warnings.join("\n") + "\n\n" : "";
 
     if (run_in_background) {
-      const task = spawnBackground(command, timeoutMs, description || "");
+      const task = spawnBackground(command, timeoutMs, description || "", workDir);
       return {
         content: [{
           type: "text",
@@ -605,6 +610,11 @@ IMPORTANT:
   async ({ file_path, content }) => {
     const absPath = resolvePath(file_path);
 
+    // Blocked device paths
+    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/")) {
+      return { content: [{ type: "text", text: `Cannot write to device path: ${file_path}` }], isError: true };
+    }
+
     // Staleness check for existing files
     const existed = await stat(absPath).then(() => true).catch(() => false);
     if (existed) {
@@ -671,6 +681,11 @@ RULES:
     }
 
     const absPath = resolvePath(file_path);
+
+    // Blocked device paths
+    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/")) {
+      return { content: [{ type: "text", text: `Cannot edit device path: ${file_path}` }], isError: true };
+    }
 
     // Staleness check
     const stale = await checkStaleness(absPath);
@@ -946,14 +961,18 @@ If the URL redirects to a different host, a warning is shown.`,
     }
 
     const maxLen = max_length ?? 50_000;
+    const hasCustomHeaders = !!headers;
     evictStaleWebCache();
 
-    const cached = webCache.get(url);
-    if (cached && (Date.now() - cached.fetchedAt) < WEB_CACHE_TTL) {
-      let body = cached.contentType.includes("json")
-        ? cached.body : cached.contentType.includes("html") ? htmlToText(cached.body) : cached.body;
-      if (body.length > maxLen) body = body.slice(0, maxLen) + `\n[truncated — ${body.length} chars total]`;
-      return { content: [{ type: "text", text: `[${cached.status} cached] ${url}\n\n${body}` }] };
+    // Skip cache when custom headers are present to avoid leaking authenticated responses
+    if (!hasCustomHeaders) {
+      const cached = webCache.get(url);
+      if (cached && (Date.now() - cached.fetchedAt) < WEB_CACHE_TTL) {
+        let body = cached.contentType.includes("json")
+          ? cached.body : cached.contentType.includes("html") ? htmlToText(cached.body) : cached.body;
+        if (body.length > maxLen) body = body.slice(0, maxLen) + `\n[truncated — ${body.length} chars total]`;
+        return { content: [{ type: "text", text: `[${cached.status} cached] ${url}\n\n${body}` }] };
+      }
     }
 
     try {
@@ -977,8 +996,10 @@ If the URL redirects to a different host, a warning is shown.`,
       const contentType = res.headers.get("content-type") || "";
       const rawBody = await res.text();
 
-      // Cache the raw result
-      webCache.set(url, { body: rawBody, contentType, status: res.status, fetchedAt: Date.now() });
+      // Cache the raw result (skip when custom headers were used to avoid leaking authenticated data)
+      if (!hasCustomHeaders) {
+        webCache.set(url, { body: rawBody, contentType, status: res.status, fetchedAt: Date.now() });
+      }
 
       let body: string;
       if (contentType.includes("json")) {
@@ -1045,8 +1066,8 @@ After searching, use web_fetch to read specific pages in full.`,
         const { url, title } = links[i];
         try {
           const host = new URL(url).hostname.toLowerCase();
-          if (allowed && !allowed.some((d: string) => host.includes(d))) continue;
-          if (blocked && blocked.some((d: string) => host.includes(d))) continue;
+          if (allowed && !allowed.some((d: string) => hostMatchesDomain(host, d))) continue;
+          if (blocked && blocked.some((d: string) => hostMatchesDomain(host, d))) continue;
         } catch { continue; }
         results.push({ title, url, snippet: snippets[i] || "" });
       }
@@ -1059,8 +1080,8 @@ After searching, use web_fetch to read specific pages in full.`,
           if (!text || href.includes("duckduckgo.com") || text.length < 5) continue;
           try {
             const host = new URL(href).hostname.toLowerCase();
-            if (allowed && !allowed.some((d: string) => host.includes(d))) continue;
-            if (blocked && blocked.some((d: string) => host.includes(d))) continue;
+            if (allowed && !allowed.some((d: string) => hostMatchesDomain(host, d))) continue;
+            if (blocked && blocked.some((d: string) => hostMatchesDomain(host, d))) continue;
           } catch { continue; }
           results.push({ title: text, url: href, snippet: "" });
         }

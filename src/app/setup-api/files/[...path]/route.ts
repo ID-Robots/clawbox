@@ -37,7 +37,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
   const filename = path.basename(abs);
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-  const isInline = contentType.startsWith('image/') || contentType === 'application/pdf';
+  const isInline = (contentType.startsWith('image/') && contentType !== 'image/svg+xml') || contentType === 'application/pdf';
   return new NextResponse(buffer, {
     headers: {
       "Content-Disposition": `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(filename)}"`,

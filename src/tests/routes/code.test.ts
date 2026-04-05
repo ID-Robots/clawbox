@@ -34,9 +34,7 @@ import {
 
 const mockInitProject = vi.mocked(initProject);
 const mockGetProject = vi.mocked(getProject);
-const mockReadFile = vi.mocked(readFile);
 const mockSearchFiles = vi.mocked(searchFiles);
-const mockBuildProject = vi.mocked(buildProject);
 
 describe("/setup-api/code", () => {
   let POST: (req: NextRequest) => Promise<Response>;

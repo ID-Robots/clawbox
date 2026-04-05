@@ -49,11 +49,7 @@ wss.on("connection", (ws: WebSocket, req) => {
     POWERLEVEL9K_INSTANT_PROMPT: "quiet",
   };
 
-  // If running as root, use sudo to spawn as clawbox user
-  const isRoot = process.getuid?.() === 0;
-  const cmd = isRoot ? "sudo" : shell;
-  const args = isRoot ? ["-u", targetUser, "-i", shell, "-l"] : ["-l"];
-  const term = pty.spawn(cmd, args, {
+  const term = pty.spawn(shell, ["-l"], {
     name: "xterm-256color",
     cols: 80,
     rows: 24,

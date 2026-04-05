@@ -5,12 +5,18 @@
 <h3 align="center">OpenClaw OS</h3>
 
 <p align="center">
-  The operating system for <a href="https://openclawhardware.dev/">OpenClaw Hardware</a> — a private AI assistant you own, running on NVIDIA Jetson.
+  <strong>Your private AI assistant that runs 24/7 on your desk.</strong><br/>
+  Plug in. Scan QR. Done. No cloud required.
 </p>
 
 <p align="center">
+  <a href="https://openclawhardware.dev"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-openclawhardware.dev-orange?style=flat-square" /></a>
+  <a href="https://discord.gg/FbKmnxYnpq"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-NVIDIA_Jetson-76b900?style=flat-square&logo=nvidia" />
+</p>
+
+<p align="center">
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js_16-black?style=flat-square&logo=next.js" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178c6?style=flat-square&logo=typescript&logoColor=white" />
   <img alt="Bun" src="https://img.shields.io/badge/Bun-fbf0df?style=flat-square&logo=bun&logoColor=black" />
@@ -20,15 +26,39 @@
 
 ## What is ClawBox?
 
-ClawBox **is** OpenClaw OS — the system software that turns a bare NVIDIA Jetson board into a fully functional private AI device. It handles everything from first-boot provisioning to the desktop you interact with daily:
+ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://openclawhardware.dev/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). Unlike cloud AI, your data never leaves your device. It manages the full device lifecycle: broadcasts a WiFi access point for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps.
 
-1. **First boot** — The Jetson broadcasts a WiFi hotspot (`ClawBox-Setup`). You connect from any phone or laptop and walk through guided setup at `http://clawbox.local/`.
-2. **Configuration** — A 7-step wizard configures WiFi, security credentials, system updates, AI provider keys (Claude, GPT, Gemini, Ollama, etc.), and optional Telegram integration.
-3. **Daily use** — After setup the same URL serves a full desktop environment with windowed apps, a taskbar, and system tray. The AI agent (OpenClaw) runs locally and can control the entire device through MCP tools.
+The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
 
-Everything runs on the device. No cloud dependency, no subscription, no data leaving your network unless you choose to connect an external AI provider.
+### Key Features
 
-## Quick Start
+| Feature | Description |
+|---------|-------------|
+| 🧙 **5-minute setup** | Guided wizard: WiFi → updates → AI provider → messaging → done |
+| 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, and system tray |
+| 🤖 **AI-controlled OS** | 40+ MCP tools let the AI agent operate the entire device |
+| 🔒 **Privacy-first** | Everything runs locally. No telemetry. No data collection. |
+| 🧠 **Hybrid AI** | Local models (Llama, Gemma, Mistral) + cloud (Claude, GPT, Gemini) |
+| 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
+| 💬 **Multi-platform** | Telegram, web panel, desktop chat |
+| 💻 **Built-in apps** | Terminal, file manager, VS Code, VNC, app store, AI chat |
+| 🛠️ **Code assistant** | AI builds and deploys desktop webapps through iterative coding |
+| ⚡ **Always-on** | 7-15W power. Runs 24/7 for ~€39/year in electricity |
+
+### 🖥️ Hardware
+
+| Component | Spec |
+|-----------|------|
+| **Processor** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **AI Performance** | 67 TOPS |
+| **Storage** | 512GB NVMe SSD |
+| **Power** | 7-15W typical, USB-C |
+| **Size** | 100 × 79 × 31mm |
+| **Case** | Carbon fiber |
+
+---
+
+## 🚀 Quick Start
 
 ```bash
 sudo bash install.sh
@@ -60,28 +90,28 @@ Two systemd services run the OS:
 
 On first boot (or after factory reset), the OS presents a 7-step wizard:
 
-1. **Welcome** — Language selection (10 languages supported)
-2. **Security** — Device password + WiFi hotspot credentials
-3. **WiFi** — Connect to your home/office network (or use Ethernet)
-4. **Update** — Pull latest system updates
-5. **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
-6. **Telegram** — Optional bot token for remote messaging
-7. **Done** — System status dashboard and factory reset option
+1. 🌐 **Welcome** — Language selection (10 languages supported)
+2. 🔒 **Security** — Device password + WiFi hotspot credentials
+3. 📶 **WiFi** — Connect to your home/office network (or use Ethernet)
+4. ⬆️ **Update** — Pull latest system updates
+5. 🧠 **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
+6. 💬 **Telegram** — Optional bot token for remote messaging
+7. ✅ **Done** — System status dashboard and factory reset option
 
 ### Layer 3 — Desktop Environment
 
 After setup, ClawBox serves a Chrome OS-style desktop accessible from any browser:
 
-- **AI Chat** — Full-window and floating popup chat via the OpenClaw gateway
-- **Terminal** — xterm.js shell with WebSocket PTY
-- **File Manager** — Browse, upload, rename, delete files on the device
-- **Browser Automation** — Visual Chromium control via DevTools Protocol
-- **Remote Desktop** — NoVNC viewer for VNC sessions
-- **VS Code** — Integrated code-server IDE
-- **App Store** — Discover and install skills from openclawhardware.dev
-- **Settings** — WiFi, AI provider, appearance, Telegram, system management
-- **Ollama Models** — Pull, search, and manage local AI models
-- **Mascot** — Animated crab companion with personality states
+- 🤖 **AI Chat** — Full-window and floating popup chat via the OpenClaw gateway
+- 💻 **Terminal** — xterm.js shell with WebSocket PTY
+- 📁 **File Manager** — Browse, upload, rename, delete files on the device
+- 🌐 **Browser Automation** — Visual Chromium control via DevTools Protocol
+- 🖥️ **Remote Desktop** — NoVNC viewer for VNC sessions
+- 📝 **VS Code** — Integrated code-server IDE
+- 🏪 **App Store** — Discover and install skills from openclawhardware.dev
+- ⚙️ **Settings** — WiFi, AI provider, appearance, Telegram, system management
+- 🦙 **Ollama Models** — Pull, search, and manage local AI models
+- 🦀 **Mascot** — Animated crab companion with personality states
 
 The desktop features draggable/resizable windows, a taskbar with system tray, and a responsive mobile layout for phone access.
 
@@ -93,10 +123,11 @@ The OpenClaw AI agent controls the device through an MCP (Model Context Protocol
 
 ```text
 system_stats / system_info / system_power   — monitor and manage the device
-run_command                                  — execute any shell command
-file_list / file_read / file_write           — file operations
-wifi_scan / wifi_status                      — network management
-ui_open_app / ui_notify                      — control the desktop UI
+bash                                        — execute shell commands
+read_file / write_file / edit_file          — file operations
+list_directory / glob / grep                — search files and content
+wifi_scan / wifi_status                     — network management
+ui_open_app / ui_notify                     — control the desktop UI
 ```
 
 **Browser automation tools:**
@@ -119,19 +150,20 @@ preferences_get / preferences_set            — user preferences
 ```text
 code_project_init    — scaffold a new multi-file webapp project
 code_project_list    — list all projects
+code_project_build   — bundle CSS/JS into HTML, deploy to desktop, open the app
+code_project_delete  — remove a project
 code_file_write      — create or overwrite a project file
 code_file_read       — read a project file
 code_file_edit       — surgical string-replacement edits
 code_file_delete     — remove a file
 code_file_list       — recursive project tree
 code_search          — grep across project files
-code_project_build   — bundle CSS/JS into HTML, deploy to desktop, open the app
-code_project_delete  — remove a project
 ```
 
 The code assistant enables the AI to iteratively build, test, and deploy new desktop apps — write code across multiple files, make precise edits, search the codebase, then build a self-contained webapp that appears on the user's desktop.
 
 **CLI wrapper** (`clawbox` command):
+
 ```bash
 clawbox webapp create <appId> <name> [color] < file.html
 clawbox app open <appId>
@@ -144,7 +176,9 @@ clawbox code files <projectId>
 clawbox code search <projectId> <pattern>
 ```
 
-## Architecture
+---
+
+## 🏗️ Architecture
 
 ```text
 Browser (http://clawbox.local)
@@ -170,20 +204,20 @@ Browser (http://clawbox.local)
 
 Node.js is used for the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying.
 
-## Tech Stack
+## 🛠️ Tech Stack
 
-- **Next.js 16** / React 19 / TypeScript 5 — web OS frontend and API
-- **Tailwind CSS 4** — styling
-- **Bun** — package management and builds
-- **Node.js 22** — production runtime
-- **MCP SDK** — AI agent tool protocol
-- **xterm.js** / **node-pty** — terminal emulation
-- **NoVNC** — remote desktop
-- **NetworkManager** — WiFi AP and client management
-- **Avahi** — mDNS discovery (`clawbox.local`)
-- **Vitest** / **Playwright** — unit and E2E testing
+| Layer | Technology |
+|-------|-----------|
+| **Frontend** | Next.js 16, React 19, Tailwind CSS 4 |
+| **Language** | TypeScript 5 |
+| **Package Manager** | Bun |
+| **Runtime** | Node.js 22 (production), Bun (dev/build) |
+| **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) via MCP |
+| **Local Models** | Ollama (Llama, Gemma, Mistral) |
+| **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
+| **Testing** | Vitest + Playwright |
 
-## Project Structure
+## 📁 Project Structure
 
 ```text
 ├── config/                 Systemd services, captive-portal DNS
@@ -201,7 +235,9 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 └── install.sh              Full system installer (idempotent)
 ```
 
-## Development
+---
+
+## 🧪 Development
 
 ```bash
 bun install
@@ -212,7 +248,7 @@ bun run lint
 bun run test             # Unit tests (Vitest)
 ```
 
-## Environment Variables
+### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
@@ -225,11 +261,23 @@ bun run test             # Unit tests (Vitest)
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
 
-## Internationalization
+## 🌍 Internationalization
 
 10 languages: English, German, Spanish, French, Italian, Japanese, Dutch, Swedish, Chinese, Bulgarian. Auto-detected from browser, changeable in settings.
 
-## License
+---
+
+## 🌍 Community & Links
+
+- **🌐 Website:** [openclawhardware.dev](https://openclawhardware.dev)
+- **💬 Discord:** [discord.gg/FbKmnxYnpq](https://discord.gg/FbKmnxYnpq)
+- **📖 Docs:** [openclawhardware.dev/docs](https://openclawhardware.dev/docs)
+- **🛒 Buy ClawBox:** [openclawhardware.dev](https://openclawhardware.dev)
+- **🤖 Powered by:** [OpenClaw](https://github.com/openclaw/openclaw)
+
+---
+
+## 📄 License
 
 ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://openclawhardware.dev/) — contact yanko@idrobots.com.
 
@@ -237,5 +285,5 @@ ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). 
 
 <p align="center">
   <a href="https://openclawhardware.dev/">openclawhardware.dev</a><br/>
-  Built by <a href="https://github.com/ID-Robots">ID Robots</a> — source available
+  Built with ❤️ by <a href="https://github.com/ID-Robots">ID Robots</a> in the EU 🇪🇺 — source available
 </p>

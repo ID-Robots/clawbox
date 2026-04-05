@@ -191,17 +191,45 @@ export default function FilesApp() {
 
   const uploadFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    setStatusMsg(`Uploading ${fileList.length} file(s)...`);
+    const total = fileList.length;
+    const totalSize = Array.from(fileList).reduce((sum, f) => sum + f.size, 0);
+
+    // Check available disk space
+    try {
+      const checkRes = await fetch(`/setup-api/files?dir=${encodeURIComponent(currentPath)}`);
+      if (checkRes.ok) {
+        const checkData = await checkRes.json();
+        if (checkData.availableSpace && totalSize > checkData.availableSpace) {
+          setStatusMsg(`Not enough disk space. Need ${formatSize(totalSize)}, only ${formatSize(checkData.availableSpace)} available.`);
+          setTimeout(() => setStatusMsg(null), 5000);
+          return;
+        }
+      }
+    } catch { /* proceed anyway */ }
+
     let ok = 0;
-    for (const file of Array.from(fileList)) {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(currentPath)}`, {
-        method: "POST", body: form,
-      });
-      if (res.ok) ok++;
+    for (let i = 0; i < total; i++) {
+      const file = fileList[i];
+      setStatusMsg(`Uploading ${file.name} (${i + 1}/${total})...`);
+      try {
+        const res = await fetch(
+          `/setup-api/files?dir=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(file.name)}`,
+          { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file }
+        );
+        if (res.ok) {
+          ok++;
+        } else {
+          const data = await res.json().catch(() => ({}));
+          if (data.error) {
+            setStatusMsg(data.error);
+            setTimeout(() => setStatusMsg(null), 5000);
+            load(currentPath);
+            return;
+          }
+        }
+      } catch { /* ignore */ }
     }
-    setStatusMsg(`Uploaded ${ok}/${fileList.length} file(s)`);
+    setStatusMsg(`Uploaded ${ok}/${total} file(s)`);
     setTimeout(() => setStatusMsg(null), 2500);
     load(currentPath);
   };

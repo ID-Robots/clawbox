@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import os from "os";
 import path from "path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-kv-tests-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "data");
@@ -22,6 +22,10 @@ beforeEach(async () => {
   await fs.rm(KV_PATH, { force: true });
   // Also remove the tmp file in case a previous test left one
   await fs.rm(KV_PATH + ".tmp", { force: true });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 afterAll(async () => {

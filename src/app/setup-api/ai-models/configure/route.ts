@@ -346,7 +346,9 @@ export async function POST(request: Request) {
         const rawProfiles = await fs.readFile(AUTH_PROFILES_PATH, "utf-8").catch(() => '{"version":1,"profiles":{}}');
         const profiles = JSON.parse(rawProfiles);
         profiles.profiles["deepseek:default"] = { type: "api_key", provider: "deepseek", key: CLAWAI_API_KEY };
-        await fs.writeFile(AUTH_PROFILES_PATH, JSON.stringify(profiles, null, 2));
+        const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
+        await fs.writeFile(tmpPath, JSON.stringify(profiles, null, 2));
+        await fs.rename(tmpPath, AUTH_PROFILES_PATH);
         await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
         await runCommand(OPENCLAW_BIN, [
           "config", "set", "auth.profiles.deepseek:default",

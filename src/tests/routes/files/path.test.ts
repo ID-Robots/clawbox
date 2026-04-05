@@ -47,7 +47,7 @@ describe("GET /setup-api/files/[...path]", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Disposition")).toContain("test.txt");
-    expect(res.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
 
     const body = await res.arrayBuffer();
     expect(new TextDecoder().decode(body)).toBe("hello world");

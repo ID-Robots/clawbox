@@ -110,7 +110,8 @@ step_apt_update() {
   fi
 }
 
-step_detect_wifi() {
+step_network_setup() {
+  # --- Detect WiFi interface ---
   local WIFI_IFACE="${NETWORK_INTERFACE:-}"
   if [ -z "$WIFI_IFACE" ]; then
     WIFI_IFACE=$(iw dev 2>/dev/null | awk '/Interface/{print $2}' | head -1)
@@ -134,16 +135,14 @@ step_detect_wifi() {
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
   chmod 644 /etc/clawbox/network.env
   echo "  WiFi interface saved to $IFACE_ENV and /etc/clawbox/network.env"
-}
 
-step_hostname_mdns() {
+  # --- Hostname and mDNS ---
   hostnamectl set-hostname clawbox
   if [ ! -f "$AVAHI_CONF" ]; then
     echo "  Warning: $AVAHI_CONF not found, skipping avahi configuration"
     return
   fi
   cp -n "$AVAHI_CONF" "${AVAHI_CONF}.bak" 2>/dev/null || true
-  # Handle both commented and uncommented host-name lines
   if grep -q '^#\?host-name=' "$AVAHI_CONF"; then
     sed -i 's/^#\?host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
   elif grep -q '^\[server\]' "$AVAHI_CONF"; then
@@ -202,6 +201,12 @@ step_build() {
     exit 1
   fi
   echo "  Build complete"
+}
+
+step_openclaw_setup() {
+  step_openclaw_install
+  step_openclaw_patch
+  step_openclaw_config
 }
 
 step_openclaw_install() {
@@ -361,6 +366,11 @@ NODE
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
 }
 
+step_setup_config() {
+  step_directories_permissions
+  step_captive_portal_dns
+}
+
 step_captive_portal_dns() {
   mkdir -p "$DNSMASQ_DIR"
   # Remove old captive portal DNS hijack (breaks internet for hotspot clients)
@@ -397,6 +407,11 @@ step_directories_permissions() {
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   echo "  Done"
+}
+
+step_system_config() {
+  step_systemd_services
+  step_polkit_rules
 }
 
 step_systemd_services() {
@@ -585,12 +600,29 @@ CSCONF
   echo "  code-server configured and started"
 }
 
-step_claude_code_install() {
+step_ai_tools_install() {
+  # Claude Code
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
     echo "  Claude Code already installed"
   else
     sudo -u "$CLAWBOX_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
     echo "  Claude Code installed"
+  fi
+
+  # OpenAI Codex CLI
+  if as_clawbox_login "command -v codex" &>/dev/null; then
+    echo "  OpenAI Codex already installed"
+  else
+    as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"
+    echo "  OpenAI Codex installed"
+  fi
+
+  # Google Gemini CLI
+  if as_clawbox_login "command -v gemini" &>/dev/null; then
+    echo "  Gemini CLI already installed"
+  else
+    as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"
+    echo "  Gemini CLI installed"
   fi
 }
 
@@ -682,9 +714,12 @@ step_browser_launch() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install ollama_install
-  chromium_install code_server_install claude_code_install vnc_install openclaw_install openclaw_patch openclaw_config openclaw_models
+  chromium_install code_server_install ai_tools_install vnc_install
+  openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
+  network_setup setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  directories_permissions captive_portal_dns
   fix_git_perms browser_launch
 )
 
@@ -709,7 +744,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=21
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -731,11 +766,8 @@ step_nvidia_jetpack
 log "Enabling max performance mode..."
 step_performance_mode
 
-log "Detecting WiFi interface..."
-step_detect_wifi
-
-log "Configuring hostname and mDNS..."
-step_hostname_mdns
+log "Configuring network (WiFi, hostname, mDNS)..."
+step_network_setup
 
 log "Setting up ClawBox repository..."
 step_git_pull
@@ -746,27 +778,17 @@ step_install_bun
 log "Building ClawBox..."
 step_build
 
-log "Installing OpenClaw..."
-step_openclaw_install
+log "Installing and configuring OpenClaw..."
+step_openclaw_setup
 
-log "Patching and configuring OpenClaw..."
-step_openclaw_patch
-step_openclaw_config
-
-log "Configuring captive portal DNS..."
-step_captive_portal_dns
-
-log "Setting up directories and permissions..."
-step_directories_permissions
+log "Setting up directories, permissions and DNS..."
+step_setup_config
 
 # Clean up default NVIDIA desktop shortcuts
 rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
 
-log "Installing systemd services..."
-step_systemd_services
-
-log "Installing polkit rules..."
-step_polkit_rules
+log "Installing systemd services and polkit rules..."
+step_system_config
 
 log "Installing jtop (jetson-stats)..."
 step_jtop_install
@@ -780,8 +802,8 @@ step_chromium_install
 log "Installing code-server (VS Code)..."
 step_code_server_install
 
-log "Installing Claude Code..."
-step_claude_code_install
+log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
+step_ai_tools_install
 
 log "Installing VNC server..."
 step_vnc_install

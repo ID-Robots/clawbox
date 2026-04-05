@@ -114,7 +114,8 @@ export async function POST(req: Request) {
       }
     }
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (err) {
+    console.error("[preferences] Invalid request:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 }

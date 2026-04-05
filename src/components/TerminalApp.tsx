@@ -327,25 +327,23 @@ function TerminalInner() {
       style={{ background: "#0d0d1a" }}
       onKeyDown={handleKeyDown}
     >
-      {/* Status bar */}
-      <div
-        className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
-        style={{
-          background: "#12122a",
-          borderColor: "rgba(255,255,255,0.06)",
-        }}
-      >
-        <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} />
-        <span className="text-xs font-mono" style={{ color: "#9ca3af" }}>
-          {statusLabel}
-        </span>
-        {status !== "connected" && (
+      {/* Status bar — only shown when disconnected/error */}
+      {status !== "connected" && (
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
+          style={{
+            background: "#12122a",
+            borderColor: "rgba(255,255,255,0.06)",
+          }}
+        >
+          <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} />
+          <span className="text-xs font-mono" style={{ color: "#9ca3af" }}>
+            {statusLabel}
+          </span>
           <span className="text-xs font-mono ml-1" style={{ color: "#6b7280" }}>
             — {wsUrl}
           </span>
-        )}
-        <div className="flex-1" />
-        {(status === "disconnected" || status === "error") && (
+          <div className="flex-1" />
           <button
             onClick={handleReconnect}
             className="text-xs px-2 py-0.5 rounded transition-colors font-mono"
@@ -357,11 +355,8 @@ function TerminalInner() {
           >
             Reconnect
           </button>
-        )}
-        <span className="text-xs font-mono" style={{ color: "#4b5563" }}>
-          Ctrl+Shift+C copy · Ctrl+V paste
-        </span>
-      </div>
+        </div>
+      )}
 
       {/* Terminal container */}
       <div

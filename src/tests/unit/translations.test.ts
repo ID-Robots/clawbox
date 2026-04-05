@@ -90,7 +90,8 @@ describe("translations", () => {
     });
 
     it("keys are organized into known namespaces", () => {
-      // Update this set when adding new translation namespaces
+      // Manually maintained: add new prefixes here when introducing new
+      // translation namespaces (i.e. keys like "foo.bar" where "foo" is the prefix).
       const knownPrefixes = new Set([
         "wifi",
         "update",

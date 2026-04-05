@@ -24,6 +24,7 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
+  findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
 
 import { setMany } from "@/lib/config-store";

@@ -1,6 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import Busboy from "busboy";
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function getAvailableDiskBytes(dir: string): number {
+  try {
+    const stat = fs.statfsSync(dir);
+    return stat.bavail * stat.bsize;
+  } catch {
+    return 0;
+  }
+}
 
 export const dynamic = "force-dynamic";
 
@@ -60,7 +79,8 @@ export async function GET(req: NextRequest) {
     })
     .filter(Boolean);
 
-  return NextResponse.json({ files });
+  const availableSpace = getAvailableDiskBytes(abs);
+  return NextResponse.json({ files, availableSpace });
 }
 
 // POST /setup-api/files?dir=relative/path
@@ -74,19 +94,36 @@ export async function POST(req: NextRequest) {
   const contentType = req.headers.get("content-type") ?? "";
 
   if (contentType.includes("multipart/form-data")) {
-    // File upload
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-    if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
-
-    const destPath = safePath(path.join(dir, file.name));
-    if (!destPath) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
-
+    if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
     if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    fs.writeFileSync(destPath, buffer);
-    return NextResponse.json({ ok: true, name: file.name });
+    try {
+      const result = await new Promise<{ name: string }>((resolve, reject) => {
+        const busboy = Busboy({ headers: { "content-type": contentType } });
+        let fileName = "";
+
+        busboy.on("file", (_field, fileStream, info) => {
+          fileName = info.filename;
+          const destPath = safePath(path.join(dir, fileName));
+          if (!destPath) {
+            fileStream.resume();
+            reject(new Error("Invalid destination"));
+            return;
+          }
+          const ws = fs.createWriteStream(destPath);
+          fileStream.pipe(ws);
+          ws.on("error", reject);
+        });
+        busboy.on("finish", () => resolve({ name: fileName }));
+        busboy.on("error", reject);
+
+        const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+        nodeStream.pipe(busboy);
+      });
+      return NextResponse.json({ ok: true, name: result.name });
+    } catch (err) {
+      return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
+    }
   }
 
   // JSON action
@@ -108,4 +145,42 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+}
+
+// PUT /setup-api/files?dir=relative/path&name=filename
+// Body: raw binary file (application/octet-stream)
+// Streams directly to disk — handles large files without buffering
+export async function PUT(req: NextRequest) {
+  ensureBaseDir();
+  const dir = req.nextUrl.searchParams.get("dir") ?? "";
+  const name = req.nextUrl.searchParams.get("name");
+  if (!name) return NextResponse.json({ error: "Name required" }, { status: 400 });
+
+  const abs = safePath(dir);
+  if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+
+  const destPath = safePath(path.join(dir, name));
+  if (!destPath) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+
+  if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
+
+  if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
+
+  // Check disk space before writing
+  const contentLength = parseInt(req.headers.get("content-length") ?? "0", 10);
+  const available = getAvailableDiskBytes(abs);
+  if (contentLength > 0 && contentLength > available) {
+    const avail = formatBytes(available);
+    const need = formatBytes(contentLength);
+    return NextResponse.json({ error: `Not enough disk space. Need ${need}, only ${avail} available.` }, { status: 507 });
+  }
+
+  try {
+    const nodeReadable = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+    await pipeline(nodeReadable, fs.createWriteStream(destPath));
+  } catch (err) {
+    try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
+    return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
+  }
+  return NextResponse.json({ ok: true, name });
 }

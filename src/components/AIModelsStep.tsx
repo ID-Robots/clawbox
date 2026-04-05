@@ -464,6 +464,8 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     const controller = new AbortController();
     saveControllerRef.current = controller;
 
+    showConfiguring();
+
     try {
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
@@ -740,24 +742,18 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
       ) : (
         <div>
           <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
-            <p className="text-xs text-[var(--text-secondary)] mb-2">
-              {t("ai.openThisUrl")}
-            </p>
-            <a
-              href={deviceUrl!}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => {
+            <button
+              type="button"
+              onClick={() => {
                 const win = window.open(deviceUrl!, "_blank");
                 if (win) {
-                  e.preventDefault();
                   oauthWindowRef.current = win;
                 }
               }}
-              className="text-sm font-medium text-[var(--coral-bright)] hover:text-orange-300 underline break-all"
+              className="w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm"
             >
-              {deviceUrl}
-            </a>
+              {t("ai.openAuthPage")}
+            </button>
             <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
             <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
               <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">

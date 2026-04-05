@@ -152,8 +152,8 @@ async function main() {
   } else if (cmd === "code" && sub === "init") {
     const projectId = args[2];
     const name = args[3];
-    const template = args[4] || "app";
-    const color = args[5] || "#f97316";
+    const template = args[4] && !args[4].startsWith("--") ? args[4] : "app";
+    const color = args[5] && !args[5].startsWith("--") ? args[5] : "#f97316";
     if (!projectId || !name) {
       console.error("Usage: clawbox code init <projectId> <name> [template] [color]");
       process.exit(1);
@@ -196,7 +196,7 @@ async function main() {
     }
     const contentIdx = args.indexOf("--content");
     let content: string;
-    if (contentIdx !== -1 && contentIdx + 1 < args.length) {
+    if (contentIdx !== -1 && contentIdx + 1 < args.length && !args[contentIdx + 1].startsWith("--")) {
       content = args[contentIdx + 1];
     } else {
       content = await readStdin();
