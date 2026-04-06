@@ -222,39 +222,37 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile and primary model in parallel
-    await Promise.all([
-      runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        `auth.profiles.${config.profileKey}`,
-        JSON.stringify((isOllama || isClawAI)
-          ? { provider: ocProvider, mode: "api_key" }
-          : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
-        "--json",
-      ]),
-      runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "agents.defaults.model.primary",
-        config.defaultModel,
-      ]),
+    // 3. Set auth profile and primary model sequentially (parallel writes cause
+    //    ConfigMutationConflictError because openclaw config set reads/writes the
+    //    same file).
+    await runCommand(OPENCLAW_BIN, [
+      "config",
+      "set",
+      `auth.profiles.${config.profileKey}`,
+      JSON.stringify((isOllama || isClawAI)
+        ? { provider: ocProvider, mode: "api_key" }
+        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      "--json",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config",
+      "set",
+      "agents.defaults.model.primary",
+      config.defaultModel,
     ]);
 
     // 4c. Local device gateway setup: disable gateway auth (no HTTPS for browser
     // token exchange) and disable device identity checks (no secure context for
     // browser crypto key-pair). The gateway is only reachable via local proxy.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
-    await Promise.all([
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.auth.mode", "none",
-      ]),
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-      ]),
-      runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
-      ]),
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.auth.mode", "none",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
     ]);
 
     // 5. Ensure openclaw config files are owned by clawbox
@@ -287,13 +285,11 @@ export async function POST(request: Request) {
           maxTokens: CLAWAI_MAX_TOKENS,
         }],
       });
-      await Promise.all([
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.providers.deepseek", providerDef, "--json",
-        ]),
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "replace",
-        ]),
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.deepseek", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "replace",
       ]);
       console.log(`[AI Config] Set ClawBox AI (DeepSeek) provider in openclaw.json (context=${CLAWAI_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isOllama) {
@@ -312,13 +308,11 @@ export async function POST(request: Request) {
           maxTokens: OLLAMA_MAX_TOKENS,
         }],
       });
-      await Promise.all([
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.providers.ollama", providerDef, "--json",
-        ]),
-        runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "replace",
-        ]),
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.ollama", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "replace",
       ]);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {

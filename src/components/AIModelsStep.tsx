@@ -11,6 +11,7 @@ import { useT } from "@/lib/i18n";
 interface AIModelsStepProps {
   onNext?: () => void;
   embedded?: boolean;
+  onConfigured?: () => void;
 }
 
 type AuthMode = "token" | "subscription" | "local";
@@ -270,7 +271,7 @@ const PROVIDERS: Provider[] = [
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
 
-export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepProps) {
+export default function AIModelsStep({ onNext, embedded = false, onConfigured }: AIModelsStepProps) {
   const { t } = useT();
   const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
   const [authMode, setAuthMode] = useState<AuthMode>("local");
@@ -339,7 +340,6 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   };
 
   const showConfiguring = () => {
-    if (embedded) return;
     tryCloseOAuthWindow(oauthWindowRef);
     setSaving(false);
     setExchanging(false);
@@ -347,13 +347,9 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
     setConfiguring(true);
   };
 
-  const showSuccessAndContinue = (message: string) => {
+  const showSuccessAndContinue = (_message: string) => {
     tryCloseOAuthWindow(oauthWindowRef);
-    if (embedded) {
-      setStatus({ type: "success", message: message.replace(/\s*Continuing\.\.\.$/i, "") });
-      return;
-    }
-    // Overlay is already showing — no-op in setup wizard mode
+    // Overlay is already showing — it will call handleConfiguringDone when done
   };
 
   const extractError = async (res: Response, fallback: string) => {
@@ -865,8 +861,14 @@ export default function AIModelsStep({ onNext, embedded = false }: AIModelsStepP
   );
 
   const handleConfiguringDone = useCallback(() => {
-    if (onNext) onNext();
-  }, [onNext]);
+    if (embedded) {
+      setConfiguring(false);
+      setStatus({ type: "success", message: t("ai.configured") });
+      onConfigured?.();
+    } else if (onNext) {
+      onNext();
+    }
+  }, [embedded, onNext, onConfigured, t]);
 
   return (
     <div className="w-full max-w-[520px]">

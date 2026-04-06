@@ -898,7 +898,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
-            <I18nProvider><AIModelsStep embedded /></I18nProvider>
+            <I18nProvider><AIModelsStep embedded onConfigured={() => {
+              fetch("/setup-api/ai-models/status").then(r => r.json()).then(setAiProvider).catch(() => {});
+            }} /></I18nProvider>
           </div>
         )}
 

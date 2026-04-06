@@ -16,30 +16,35 @@ const CDP_PORT = 18800;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
-  // Check all candidates in parallel
-  const candidates = ["chromium-browser", "chromium", "google-chrome", "google-chrome-stable"];
-  const results = await Promise.all(candidates.map(async (bin) => {
+  // Check known paths directly first (fast, no subprocess), then fall back to `which`
+  const knownPaths = ["/usr/bin/chromium-browser", "/snap/bin/chromium", "/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
+  for (const p of knownPaths) {
+    try {
+      await fs.access(p, 1 /* fs.constants.X_OK */);
+      try {
+        const { stdout: ver } = await exec(p, ["--version"], { timeout: 5000 });
+        return { installed: true, path: p, version: ver.trim() };
+      } catch {
+        return { installed: true, path: p };
+      }
+    } catch {}
+  }
+  // Fallback: use `which` for non-standard installs
+  const candidates = ["chromium-browser", "chromium", "google-chrome"];
+  for (const bin of candidates) {
     try {
       const { stdout } = await exec("which", [bin], { timeout: 3000 });
-      return stdout.trim() || null;
-    } catch { return null; }
-  }));
-  const found = results.find(p => p);
-  if (found) {
-    try {
-      const { stdout: ver } = await exec(found, ["--version"], { timeout: 3000 });
-      return { installed: true, path: found, version: ver.trim() };
-    } catch {
-      return { installed: true, path: found };
-    }
+      const found = stdout.trim();
+      if (found) {
+        try {
+          const { stdout: ver } = await exec(found, ["--version"], { timeout: 5000 });
+          return { installed: true, path: found, version: ver.trim() };
+        } catch {
+          return { installed: true, path: found };
+        }
+      }
+    } catch {}
   }
-  // Check snap
-  try {
-    const { stdout } = await exec("snap", ["list", "chromium"], { timeout: 3000 });
-    if (stdout.includes("chromium")) {
-      return { installed: true, path: "/snap/bin/chromium", version: stdout.split("\n")[1]?.trim() };
-    }
-  } catch {}
   return { installed: false };
 }
 
@@ -136,10 +141,8 @@ export async function POST(req: Request) {
 
         const openclawBin = findOpenclawBin();
         try {
-          await Promise.all([
-            exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 }),
-            exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 }),
-          ]);
+          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 });
+          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 });
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
         }

@@ -85,21 +85,36 @@ export default function VNCApp() {
     // Find the parent ChromeWindow element (contains both title bar and VNC content)
     const chromeWindow = container.closest('[class*="chrome-window"]') || container.parentElement?.parentElement;
 
-    const onFocusIn = () => { vncFocusedRef.current = true; };
-    const onFocusOut = (e: MouseEvent) => {
-      // Only lose focus if click is completely outside the VNC window (not on title bar)
-      const target = e.target as Node;
-      if (!container.contains(target) && (!chromeWindow || !chromeWindow.contains(target))) {
-        vncFocusedRef.current = false;
-      }
+    // Use capture phase — noVNC's canvas calls stopPropagation() on mouse events,
+    // so bubble-phase listeners on the container never fire.
+    const onFocusIn = () => {
+      vncFocusedRef.current = true;
+      rfbRef.current?.focus();
     };
-    container.addEventListener("mousedown", onFocusIn);
+    const onFocusOut = (e: MouseEvent) => {
+      const target = e.target as Node;
+      // Keep focus if click is anywhere inside the ChromeWindow (title bar, resize handles, etc.)
+      if (chromeWindow?.contains(target)) return;
+      if (container.contains(target)) return;
+      vncFocusedRef.current = false;
+    };
+    container.addEventListener("mousedown", onFocusIn, true);
+    container.addEventListener("pointerdown", onFocusIn, true);
     document.addEventListener("mousedown", onFocusOut);
+    // Re-focus VNC after resize/drag ends (pointerEvents go from "none" back to "")
+    const observer = new MutationObserver(() => {
+      if (container.style.pointerEvents !== "none" && vncFocusedRef.current) {
+        rfbRef.current?.focus();
+      }
+    });
+    observer.observe(container, { attributes: true, attributeFilter: ["style"] });
     vncFocusedRef.current = true; // auto-focus on connect
 
     return () => {
-      container.removeEventListener("mousedown", onFocusIn);
+      container.removeEventListener("mousedown", onFocusIn, true);
+      container.removeEventListener("pointerdown", onFocusIn, true);
       document.removeEventListener("mousedown", onFocusOut);
+      observer.disconnect();
     };
   }, [status]);
 

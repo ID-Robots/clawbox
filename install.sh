@@ -244,9 +244,6 @@ PATHEOF
 }
 
 step_openclaw_patch() {
-  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
-  echo "  allowInsecureAuth enabled"
-
   local PATCHED_MARKER='isControlUi && allowControlUiBypass'
 
   # Already patched — nothing to do
@@ -322,48 +319,33 @@ step_openclaw_patch() {
 
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
-  local OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
 
-  # Register Telegram channel (if token exists) and set default model
-  # in a single node invocation to avoid reading/writing the config file twice
-  if [ -f "$OPENCLAW_CONFIG" ]; then
-    CLAWBOX_CONFIG="$CLAWBOX_CONFIG" OPENCLAW_CONFIG="$OPENCLAW_CONFIG" \
-      CLAWBOX_HOME="$CLAWBOX_HOME" node <<'NODE'
-const fs=require('fs');
-const cfgPath=process.env.OPENCLAW_CONFIG;
-const home=process.env.CLAWBOX_HOME;
-const c=JSON.parse(fs.readFileSync(cfgPath,'utf8'));
+  # Sequential config set calls to avoid ConfigMutationConflictError
+  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+  echo "  Default model set"
 
-// Telegram channel (if ClawBox config has a token)
-try {
-  const cb=JSON.parse(fs.readFileSync(process.env.CLAWBOX_CONFIG,'utf8'));
-  if(cb.telegram_bot_token){
-    if(!c.channels)c.channels={};
-    c.channels.telegram={...c.channels.telegram,enabled:true,botToken:cb.telegram_bot_token,dmPolicy:'open',allowFrom:['*']};
-    process.stderr.write('  Telegram channel registered in OpenClaw config\n');
-  }
-} catch {}
+  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode none
+  echo "  Gateway auth mode set to none"
 
-if(!c.agents)c.agents={};
-if(!c.agents.defaults)c.agents.defaults={};
-if(!c.agents.defaults.model)c.agents.defaults.model={};
-c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
+  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
+  echo "  allowInsecureAuth enabled"
 
-// Local device: disable gateway auth (no HTTPS for browser token exchange)
-// and enable insecure auth + device auth bypass for Control UI
-if(!c.gateway)c.gateway={};
-if(!c.gateway.auth)c.gateway.auth={};
-c.gateway.auth.mode='none';
-if(!c.gateway.controlUi)c.gateway.controlUi={};
-c.gateway.controlUi.allowInsecureAuth=true;
-c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
+  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json
+  echo "  dangerouslyDisableDeviceAuth enabled"
 
-fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
-NODE
-    echo "  OpenClaw config updated"
+  # Register Telegram channel (if token exists)
+  if [ -f "$CLAWBOX_CONFIG" ]; then
+    local TG_TOKEN
+    TG_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
+    if [ -n "$TG_TOKEN" ]; then
+      as_clawbox "$OPENCLAW_BIN" config set channels.telegram \
+        "{\"enabled\":true,\"botToken\":\"$TG_TOKEN\",\"dmPolicy\":\"open\",\"allowFrom\":[\"*\"]}" --json
+      echo "  Telegram channel registered"
+    fi
   fi
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
+  echo "  OpenClaw config updated"
 }
 
 step_setup_config() {
