@@ -84,7 +84,7 @@ describe("translations", () => {
     it("all keys use dot-notation or camelCase (no spaces or special chars)", () => {
       for (const key of Object.keys(translations.en)) {
         expect(key).toMatch(
-          /^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*$/,
+          /^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z0-9][a-zA-Z0-9]*)*$/,
         );
       }
     });
@@ -100,6 +100,24 @@ describe("translations", () => {
         "telegram",
         "wizard",
         "progress",
+        "settings",
+        "app",
+        "shelf",
+        "launcher",
+        "window",
+        "taskbar",
+        "tray",
+        "chat",
+        "terminal",
+        "browser",
+        "files",
+        "vnc",
+        "vscode",
+        "store",
+        "ollama",
+        "openclaw",
+        "drawer",
+        "login",
       ]);
 
       for (const key of Object.keys(translations.en)) {

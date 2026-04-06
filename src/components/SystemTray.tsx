@@ -206,7 +206,7 @@ export default function SystemTray({
     <>
       {/* Backdrop */}
       <div
-        className={`fixed inset-0 z-[9998] transition-opacity duration-150 ${
+        className={`fixed inset-0 z-[10020] transition-opacity duration-150 ${
           closing ? "opacity-0" : "opacity-100"
         }`}
         style={{ background: "rgba(0, 0, 0, 0.2)" }}
@@ -215,7 +215,7 @@ export default function SystemTray({
 
       {/* Power menu panel — anchored above the power button (bottom-right) */}
       <div
-        className={`fixed bottom-16 right-2 w-72 z-[9999] transition-all duration-150 ${
+        className={`fixed bottom-16 right-2 w-72 z-[10020] transition-all duration-150 ${
           closing
             ? "opacity-0 translate-y-2 scale-95"
             : "opacity-100 translate-y-0 scale-100"
