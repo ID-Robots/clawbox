@@ -12,6 +12,10 @@ const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
+const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() ?? "";
+const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
+const CLAWBOX_AI_PROVIDER = "deepseek";
+const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
@@ -21,9 +25,8 @@ const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const OLLAMA_CONTEXT_WINDOW = 16384;
 const OLLAMA_MAX_TOKENS = 8192;
 
-const CLAWAI_API_KEY = "sk-d79a8071b0634ff7a809b1abe3d963f3";
-const CLAWAI_CONTEXT_WINDOW = 65536;
-const CLAWAI_MAX_TOKENS = 8192;
+const CLAWBOX_AI_CONTEXT_WINDOW = 65536;
+const CLAWBOX_AI_MAX_TOKENS = 8192;
 
 interface ProviderConfig {
   defaultModel: string;
@@ -34,8 +37,8 @@ interface ProviderConfig {
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   clawai: {
-    defaultModel: "deepseek/deepseek-chat",
-    profileKey: "deepseek:default",
+    defaultModel: CLAWBOX_AI_MODEL,
+    profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
     defaultModel: "anthropic/claude-sonnet-4-6",
@@ -65,6 +68,11 @@ const PROVIDERS: Record<string, ProviderConfig> = {
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
 const COMMAND_TIMEOUT_MS = 30_000;
+
+interface AuthProfilesFile {
+  version: number;
+  profiles: Record<string, unknown>;
+}
 
 function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -111,6 +119,82 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
   });
 }
 
+async function readAuthProfiles(): Promise<AuthProfilesFile> {
+  try {
+    const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
+    return JSON.parse(raw) as AuthProfilesFile;
+  } catch {
+    return { version: 1, profiles: {} };
+  }
+}
+
+async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
+  await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
+  const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
+  await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
+    mode: 0o600,
+  });
+  await fs.rename(tmpPath, AUTH_PROFILES_PATH);
+  await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
+}
+
+function buildClawboxAiProviderDefinition() {
+  return JSON.stringify({
+    baseUrl: "https://api.deepseek.com",
+    api: "openai-completions",
+    apiKey: CLAWBOX_AI_API_KEY,
+    models: [{
+      id: "deepseek-chat",
+      name: "ClawBox AI",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+      maxTokens: CLAWBOX_AI_MAX_TOKENS,
+    }],
+  });
+}
+
+async function configureClawboxAi(setFallback: boolean) {
+  if (!CLAWBOX_AI_API_KEY) {
+    return false;
+  }
+
+  const authProfiles = await readAuthProfiles();
+  authProfiles.profiles[CLAWBOX_AI_PROFILE_KEY] = {
+    type: "api_key",
+    provider: CLAWBOX_AI_PROVIDER,
+    key: CLAWBOX_AI_API_KEY,
+  };
+  await writeAuthProfiles(authProfiles);
+
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    `auth.profiles.${CLAWBOX_AI_PROFILE_KEY}`,
+    JSON.stringify({ provider: CLAWBOX_AI_PROVIDER, mode: "api_key" }),
+    "--json",
+  ]);
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    `models.providers.${CLAWBOX_AI_PROVIDER}`,
+    buildClawboxAiProviderDefinition(),
+    "--json",
+  ]);
+
+  if (setFallback) {
+    await runCommand(OPENCLAW_BIN, [
+      "config",
+      "set",
+      "agents.defaults.model.fallback",
+      CLAWBOX_AI_MODEL,
+    ]);
+  }
+
+  return true;
+}
+
 export async function POST(request: Request) {
   try {
     let body: {
@@ -130,6 +214,12 @@ export async function POST(request: Request) {
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
     const isClawAI = provider === "clawai";
+    if (isClawAI && !CLAWBOX_AI_API_KEY) {
+      return NextResponse.json(
+        { error: "ClawBox AI is not configured on this device. Set CLAWBOX_AI_API_KEY first." },
+        { status: 503 }
+      );
+    }
     if (!provider || (!apiKey && !isOllama && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
@@ -160,22 +250,13 @@ export async function POST(request: Request) {
 
     // 1. Write token to auth-profiles.json
     {
-      let authProfiles: {
-        version: number;
-        profiles: Record<string, unknown>;
-      };
-      try {
-        const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
-        authProfiles = JSON.parse(raw);
-      } catch {
-        authProfiles = { version: 1, profiles: {} };
-      }
+      const authProfiles = await readAuthProfiles();
       if (isClawAI) {
-        // ClawBox AI uses a pre-configured DeepSeek API key
+        // ClawBox AI uses the device-provided DeepSeek API key.
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
-          key: CLAWAI_API_KEY,
+          key: CLAWBOX_AI_API_KEY,
         };
       } else if (isOllama) {
         // Ollama runs locally — use a dummy api_key entry
@@ -204,14 +285,7 @@ export async function POST(request: Request) {
           token: apiKey,
         };
       }
-      await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
-      const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
-      await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
-        mode: 0o600,
-      });
-      await fs.rename(tmpPath, AUTH_PROFILES_PATH);
-      // Fix ownership so the gateway (running as clawbox) can read it
-      await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
+      await writeAuthProfiles(authProfiles);
     }
 
     // 2. Validate profileKey before interpolating into config path
@@ -271,27 +345,11 @@ export async function POST(request: Request) {
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
-      const providerDef = JSON.stringify({
-        baseUrl: "https://api.deepseek.com",
-        api: "openai-completions",
-        apiKey: CLAWAI_API_KEY,
-        models: [{
-          id: "deepseek-chat",
-          name: "DeepSeek V3",
-          reasoning: false,
-          input: ["text"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: CLAWAI_CONTEXT_WINDOW,
-          maxTokens: CLAWAI_MAX_TOKENS,
-        }],
-      });
+      await configureClawboxAi(false);
       await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.deepseek", providerDef, "--json",
+        "config", "set", "models.mode", "merge",
       ]);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", "replace",
-      ]);
-      console.log(`[AI Config] Set ClawBox AI (DeepSeek) provider in openclaw.json (context=${CLAWAI_CONTEXT_WINDOW}, mode=replace)`);
+      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
@@ -314,6 +372,14 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "replace",
       ]);
+      try {
+        const fallbackConfigured = await configureClawboxAi(true);
+        if (fallbackConfigured) {
+          console.log("[AI Config] Configured ClawBox AI as fallback model");
+        }
+      } catch (err) {
+        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
+      }
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
         await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
@@ -333,26 +399,13 @@ export async function POST(request: Request) {
         // Non-fatal: merge is the default behavior anyway
       }
 
-      // Always configure ClawBox AI (DeepSeek) as backup provider alongside
-      // the primary, so the agent has a fallback if the primary provider fails.
       try {
-        // Add DeepSeek backup to the auth-profiles file
-        const rawProfiles = await fs.readFile(AUTH_PROFILES_PATH, "utf-8").catch(() => '{"version":1,"profiles":{}}');
-        const profiles = JSON.parse(rawProfiles);
-        profiles.profiles["deepseek:default"] = { type: "api_key", provider: "deepseek", key: CLAWAI_API_KEY };
-        const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
-        await fs.writeFile(tmpPath, JSON.stringify(profiles, null, 2));
-        await fs.rename(tmpPath, AUTH_PROFILES_PATH);
-        await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "auth.profiles.deepseek:default",
-          JSON.stringify({ provider: "deepseek", mode: "api_key" }),
-          "--json",
-        ]);
-        console.log("[AI Config] Configured ClawBox AI (DeepSeek) as backup provider");
+        const fallbackConfigured = await configureClawboxAi(true);
+        if (fallbackConfigured) {
+          console.log("[AI Config] Configured ClawBox AI as fallback model");
+        }
       } catch (err) {
-        // Non-fatal: backup is a nice-to-have
-        console.warn("[AI Config] Failed to configure backup provider:", err instanceof Error ? err.message : err);
+        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
       }
     }
 

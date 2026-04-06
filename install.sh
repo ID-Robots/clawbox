@@ -319,10 +319,27 @@ step_openclaw_patch() {
 
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
+  local CLAWBOX_AI_ENV="$PROJECT_DIR/.env"
+  local CLAWBOX_AI_KEY="${CLAWBOX_AI_API_KEY:-}"
+  local AUTH_PROFILES="$CLAWBOX_HOME/.openclaw/agents/main/agent/auth-profiles.json"
 
   # Sequential config set calls to avoid ConfigMutationConflictError
   as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
   echo "  Default model set"
+
+  if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
+    CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  if [ -n "$CLAWBOX_AI_KEY" ]; then
+    local CLAWBOX_AI_PROVIDER_JSON
+    CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
+    mkdir -p "$(dirname "$AUTH_PROFILES")"
+    CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    as_clawbox "$OPENCLAW_BIN" config set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
+    as_clawbox "$OPENCLAW_BIN" config set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.fallback "deepseek/deepseek-chat"
+    echo "  ClawBox AI fallback model configured"
+  fi
 
   as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode none
   echo "  Gateway auth mode set to none"
@@ -387,6 +404,10 @@ step_directories_permissions() {
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null; then
     printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
+  fi
+  if [ -n "${CLAWBOX_AI_API_KEY:-}" ] && ! grep -q '^CLAWBOX_AI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
+    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
+    echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
   echo "  Done"
 }
