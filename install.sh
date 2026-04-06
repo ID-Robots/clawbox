@@ -577,28 +577,6 @@ step_chromium_install() {
   echo "  Chromium installed (snap)"
 }
 
-step_code_server_install() {
-  if command -v code-server &>/dev/null; then
-    echo "  code-server already installed"
-  else
-    curl -fsSL https://code-server.dev/install.sh | sh
-    echo "  code-server installed"
-  fi
-
-  # Configure for local access (no auth, bind to all interfaces)
-  local CS_CONFIG_DIR="$CLAWBOX_HOME/.config/code-server"
-  mkdir -p "$CS_CONFIG_DIR"
-  cat > "$CS_CONFIG_DIR/config.yaml" <<'CSCONF'
-bind-addr: 0.0.0.0:8080
-auth: none
-cert: false
-CSCONF
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CS_CONFIG_DIR"
-
-  # Enable and start as a user service via systemd
-  systemctl enable --now "code-server@$CLAWBOX_USER" 2>/dev/null || true
-  echo "  code-server configured and started"
-}
 
 step_ai_tools_install() {
   # Claude Code
@@ -714,7 +692,7 @@ step_browser_launch() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install ollama_install
-  chromium_install code_server_install ai_tools_install vnc_install
+  chromium_install ai_tools_install vnc_install
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
   network_setup setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
@@ -744,7 +722,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=17
 step=0
 log() {
   step=$((step + 1))
@@ -798,9 +776,6 @@ step_ollama_install
 
 log "Installing Chromium..."
 step_chromium_install
-
-log "Installing code-server (VS Code)..."
-step_code_server_install
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install

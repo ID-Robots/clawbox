@@ -125,7 +125,7 @@ async function main() {
     console.log(`✅ Opening ${appId} on desktop.`);
 
   } else if (cmd === "app" && sub === "list") {
-    const builtIn = ["settings", "openclaw", "terminal", "files", "store", "browser", "vnc", "vscode"];
+    const builtIn = ["settings", "openclaw", "terminal", "files", "store", "browser", "vnc"];
     console.log("Built-in apps:");
     builtIn.forEach(a => console.log(`  ${a}`));
 

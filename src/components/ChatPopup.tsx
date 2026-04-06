@@ -110,6 +110,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
   const [sending, setSending] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [modelName, setModelName] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -525,23 +527,59 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     }
   }, [wsRequest])
 
+  // Handle file selection for attachments — upload all files to server
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    for (const file of Array.from(files)) {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('path', 'uploads')
+      try {
+        const res = await fetch('/setup-api/files', { method: 'POST', body: formData })
+        if (res.ok) {
+          setAttachments(prev => [...prev, { name: file.name, path: `/home/clawbox/uploads/${file.name}`, type: file.type }])
+        }
+      } catch { /* upload failed */ }
+    }
+    e.target.value = ''
+  }, [])
+
+  const removeAttachment = useCallback((idx: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== idx))
+  }, [])
+
   // Send a message
   const sendMessage = useCallback(async () => {
     const text = input.trim()
-    if (!text || sending) return
+    if (!text && attachments.length === 0) return
+    if (sending) return
 
+    const currentAttachments = [...attachments]
     setInput('')
-    setMessages(prev => [...prev, { role: 'user', text, timestamp: Date.now() }])
+    setAttachments([])
+
+    // Build display text for user message
+    const fileNames = currentAttachments.map(a => `📎 ${a.name}`).join('\n')
+    const displayText = [fileNames, text].filter(Boolean).join('\n')
+    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now() }])
     setSending(true)
     setStreaming('')
 
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
 
+    // Build message with file paths — gateway only supports 'message' string
+    let messageText = text
+    if (currentAttachments.length > 0) {
+      const filePaths = currentAttachments.map(a => `[Attached file: ${a.path}]`).join('\n')
+      messageText = [filePaths, text].filter(Boolean).join('\n')
+    }
+
     try {
       await wsRequest('chat.send', {
         sessionKey: sessionKeyRef.current,
-        message: text,
+        message: messageText || '(file attached)',
         deliver: false,
         idempotencyKey,
       })
@@ -550,7 +588,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
       runIdRef.current = null
       setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
     }
-  }, [input, sending, wsRequest])
+  }, [input, sending, attachments, wsRequest])
 
   // Abort generation
   const abort = useCallback(async () => {
@@ -883,13 +921,47 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Attachment preview */}
+      {attachments.length > 0 && (
+        <div style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          {attachments.map((a, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 8, background: 'rgba(249,115,22,0.15)', fontSize: 11, color: '#f97316' }}>
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{a.type.startsWith('image/') ? 'image' : 'attach_file'}</span>
+              <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+              <button onClick={() => removeAttachment(i)} style={{ background: 'none', border: 'none', color: '#f97316', cursor: 'pointer', padding: 0, display: 'flex' }}>
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
-        borderTop: '1px solid rgba(255,255,255,0.06)',
+        borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
       }}>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={status !== 'connected'}
+          title="Attach file"
+          style={{
+            width: 36, height: 36, borderRadius: 10, border: 'none',
+            background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
+            cursor: status === 'connected' ? 'pointer' : 'default',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0, transition: 'all 0.15s',
+          }}
+          onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
+        </button>
         <textarea
           ref={inputRef}
           value={input}
@@ -930,13 +1002,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         ) : (
           <button
             onClick={sendMessage}
-            disabled={!input.trim() || status !== 'connected'}
+            disabled={(!input.trim() && attachments.length === 0) || status !== 'connected'}
             title={t("chat.send")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: input.trim() ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
-              color: input.trim() ? '#fff' : 'rgba(255,255,255,0.2)',
-              cursor: input.trim() ? 'pointer' : 'default',
+              background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
+              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
+              cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               flexShrink: 0, transition: 'all 0.15s',
             }}

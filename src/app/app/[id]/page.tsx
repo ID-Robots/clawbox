@@ -8,7 +8,6 @@ const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: fal
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });
 const BrowserApp = dynamic(() => import("@/components/BrowserApp"), { ssr: false });
 const VNCApp = dynamic(() => import("@/components/VNCApp"), { ssr: false });
-const VSCodeApp = dynamic(() => import("@/components/VSCodeApp"), { ssr: false });
 const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: false });
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 
@@ -18,7 +17,6 @@ const APP_TITLES: Record<string, string> = {
   files: "Files",
   browser: "Browser",
   vnc: "Remote Desktop",
-  vscode: "VS Code",
   store: "App Store",
   openclaw: "OpenClaw",
 };
@@ -36,8 +34,6 @@ export default function StandaloneAppPage() {
         return <BrowserApp />;
       case "vnc":
         return <VNCApp />;
-      case "vscode":
-        return <VSCodeApp />;
       case "settings":
         return (
           <div className="h-full overflow-y-auto">

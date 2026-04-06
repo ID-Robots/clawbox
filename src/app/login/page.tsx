@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import ClawIcon from "@/components/ClawIcon";
+import Image from "next/image";
 import { I18nProvider, useT } from "@/lib/i18n";
 
 const DURATION_OPTIONS = [
@@ -83,7 +83,7 @@ function LoginForm() {
       <div className="w-full max-w-[380px]">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex flex-col items-center gap-3 mb-6">
-            <ClawIcon size={80} />
+            <Image src="/clawbox-crab.png" alt="ClawBox" width={120} height={120} className="w-[120px] h-[120px] object-contain animate-welcome-powerup" priority />
             <h1 className="text-xl font-bold font-display text-[var(--text-primary)]">
               ClawBox
             </h1>

@@ -304,23 +304,6 @@ export default function FilesApp() {
     setDialog({ type: null });
   };
 
-  // ─── Open in VS Code ───────────────────────────────────────────────────────
-
-  const openInVSCode = async (entry: FileEntry) => {
-    const filePath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-    try {
-      const res = await fetch("/setup-api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "resolve", filePath }),
-      });
-      const data = await res.json();
-      if (data.absPath) {
-        window.dispatchEvent(new CustomEvent("clawbox:open-in-vscode", { detail: { filePath: data.absPath } }));
-      }
-    } catch { /* resolve failed */ }
-  };
-
   // ─── Context menu ──────────────────────────────────────────────────────────
 
   const openContextMenu = (e: React.MouseEvent, entry: FileEntry) => {
@@ -513,7 +496,6 @@ export default function FilesApp() {
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
-              onOpenFile={openInVSCode}
               onContextMenu={openContextMenu}
               onLongPressStart={handleLongPressStart}
               onLongPressEnd={handleLongPressEnd}
@@ -524,7 +506,6 @@ export default function FilesApp() {
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
-              onOpenFile={openInVSCode}
               onContextMenu={openContextMenu}
               onLongPressStart={handleLongPressStart}
               onLongPressEnd={handleLongPressEnd}
@@ -556,7 +537,6 @@ export default function FilesApp() {
           y={contextMenu.y}
           onOpen={() => { closeContextMenu(); navigateTo(contextMenu.entry); }}
           onDownload={() => { closeContextMenu(); downloadFile(contextMenu.entry); }}
-          onOpenInVSCode={() => { closeContextMenu(); openInVSCode(contextMenu.entry); }}
           onRename={() => { closeContextMenu(); setDialog({ type: "rename", entry: contextMenu.entry, value: contextMenu.entry.name }); }}
           onDelete={() => { closeContextMenu(); setDialog({ type: "delete", entry: contextMenu.entry }); }}
           onClose={closeContextMenu}
@@ -578,12 +558,11 @@ export default function FilesApp() {
 
 // ─── Grid View ────────────────────────────────────────────────────────────────
 
-function GridView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu, onLongPressStart, onLongPressEnd }: {
+function GridView({ files, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
   files: FileEntry[];
   selected: string | null;
   onSelect: (name: string | null) => void;
   onOpen: (entry: FileEntry) => void;
-  onOpenFile: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onLongPressStart: (e: React.TouchEvent, entry: FileEntry) => void;
   onLongPressEnd: () => void;
@@ -603,7 +582,7 @@ function GridView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu
                 : "border border-transparent hover:bg-white/[0.04]"
             }`}
             onClick={(e) => { e.stopPropagation(); onSelect(entry.name); }}
-            onDoubleClick={() => entry.type === "directory" ? onOpen(entry) : onOpenFile(entry)}
+            onDoubleClick={() => onOpen(entry)}
             onContextMenu={(e) => onContextMenu(e, entry)}
             onTouchStart={(e) => onLongPressStart(e, entry)}
             onTouchEnd={onLongPressEnd}
@@ -622,12 +601,11 @@ function GridView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu
 
 // ─── List View ────────────────────────────────────────────────────────────────
 
-function ListView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu, onLongPressStart, onLongPressEnd }: {
+function ListView({ files, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
   files: FileEntry[];
   selected: string | null;
   onSelect: (name: string | null) => void;
   onOpen: (entry: FileEntry) => void;
-  onOpenFile: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onLongPressStart: (e: React.TouchEvent, entry: FileEntry) => void;
   onLongPressEnd: () => void;
@@ -653,7 +631,7 @@ function ListView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu
             }`}
             style={{ gridTemplateColumns: "1fr 80px 160px" }}
             onClick={(e) => { e.stopPropagation(); onSelect(entry.name); }}
-            onDoubleClick={() => entry.type === "directory" ? onOpen(entry) : onOpenFile(entry)}
+            onDoubleClick={() => onOpen(entry)}
             onContextMenu={(e) => onContextMenu(e, entry)}
             onTouchStart={(e) => onLongPressStart(e, entry)}
             onTouchEnd={onLongPressEnd}
@@ -674,13 +652,12 @@ function ListView({ files, selected, onSelect, onOpen, onOpenFile, onContextMenu
 
 // ─── Context Menu ────────────────────────────────────────────────────────────
 
-function ContextMenu({ entry, x, y, onOpen, onDownload, onOpenInVSCode, onRename, onDelete, onClose }: {
+function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onClose }: {
   entry: FileEntry;
   x: number;
   y: number;
   onOpen: () => void;
   onDownload: () => void;
-  onOpenInVSCode: () => void;
   onRename: () => void;
   onDelete: () => void;
   onClose: () => void;
@@ -709,7 +686,6 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onOpenInVSCode, onRename
   } else {
     items.push({ icon: "download", label: t("files.download"), onClick: onDownload });
   }
-  items.push({ icon: "code", label: t("files.openInVSCode"), onClick: onOpenInVSCode, color: "#007acc" });
   items.push({ icon: "edit", label: t("files.rename"), onClick: onRename });
   items.push({ icon: "delete", label: t("files.delete"), onClick: onDelete, danger: true });
 

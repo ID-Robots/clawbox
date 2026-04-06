@@ -112,7 +112,6 @@ describe("translations", () => {
         "browser",
         "files",
         "vnc",
-        "vscode",
         "store",
         "ollama",
         "openclaw",

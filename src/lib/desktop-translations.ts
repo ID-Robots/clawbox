@@ -13,7 +13,6 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.store": "Store",
     "app.browser": "Browser",
     "app.remoteDesktop": "Remote Desktop",
-    "app.vscode": "VS Code",
     "app.chat": "Chat",
 
     // === ChromeShelf ===
@@ -146,7 +145,6 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "files.modified": "Modified",
     "files.open": "Open",
     "files.download": "Download",
-    "files.openInVSCode": "Open in VS Code",
     "files.rename": "Rename",
     "files.delete": "Delete",
     "files.newFolderTitle": "New Folder",
@@ -162,16 +160,6 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "vnc.disconnected": "Disconnected",
     "vnc.reconnect": "Reconnect",
 
-    // === VSCodeApp ===
-    "vscode.connecting": "Connecting to code-server...",
-    "vscode.title": "VS Code",
-    "vscode.notRunning": "code-server is not running on port {port}.",
-    "vscode.installInstructions": "Install and start code-server to use VS Code in the browser.",
-    "vscode.installLabel": "Install code-server:",
-    "vscode.configureLabel": "Configure (no auth for local use):",
-    "vscode.startLabel": "Start code-server:",
-    "vscode.serviceLabel": "Or run as a service:",
-    "vscode.retryConnection": "Retry Connection",
 
     // === AppStore ===
     "store.all": "All",

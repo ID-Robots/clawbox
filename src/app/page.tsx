@@ -15,7 +15,6 @@ import TerminalApp from "@/components/TerminalApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
-import VSCodeApp from "@/components/VSCodeApp";
 import ChatPopup from "@/components/ChatPopup";
 import { I18nProvider, useT } from "@/lib/i18n";
 
@@ -27,7 +26,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "vscode" | "webapp";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -43,7 +42,6 @@ const apps: AppDef[] = [
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vscode", name: "app.vscode", color: "#007acc", type: "vscode", pinned: false, defaultWidth: 1100, defaultHeight: 750 },
 ];
 const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
 
@@ -54,14 +52,6 @@ function MIcon({ name, className = "", size = 24 }: { name: string; className?: 
 
 function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
-
-  if (id === "vscode") {
-    return (
-      <svg className={`${size}`} viewBox="0 0 100 100" fill="none">
-        <path d="M74.5 3.5L37.8 35.2 18.3 20.5c-1.8-1.3-4.3-1.1-5.9.4l-5 5c-1.8 1.8-1.8 4.7 0 6.5L21.5 50 7.4 67.6c-1.8 1.8-1.8 4.7 0 6.5l5 5c1.6 1.5 4.1 1.7 5.9.4l19.5-14.7L74.5 96.5c1.7 1.7 4.1 2.5 6.5 2.1l.8-.2c2-.4 3.6-1.7 4.4-3.5L97 50V7.2l-12-4.3c-2.7-1-5.5-.5-7.6 1.6L74.5 3.5zM79 73L53 50l26-23v46z" fill="white"/>
-      </svg>
-    );
-  }
 
   if (id === "browser") {
     return (
@@ -889,27 +879,6 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener("popstate", handleBack);
   }, [launcherOpen, trayOpen, openWindows, closeWindow]);
 
-  // ─── Open file in VS Code from other apps (e.g. file manager) ───
-  const nextZIndexRef = useRef(nextZIndex);
-  nextZIndexRef.current = nextZIndex;
-
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { filePath?: string };
-      const fp = detail?.filePath;
-      if (!fp) return;
-      const windowId = `vscode-${Date.now()}`;
-      const z = nextZIndexRef.current;
-      setOpenWindows((prev) => [
-        ...prev,
-        { id: windowId, appId: "vscode", zIndex: z, minimized: false, meta: { filePath: fp } },
-      ]);
-      setNextZIndex(z + 1);
-    };
-    window.addEventListener("clawbox:open-in-vscode", handler);
-    return () => window.removeEventListener("clawbox:open-in-vscode", handler);
-  }, []);
-
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);
   openAppRef.current = openApp;
@@ -1023,7 +992,7 @@ function ChromeDesktopInner() {
 
   const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
 
-  const renderWindowContent = (appId: string, meta?: Record<string, string>) => {
+  const renderWindowContent = (appId: string, _meta?: Record<string, string>) => {
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return null;
@@ -1082,8 +1051,6 @@ function ChromeDesktopInner() {
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":
         return <VNCApp />;
-      case "vscode":
-        return <VSCodeApp filePath={meta?.filePath} />;
       case "webapp": {
         let webappSrc = "about:blank";
         try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
@@ -1133,7 +1100,7 @@ function ChromeDesktopInner() {
   // Built-in apps with desktop shortcuts
   const desktopBuiltinApps = desktopApps
     .map((appId) => apps.find((a) => a.id === appId))
-    .filter((a): a is AppDef => a !== null);
+    .filter((a): a is AppDef => !!a);
 
   // Get all apps for launcher (including installed)
   const allAppsForLauncher = getAllApps();
@@ -1662,7 +1629,7 @@ function ChromeDesktopInner() {
           const unpinnedOpenApps = openWindows
             .filter(w => !pinnedIds.has(w.appId))
             .map(w => allApps.find(a => a.id === w.appId))
-            .filter((a): a is AppDef => a !== null)
+            .filter((a): a is AppDef => !!a)
             // Deduplicate
             .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i);
 

@@ -3,8 +3,6 @@ import { execSync } from "child_process";
 
 const isDev = process.env.NODE_ENV === "development";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
-const CODE_SERVER_PORT = process.env.CODE_SERVER_PORT || "8080";
-const CODE_SERVER_URL = `http://127.0.0.1:${CODE_SERVER_PORT}`;
 // Git-based version: "v2.0.0" on tag, "v2.0.0-3-gca62836" after commits
 const APP_VERSION = (() => {
   try {
@@ -52,13 +50,7 @@ const nextConfig: NextConfig = {
           destination: `${GATEWAY_URL}/favicon-32.png`,
         },
       ],
-      afterFiles: [
-        // Proxy code-server through same origin (avoids port/CSP/CORS issues)
-        {
-          source: "/code-server/:path*",
-          destination: `${CODE_SERVER_URL}/:path*`,
-        },
-      ],
+      afterFiles: [],
       // Fallback: anything not matched by Next.js → proxy to gateway
       fallback: [
         {

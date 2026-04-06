@@ -210,10 +210,13 @@ export default function ChromeWindow({
     onFocus();
   }, [maximized, snapped, size.width, size.height, position.x, position.y, onFocus]);
 
+  const contentRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     const handleMove = (e: MouseEvent | TouchEvent) => {
       const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
       const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
+      const el = windowRef.current;
 
       if (resizeRef.current.isResizing) {
         const r = resizeRef.current;
@@ -237,18 +240,34 @@ export default function ChromeWindow({
           newY = Math.max(0, r.startPosY + dh);
         }
 
-        setSize({ width: newW, height: newH });
-        setPosition({ x: newX, y: newY });
+        // Direct DOM update — no React re-render during resize
+        if (el) {
+          el.style.left = newX + "px";
+          el.style.top = newY + "px";
+          el.style.width = newW + "px";
+          el.style.height = newH + "px";
+        }
+        currentPosRef.current = { x: newX, y: newY };
+        currentSizeRef.current = { width: newW, height: newH };
+        // Disable pointer events on content during resize
+        if (contentRef.current) contentRef.current.style.pointerEvents = "none";
         return;
       }
 
       if (!dragRef.current.isDragging) return;
       const dx = clientX - dragRef.current.startX;
       const dy = clientY - dragRef.current.startY;
-      setPosition({
-        x: dragRef.current.startPosX + dx,
-        y: Math.max(0, dragRef.current.startPosY + dy),
-      });
+      const newX = dragRef.current.startPosX + dx;
+      const newY = Math.max(0, dragRef.current.startPosY + dy);
+
+      // Direct DOM update — no React re-render during drag
+      if (el) {
+        el.style.left = newX + "px";
+        el.style.top = newY + "px";
+      }
+      currentPosRef.current = { x: newX, y: newY };
+      // Disable pointer events on content during drag
+      if (contentRef.current) contentRef.current.style.pointerEvents = "none";
       setSnapPreview(getSnapZone(clientX, clientY, rightInsetRef.current));
     };
 
@@ -261,11 +280,18 @@ export default function ChromeWindow({
     };
 
     const handleEnd = (e: MouseEvent | TouchEvent) => {
+      // Re-enable pointer events on content
+      if (contentRef.current) contentRef.current.style.pointerEvents = "";
+
       if (resizeRef.current.isResizing) {
         resizeRef.current.isResizing = false;
+        // Commit final size/position to React state
+        const cur = currentSizeRef.current;
+        const pos = currentPosRef.current;
+        setSize({ width: cur.width, height: cur.height });
+        setPosition({ x: pos.x, y: pos.y });
         // Save resized size per app
         if (appId) {
-          const cur = currentSizeRef.current;
           kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
         }
         notifyGeometry();
@@ -288,6 +314,9 @@ export default function ChromeWindow({
         setPosition({ x: rect.x, y: rect.y });
         setSize({ width: rect.width, height: rect.height });
         setSnapped(zone);
+      } else {
+        // Commit final drag position to React state
+        setPosition(currentPosRef.current);
       }
       notifyGeometry();
     };
@@ -417,7 +446,7 @@ export default function ChromeWindow({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
+      <div ref={contentRef} className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
 
       {/* Resize handles — hidden when maximized/snapped */}
       {!maximized && !snapped && (

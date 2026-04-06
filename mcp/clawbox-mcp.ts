@@ -1418,67 +1418,116 @@ server.tool("system_power", "Restart or shut down the ClawBox device",
 
 type ContentPart = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
-function browserResult(text: string, result: { screenshot?: string }): { content: ContentPart[] } {
-  const parts: ContentPart[] = [{ type: "text", text }];
+// Track the active browser session — auto-launched on first use
+let currentSessionId: string | null = null;
+
+function browserResult(text: string, result: { screenshot?: string; url?: string; title?: string }): { content: ContentPart[] } {
+  const info = [text];
+  if (result.url) info.push(`URL: ${result.url}`);
+  if (result.title) info.push(`Title: ${result.title}`);
+  const parts: ContentPart[] = [{ type: "text", text: info.join("\n") }];
   if (result.screenshot) parts.push({ type: "image", data: result.screenshot, mimeType: "image/png" });
   return { content: parts };
 }
 
-server.tool("browser_launch", "Launch headless Chromium and optionally navigate. Returns screenshot.",
-  { url: z.string().optional().describe("URL to navigate to") },
+/** Ensure a browser session exists — launch one if not */
+async function ensureBrowser(url?: string): Promise<string> {
+  if (currentSessionId) {
+    // Verify session is still alive
+    try {
+      const r = await apiPost("/setup-api/browser", { action: "screenshot", sessionId: currentSessionId });
+      if (r && !("error" in r)) return currentSessionId;
+    } catch { /* session expired */ }
+  }
+  const result = await apiPost("/setup-api/browser", { action: "launch", ...(url ? { url } : {}) }) as { sessionId?: string };
+  currentSessionId = result.sessionId || null;
+  if (!currentSessionId) throw new Error("Failed to launch browser");
+  return currentSessionId;
+}
+
+async function browserAction(action: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  const sessionId = await ensureBrowser();
+  return apiPost("/setup-api/browser", { action, sessionId, ...params }) as Promise<Record<string, unknown>>;
+}
+
+server.tool("browser_launch",
+  `Launch a headless Chromium browser and navigate to a URL. Returns a screenshot.
+The browser runs server-side via Playwright (1280x720 viewport). Use browser_screenshot to see the page,
+browser_click to interact with elements at x,y coordinates visible in the screenshot,
+browser_type to enter text, and browser_keypress for special keys.
+
+Workflow: browser_launch → browser_screenshot → browser_click/type → browser_screenshot → ...`,
+  { url: z.string().optional().describe("URL to navigate to (default: google.com)") },
   async ({ url }) => {
-    const result = await apiPost("/setup-api/browser", { action: "launch", ...(url ? { url } : {}) });
+    // Force new session
+    if (currentSessionId) {
+      try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
+      currentSessionId = null;
+    }
+    const sessionId = await ensureBrowser(url);
+    const result = await apiPost("/setup-api/browser", { action: "screenshot", sessionId }) as Record<string, unknown>;
     return browserResult(`Browser launched.${url ? ` Navigated to: ${url}` : ""}`, result);
   }
 );
 
-server.tool("browser_navigate", "Navigate browser to URL. Returns screenshot.",
+server.tool("browser_navigate",
+  "Navigate the browser to a new URL. Returns screenshot of the loaded page.",
   { url: z.string().describe("URL to navigate to") },
   async ({ url }) => {
-    const result = await apiPost("/setup-api/browser", { action: "navigate", url });
+    const result = await browserAction("navigate", { url });
     return browserResult(`Navigated to: ${url}`, result);
   }
 );
 
-server.tool("browser_click", "Click at coordinates in browser.",
-  { x: z.number().describe("X"), y: z.number().describe("Y"), button: z.enum(["left", "right", "middle"]).optional().describe("Button (default: left)") },
+server.tool("browser_click",
+  "Click at x,y coordinates in the browser viewport (1280x720). Use screenshot to find element positions.",
+  { x: z.number().describe("X coordinate"), y: z.number().describe("Y coordinate"), button: z.enum(["left", "right", "middle"]).optional().describe("Mouse button (default: left)") },
   async ({ x, y, button }) => {
-    const result = await apiPost("/setup-api/browser", { action: "click", x, y, ...(button ? { button } : {}) });
+    const result = await browserAction("click", { x, y, ...(button ? { button } : {}) });
     return browserResult(`Clicked (${x}, ${y})`, result);
   }
 );
 
-server.tool("browser_type", "Type text into focused browser element.",
+server.tool("browser_type",
+  "Type text into the currently focused element in the browser. Click an input field first.",
   { text: z.string().describe("Text to type") },
   async ({ text }) => {
-    const result = await apiPost("/setup-api/browser", { action: "type", text });
+    const result = await browserAction("type", { text });
     return browserResult(`Typed: "${text}"`, result);
   }
 );
 
-server.tool("browser_keypress", "Press a key in browser (Enter, Tab, Escape, etc.).",
-  { key: z.string().describe("Key name") },
+server.tool("browser_keypress",
+  "Press a special key. Common keys: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, ArrowLeft, ArrowRight.",
+  { key: z.string().describe("Key name (e.g. Enter, Tab, Escape)") },
   async ({ key }) => {
-    const result = await apiPost("/setup-api/browser", { action: "keydown", key });
+    const result = await browserAction("keydown", { key });
     return browserResult(`Pressed: ${key}`, result);
   }
 );
 
-server.tool("browser_scroll", "Scroll the browser page.",
-  { x: z.number().describe("X"), y: z.number().describe("Y"), deltaX: z.number().optional().describe("Horizontal"), deltaY: z.number().describe("Vertical (positive=down)") },
+server.tool("browser_scroll",
+  "Scroll the page at the given coordinates. Positive deltaY scrolls down.",
+  { x: z.number().describe("X coordinate"), y: z.number().describe("Y coordinate"), deltaX: z.number().optional().describe("Horizontal scroll"), deltaY: z.number().describe("Vertical scroll (positive=down)") },
   async ({ x, y, deltaX, deltaY }) => {
-    const result = await apiPost("/setup-api/browser", { action: "scroll", x, y, ...(deltaX !== undefined ? { deltaX } : {}), deltaY });
-    return browserResult(`Scrolled (${x},${y}) by ${deltaY}px`, result);
+    const result = await browserAction("scroll", { x, y, ...(deltaX !== undefined ? { deltaX } : {}), deltaY });
+    return browserResult(`Scrolled at (${x},${y}) by ${deltaY}px`, result);
   }
 );
 
-server.tool("browser_screenshot", "Take a screenshot of current browser page.", async () => {
-  const result = await apiPost("/setup-api/browser", { action: "screenshot" });
-  return browserResult("Screenshot captured.", result);
-});
+server.tool("browser_screenshot",
+  "Take a screenshot of the current browser page (1280x720). Use this to see what's on screen before clicking.",
+  async () => {
+    const result = await browserAction("screenshot");
+    return browserResult("Screenshot captured.", result);
+  }
+);
 
-server.tool("browser_close", "Close the browser session.", async () => {
-  await apiPost("/setup-api/browser", { action: "close" });
+server.tool("browser_close", "Close the browser and end the session.", async () => {
+  if (currentSessionId) {
+    try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
+    currentSessionId = null;
+  }
   return { content: [{ type: "text", text: "Browser closed." }] };
 });
 
@@ -1551,7 +1600,6 @@ const AVAILABLE_APPS = [
   { id: "store", name: "Store", description: "App store" },
   { id: "browser", name: "Browser", description: "Web browser" },
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
-  { id: "vscode", name: "VS Code", description: "Code editor" },
 ];
 
 server.tool("ui_open_app", "Open an app on the ClawBox desktop",
@@ -1586,7 +1634,16 @@ server.tool("ui_notify", "Show a notification on the ClawBox desktop",
 
 server.tool("webapp_create",
   `Create a single-file web app on the ClawBox desktop. For multi-file apps, use code_project_* instead.
-Write complete standalone HTML with inline CSS/JS. Dark theme: bg #1a1a2e, text #e0e0e0, accent #f97316. No CDN links.`,
+Write complete standalone HTML with inline CSS/JS. Dark theme: bg #1a1a2e, text #e0e0e0, accent #f97316. No CDN links.
+
+IMPORTANT — persistent data: Do NOT use localStorage (it does not persist across sessions).
+Use the server-side KV store API instead:
+  GET  /setup-api/kv?key=myapp:data         → { key, value }
+  GET  /setup-api/kv?prefix=myapp:          → { "myapp:a": "...", "myapp:b": "..." }
+  POST /setup-api/kv  { key: "myapp:data", value: JSON.stringify(data) }
+  POST /setup-api/kv  { delete: "myapp:data" }
+Always namespace keys with your appId prefix (e.g. "todo:items", "notes:list").
+Values are strings — JSON.stringify objects before saving, JSON.parse after loading.`,
   {
     appId: z.string().describe("Unique app ID (lowercase, hyphens)"),
     name: z.string().describe("Display name"),
@@ -1628,7 +1685,15 @@ server.tool("code_project_init",
 2. Use read_file/write_file/edit_file on files in data/code-projects/<id>/
 3. Use code_project_build to bundle and deploy
 
-Templates: "app" (default, multi-file) or "blank" (single index.html)`,
+Templates: "app" (default, multi-file) or "blank" (single index.html)
+
+IMPORTANT — persistent data: Do NOT use localStorage (it does not persist across sessions).
+Use the server-side KV store API instead:
+  GET  /setup-api/kv?key=myapp:data         → { key, value }
+  GET  /setup-api/kv?prefix=myapp:          → all keys with prefix
+  POST /setup-api/kv  { key: "myapp:data", value: JSON.stringify(data) }
+  POST /setup-api/kv  { delete: "myapp:data" }
+Namespace keys with projectId prefix (e.g. "todo:items"). Values are strings — use JSON.stringify/parse.`,
   {
     projectId: z.string().describe("Unique ID (lowercase, hyphens)"),
     name: z.string().describe("Display name"),

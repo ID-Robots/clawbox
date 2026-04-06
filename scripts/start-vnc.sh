@@ -55,6 +55,13 @@ if command -v openbox &>/dev/null; then
     <name>Clearlooks</name>
     <titleLayout>NLIMC</titleLayout>
   </theme>
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>yes</followMouse>
+    <focusDelay>0</focusDelay>
+    <underMouse>yes</underMouse>
+    <raiseOnFocus>yes</raiseOnFocus>
+  </focus>
   <desktops><number>1</number></desktops>
   <mouse>
     <context name="Root">
@@ -66,6 +73,9 @@ if command -v openbox &>/dev/null; then
       <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
     </context>
     <context name="Frame">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+    <context name="Client">
       <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
     </context>
   </mouse>

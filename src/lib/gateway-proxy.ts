@@ -88,6 +88,13 @@ export async function serveGatewayHTML(
     var s=JSON.parse(localStorage.getItem(SK)||"{}");
     if(s.gatewayUrl!==wsUrl){s.gatewayUrl=wsUrl;localStorage.setItem(SK,JSON.stringify(s))}
     ${safeToken ? `var t=${safeToken};var tk=TP+wsUrl;if(sessionStorage.getItem(tk)!==t){sessionStorage.setItem(tk,t)}` : ""}
+    // Inject gatewayUrl+token into URL hash so the SPA auto-connects on first load
+    if(!location.hash.includes("gatewayUrl")){
+      var h=new URLSearchParams(location.hash.replace(/^#/,""));
+      h.set("gatewayUrl",wsUrl);
+      ${safeToken ? `h.set("token",t);` : ""}
+      location.replace(location.pathname+location.search+"#"+h.toString());
+    }
   }catch(e){}
 })();
 </script>`;
