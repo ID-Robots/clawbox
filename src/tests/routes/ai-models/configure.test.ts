@@ -80,6 +80,7 @@ describe("POST /setup-api/ai-models/configure", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    process.env.CLAWBOX_AI_API_KEY = "test-clawbox-ai-key";
 
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
@@ -95,6 +96,7 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   afterEach(() => {
+    delete process.env.CLAWBOX_AI_API_KEY;
     vi.clearAllMocks();
   });
 
@@ -159,6 +161,16 @@ describe("POST /setup-api/ai-models/configure", () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
       apiKey: "sk-openai-key",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+  });
+
+  it("configures ClawBox AI without a user-supplied API key", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
     }));
     const body = await res.json();
 
@@ -276,6 +288,41 @@ describe("POST /setup-api/ai-models/configure", () => {
     const writeCall = mockFs.writeFile.mock.calls[0];
     const writtenContent = JSON.parse(writeCall[1] as string);
     expect(writtenContent.profiles["ollama:default"].key).toBe("ollama-local");
+  });
+
+  it("configures ClawBox AI as a fallback model when the device key is present", async () => {
+    await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+    }));
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).toContain("config set agents.defaults.model.fallback deepseek/deepseek-chat");
+    expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
+
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["deepseek:default"]).toEqual(
+      expect.objectContaining({
+        type: "api_key",
+        provider: "deepseek",
+        key: "test-clawbox-ai-key",
+      })
+    );
+  });
+
+  it("returns 503 for ClawBox AI when the device key is missing", async () => {
+    delete process.env.CLAWBOX_AI_API_KEY;
+    vi.resetModules();
+    const mod = await import("@/app/setup-api/ai-models/configure/route");
+    configurePost = mod.POST;
+
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error).toContain("CLAWBOX_AI_API_KEY");
   });
 
   it("restarts gateway after configuration", async () => {
