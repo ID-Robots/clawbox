@@ -19,15 +19,27 @@ export async function GET() {
     const profiles = config.auth?.profiles ?? {};
     const model = config.agents?.defaults?.model?.primary ?? null;
 
-    // Find the first connected provider
+    // Match the active profile against the primary model so legacy/fallback
+    // profiles (e.g. ClawBox AI added as a fallback alongside the user's
+    // chosen provider) don't get reported as the active one.
     const profileKeys = Object.keys(profiles);
+    const primaryProviderHint = model ? model.split("/")[0] : null;
+    let activeKey: string | undefined;
+    if (primaryProviderHint) {
+      activeKey = profileKeys.find((key) => {
+        const entry = profiles[key];
+        const entryProvider = entry?.provider ?? key.split(":")[0];
+        return entryProvider === primaryProviderHint;
+      });
+    }
+    activeKey ??= profileKeys[0];
+
     let provider: string | null = null;
     let mode: string | null = null;
-
-    if (profileKeys.length > 0) {
-      const first = profiles[profileKeys[0]];
-      provider = first?.provider ?? profileKeys[0].split(":")[0];
-      mode = first?.mode ?? null;
+    if (activeKey) {
+      const entry = profiles[activeKey];
+      provider = entry?.provider ?? activeKey.split(":")[0];
+      mode = entry?.mode ?? null;
     }
 
     return NextResponse.json({

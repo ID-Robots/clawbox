@@ -304,6 +304,11 @@ export const fr: Record<string, string> = {
   "login.logIn": "Se connecter",
   "login.passwordRequired": "Le mot de passe est requis",
   "login.connectionFailed": "Échec de la connexion",
+  "updateNotification.title": "Mise à jour disponible",
+  "updateNotification.description": "Une nouvelle version est prête à être installée.",
+  "updateNotification.viewUpdate": "Voir la mise à jour",
+  "updateNotification.later": "Plus tard",
+  "updateNotification.dismiss": "Ignorer",
 };
 
 export const it: Record<string, string> = {
@@ -612,6 +617,11 @@ export const it: Record<string, string> = {
   "login.logIn": "Accedi",
   "login.passwordRequired": "La password è obbligatoria",
   "login.connectionFailed": "Connessione fallita",
+  "updateNotification.title": "Aggiornamento disponibile",
+  "updateNotification.description": "Una nuova versione è pronta per l'installazione.",
+  "updateNotification.viewUpdate": "Vedi aggiornamento",
+  "updateNotification.later": "Più tardi",
+  "updateNotification.dismiss": "Ignora",
 };
 
 export const ja: Record<string, string> = {
@@ -920,4 +930,9 @@ export const ja: Record<string, string> = {
   "login.logIn": "ログイン",
   "login.passwordRequired": "パスワードは必須です",
   "login.connectionFailed": "接続に失敗しました",
+  "updateNotification.title": "アップデートが利用可能",
+  "updateNotification.description": "新しいバージョンをインストールできます。",
+  "updateNotification.viewUpdate": "アップデートを表示",
+  "updateNotification.later": "後で",
+  "updateNotification.dismiss": "閉じる",
 };

@@ -344,6 +344,13 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "login.logIn": "Log In",
     "login.passwordRequired": "Password is required",
     "login.connectionFailed": "Connection failed",
+
+    // === UpdateNotification ===
+    "updateNotification.title": "Update available",
+    "updateNotification.description": "A newer version is ready to install.",
+    "updateNotification.viewUpdate": "View update",
+    "updateNotification.later": "Later",
+    "updateNotification.dismiss": "Dismiss",
   },
   bg: bgDesktop,
   de: deDesktop,

@@ -66,4 +66,27 @@ describe("/setup-api/ai-models/status", () => {
     expect(body.provider).toBe("openai");
     expect(body.providerLabel).toBe("OpenAI GPT");
   });
+
+  it("matches the active profile to the primary model when fallback profiles exist", async () => {
+    // Simulates a device that previously had Anthropic OAuth configured and
+    // then switched to ClawBox AI — both profiles remain in the file but the
+    // primary model points at deepseek.
+    mockReadConfig.mockResolvedValue({
+      auth: {
+        profiles: {
+          "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+        },
+      },
+      agents: {
+        defaults: { model: { primary: "deepseek/deepseek-chat" } },
+      },
+    } as never);
+    const res = await GET();
+    const body = await res.json();
+    expect(body.provider).toBe("deepseek");
+    expect(body.providerLabel).toBe("ClawBox AI");
+    expect(body.mode).toBe("api_key");
+    expect(body.model).toBe("deepseek/deepseek-chat");
+  });
 });

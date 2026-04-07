@@ -304,6 +304,11 @@ export const bg: Record<string, string> = {
   "login.logIn": "Влез",
   "login.passwordRequired": "Паролата е задължителна",
   "login.connectionFailed": "Неуспешно свързване",
+  "updateNotification.title": "Налична е актуализация",
+  "updateNotification.description": "Готова е за инсталиране нова версия.",
+  "updateNotification.viewUpdate": "Виж актуализацията",
+  "updateNotification.later": "По-късно",
+  "updateNotification.dismiss": "Затвори",
 };
 
 export const de: Record<string, string> = {
@@ -612,6 +617,11 @@ export const de: Record<string, string> = {
   "login.logIn": "Anmelden",
   "login.passwordRequired": "Passwort ist erforderlich",
   "login.connectionFailed": "Verbindung fehlgeschlagen",
+  "updateNotification.title": "Aktualisierung verfügbar",
+  "updateNotification.description": "Eine neuere Version ist bereit zur Installation.",
+  "updateNotification.viewUpdate": "Update anzeigen",
+  "updateNotification.later": "Später",
+  "updateNotification.dismiss": "Schließen",
 };
 
 export const es: Record<string, string> = {
@@ -920,4 +930,9 @@ export const es: Record<string, string> = {
   "login.logIn": "Iniciar sesión",
   "login.passwordRequired": "La contraseña es obligatoria",
   "login.connectionFailed": "Error de conexión",
+  "updateNotification.title": "Actualización disponible",
+  "updateNotification.description": "Una versión más reciente está lista para instalar.",
+  "updateNotification.viewUpdate": "Ver actualización",
+  "updateNotification.later": "Más tarde",
+  "updateNotification.dismiss": "Descartar",
 };

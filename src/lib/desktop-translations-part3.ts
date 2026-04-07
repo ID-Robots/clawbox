@@ -304,6 +304,11 @@ export const nl: Record<string, string> = {
   "login.logIn": "Inloggen",
   "login.passwordRequired": "Wachtwoord is verplicht",
   "login.connectionFailed": "Verbinding mislukt",
+  "updateNotification.title": "Update beschikbaar",
+  "updateNotification.description": "Er is een nieuwere versie klaar om te installeren.",
+  "updateNotification.viewUpdate": "Update bekijken",
+  "updateNotification.later": "Later",
+  "updateNotification.dismiss": "Sluiten",
 };
 
 export const sv: Record<string, string> = {
@@ -612,6 +617,11 @@ export const sv: Record<string, string> = {
   "login.logIn": "Logga in",
   "login.passwordRequired": "Lösenord krävs",
   "login.connectionFailed": "Anslutningen misslyckades",
+  "updateNotification.title": "Uppdatering tillgänglig",
+  "updateNotification.description": "En nyare version är redo att installeras.",
+  "updateNotification.viewUpdate": "Visa uppdatering",
+  "updateNotification.later": "Senare",
+  "updateNotification.dismiss": "Stäng",
 };
 
 export const zh: Record<string, string> = {
@@ -920,4 +930,9 @@ export const zh: Record<string, string> = {
   "login.logIn": "登录",
   "login.passwordRequired": "请输入密码",
   "login.connectionFailed": "连接失败",
+  "updateNotification.title": "有可用更新",
+  "updateNotification.description": "新版本已准备好安装。",
+  "updateNotification.viewUpdate": "查看更新",
+  "updateNotification.later": "稍后",
+  "updateNotification.dismiss": "关闭",
 };

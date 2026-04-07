@@ -3,7 +3,7 @@ import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
-import { findOpenclawBin } from "./openclaw-config";
+import { findOpenclawBin, restartGateway } from "./openclaw-config";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -234,6 +234,26 @@ interface VersionInfo {
 let cachedVersionInfo: VersionInfo | null = null;
 let versionInfoCacheTime = 0;
 
+function invalidateVersionCache(): void {
+  cachedVersionInfo = null;
+  versionInfoCacheTime = 0;
+}
+
+/**
+ * Compare two semver tags ("v2.2.3" vs "v2.2.2"). Returns negative if a<b,
+ * positive if a>b, 0 if equal. Non-semver inputs sort as 0.
+ */
+function compareSemverTags(a: string, b: string): number {
+  const parse = (t: string) => t.replace(/^v/, "").split(".").map((n) => Number(n) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
     return cachedVersionInfo;
@@ -259,10 +279,16 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const rawVersion = process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
   const baseTag = rawVersion.match(/^(v\d+\.\d+\.\d+)/)?.[1] ?? rawVersion;
 
+  // Only report a target if it's strictly newer than the device's base tag.
+  // (A dev box can sit on a local tag ahead of origin's latest release.)
+  const clawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+    ? targetVersion
+    : null;
+
   cachedVersionInfo = {
     clawbox: {
       current: rawVersion,
-      target: targetVersion && targetVersion === baseTag ? null : targetVersion,
+      target: clawboxTarget,
     },
     openclaw: {
       current: openclawCurrent,
@@ -292,15 +318,7 @@ export async function getTargetVersion(): Promise<string | null> {
       targetVersionCacheTime = Date.now();
       return null;
     }
-    semverTags.sort((a, b) => {
-      const pa = a.replace(/^v/, "").split(".").map(Number);
-      const pb = b.replace(/^v/, "").split(".").map(Number);
-      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const diff = (pa[i] || 0) - (pb[i] || 0);
-        if (diff !== 0) return diff;
-      }
-      return 0;
-    });
+    semverTags.sort(compareSemverTags);
     cachedTargetVersion = semverTags[semverTags.length - 1];
     targetVersionCacheTime = Date.now();
     return cachedTargetVersion;
@@ -311,14 +329,14 @@ export async function getTargetVersion(): Promise<string | null> {
   }
 }
 
+function createStepStates(steps: UpdateStepDef[]): StepState[] {
+  return steps.map((s) => ({ id: s.id, label: s.label, status: "pending" as const }));
+}
+
 function createInitialState(): UpdateState {
   return {
     phase: "idle",
-    steps: UPDATE_STEPS.map((s) => ({
-      id: s.id,
-      label: s.label,
-      status: "pending" as const,
-    })),
+    steps: createStepStates(UPDATE_STEPS),
     currentStepIndex: -1,
   };
 }
@@ -339,12 +357,18 @@ export async function isUpdateCompleted(): Promise<boolean> {
   return !!(await get("update_completed"));
 }
 
+interface RunOptions {
+  /** Persist `update_completed` after a successful full run. */
+  markCompleted: boolean;
+}
+
 /**
  * Launch runUpdate in the background with shared error handling.
- * Used by both startUpdate (fresh run) and checkContinuation (post-reboot).
+ * Used by startUpdate (fresh run), checkContinuation (post-reboot), and
+ * startOpenclawUpdate (scoped run with a different step list).
  */
-function launchUpdate(startFrom: number): void {
-  runUpdate(startFrom)
+function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): void {
+  runUpdate(steps, startFrom, options)
     .catch((err) => {
       console.error("[Updater] Unexpected error:", err);
       state.phase = "failed";
@@ -376,7 +400,7 @@ export async function checkContinuation(): Promise<boolean> {
   }
   state.currentStepIndex = startFrom;
 
-  launchUpdate(startFrom);
+  launchUpdate(UPDATE_STEPS, startFrom, { markCompleted: true });
   return true;
 }
 
@@ -390,7 +414,47 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  launchUpdate(0);
+  launchUpdate(UPDATE_STEPS, 0, { markCompleted: true });
+  return { started: true };
+}
+
+// Scoped update path: re-installs OpenClaw + re-applies the gateway patch
+// and bounces the gateway, without touching ClawBox itself. Reuses the
+// same global state machine so the existing UpdateOverlay UI renders it.
+const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
+  {
+    id: "openclaw_install",
+    label: "Updating OpenClaw",
+    timeoutMs: 120_000,
+    requiresRoot: true,
+  },
+  {
+    id: "openclaw_patch",
+    label: "Patching OpenClaw gateway",
+    timeoutMs: 30_000,
+    requiresRoot: true,
+  },
+  {
+    id: "gateway_restart",
+    label: "Restarting OpenClaw gateway",
+    timeoutMs: 30_000,
+    customRun: () => restartGateway(),
+  },
+];
+
+export function startOpenclawUpdate(): { started: boolean; error?: string } {
+  if (running) {
+    return { started: false, error: "Update already in progress" };
+  }
+
+  running = true;
+  state = {
+    phase: "running",
+    steps: createStepStates(OPENCLAW_UPDATE_STEPS),
+    currentStepIndex: 0,
+  };
+
+  launchUpdate(OPENCLAW_UPDATE_STEPS, 0, { markCompleted: false });
   return { started: true };
 }
 
@@ -406,7 +470,7 @@ async function checkInternet(): Promise<boolean> {
   return false;
 }
 
-async function runUpdate(startFrom: number): Promise<void> {
+async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
   if (startFrom === 0 && !(await checkInternet())) {
     state.phase = "failed";
     state.error = "No internet connection. Check your WiFi and try again.";
@@ -416,8 +480,8 @@ async function runUpdate(startFrom: number): Promise<void> {
 
   let failed = false;
 
-  for (let i = startFrom; i < UPDATE_STEPS.length; i++) {
-    const step = UPDATE_STEPS[i];
+  for (let i = startFrom; i < steps.length; i++) {
+    const step = steps[i];
     state.currentStepIndex = i;
     state.steps[i].status = "running";
     state.steps[i].error = undefined;
@@ -449,11 +513,14 @@ async function runUpdate(startFrom: number): Promise<void> {
   state.currentStepIndex = -1;
   state.phase = failed ? "failed" : "completed";
 
-  if (!failed) {
+  if (!failed && options.markCompleted) {
     await setMany({
       update_completed: true,
       update_completed_at: new Date().toISOString(),
     });
   }
+  // Force the next /update/versions poll to refetch — both the device's
+  // installed versions and the desktop notification depend on it.
+  invalidateVersionCache();
   console.log("[Updater] Update process finished");
 }

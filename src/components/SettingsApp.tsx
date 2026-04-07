@@ -51,7 +51,8 @@ interface SystemStats {
 }
 
 
-type Section = "appearance" | "wifi" | "ai" | "telegram" | "system" | "about";
+const SECTIONS = ["appearance", "wifi", "ai", "telegram", "system", "about"] as const;
+type Section = typeof SECTIONS[number];
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
@@ -101,6 +102,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [section, setSection] = useState<Section>("appearance");
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
+
+  // Allow other parts of the desktop (e.g. the "new version available" toast)
+  // to deep-link into a specific Settings section. Read a pending value left
+  // on `window` first, so a deep-link issued before this effect runs (cold
+  // open of Settings) isn't lost to a listener-mount race.
+  useEffect(() => {
+    const isSection = (s: unknown): s is Section =>
+      typeof s === "string" && (SECTIONS as readonly string[]).includes(s);
+    const apply = (s: unknown) => {
+      if (isSection(s)) {
+        setSection(s);
+        setMobileSection(s);
+      }
+    };
+    const w = window as Window & { __clawboxPendingSettingsSection?: unknown };
+    if (w.__clawboxPendingSettingsSection !== undefined) {
+      apply(w.__clawboxPendingSettingsSection);
+      delete w.__clawboxPendingSettingsSection;
+    }
+    const handler = (event: Event) =>
+      apply((event as CustomEvent<{ section?: string }>).detail?.section);
+    window.addEventListener("clawbox:open-settings-section", handler);
+    return () => window.removeEventListener("clawbox:open-settings-section", handler);
+  }, []);
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 640);
@@ -246,6 +271,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setUpdateState(null);
     try {
       const res = await fetch("/setup-api/update/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
+      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
+      startUpdatePolling();
+    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
+  };
+
+  const triggerOpenclawUpdate = async () => {
+    setUpdateStarted(true);
+    setUpdateError(null);
+    setUpdateState(null);
+    try {
+      const res = await fetch("/setup-api/update/openclaw", { method: "POST" });
       if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
       startUpdatePolling();
     } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
@@ -880,7 +916,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
                       <span className="text-xs text-green-400/80">
                         {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
-                        {aiProvider.mode ? ` · ${aiProvider.mode}` : ""}
                       </span>
                     </div>
                   </div>
@@ -1297,13 +1332,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
-            <button
-              onClick={() => triggerUpdate()}
-              className="flex items-center gap-3 w-full bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
-              {t("settings.systemUpdate")}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => triggerUpdate()}
+                className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
+                {t("settings.systemUpdate")}
+              </button>
+              <button
+                onClick={() => triggerOpenclawUpdate()}
+                className="flex items-center gap-3 flex-1 bg-blue-500/10 rounded-xl px-4 py-3 text-sm text-blue-400/80 hover:text-blue-400 border border-blue-500/20 hover:bg-blue-500/15 transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>cloud_download</span>
+                {t("settings.openclawUpdate")}
+              </button>
+            </div>
 
             <button
               onClick={() => setResetConfirm(true)}
@@ -1686,11 +1730,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {(updateError || updateState?.phase === "failed") && (
                 <div className="absolute inset-0 rounded-full border-2 border-red-500/30" />
               )}
-              {/* Logo */}
+              {/* Logo — matches the welcome screen in the setup wizard */}
               <img
-                src="/clawbox-logo.png"
+                src="/clawbox-crab.png"
                 alt="ClawBox"
-                className="w-20 h-20 rounded-3xl shadow-2xl relative z-10"
+                className="w-24 h-24 object-contain relative z-10"
                 style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
               />
             </div>

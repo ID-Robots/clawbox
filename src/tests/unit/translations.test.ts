@@ -117,6 +117,7 @@ describe("translations", () => {
         "openclaw",
         "drawer",
         "login",
+        "updateNotification",
       ]);
 
       for (const key of Object.keys(translations.en)) {

@@ -932,6 +932,73 @@ function ChromeDesktopInner() {
     return () => { active = false; clearInterval(id); };
   }, []);
 
+  // Surfaces a corner card when ClawBox or OpenClaw has a newer release.
+  // Dismissals persist per exact target-version pair via SQLite so the user
+  // isn't pestered across browsers or after a cache wipe.
+  const [updateAvailable, setUpdateAvailable] = useState<{
+    clawbox: { current: string | null; target: string | null };
+    openclaw: { current: string | null; target: string | null };
+  } | null>(null);
+  const lastVersionFingerprintRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const checkVersions = async () => {
+      try {
+        const versionsRes = await fetch("/setup-api/update/versions");
+        if (!active || !versionsRes.ok) return;
+        const data = await versionsRes.json();
+        const clawboxNeedsUpdate = !!data.clawbox?.target && data.clawbox.target !== data.clawbox.current;
+        const openclawNeedsUpdate = !!data.openclaw?.target && data.openclaw.target !== data.openclaw.current;
+        // Fingerprint covers both targets *and* currents — bumping the device
+        // version after an update should retire a stale "available" card even
+        // if the next-target hasn't shifted yet.
+        const fingerprint = `${data.clawbox?.current ?? ""}|${data.clawbox?.target ?? ""}|${data.openclaw?.current ?? ""}|${data.openclaw?.target ?? ""}`;
+        if (fingerprint === lastVersionFingerprintRef.current) return;
+        lastVersionFingerprintRef.current = fingerprint;
+
+        if (!clawboxNeedsUpdate && !openclawNeedsUpdate) {
+          setUpdateAvailable(null);
+          return;
+        }
+        // Only hit the dismissal store when we actually have something to suppress.
+        const dismissalRes = await fetch("/setup-api/update/dismissal");
+        let dismissed: string | null = null;
+        if (dismissalRes.ok) {
+          try { dismissed = (await dismissalRes.json()).fingerprint ?? null; } catch {}
+        }
+        const dismissalFingerprint = `${data.clawbox?.target ?? ""}|${data.openclaw?.target ?? ""}`;
+        setUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+      } catch { /* network blip — try again next interval */ }
+    };
+    checkVersions();
+    const id = setInterval(checkVersions, 30 * 60 * 1000);
+    return () => { active = false; clearInterval(id); };
+  }, []);
+
+  const dismissUpdateNotification = useCallback(() => {
+    setUpdateAvailable((current) => {
+      if (current) {
+        const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
+        fetch("/setup-api/update/dismissal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fingerprint }),
+        }).catch(() => { /* will retry next dismiss */ });
+      }
+      return null;
+    });
+  }, []);
+
+  const openUpdateSettings = useCallback(() => {
+    // Stash the section before opening so SettingsApp drains it on mount,
+    // and also dispatch the event for already-mounted instances.
+    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = "about";
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "about" } }));
+    openAppRef.current("settings");
+    dismissUpdateNotification();
+  }, [dismissUpdateNotification]);
+
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
       prev.map((w) => w.id === windowId ? { ...w, x: geo.x, y: geo.y, width: geo.width, height: geo.height } : w)
@@ -1259,6 +1326,63 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
+      {/* New version available notification */}
+      {updateAvailable && (() => {
+        const cb = updateAvailable.clawbox;
+        const oc = updateAvailable.openclaw;
+        const cbNeeds = !!cb?.target && cb.target !== cb.current;
+        const ocNeeds = !!oc?.target && oc.target !== oc.current;
+        return (
+          <div
+            className="fixed bottom-20 right-4 z-[99998] w-[320px] rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 fade-in duration-300"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="flex items-start gap-3 px-4 py-3">
+              <div className="w-9 h-9 rounded-full bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
+                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 20 }}>system_update</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold text-white">{t("updateNotification.title")}</div>
+                <div className="text-xs text-white/60 mt-0.5">{t("updateNotification.description")}</div>
+                <div className="mt-2 space-y-0.5">
+                  {cbNeeds && (
+                    <div className="text-[11px] text-white/70 font-mono truncate">
+                      ClawBox {cb.current} → <span className="text-orange-300">{cb.target}</span>
+                    </div>
+                  )}
+                  {ocNeeds && (
+                    <div className="text-[11px] text-white/70 font-mono truncate">
+                      OpenClaw {oc.current ?? "?"} → <span className="text-orange-300">{oc.target}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={dismissUpdateNotification}
+                className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                aria-label={t("updateNotification.dismiss")}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-2 px-4 pb-3">
+              <button
+                onClick={openUpdateSettings}
+                className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
+              >
+                {t("updateNotification.viewUpdate")}
+              </button>
+              <button
+                onClick={dismissUpdateNotification}
+                className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
+              >
+                {t("updateNotification.later")}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
       {/* Mobile fullscreen splash */}
       {showSplash && (
         <div
