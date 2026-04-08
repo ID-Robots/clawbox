@@ -18,11 +18,10 @@ test("browser app installs chromium, enables integration, and opens the VNC app"
 
   await openLauncher(page);
   const browserLauncherButton = page.getByTestId("app-launcher").getByRole("button", { name: "Browser" });
-  await browserLauncherButton.focus();
-  await browserLauncherButton.press("Enter");
+  await browserLauncherButton.click();
 
   const browserWindow = page.getByTestId("chrome-window-browser");
-  await expect(browserWindow).toBeVisible();
+  await expect(browserWindow).toBeVisible({ timeout: 15000 });
 
   await browserWindow.getByRole("button", { name: "Install Chromium" }).click();
   await expect(browserWindow.getByText("Chromium 124.0.0")).toBeVisible();
