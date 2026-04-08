@@ -18,19 +18,12 @@ jobs:
           bun-version: "1.2.10"
 
       - name: Install
-        id: install
-        continue-on-error: true
         run: bun install --frozen-lockfile
 
       - name: Test
-        id: tests
-        if: always()
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          bun run test:coverage 2>&1 | tee test-output.log
-          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        run: bun run test:coverage
 
+      # Always parse coverage so the PR comment can show numbers even on failure.
       - name: Parse coverage
         id: coverage
         if: always()
@@ -48,10 +41,6 @@ jobs:
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Fail if tests failed
-        if: ${{ steps.install.outcome != 'success' || steps.tests.outputs.exit_code != '0' }}
-        run: exit 1
 
   comment:
     if: ${{ github.event_name == 'pull_request' }}
