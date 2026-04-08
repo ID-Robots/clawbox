@@ -253,7 +253,7 @@ step_openclaw_patch() {
   local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
 
   local DEVICE_FILES
-  DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  DEVICE_FILES=$(grep -rl --include='*.js' 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
   if [ -z "$DEVICE_FILES" ]; then
     echo "  Device identity bypass patch: pattern not found, skipping"
     return
@@ -276,7 +276,7 @@ step_openclaw_patch() {
     sed -i 's|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };\n\tif (params.isControlUi \&\& params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "$file"
   done
 
-  # Verify ALL files with reject-device-required now have the patch
+  # Verify ALL JS files with reject-device-required now have the patch
   local UNPATCHED
   UNPATCHED=""
   for file in $DEVICE_FILES; do
