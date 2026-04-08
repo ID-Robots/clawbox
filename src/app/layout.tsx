@@ -15,7 +15,7 @@ export const metadata: Metadata = {
   title: "ClawBox",
   description: "Personal AI Assistant Device",
   manifest: "/manifest.json",
-  themeColor: "#f97316",
+  themeColor: "#0a0f1a",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "48x48" },

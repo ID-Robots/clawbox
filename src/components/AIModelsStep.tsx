@@ -871,7 +871,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
   }, [embedded, onNext, onConfigured, t]);
 
   return (
-    <div className="w-full max-w-[520px]">
+    <div className="w-full max-w-[520px]" data-testid="setup-step-ai-models">
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
         {configuring && (
           <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} t={t} />

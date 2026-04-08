@@ -2,6 +2,7 @@
 
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import Link from "next/link";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
@@ -95,7 +96,7 @@ export default function StandaloneAppPage() {
     <div className="h-dvh w-full bg-[#0a0f1a] text-white flex flex-col">
       {/* Minimal title bar */}
       <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
-        <img src="/clawbox-logo.png" alt="" className="w-5 h-5 rounded" />
+        <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
         <span className="text-xs font-medium text-white/70">{APP_TITLES[id ?? ""] ?? id}</span>
         <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
           Back to Desktop

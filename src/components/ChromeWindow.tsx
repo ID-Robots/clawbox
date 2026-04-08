@@ -108,6 +108,7 @@ export default function ChromeWindow({
   const [opening, setOpening] = useState(true);
   const [minimizing, setMinimizing] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const windowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ isDragging: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
   const resizeRef = useRef<{
@@ -125,12 +126,20 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
-  rightInsetRef.current = rightInset;
   const MIN_WIDTH = 300;
   const MIN_HEIGHT = 200;
 
-  currentSizeRef.current = size;
-  currentPosRef.current = position;
+  useLayoutEffect(() => {
+    rightInsetRef.current = rightInset;
+  }, [rightInset]);
+
+  useLayoutEffect(() => {
+    currentSizeRef.current = size;
+  }, [size]);
+
+  useLayoutEffect(() => {
+    currentPosRef.current = position;
+  }, [position]);
 
   // Opening animation - runs once on mount
   useEffect(() => {
@@ -142,18 +151,28 @@ export default function ChromeWindow({
   useLayoutEffect(() => {
     const wasMinimized = prevMinimizedRef.current;
     prevMinimizedRef.current = minimized;
+    let frame: number | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     if (minimized && !wasMinimized) {
       // Starting minimize animation
-      setMinimizing(true);
+      frame = requestAnimationFrame(() => {
+        setMinimizing(true);
+      });
     } else if (!minimized && wasMinimized) {
-      // Clear any leftover minimizing state before restoring
-      setMinimizing(false);
-      // Starting restore animation
-      setRestoring(true);
-      const timer = setTimeout(() => setRestoring(false), 250);
-      return () => clearTimeout(timer);
+      frame = requestAnimationFrame(() => {
+        // Clear any leftover minimizing state before restoring
+        setMinimizing(false);
+        // Starting restore animation
+        setRestoring(true);
+        timer = setTimeout(() => setRestoring(false), 250);
+      });
     }
+
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (timer !== null) clearTimeout(timer);
+    };
   }, [minimized]);
 
   const handleDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
@@ -187,6 +206,7 @@ export default function ChromeWindow({
         startPosY: position.y,
       };
     }
+    setIsDragging(true);
     onFocus();
   }, [maximized, snapped, position.x, position.y, onFocus]);
 
@@ -300,6 +320,7 @@ export default function ChromeWindow({
 
       if (!dragRef.current.isDragging) return;
       dragRef.current.isDragging = false;
+      setIsDragging(false);
 
       const clientX = "changedTouches" in e ? e.changedTouches[0].clientX : (e as MouseEvent).clientX;
       const clientY = "changedTouches" in e ? e.changedTouches[0].clientY : (e as MouseEvent).clientY;
@@ -376,6 +397,7 @@ export default function ChromeWindow({
   return (
     <div
       ref={windowRef}
+      data-testid={appId ? `chrome-window-${appId}` : undefined}
       className={`fixed flex flex-col overflow-hidden ${
         opening ? "chrome-window-opening" : ""
       } ${closing ? "chrome-window-closing" : ""} ${
@@ -389,7 +411,7 @@ export default function ChromeWindow({
           ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
           : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
         opacity: 1,
-        transition: snapped && !dragRef.current.isDragging
+        transition: snapped && !isDragging
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
           : "opacity 0.15s, box-shadow 0.15s",
       }}
@@ -421,6 +443,7 @@ export default function ChromeWindow({
             onClick={handleMinimize}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
             title={t("window.minimize")}
+            aria-label={t("window.minimize")}
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
           </button>
@@ -430,6 +453,7 @@ export default function ChromeWindow({
             onClick={handleMaximize}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
             title={maximized ? t("window.restore") : t("window.maximize")}
+            aria-label={maximized ? t("window.restore") : t("window.maximize")}
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
@@ -439,6 +463,7 @@ export default function ChromeWindow({
             onClick={handleClose}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-red-500/80 active:bg-red-600 transition-colors cursor-pointer group"
             title={t("window.close")}
+            aria-label={t("window.close")}
           >
             <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
           </button>

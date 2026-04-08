@@ -50,6 +50,11 @@ const FACEPALM_LINES = [
   '🤦', 'Seriously?', 'Why.', '*deep breath*',
   'I can\'t even...', 'This day is cancelled.',
 ]
+const POWER_PARTICLES = [
+  { bottom: 24, left: 38, duration: 1.2, delay: 0.15 },
+  { bottom: 42, left: 76, duration: 1.5, delay: 0.55 },
+  { bottom: 30, left: 108, duration: 1.35, delay: 0.95 },
+]
 
 // Conversation-based sass lines, loaded from server and refreshed daily
 let cachedConvoLines: string[] = []
@@ -145,7 +150,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const [state, setState] = useState<MascotState>('idle')
   const [physicsActive, setPhysicsActive] = useState(false)
   const [frenzy, setFrenzy] = useState(false)
-  const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; emoji: string}[]>([])
+  const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; duration: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const sleepZzzRef = useRef<ReturnType<typeof setInterval>>(null)
@@ -245,7 +250,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   }, [say])
 
   // ─── ImpactJS-style physics tick (runs after drop) ───
-  const physicsLoop = useCallback(() => {
+  const physicsLoop = useCallback(function runPhysicsLoop() {
     const p = physicsRef.current
     if (!p.active || draggingRef.current) return
 
@@ -318,7 +323,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         if (Math.abs(p.velX) < 5) {
           p.active = false; setPhysicsActive(false)
           updateCrabPos()
-          setTimeout(() => doAction(), 2000)
+          setTimeout(() => doActionRef.current(), 2000)
           return
         }
       }
@@ -347,7 +352,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         if (Math.abs(p.velX) < 5) {
           p.active = false; setPhysicsActive(false)
           updateCrabPos()
-          setTimeout(() => doAction(), 2000)
+          setTimeout(() => doActionRef.current(), 2000)
           return
         }
       }
@@ -391,7 +396,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px)`
     }
 
-    physicsRAF.current = requestAnimationFrame(physicsLoop)
+    physicsRAF.current = requestAnimationFrame(runPhysicsLoop)
   }, [updateCrabPos, applyImpactDamage])
 
   // ─── Crab drag + tap detection ───
@@ -482,7 +487,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   }, [physicsLoop])
 
   // ─── Box physics loop ───
-  const boxPhysicsLoop = useCallback(() => {
+  const boxPhysicsLoop = useCallback(function runBoxPhysicsLoop() {
     const p = boxPhysicsRef.current
     if (!p.active || boxDraggingRef.current) return
     const now = performance.now()
@@ -526,7 +531,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       boxElRef.current.style.bottom = '0px'
       boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-p.posY}px)`
     }
-    boxPhysicsRAF.current = requestAnimationFrame(boxPhysicsLoop)
+    boxPhysicsRAF.current = requestAnimationFrame(runBoxPhysicsLoop)
   }, [])
 
   const handleBoxPointerDown = useCallback((e: React.PointerEvent) => {
@@ -632,8 +637,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     kv.remove(SLEEP_KEY)
     say('*yawn* I\'m awake! 😤', 2500)
   }, [say])
-  const wakeSleepRef = useRef(wakeSleep)
-  wakeSleepRef.current = wakeSleep
+  const wakeSleepRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    wakeSleepRef.current = wakeSleep
+  }, [wakeSleep])
 
   // mascotSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
   const mascotSleep = useCallback(() => {
@@ -755,9 +762,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       requestAnimationFrame(jumpLoop)
     }
 
-    stateTimeout.current = setTimeout(doAction, duration + randRange(2000, 6000))
+    stateTimeout.current = setTimeout(() => doActionRef.current(), duration + randRange(2000, 6000))
   }, [pickAction])
-  doActionRef.current = doAction
+  useEffect(() => {
+    doActionRef.current = doAction
+  }, [doAction])
 
   // Listen for new order events — FRENZY MODE
   // Randomize positions on mount to avoid hydration mismatch
@@ -852,6 +861,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           id: Date.now() + i,
           x: Math.random() * 180 - 40,
           delay: Math.random() * 1,
+          duration: 2 + Math.random() * 1.5,
           emoji: moneyEmojis[Math.floor(Math.random() * moneyEmojis.length)],
         }))
         setMoneyParticles(particles)
@@ -882,7 +892,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         frenzyIntervalsRef.current.forEach(clearInterval)
         frenzyIntervalsRef.current = []
         if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-        doAction()
+        doActionRef.current()
       }, 60000)
     }
 
@@ -1145,7 +1155,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
                 <div key={p.id} style={{
                   position: 'absolute', bottom: 50, left: p.x,
                   fontSize: '2rem',
-                  animation: `money-rain ${2 + Math.random() * 1.5}s ease-out ${p.delay}s both`,
+                  animation: `money-rain ${p.duration}s ease-out ${p.delay}s both`,
                   pointerEvents: 'none',
                 }}>{p.emoji}</div>
               ))}
@@ -1174,14 +1184,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
                 }} />
               ))}
               {/* Floating particles */}
-              {[...Array(3)].map((_, i) => (
+              {POWER_PARTICLES.map((particle, i) => (
                 <div key={i} style={{
                   position: 'absolute',
-                  bottom: 20 + Math.random() * 40,
-                  left: 30 + Math.random() * 90,
+                  bottom: particle.bottom,
+                  left: particle.left,
                   width: 4, height: 4, borderRadius: '50%',
                   background: i % 2 === 0 ? '#f97316' : '#fbbf24',
-                  animation: `power-particles ${1 + Math.random()}s ease-out ${Math.random() * 2}s infinite`,
+                  animation: `power-particles ${particle.duration}s ease-out ${particle.delay}s infinite`,
                   pointerEvents: 'none',
                 }} />
               ))}

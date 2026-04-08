@@ -342,7 +342,11 @@ export default function FilesApp() {
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full overflow-hidden relative bg-[var(--bg-deep)] text-[var(--text-primary)] font-body" onClick={closeContextMenu}>
+    <div
+      className="flex h-full overflow-hidden relative bg-[var(--bg-deep)] text-[var(--text-primary)] font-body"
+      data-testid="files-app"
+      onClick={closeContextMenu}
+    >
 
       {/* ── Sidebar ── */}
       {sidebarOpen && (

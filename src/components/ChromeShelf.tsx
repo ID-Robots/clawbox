@@ -95,6 +95,7 @@ export default function ChromeShelf({
     <button
       key={app.id}
       data-crab-platform="true"
+      data-testid={`shelf-app-${app.id}`}
       onClick={() => onAppClick(app.id)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -104,6 +105,7 @@ export default function ChromeShelf({
       }}
       className="relative w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
       title={app.name}
+      aria-label={app.name}
     >
       <div className="w-10 h-10 flex items-center justify-center">{app.icon}</div>
 
@@ -162,6 +164,8 @@ export default function ChromeShelf({
             onClick={onLauncherClick}
             className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.appLauncher")}
+            aria-label={t("shelf.appLauncher")}
+            data-testid="shelf-launcher-button"
           >
             <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
               <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
@@ -176,6 +180,8 @@ export default function ChromeShelf({
             onClick={onLauncherClick}
             className="w-11 h-11 hidden sm:flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.appLauncher")}
+            aria-label={t("shelf.appLauncher")}
+            data-testid="shelf-launcher-button"
           >
             <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
               <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
@@ -213,6 +219,8 @@ export default function ChromeShelf({
             onClick={onTrayClick}
             className="flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.systemSettings")}
+            aria-label={t("shelf.systemSettings")}
+            data-testid="shelf-tray-button"
           >
             <span className="text-sm text-white/80 font-medium hidden sm:inline">{time}</span>
           </button>
@@ -231,6 +239,8 @@ export default function ChromeShelf({
             onClick={onPowerClick}
             className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.power")}
+            aria-label={t("shelf.power")}
+            data-testid="shelf-power-button"
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>power_settings_new</span>
           </button>

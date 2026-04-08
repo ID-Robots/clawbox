@@ -54,7 +54,7 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --no-sandbox \
   --disable-dev-shm-usage \
   --disable-features=Crashpad \
-  --enable-crash-reporter="" \
+  --disable-crash-reporter \
   --no-zygote \
   --disable-background-networking \
   --password-store=basic \

@@ -15,3 +15,6 @@ next-env.d.ts
 .update-branch
 claude-code-source-code/
 code-source-code/
+.omx/
+playwright-report/
+test-results/

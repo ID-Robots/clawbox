@@ -18,7 +18,9 @@ export async function GET(request: NextRequest) {
     const raw = await fs.readFile(OPENCLAW_CONFIG, "utf-8");
     const config = JSON.parse(raw);
     model = config?.agents?.defaults?.model?.primary || "";
-  } catch {}
+  } catch (err) {
+    console.debug("[ws-config] Failed to read openclaw config:", err instanceof Error ? err.message : err);
+  }
 
   return NextResponse.json({
     wsUrl: `ws://${host}:${GATEWAY_PORT}`,

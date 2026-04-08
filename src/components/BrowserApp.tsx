@@ -60,6 +60,24 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [fetchStatus]);
 
+  // Clear actionLoading once polling sees the requested end-state. Some
+  // actions (enable/disable restart the gateway) can outlast or hang the
+  // POST request — without this, the button stays stuck on "Enabling..."
+  // even though the backend already reflects the new state.
+  useEffect(() => {
+    if (!actionLoading || !status) return;
+    const enabled = status.enabled;
+    const browserOn = status.browser?.running;
+    if (
+      (actionLoading === "Enabling..." && enabled) ||
+      (actionLoading === "Disabling..." && !enabled) ||
+      (actionLoading === "Opening..." && browserOn) ||
+      (actionLoading === "Closing..." && !browserOn)
+    ) {
+      setActionLoading(null);
+    }
+  }, [status, actionLoading]);
+
   const doAction = useCallback(async (action: string, loadingLabel: string, successLabel?: string) => {
     setActionLoading(loadingLabel);
     setError(null);

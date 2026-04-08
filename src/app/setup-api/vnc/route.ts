@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import net from "net";
 
@@ -50,7 +50,6 @@ export async function GET() {
       try {
         await execFileAsync("which", ["websockify"]);
         // websockify is installed, start it in background
-        const { spawn } = require("child_process");
         const proc = spawn("websockify", [String(WS_PORT), `localhost:${VNC_PORT}`], {
           detached: true,
           stdio: "ignore",

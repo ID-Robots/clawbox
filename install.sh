@@ -167,7 +167,13 @@ step_git_pull() {
     echo "  Repository exists, pulling latest on branch '$TARGET_BRANCH'..."
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
     if [ "$TARGET_BRANCH" != "$CURRENT_BRANCH" ]; then
-      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null || true
+      if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null; then
+        # Try creating a tracking branch from origin if it only exists remotely
+        if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH" 2>/dev/null; then
+          echo "Error: failed to checkout branch '$TARGET_BRANCH'" >&2
+          exit 1
+        fi
+      fi
     fi
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
     # Fix .git ownership — git operations run as root create root-owned files
@@ -244,32 +250,32 @@ PATHEOF
 }
 
 step_openclaw_patch() {
+  # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
+  # releases ship .d.ts declaration files alongside bundled JS, and literal
+  # type strings would otherwise match files we cannot patch.
   local PATCHED_MARKER='isControlUi && allowControlUiBypass'
 
-  # Already patched — nothing to do
-  if grep -qrl "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+  # Gateway scope patch
+  if grep -qrl --include='*.js' "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
     echo "  Gateway scope patch: already applied"
-    return
-  fi
+  else
+    local SCOPE_FILES
+    SCOPE_FILES=$(grep -Prl --include='*.js' 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
+    if [ -z "$SCOPE_FILES" ]; then
+      echo "Error: Gateway scope patch: pattern not found and patch not already applied"
+      exit 1
+    fi
 
-  # Find files containing the unpatched pattern
-  local SCOPE_FILES
-  SCOPE_FILES=$(grep -Prl 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
-  if [ -z "$SCOPE_FILES" ]; then
-    echo "Error: Gateway scope patch: pattern not found and patch not already applied"
-    exit 1
-  fi
+    for file in $SCOPE_FILES; do
+      sed -i -E 's/if[[:space:]]*\([[:space:]]*scopes\.length[[:space:]]*>[[:space:]]*0[[:space:]]*\)[[:space:]]*\{/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/g' "$file"
+    done
 
-  for file in $SCOPE_FILES; do
-    sed -i -E 's/if[[:space:]]*\([[:space:]]*scopes\.length[[:space:]]*>[[:space:]]*0[[:space:]]*\)[[:space:]]*\{/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/g' "$file"
-  done
-
-  # Verify the patch took effect
-  if ! grep -qrl "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
-    echo "Error: Gateway scope patch verification failed"
-    exit 1
+    if ! grep -qrl --include='*.js' "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+      echo "Error: Gateway scope patch verification failed"
+      exit 1
+    fi
+    echo "  Gateway scope patch applied and verified"
   fi
-  echo "  Gateway scope patch applied and verified"
 
   # --- Device identity bypass patch ---
   # OpenClaw bug: dangerouslyDisableDeviceAuth sets allowBypass but
@@ -278,7 +284,7 @@ step_openclaw_patch() {
   local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
 
   local DEVICE_FILES
-  DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  DEVICE_FILES=$(grep -rl --include='*.js' 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
   if [ -z "$DEVICE_FILES" ]; then
     echo "  Device identity bypass patch: pattern not found, skipping"
     return
@@ -439,6 +445,11 @@ step_systemd_services() {
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
     chmod 0440 /etc/sudoers.d/clawbox
     chown root:root /etc/sudoers.d/clawbox
+    if ! visudo -cf /etc/sudoers.d/clawbox >/dev/null; then
+      rm -f /etc/sudoers.d/clawbox
+      echo "Error: sudoers drop-in failed visudo validation; removed to keep sudo functional" >&2
+      exit 1
+    fi
     echo "  Sudoers rules installed"
   fi
   echo "  Services installed and enabled"

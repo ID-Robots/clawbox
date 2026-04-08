@@ -24,7 +24,12 @@ async function api(path: string, options?: RequestInit) {
     console.error(`Error ${res.status}: ${body}`);
     process.exit(1);
   }
-  return res.json();
+  try {
+    return await res.json();
+  } catch (err) {
+    console.error(`Error: invalid JSON response: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
 }
 
 async function apiPost(path: string, body: Record<string, unknown>) {
@@ -36,6 +41,12 @@ async function apiPost(path: string, body: Record<string, unknown>) {
 }
 
 async function readStdin(): Promise<string> {
+  // If stdin is a TTY, no piped input is coming — fail fast instead of hanging
+  // forever waiting for the user to type EOF.
+  if (process.stdin.isTTY) {
+    console.error("No input on stdin (and no --html/--content flag provided).");
+    process.exit(1);
+  }
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
     chunks.push(chunk);
@@ -57,10 +68,10 @@ async function main() {
       process.exit(1);
     }
 
-    // Get HTML from --html flag or stdin
+    // Get HTML from --html flag or stdin (don't capture another flag as content)
     let html: string;
     const htmlIdx = args.indexOf("--html");
-    if (htmlIdx !== -1 && args[htmlIdx + 1]) {
+    if (htmlIdx !== -1 && args[htmlIdx + 1] && !args[htmlIdx + 1].startsWith("--")) {
       html = args[htmlIdx + 1];
     } else {
       html = await readStdin();
@@ -104,7 +115,7 @@ async function main() {
     }
     const htmlIdx = args.indexOf("--html");
     let html: string;
-    if (htmlIdx !== -1 && args[htmlIdx + 1]) {
+    if (htmlIdx !== -1 && args[htmlIdx + 1] && !args[htmlIdx + 1].startsWith("--")) {
       html = args[htmlIdx + 1];
     } else {
       html = await readStdin();

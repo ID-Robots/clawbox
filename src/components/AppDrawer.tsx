@@ -32,9 +32,11 @@ export function AppDrawer({
 
   // Reset search when drawer closes
   useEffect(() => {
-    if (!isOpen) {
+    if (isOpen) return;
+    const timer = window.setTimeout(() => {
       setSearchQuery("");
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [isOpen]);
 
   // Handle swipe down to close

@@ -15,14 +15,20 @@ const CACHEABLE_EXT = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/i
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) =>
-      cache.addAll(PRECACHE).catch(() => {
-        // Don't fail install if some assets are missing
-        return Promise.allSettled(PRECACHE.map(url => cache.add(url)))
-      })
-    )
+    (async () => {
+      let cache = await caches.open(CACHE_NAME)
+      try {
+        await cache.addAll(PRECACHE)
+      } catch {
+        // addAll is atomic — on failure the cache may be in a partial state.
+        // Wipe and retry per-URL so we tolerate individual missing assets.
+        await caches.delete(CACHE_NAME)
+        cache = await caches.open(CACHE_NAME)
+        await Promise.allSettled(PRECACHE.map((url) => cache.add(url).catch(() => undefined)))
+      }
+      await self.skipWaiting()
+    })()
   )
-  self.skipWaiting()
 })
 
 self.addEventListener('activate', (event) => {
@@ -52,7 +58,7 @@ self.addEventListener('fetch', (event) => {
             caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
           }
           return response
-        }).catch(() => cached)
+        }).catch(() => cached || Response.error())
       })
     )
     return

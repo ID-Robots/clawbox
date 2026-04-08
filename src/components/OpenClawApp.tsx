@@ -10,7 +10,7 @@ export default function OpenClawApp() {
   const retryRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const checkGateway = useCallback(async (auto = false) => {
+  const checkGateway = useCallback(async function runCheckGateway(auto = false) {
     if (!auto) retryRef.current = 0;
     setStatus("checking");
     try {
@@ -32,7 +32,9 @@ export default function OpenClawApp() {
     // Auto-retry up to 15 times (covers ~45s gateway startup)
     if (retryRef.current < 15) {
       retryRef.current++;
-      timerRef.current = setTimeout(() => checkGateway(true), 3000);
+      timerRef.current = setTimeout(() => {
+        void runCheckGateway(true);
+      }, 3000);
     } else {
       setStatus("not-running");
     }

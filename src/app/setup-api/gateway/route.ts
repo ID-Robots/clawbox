@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",
         "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http: https:; frame-ancestors 'self'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http: https:; frame-ancestors 'self'",
       },
     });
   } catch {
@@ -84,7 +84,7 @@ function gatewayOfflineResponse() {
 </div>
 </body></html>`;
   return new NextResponse(html, {
-    status: 200,
+    status: 503,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",

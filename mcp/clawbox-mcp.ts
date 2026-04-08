@@ -13,6 +13,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
+import type { Dirent } from "fs";
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir, unlink } from "fs/promises";
 import { resolve, relative, dirname, extname, join, basename } from "path";
 
@@ -754,11 +755,11 @@ server.tool(
     }
     const entries = await readdir(absPath, { withFileTypes: true });
     const lines = entries
-      .sort((a: any, b: any) => {
+      .sort((a: Dirent, b: Dirent) => {
         if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
         return a.name.localeCompare(b.name);
       })
-      .map((e: any) => `${e.isDirectory() ? "📁 " : "   "}${e.name}${e.isDirectory() ? "/" : ""}`);
+      .map((e: Dirent) => `${e.isDirectory() ? "📁 " : "   "}${e.name}${e.isDirectory() ? "/" : ""}`);
     return { content: [{ type: "text", text: `${absPath}/\n${lines.join("\n")}` }] };
   }
 );
@@ -1712,7 +1713,7 @@ Namespace keys with projectId prefix (e.g. "todo:items"). Values are strings —
 server.tool("code_project_list", "List all code projects.", async () => {
   const data = await codeApi("list-projects") as { projects: { projectId: string; name: string; updated: string }[] };
   if (!data.projects.length) return { content: [{ type: "text", text: "No projects." }] };
-  return { content: [{ type: "text", text: `Projects:\n${data.projects.map((p: any) => `${p.projectId} — ${p.name} (${new Date(p.updated).toLocaleDateString()})`).join("\n")}` }] };
+  return { content: [{ type: "text", text: `Projects:\n${data.projects.map((p) => `${p.projectId} — ${p.name} (${new Date(p.updated).toLocaleDateString()})`).join("\n")}` }] };
 });
 
 server.tool("code_project_build",
@@ -1724,7 +1725,7 @@ server.tool("code_project_build",
     openAfterBuild: z.boolean().optional().describe("Open after build (default: true)"),
   },
   async ({ projectId, name, color, openAfterBuild }) => {
-    let meta = { name: name || projectId, color: color || "#f97316" };
+    const meta = { name: name || projectId, color: color || "#f97316" };
     try {
       const proj = await codeApi("get-project", { projectId }) as { project: { name: string; color: string } };
       if (!name) meta.name = proj.project.name;

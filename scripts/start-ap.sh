@@ -20,7 +20,7 @@ CON_NAME="ClawBox-Setup"
 # Check if setup is complete (phone should get internet, not captive portal)
 setup_complete=false
 if [ -f "$CONFIG_FILE" ]; then
-  if grep -q '"setup_complete":\s*true' "$CONFIG_FILE" 2>/dev/null; then
+  if grep -E -q '"setup_complete":[[:space:]]*true' "$CONFIG_FILE" 2>/dev/null; then
     setup_complete=true
   fi
 fi
@@ -84,7 +84,7 @@ sleep 2
 SCAN_OUTPUT=$(nmcli -t -f SSID,SIGNAL,SECURITY,FREQ device wifi list ifname "$IFACE" 2>/dev/null || true)
 if [ -n "$SCAN_OUTPUT" ]; then
   # Parse nmcli terse output into JSON array
-  echo "$SCAN_OUTPUT" | awk -F: '
+  echo "$SCAN_OUTPUT" | awk -F: -v our_ssid="$SSID" '
     BEGIN { printf "[" }
     {
       # Fields from right: FREQ, SECURITY, SIGNAL, rest is SSID
@@ -95,12 +95,15 @@ if [ -n "$SCAN_OUTPUT" ]; then
       sig = a[n-2]
       ssid = a[1]
       for (i = 2; i <= n-3; i++) ssid = ssid ":" a[i]
-      if (ssid == "" || ssid == "ClawBox-Setup") next
+      if (ssid == "" || ssid == our_ssid) next
       if (sig+0 != sig) next
       if (count++) printf ","
-      # Escape JSON special chars in SSID
+      # Escape JSON special chars in SSID — backslash, quote, control chars
       gsub(/\\/, "\\\\", ssid)
       gsub(/"/, "\\\"", ssid)
+      gsub(/\n/, "\\n", ssid)
+      gsub(/\r/, "\\r", ssid)
+      gsub(/\t/, "\\t", ssid)
       printf "{\"ssid\":\"%s\",\"signal\":%s,\"security\":\"%s\",\"freq\":\"%s\"}", ssid, sig, sec, freq
     }
     END { print "]" }

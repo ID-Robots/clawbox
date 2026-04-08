@@ -19,10 +19,6 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   compress: true,
   poweredByHeader: false,
-  experimental: {
-    // Default is 10MB — raise to match available disk space (no in-memory buffering)
-    proxyClientMaxBodySize: 500 * 1024 * 1024 * 1024,
-  },
   env: {
     NEXT_PUBLIC_APP_VERSION: APP_VERSION,
   },

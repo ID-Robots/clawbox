@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, ReactNode, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 
 interface LauncherApp {
@@ -50,7 +50,7 @@ export default function ChromeLauncher({
 }: ChromeLauncherProps) {
   const { t } = useT();
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
-  const APPS_PER_PAGE = gridCols * gridRows;
+  const appsPerPage = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(0);
   const [animationState, setAnimationState] = useState<"closed" | "opening" | "open" | "closing">("closed");
@@ -67,34 +67,36 @@ export default function ChromeLauncher({
     app.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const totalPages = Math.max(1, Math.ceil(filteredApps.length / APPS_PER_PAGE));
-  const pageApps = useMemo(() => {
-    const start = currentPage * APPS_PER_PAGE;
-    return filteredApps.slice(start, start + APPS_PER_PAGE);
-  }, [filteredApps, currentPage]);
-
-  // Reset page when search changes or launcher opens
-  useEffect(() => {
-    setCurrentPage(0);
-  }, [searchQuery]);
+  const totalPages = Math.max(1, Math.ceil(filteredApps.length / appsPerPage));
+  const pageStart = currentPage * appsPerPage;
+  const pageApps = filteredApps.slice(pageStart, pageStart + appsPerPage);
 
   // Handle open/close state transitions
   useEffect(() => {
+    let animationTimer: number | null = null;
+    let focusTimer: number | null = null;
     if (isOpen && !prevOpenRef.current) {
-      setSearchQuery("");
-      setCtxMenu(null);
-      setCurrentPage(0);
-      setAnimationState("opening");
-      const timer = setTimeout(() => {
-        setAnimationState("open");
-        searchRef.current?.focus();
-      }, 50);
-      return () => clearTimeout(timer);
+      animationTimer = window.setTimeout(() => {
+        setSearchQuery("");
+        setCtxMenu(null);
+        setCurrentPage(0);
+        setAnimationState("opening");
+        focusTimer = window.setTimeout(() => {
+          setAnimationState("open");
+          searchRef.current?.focus();
+        }, 50);
+      }, 0);
     } else if (!isOpen && prevOpenRef.current) {
-      setAnimationState("closed");
-      setCtxMenu(null);
+      animationTimer = window.setTimeout(() => {
+        setAnimationState("closed");
+        setCtxMenu(null);
+      }, 0);
     }
     prevOpenRef.current = isOpen;
+    return () => {
+      if (animationTimer !== null) window.clearTimeout(animationTimer);
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
+    };
   }, [isOpen]);
 
   // Close context menu on click/right-click elsewhere
@@ -193,6 +195,7 @@ export default function ChromeLauncher({
       {/* Launcher panel */}
       <div
         style={{ maxWidth: gridCols * 100 + 32 }}
+        data-testid="app-launcher"
         className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
@@ -217,7 +220,10 @@ export default function ChromeLauncher({
                 type="text"
                 placeholder={t("launcher.searchPlaceholder")}
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setCurrentPage(0);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && searchQuery.trim()) {
                     window.open(`https://openclawhardware.dev/store?q=${encodeURIComponent(searchQuery.trim())}`, "_blank", "noopener,noreferrer");

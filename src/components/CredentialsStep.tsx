@@ -168,7 +168,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   );
 
   return (
-    <div className="w-full max-w-[520px]">
+    <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
       <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           {t("credentials.title")}

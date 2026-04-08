@@ -33,7 +33,17 @@ echo "[vnc] Starting virtual desktop on :${VDISPLAY}"
 
 if ! xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
   Xvfb ":${VDISPLAY}" -screen 0 1280x720x24 &
-  sleep 1
+  # Poll for Xvfb readiness instead of a fixed sleep
+  for _ in $(seq 1 50); do
+    if xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ! xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
+    echo "[vnc] Error: Xvfb did not become ready on :${VDISPLAY} within 5s" >&2
+    exit 1
+  fi
 fi
 
 export DISPLAY=":${VDISPLAY}"

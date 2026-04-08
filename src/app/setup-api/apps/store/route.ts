@@ -20,6 +20,7 @@ export async function GET(req: Request) {
   try {
     const res = await fetch(`${STORE_API}?${params}`, {
       headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {
       return NextResponse.json({ error: "Store API error" }, { status: res.status });

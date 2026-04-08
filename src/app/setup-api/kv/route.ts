@@ -20,6 +20,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ key, value: kvGet(key) });
   }
   const prefix = url.searchParams.get("prefix") ?? undefined;
+  if (prefix !== undefined && !isValidKey(prefix)) {
+    return NextResponse.json({ error: "Invalid prefix" }, { status: 400 });
+  }
   return NextResponse.json(kvGetAll(prefix));
 }
 
