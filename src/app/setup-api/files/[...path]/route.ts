@@ -60,7 +60,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
   const parentDir = path.dirname(abs);
   const newAbs = path.resolve(parentDir, body.newName);
-  if (!newAbs.startsWith(path.resolve(BASE_DIR))) {
+  const base = path.resolve(BASE_DIR);
+  if (newAbs !== base && !newAbs.startsWith(base + path.sep)) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
   }
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });

@@ -21,6 +21,22 @@ describe("middleware", () => {
     return new NextRequest(new URL(`http://localhost${pathname}`));
   }
 
+  async function createSignedSessionCookie(exp: number): Promise<string> {
+    const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode("test-secret"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
+    const signatureHex = Array.from(signature)
+      .map(byte => byte.toString(16).padStart(2, "0"))
+      .join("");
+    return `${payload}.${signatureHex}`;
+  }
+
   describe("Android captive portal", () => {
     it("redirects /generate_204 to portal", async () => {
       const request = createRequest("/generate_204");
@@ -230,6 +246,36 @@ describe("middleware", () => {
         headers: { cookie: "clawbox_session=invalid.cookie" },
       });
       const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+    });
+
+    it("allows requests with a valid signed session cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      const response = await mod.middleware(req);
+
+      expect(response.status).toBe(200);
+    });
+
+    it("rejects expired signed session cookies", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) - 60)}`,
+        },
+      });
+      const response = await mod.middleware(req);
+
       expect(response.status).toBe(307);
     });
   });

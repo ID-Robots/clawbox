@@ -35,8 +35,14 @@ function ok(data: Record<string, unknown>) {
  *   search, build
  */
 export async function POST(request: NextRequest) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let body: any;
   try {
-    const body = await request.json();
+    body = await request.json();
+  } catch {
+    return err("Invalid JSON payload", 400);
+  }
+  try {
     const { action } = body;
 
     switch (action) {

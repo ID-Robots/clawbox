@@ -26,8 +26,11 @@ export const dynamic = "force-dynamic";
 const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 
 function safePath(rel: string): string | null {
-  const resolved = path.resolve(BASE_DIR, rel);
-  if (!resolved.startsWith(path.resolve(BASE_DIR))) return null;
+  const base = path.resolve(BASE_DIR);
+  const resolved = path.resolve(base, rel);
+  // Require either an exact base match or a path inside base (with separator),
+  // otherwise sibling dirs like "/home/clawboxmalicious" would slip through.
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
   return resolved;
 }
 

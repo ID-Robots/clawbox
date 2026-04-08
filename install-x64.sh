@@ -25,7 +25,13 @@ fi
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
 REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
 CLAWBOX_USER="${CLAWBOX_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
-CLAWBOX_HOME="$(eval echo ~$CLAWBOX_USER)"
+# Look up the user's home from passwd instead of `eval echo ~$CLAWBOX_USER`,
+# which would expand shell metacharacters in CLAWBOX_USER.
+CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
+if [ -z "$CLAWBOX_HOME" ]; then
+  echo "Error: cannot find home directory for user '$CLAWBOX_USER'" >&2
+  exit 1
+fi
 PROJECT_DIR="${CLAWBOX_DIR:-$CLAWBOX_HOME/clawbox}"
 PORT="${CLAWBOX_PORT:-3005}"
 
@@ -47,8 +53,12 @@ GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 
 as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
 
-# Run a command as the user with login environment
-as_user_login() { su - "$CLAWBOX_USER" -c "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"; }
+# Run a command as the user with login environment.
+# Pass the entire command as a single argument (don't $* expand) so callers
+# control quoting and shell metacharacters in their command can't break out.
+as_user_login() {
+  sudo -iu "$CLAWBOX_USER" bash -lc "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
+}
 
 wait_for_apt() {
   local waited=0
@@ -107,7 +117,12 @@ step_git_pull() {
     echo "  Repository exists, pulling latest on branch '$TARGET_BRANCH'..."
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
     if [ "$TARGET_BRANCH" != "$CURRENT_BRANCH" ]; then
-      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null || true
+      if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null; then
+        if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH" 2>/dev/null; then
+          echo "Error: failed to checkout branch '$TARGET_BRANCH'" >&2
+          exit 1
+        fi
+      fi
     fi
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
@@ -181,19 +196,19 @@ step_openclaw_patch() {
   local PATCHED_MARKER='isControlUi && allowControlUiBypass'
 
   # Already patched — nothing to do
-  if grep -qrl "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+  if grep -qrl --include='*.js' "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
     echo "  Gateway scope patch: already applied"
   else
     # Find files containing the unpatched pattern
     local SCOPE_FILES
-    SCOPE_FILES=$(grep -Prl 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
+    SCOPE_FILES=$(grep -Prl --include='*.js' 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
     if [ -z "$SCOPE_FILES" ]; then
       echo "  Warning: Gateway scope patch: pattern not found and patch not already applied"
     else
       for file in $SCOPE_FILES; do
         sed -i -E 's/if[[:space:]]*\([[:space:]]*scopes\.length[[:space:]]*>[[:space:]]*0[[:space:]]*\)[[:space:]]*\{/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/g' "$file"
       done
-      if ! grep -qrl "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
+      if ! grep -qrl --include='*.js' "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
         echo "  Warning: Gateway scope patch verification failed"
       else
         echo "  Gateway scope patch applied and verified"
@@ -205,7 +220,7 @@ step_openclaw_patch() {
   local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
 
   local DEVICE_FILES
-  DEVICE_FILES=$(grep -rl 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  DEVICE_FILES=$(grep -rl --include='*.js' 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
   if [ -z "$DEVICE_FILES" ]; then
     echo "  Device identity bypass patch: pattern not found, skipping"
     return

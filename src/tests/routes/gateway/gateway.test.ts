@@ -38,7 +38,7 @@ describe("/setup-api/gateway", () => {
     mockFetch.mockRejectedValue(new Error("Connection refused"));
     const req = new NextRequest(new URL("http://clawbox.local/setup-api/gateway"));
     const res = await GET(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     const html = await res.text();
     expect(html).toContain("Gateway Offline");
   });

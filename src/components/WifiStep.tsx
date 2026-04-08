@@ -170,7 +170,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   const showForm = selectedNetwork || manualMode;
 
   return (
-    <div className="w-full max-w-[520px]">
+    <div className="w-full max-w-[520px]" data-testid="setup-step-wifi">
       <div className="card-surface rounded-2xl p-8">
         <div className="flex flex-col items-center gap-2 mb-6">
           <Image

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
+import { cleanVersion } from "@/lib/version-utils";
 
 interface UpdateStepProps {
   onNext: () => void;
@@ -38,12 +39,9 @@ function StepIcon({ status }: { status: StepStatus }) {
   return <div className="w-5 h-5 rounded-full bg-gray-600" />;
 }
 
-// Strip git describe suffixes (e.g. "v2.2.3-1-g55c3152" → "v2.2.3", "2026.3.13 (61d171a)" → "2026.3.13")
-const cleanVersion = (v: string) => v.replace(/\s*\([^)]*\)/, '').replace(/(-\d+-g[0-9a-f]+)$/, '');
-
 function compareVersions(a: string, b: string): number {
-  const pa = cleanVersion(a).replace(/^v/, '').split('.').map(n => Number(n) || 0);
-  const pb = cleanVersion(b).replace(/^v/, '').split('.').map(n => Number(n) || 0);
+  const pa = (cleanVersion(a) ?? a).replace(/^v/, '').split('.').map(n => Number(n) || 0);
+  const pb = (cleanVersion(b) ?? b).replace(/^v/, '').split('.').map(n => Number(n) || 0);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const na = pa[i] ?? 0, nb = pb[i] ?? 0;
     if (na < nb) return -1;
@@ -193,7 +191,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   if (loading) {
     return (
-      <div className="w-full max-w-[520px]">
+      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> {t("update.checkingUpdates")}
@@ -205,7 +203,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   if (fetchError) {
     return (
-      <div className="w-full max-w-[520px]">
+      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
         <div className="card-surface rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
             {t("update.title")}
@@ -243,7 +241,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   if (isIdle && !starting) {
     return (
-      <div className="w-full max-w-[520px]">
+      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
         <div className="card-surface rounded-2xl p-8">
           <h1 className="text-2xl font-bold font-display mb-2">
             {isUpToDate ? (
@@ -321,7 +319,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // Loading / waiting for first poll after triggering
   if (!state || (isIdle && starting)) {
     return (
-      <div className="w-full max-w-[520px]">
+      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
         <div className="card-surface rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> {t("update.preparingUpdate")}
@@ -332,7 +330,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }
 
   return (
-    <div className="w-full max-w-[520px]">
+    <div className="w-full max-w-[520px]" data-testid="setup-step-update">
       <div className="card-surface rounded-2xl p-8">
         <h1 className="text-2xl font-bold font-display mb-2">
           {isDone ? (

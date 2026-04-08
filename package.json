@@ -13,12 +13,13 @@
     "postbuild": "SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); [ -n \"$SRVJS\" ] && SDIR=$(dirname \"$SRVJS\") && cp -r .next/static \"$SDIR/.next/static\" && cp -r public \"$SDIR/public\" && [ \"$SRVJS\" != \".next/standalone/server.js\" ] && ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js || true",
     "start": "PORT=80 HOSTNAME=0.0.0.0 bun run production-server.js",
     "lint": "eslint",
-    "test": "vitest run",
-    "test:unit": "vitest run --project unit",
-    "test:components": "vitest run --project components",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test": "vitest run --config vitest.config.ts",
+    "test:unit": "vitest run --config vitest.config.ts --project unit",
+    "test:components": "vitest run --config vitest.config.ts --project components",
+    "test:watch": "vitest --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:coverage": "rm -f coverage/e2e-summary.json coverage/e2e-bundles.json && playwright test && node scripts/e2e-coverage-report.mjs",
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {

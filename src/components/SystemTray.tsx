@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Image from "next/image";
 import { useT } from "@/lib/i18n";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -141,7 +142,10 @@ export default function SystemTray({
               <span className="material-symbols-rounded text-white/60" style={{ fontSize: 32 }}>power_settings_new</span>
             </div>
           ) : (
-            <div className="w-16 h-16 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+            <div className="relative w-32 h-32 flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+              <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 object-contain animate-welcome-powerup" priority />
+            </div>
           )}
 
           {/* Status message */}
@@ -220,6 +224,7 @@ export default function SystemTray({
             ? "opacity-0 translate-y-2 scale-95"
             : "opacity-100 translate-y-0 scale-100"
         }`}
+        data-testid="system-tray"
         style={{ transformOrigin: "bottom right" }}
       >
         <div

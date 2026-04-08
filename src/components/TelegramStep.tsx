@@ -21,7 +21,7 @@ function ConfiguringOverlay({ onDone, t }: { onDone: () => void; t: (key: string
 
   useEffect(() => {
     cancelledRef.current = false;
-    let timers: ReturnType<typeof setTimeout>[] = [];
+    const timers: ReturnType<typeof setTimeout>[] = [];
 
     async function run() {
       // Phase 0: Token verified (immediate)
@@ -247,7 +247,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
   };
 
   return (
-    <div className="w-full max-w-[520px]">
+    <div className="w-full max-w-[520px]" data-testid="setup-step-telegram">
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
         {configuring && (
           <ConfiguringOverlay onDone={onNext} t={t} />

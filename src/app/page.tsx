@@ -17,6 +17,7 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
 import { I18nProvider, useT } from "@/lib/i18n";
+import { cleanVersion } from "@/lib/version-utils";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
@@ -345,7 +346,7 @@ function ChromeDesktopInner() {
   const gridRef = useRef<HTMLDivElement>(null);
 
   // ─── Unified SQLite save (debounced, after all state is declared) ───
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!prefsLoaded.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -1293,6 +1294,7 @@ function ChromeDesktopInner() {
 
   return (
     <div
+      data-testid="desktop-root"
       className="relative overflow-hidden select-none"
       style={{ height: '100dvh' }}
       onContextMenu={(e) => {
@@ -1334,7 +1336,7 @@ function ChromeDesktopInner() {
         const ocNeeds = !!oc?.target && oc.target !== oc.current;
         return (
           <div
-            className="fixed bottom-20 right-4 z-[99998] w-[320px] rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 fade-in duration-300"
+            className="fixed top-4 right-4 z-[99998] w-[320px] rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
             role="status"
             aria-live="polite"
           >
@@ -1348,12 +1350,12 @@ function ChromeDesktopInner() {
                 <div className="mt-2 space-y-0.5">
                   {cbNeeds && (
                     <div className="text-[11px] text-white/70 font-mono truncate">
-                      ClawBox {cb.current} → <span className="text-orange-300">{cb.target}</span>
+                      ClawBox {cleanVersion(cb.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(cb.target) ?? "?"}</span>
                     </div>
                   )}
                   {ocNeeds && (
                     <div className="text-[11px] text-white/70 font-mono truncate">
-                      OpenClaw {oc.current ?? "?"} → <span className="text-orange-300">{oc.target}</span>
+                      OpenClaw {cleanVersion(oc.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(oc.target) ?? "?"}</span>
                     </div>
                   )}
                 </div>

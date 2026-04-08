@@ -7,6 +7,27 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     mockReset: true,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          environment: "node",
+          include: ["src/tests/unit/**/*.test.ts", "src/tests/routes/**/*.test.ts", "src/tests/middleware/**/*.test.ts", "src/tests/*.test.ts"],
+          exclude: ["**/node_modules/**", "**/.next/**"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "components",
+          environment: "jsdom",
+          include: ["src/tests/components/**/*.test.tsx"],
+          exclude: ["**/node_modules/**", "**/.next/**"],
+          setupFiles: ["src/tests/setup.ts"],
+        },
+      },
+    ],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "html", "clover"],

@@ -98,6 +98,16 @@ function startHttpsServer(httpServer) {
           },
         });
 
+        // Close clientWs if upstream fails before "open" — without these the
+        // client would hang forever waiting for a relay that will never start.
+        upstream.on("error", (err) => {
+          console.warn("[wss-proxy] upstream error:", err.message);
+          if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+        });
+        upstream.on("close", () => {
+          if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+        });
+
         upstream.on("open", () => {
           // Relay messages bidirectionally
           clientWs.on("message", (data, isBinary) => {
@@ -114,14 +124,7 @@ function startHttpsServer(httpServer) {
         });
 
         clientWs.on("close", () => upstream.close());
-        upstream.on("close", () => {
-          if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
-        });
-
         clientWs.on("error", () => upstream.close());
-        upstream.on("error", () => {
-          if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
-        });
       });
     });
 
@@ -144,10 +147,8 @@ function startHttpsServer(httpServer) {
 // Monkey-patch http.Server.prototype.listen to capture the server instance
 const originalListen = http.Server.prototype.listen;
 http.Server.prototype.listen = function (...args) {
-  const server = this;
-
   if (IS_DEV) {
-    attachUpgradeProxy(server);
+    attachUpgradeProxy(this);
   } else {
     const MAX_WAIT = 10000;
     const POLL_INTERVAL = 50;
@@ -155,21 +156,21 @@ http.Server.prototype.listen = function (...args) {
 
     const poll = setInterval(() => {
       elapsed += POLL_INTERVAL;
-      if (server.listenerCount("upgrade") > 0 || elapsed >= MAX_WAIT) {
+      if (this.listenerCount("upgrade") > 0 || elapsed >= MAX_WAIT) {
         clearInterval(poll);
-        server.removeAllListeners("upgrade");
-        attachUpgradeProxy(server);
+        this.removeAllListeners("upgrade");
+        attachUpgradeProxy(this);
         if (elapsed >= MAX_WAIT) {
           console.warn("[production-server] Timed out waiting for Next.js upgrade listeners; proxy attached anyway.");
         }
         // Start HTTPS server after HTTP is ready
-        startHttpsServer(server);
+        startHttpsServer(this);
       }
     }, POLL_INTERVAL);
   }
 
   http.Server.prototype.listen = originalListen;
-  return originalListen.apply(server, args);
+  return originalListen.apply(this, args);
 };
 
 require("./.next/standalone/server.js");

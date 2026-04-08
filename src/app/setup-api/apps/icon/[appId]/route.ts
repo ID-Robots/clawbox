@@ -13,6 +13,10 @@ export async function GET(
   { params }: { params: Promise<{ appId: string }> }
 ) {
   const { appId } = await params;
+  // Whitelist appId to prevent path traversal (e.g. "../../etc/passwd").
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(appId)) {
+    return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+  }
   const iconPath = path.join(ICONS_DIR, `${appId}.png`);
 
   // Try local cached icon first
@@ -30,7 +34,9 @@ export async function GET(
 
   // Proxy from remote store and cache
   try {
-    const res = await fetch(`${STORE_ICONS_BASE}/${appId}.png`);
+    const res = await fetch(`${STORE_ICONS_BASE}/${appId}.png`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (res.ok) {
       const buffer = Buffer.from(await res.arrayBuffer());
 

@@ -50,20 +50,40 @@ function LoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password, duration }),
       });
-      const data = await res.json();
 
       if (!res.ok) {
-        setError(data.error || "Login failed");
+        let message = `Login failed (${res.status})`;
+        try {
+          const data = await res.json();
+          if (typeof data?.error === "string") message = data.error;
+        } catch {
+          const text = await res.text().catch(() => "");
+          if (text) message = text;
+        }
+        setError(message);
         setLoading(false);
         return;
       }
 
-      // Redirect to the original page or home (validate to prevent open redirect)
+      // Redirect to the original page or home — parse via URL with the
+      // current origin as base, then enforce same-origin and pathname starts
+      // with a single "/" (rejects "//evil.com" and "javascript:" tricks).
       const params = new URLSearchParams(window.location.search);
       const raw = params.get("redirect") || "/";
-      const decoded = decodeURIComponent(raw);
-      const safe = decoded.startsWith("/") && !decoded.startsWith("//") && !decoded.includes(":") && !decoded.includes("\\");
-      window.location.href = safe ? decoded : "/";
+      let target = "/";
+      try {
+        const parsed = new URL(raw, window.location.origin);
+        if (
+          parsed.origin === window.location.origin &&
+          parsed.pathname.startsWith("/") &&
+          !parsed.pathname.startsWith("//")
+        ) {
+          target = parsed.pathname + parsed.search + parsed.hash;
+        }
+      } catch {
+        target = "/";
+      }
+      window.location.href = target;
     } catch {
       setError(t("login.connectionFailed"));
       setLoading(false);

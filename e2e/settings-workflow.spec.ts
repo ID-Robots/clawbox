@@ -1,0 +1,58 @@
+import { expect, test } from "./helpers/coverage";
+import { installClawboxMocks } from "./helpers/clawbox";
+
+test("settings covers appearance, network, ai, telegram, system, and about flows", async ({ page }) => {
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: false,
+      telegram_configured: false,
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await page.getByTestId("shelf-app-settings").click();
+  const settingsWindow = page.getByTestId("chrome-window-settings");
+  await expect(settingsWindow).toBeVisible();
+
+  await settingsWindow.getByRole("button", { name: "Deep Space" }).click();
+  await settingsWindow.getByRole("button", { name: "Fit" }).click();
+  await settingsWindow.locator('input[type="range"]').evaluate((element) => {
+    const input = element as HTMLInputElement;
+    input.value = "72";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settingsWindow.getByRole("button", { name: /English/ }).first().click();
+  await expect(settingsWindow.getByRole("button", { name: "Deutsch" })).toBeVisible();
+  await settingsWindow.getByRole("button", { name: /English/ }).first().click();
+
+  await settingsWindow.getByRole("button", { name: "Network" }).click();
+  await settingsWindow.getByRole("button", { name: "Available Networks" }).click();
+  await settingsWindow.getByRole("button", { name: "Guest Network" }).click();
+  await settingsWindow.getByPlaceholder("Enter WiFi password").fill("guest-pass");
+  await settingsWindow.getByRole("button", { name: "Connect" }).click();
+  await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
+
+  await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
+  await settingsWindow.getByRole("button", { name: "Save" }).click();
+  await expect(settingsWindow.getByText("ClawBox AI").first()).toBeVisible();
+
+  await settingsWindow.getByRole("button", { name: "Telegram" }).click();
+  await settingsWindow.locator("#settings-tg-token").fill("123456789:ABCdefGHI");
+  await settingsWindow.getByRole("button", { name: "Save" }).click();
+  await expect(settingsWindow.getByText("Bot Connected")).toBeVisible();
+
+  await settingsWindow.getByRole("button", { name: "System" }).click();
+  await expect(settingsWindow.getByText("clawbox")).toBeVisible();
+  await expect(settingsWindow.getByText("Ubuntu 24.04")).toBeVisible();
+
+  await settingsWindow.getByRole("button", { name: "About" }).click();
+  await expect(settingsWindow.getByText("Documentation")).toBeVisible();
+  await expect(settingsWindow.getByText("Discord Community")).toBeVisible();
+});

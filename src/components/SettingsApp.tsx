@@ -10,6 +10,7 @@ import AIModelsStep from "./AIModelsStep";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
+import { cleanVersion } from "@/lib/version-utils";
 
 /* ── Types ── */
 
@@ -144,12 +145,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [langOpen]);
 
-  /* ── System stats (only poll when visible) ── */
+  /* ── System stats ──
+   * Poll only when System section is visible (live CPU/mem/temp/etc.),
+   * but always fetch once when About is open so the static fields
+   * (arch/platform) render instead of "...".
+   */
   const [stats, setStats] = useState<SystemStats | null>(null);
   useEffect(() => {
-    if (section !== "system") return;
+    if (section !== "system" && section !== "about") return;
     const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
     poll();
+    if (section !== "system") return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
   }, [section]);
@@ -206,9 +212,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // Load version info and beta status on mount
   useEffect(() => {
-    fetch("/setup-api/update/status")
+    // /update/status only returns versions when phase=idle and not completed.
+    // Use the dedicated /update/versions endpoint which always reports them.
+    fetch("/setup-api/update/versions")
       .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.versions) setVersionInfo(data.versions); })
+      .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
     fetch("/setup-api/system/update-branch")
       .then(r => r.ok ? r.json() : null)
@@ -1335,17 +1343,33 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="flex gap-2">
               <button
                 onClick={() => triggerUpdate()}
-                className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer"
+                className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer text-left"
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>system_update</span>
-                {t("settings.systemUpdate")}
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>system_update</span>
+                <div className="flex flex-col min-w-0">
+                  <span>{t("settings.systemUpdate")}</span>
+                  {cleanVersion(versionInfo?.clawbox.current) && (
+                    <span className="text-[11px] text-green-400/60 font-mono truncate">
+                      {cleanVersion(versionInfo?.clawbox.current)}
+                      {versionInfo?.clawbox.target && <> → <span className="text-green-300">{cleanVersion(versionInfo.clawbox.target)}</span></>}
+                    </span>
+                  )}
+                </div>
               </button>
               <button
                 onClick={() => triggerOpenclawUpdate()}
-                className="flex items-center gap-3 flex-1 bg-blue-500/10 rounded-xl px-4 py-3 text-sm text-blue-400/80 hover:text-blue-400 border border-blue-500/20 hover:bg-blue-500/15 transition-colors cursor-pointer"
+                className="flex items-center gap-3 flex-1 bg-blue-500/10 rounded-xl px-4 py-3 text-sm text-blue-400/80 hover:text-blue-400 border border-blue-500/20 hover:bg-blue-500/15 transition-colors cursor-pointer text-left"
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>cloud_download</span>
-                {t("settings.openclawUpdate")}
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>cloud_download</span>
+                <div className="flex flex-col min-w-0">
+                  <span>{t("settings.openclawUpdate")}</span>
+                  {cleanVersion(versionInfo?.openclaw.current) && (
+                    <span className="text-[11px] text-blue-400/60 font-mono truncate">
+                      {cleanVersion(versionInfo?.openclaw.current)}
+                      {versionInfo?.openclaw.target && <> → <span className="text-blue-300">{cleanVersion(versionInfo.openclaw.target)}</span></>}
+                    </span>
+                  )}
+                </div>
               </button>
             </div>
 

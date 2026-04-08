@@ -109,6 +109,8 @@ export async function POST(req: Request) {
       };
     };
 
+    const validCoord = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+
     switch (action) {
       case "navigate": {
         const { url } = body;
@@ -119,6 +121,7 @@ export async function POST(req: Request) {
 
       case "click": {
         const { x, y } = body;
+        if (!validCoord(x) || !validCoord(y)) return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
         await page.mouse.click(x, y);
         await page.waitForTimeout(300);
         return NextResponse.json(await respond());
@@ -126,6 +129,7 @@ export async function POST(req: Request) {
 
       case "dblclick": {
         const { x, y } = body;
+        if (!validCoord(x) || !validCoord(y)) return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
         await page.mouse.dblclick(x, y);
         await page.waitForTimeout(300);
         return NextResponse.json(await respond());
@@ -133,14 +137,16 @@ export async function POST(req: Request) {
 
       case "scroll": {
         const { x, y, deltaX, deltaY } = body;
+        if (!validCoord(x) || !validCoord(y)) return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
         await page.mouse.move(x, y);
-        await page.mouse.wheel(deltaX || 0, deltaY || 0);
+        await page.mouse.wheel(validCoord(deltaX) ? deltaX : 0, validCoord(deltaY) ? deltaY : 0);
         await page.waitForTimeout(200);
         return NextResponse.json(await respond());
       }
 
       case "hover": {
         const { x, y } = body;
+        if (!validCoord(x) || !validCoord(y)) return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
         await page.mouse.move(x, y);
         // No screenshot for hover — too frequent
         return NextResponse.json({ ok: true });

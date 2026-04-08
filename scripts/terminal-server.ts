@@ -80,8 +80,14 @@ wss.on("connection", (ws: WebSocket, req) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "input" && typeof msg.data === "string") {
         term.write(msg.data);
-      } else if (msg.type === "resize" && msg.cols && msg.rows) {
-        term.resize(Number(msg.cols), Number(msg.rows));
+      } else if (msg.type === "resize") {
+        const cols = Number(msg.cols);
+        const rows = Number(msg.rows);
+        if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) {
+          term.resize(cols, rows);
+        } else {
+          console.warn(`[terminal-server] Ignoring invalid resize cols=${msg.cols} rows=${msg.rows}`);
+        }
       }
     } catch (e) {
       console.warn("[terminal-server] Bad message:", e);
@@ -92,14 +98,18 @@ wss.on("connection", (ws: WebSocket, req) => {
     console.log(`[terminal-server] Connection closed, killing PTY pid=${term.pid}`);
     try {
       term.kill();
-    } catch {}
+    } catch (err) {
+      console.error(`[terminal-server] Failed to kill PTY pid=${term.pid} on close:`, err);
+    }
   });
 
   ws.on("error", (err) => {
     console.error("[terminal-server] WebSocket error:", err);
     try {
       term.kill();
-    } catch {}
+    } catch (killErr) {
+      console.error(`[terminal-server] Failed to kill PTY pid=${term.pid} on error:`, killErr);
+    }
   });
 });
 

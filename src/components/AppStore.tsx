@@ -316,7 +316,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const isInstalled = installedAppIds.includes(selectedApp.id);
     const catName = categories.find(c => c.id === selectedApp.category)?.name || selectedApp.category;
     return (
-      <div className="h-full flex flex-col bg-[#0f1219] text-white">
+      <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
         {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
@@ -413,7 +413,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1219] text-white">
+    <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
       {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
