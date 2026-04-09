@@ -293,6 +293,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.updateFailed": "Update Failed",
     "settings.updating": "Updating ClawBox",
     "settings.restartingDevice": "Restarting device...",
+    "settings.updateDone": "All updates applied successfully.",
+    "settings.done": "Done",
     "settings.connectedTo": "Connected to {ssid}",
     "settings.connectionFailed": "Connection failed",
     "settings.failedSave": "Failed to save",

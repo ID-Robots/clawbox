@@ -210,6 +210,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
 
+  // Auto-dismiss the update overlay for OpenClaw-only updates (no device restart).
+  useEffect(() => {
+    if (updateState?.phase !== "completed") return;
+    const isFullUpdate = updateState.steps.some(s => s.id === "restart");
+    if (isFullUpdate) return;
+    const timer = setTimeout(() => {
+      setUpdateStarted(false);
+      setUpdateError(null);
+      setUpdateState(null);
+      stopUpdatePolling();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [updateState?.phase, updateState?.steps, stopUpdatePolling]);
+
   // Load version info and beta status on mount
   useEffect(() => {
     // /update/status only returns versions when phase=idle and not completed.
@@ -1768,7 +1782,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {updateState?.phase === "completed" ? t("settings.updateComplete") : updateError || updateState?.phase === "failed" ? t("settings.updateFailed") : t("settings.updating")}
               </h2>
               <p className="text-sm text-white/40">
-                {updateState?.phase === "completed" ? t("settings.restartingDevice") : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
+                {updateState?.phase === "completed"
+                  ? (updateState.steps.some(s => s.id === "restart") ? t("settings.restartingDevice") : t("settings.updateDone"))
+                  : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
               </p>
             </div>
 
