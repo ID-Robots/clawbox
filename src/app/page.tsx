@@ -16,6 +16,7 @@ import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
+import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 
@@ -27,7 +28,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -90,6 +91,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
 
   const iconMap: Record<string, string> = {
     settings: "settings",
+    setup: "construction",
     terminal: "terminal",
     files: "folder",
     vnc: "desktop_windows",
@@ -148,19 +150,18 @@ function ChromeDesktopInner() {
   const { t } = useT();
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
 
-  // Check if setup is complete — redirect to /setup if not
+  // Check if setup is complete. The desktop boots either way; incomplete
+  // setups get the wizard opened as a window after the UI loads.
   useEffect(() => {
     Promise.all([
       fetch("/setup-api/setup/status").then(r => r.json()),
       kv.init(),
     ])
       .then(([data]) => {
-        if (!data.setup_complete) {
-          window.location.href = "/setup";
-        } else {
-          setSetupChecked(true);
-        }
+        setSetupRequired(!data.setup_complete);
+        setSetupChecked(true);
       })
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
   }, []);
@@ -240,6 +241,7 @@ function ChromeDesktopInner() {
         // Open windows
         if (Array.isArray(data.desktop_open_windows)) {
           const restored = (data.desktop_open_windows as Array<{ appId: string; minimized: boolean; x?: number; y?: number; width?: number; height?: number }>)
+            .filter((w) => w.appId !== "setup")
             .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height }));
           if (restored.length > 0) {
             setOpenWindows(restored);
@@ -365,7 +367,9 @@ function ChromeDesktopInner() {
           hidden_installed: hiddenInstalledApps,
           pinned_apps: pinnedOverrides,
           icon_grid: iconPositions,
-          desktop_open_windows: openWindows.map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
+          desktop_open_windows: openWindows
+            .filter((w) => w.appId !== "setup")
+            .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
           ui_mascot_hidden: mascotHidden ? 1 : 0,
           ui_chat_panel_width: chatPanelWidth || 0,
           ui_chat_open: chatOpen ? 1 : 0,
@@ -790,7 +794,19 @@ function ChromeDesktopInner() {
         });
       }
     }
-    return [...apps, ...installedAppDefs];
+    return [
+      ...apps,
+      ...installedAppDefs,
+      {
+        id: "setup",
+        name: "Setup",
+        color: "#f97316",
+        type: "setup",
+        pinned: false,
+        defaultWidth: 980,
+        defaultHeight: 760,
+      },
+    ];
   }, [installedApps, installedMeta]);
 
   const getActiveWindowId = useCallback(() => {
@@ -847,6 +863,20 @@ function ChromeDesktopInner() {
 
   const closeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
+  }, []);
+
+  useEffect(() => {
+    if (!setupChecked || !setupRequired) return;
+    setOpenWindows((prev) => {
+      if (prev.some((w) => w.appId === "setup")) return prev;
+      return [...prev, { id: `setup-${Date.now()}`, appId: "setup", zIndex: nextZIndex, minimized: false }];
+    });
+    setNextZIndex((z) => z + 1);
+  }, [setupChecked, setupRequired, nextZIndex]);
+
+  const handleSetupComplete = useCallback(() => {
+    setSetupRequired(false);
+    setOpenWindows((prev) => prev.filter((w) => w.appId !== "setup"));
   }, []);
 
   // ─── Android back button / browser back handling ───
@@ -1131,6 +1161,12 @@ function ChromeDesktopInner() {
           />
         );
       }
+      case "setup":
+        return (
+          <div className="h-full overflow-y-auto bg-[var(--bg-deep)]">
+            <SetupWizard onComplete={handleSetupComplete} />
+          </div>
+        );
       case "placeholder":
         return (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
@@ -1171,7 +1207,8 @@ function ChromeDesktopInner() {
     .filter((a): a is AppDef => !!a);
 
   // Get all apps for launcher (including installed)
-  const allAppsForLauncher = getAllApps();
+  const allApps = getAllApps();
+  const allAppsForLauncher = allApps.filter((app) => app.id !== "setup");
 
   // ─── Mobile fullscreen splash (every load) ───
   const [showSplash, setShowSplash] = useState(() => {
@@ -1661,7 +1698,7 @@ function ChromeDesktopInner() {
       ) : (
         // Desktop: normal ChromeWindow rendering
         openWindows.map((window) => {
-          const app = allAppsForLauncher.find((a) => a.id === window.appId);
+          const app = allApps.find((a) => a.id === window.appId);
           if (!app) return null;
 
           const renderWindowIcon = () => {
