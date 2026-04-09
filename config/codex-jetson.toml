@@ -1,0 +1,141 @@
+# Codex configuration for Jetson Orin Nano with Oh My Codex
+# Optimized for edge deployment with local/cloud model switching
+
+# oh-my-codex top-level settings
+notify = ["node", "/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/scripts/notify-hook.js"]
+model_reasoning_effort = "xhigh"
+developer_instructions = "You are running on Jetson Orin Nano edge device. Use local models (Gemma/CodeLlama) when offline or for low-latency tasks. Use cloud models (GPT-5.4) for complex reasoning. AGENTS.md is your orchestration brain. Use skill/keyword routing like $name plus spawned role-specialized subagents for specialized work."
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+# Primary model: GPT-5.4 with maximum reasoning effort
+model = "gpt-5.4"
+
+# Fallback models for edge deployment
+fallback_model = "gemma:2b"
+offline_model = "codellama:7b"
+
+# Trusted projects
+[projects."/home/clawbox/clawbox"]
+trust_level = "trusted"
+
+[projects."/home/clawbox"]
+trust_level = "trusted"
+
+# Local model configuration for Jetson Orin Nano
+[models.local_gemma]
+enabled = true
+type = "local"
+provider = "ollama"
+model_id = "gemma:2b"
+endpoint = "http://localhost:11434"
+max_tokens = 4096
+temperature = 0.1
+timeout_seconds = 120
+description = "Gemma 2B - Optimized for Jetson 8GB RAM"
+
+[models.local_codellama]
+enabled = true
+type = "local"
+provider = "ollama"
+model_id = "codellama:7b"
+endpoint = "http://localhost:11434"
+max_tokens = 8192
+temperature = 0.1
+timeout_seconds = 180
+description = "CodeLlama 7B - Code generation for edge"
+
+# Cloud model configuration
+[models.cloud_gpt5]
+enabled = true
+type = "cloud"
+provider = "openai"
+model_id = "gpt-5.4"
+max_tokens = 16384
+temperature = 0.2
+timeout_seconds = 60
+description = "GPT-5.4 - Maximum reasoning for complex tasks"
+
+# Model selection rules
+[model_selection]
+default = "gpt-5.4"
+when_offline = "gemma:2b"
+when_low_bandwidth = "codellama:7b"
+when_latency_critical = "gemma:2b"
+when_complex_reasoning = "gpt-5.4"
+when_code_generation = "codellama:7b"
+
+# Performance tuning for Jetson Orin Nano
+[performance.jetson]
+max_concurrent_requests = 1
+request_timeout_seconds = 180
+memory_limit_mb = 6144  # Leave 2GB for system on 8GB Jetson
+cpu_priority = "high"
+use_gpu = true
+gpu_memory_limit_mb = 4096
+gpu_utilization_threshold = 0.8
+
+# Auto-switch based on system resources
+[auto_switch]
+enabled = true
+check_interval_seconds = 30
+memory_threshold_mb = 1024  # Switch to lighter model if <1GB free
+cpu_threshold_percent = 80  # Switch if CPU >80%
+network_check_url = "https://api.openai.com/v1/models"
+
+# Oh My Codex features
+[features]
+multi_agent = true
+child_agents_md = true
+local_model_fallback = true
+resource_aware_switching = true
+
+[env]
+USE_OMX_EXPLORE_CMD = "1"
+JETSON_DEPLOYMENT = "true"
+OLLAMA_ENDPOINT = "http://localhost:11434"
+
+[agents]
+max_threads = 4  # Reduced for Jetson
+max_depth = 2
+
+# MCP servers for Oh My Codex
+[mcp_servers.omx_state]
+command = "node"
+args = ["/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/mcp/state-server.js"]
+enabled = true
+startup_timeout_sec = 10  # Increased for Jetson
+
+[mcp_servers.omx_memory]
+command = "node"
+args = ["/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/mcp/memory-server.js"]
+enabled = true
+startup_timeout_sec = 10
+
+[mcp_servers.omx_code_intel]
+command = "node"
+args = ["/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/mcp/code-intel-server.js"]
+enabled = true
+startup_timeout_sec = 15  # Code analysis can be slower on Jetson
+
+[mcp_servers.omx_trace]
+command = "node"
+args = ["/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/mcp/trace-server.js"]
+enabled = true
+startup_timeout_sec = 10
+
+[mcp_servers.omx_team_run]
+command = "node"
+args = ["/home/clawbox/.nvm/versions/node/v20.18.0/lib/node_modules/oh-my-codex/dist/mcp/team-server.js"]
+enabled = true
+startup_timeout_sec = 10
+
+# ============================================================
+# Deployment script for Oh My Codex on Jetson
+# ============================================================
+
+# Post-installation script to configure Codex
+[deployment]
+setup_script = "/home/clawbox/clawbox/scripts/setup-codex-jetson.sh"
+config_dest = "/home/clawbox/.codex/config.toml"
+backup_existing = true

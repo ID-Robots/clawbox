@@ -525,6 +525,47 @@ step_ollama_install() {
   # Apply Jetson memory optimizations
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   echo "  Ollama installed and running"
+  
+  # Pull Gemma models optimized for Jetson Orin Nano
+  echo "  Setting up AI models for Jetson Orin Nano..."
+  sleep 5  # Wait for Ollama service to start
+  
+  # Check if we're on Jetson (ARM64 architecture)
+  if [[ $(uname -m) == "aarch64" ]]; then
+    echo "  Detected ARM64 (Jetson) architecture"
+    
+    # For Jetson Orin Nano 8GB, use smaller models
+    # Gemma 2B is optimized for edge devices with limited RAM
+    echo "  Pulling Gemma 2B for Jetson Orin Nano..."
+    if timeout 300 ollama pull gemma:2b 2>/dev/null; then
+      echo "  ✓ Gemma 2B installed successfully"
+    else
+      echo "  ⚠️  Gemma 2B pull failed or timed out"
+    fi
+    
+    # Also pull Codex-compatible model for Oh My Codex integration
+    echo "  Pulling Codex-compatible model for Oh My Codex..."
+    if timeout 300 ollama pull codellama:7b 2>/dev/null; then
+      echo "  ✓ CodeLlama 7B installed for Codex integration"
+    else
+      echo "  ⚠️  CodeLlama pull failed or timed out"
+    fi
+  else
+    echo "  Detected $(uname -m) architecture (not Jetson)"
+    echo "  Skipping Jetson-specific model downloads"
+  fi
+}
+
+step_codex_setup() {
+  echo "  Setting up Oh My Codex for Jetson..."
+  
+  # Run the Codex setup script as clawbox user
+  if [ -f "$PROJECT_DIR/scripts/setup-codex-jetson.sh" ]; then
+    sudo -u "$CLAWBOX_USER" bash "$PROJECT_DIR/scripts/setup-codex-jetson.sh"
+    echo "  ✓ Oh My Codex configured for Jetson"
+  else
+    echo "  ⚠️  Codex setup script not found"
+  fi
 }
 
 step_chpasswd() {
@@ -787,6 +828,9 @@ step_jtop_install
 
 log "Installing Ollama..."
 step_ollama_install
+
+log "Setting up Oh My Codex for AI development..."
+step_codex_setup
 
 log "Installing Chromium..."
 step_chromium_install
