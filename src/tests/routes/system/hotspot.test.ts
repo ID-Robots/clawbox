@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import * as fs from "fs/promises";
+import fs from "fs/promises";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -25,7 +25,7 @@ const mockGet = vi.mocked(get);
 const mockSetMany = vi.mocked(setMany);
 const mockGetAll = vi.mocked(getAll);
 const mockExecFile = vi.mocked(childProcess.execFile);
-const mockFs = vi.mocked(fs.default);
+const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExecFile.mockImplementation(((
@@ -76,8 +76,8 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
         return returnObj;
       },
     };
-    return returnObj as ReturnType<typeof childProcess.execFile>;
-  }) as typeof childProcess.execFile);
+    return returnObj as unknown as ReturnType<typeof childProcess.execFile>;
+  }) as unknown as typeof childProcess.execFile);
 }
 
 describe("/setup-api/system/hotspot", () => {

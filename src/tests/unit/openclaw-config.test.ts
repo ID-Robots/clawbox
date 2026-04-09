@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import * as fs from "fs/promises";
-import * as fsSync from "fs";
+import fs from "fs/promises";
+import fsSync from "fs";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -24,8 +24,8 @@ vi.mock("fs", () => ({
 }));
 
 const mockExecFile = vi.mocked(childProcess.execFile);
-const mockFs = vi.mocked(fs.default);
-const mockFsSync = vi.mocked(fsSync.default);
+const mockFs = vi.mocked(fs);
+const mockFsSync = vi.mocked(fsSync);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExecFile.mockImplementation(((
@@ -75,8 +75,8 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
         return returnObj;
       },
     };
-    return returnObj as ReturnType<typeof childProcess.execFile>;
-  }) as typeof childProcess.execFile);
+    return returnObj as unknown as ReturnType<typeof childProcess.execFile>;
+  }) as unknown as typeof childProcess.execFile);
 }
 
 describe("openclaw-config", () => {
@@ -347,8 +347,8 @@ describe("openclaw-config", () => {
             reject("not an Error object");
             return {};
           },
-        } as ReturnType<typeof childProcess.execFile>;
-      }) as typeof childProcess.execFile);
+        } as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
 
       await expect(openclawConfig.restartGateway()).rejects.toBe("not an Error object");
       expect(errorSpy).toHaveBeenCalledWith(
@@ -462,8 +462,8 @@ describe("openclaw-config", () => {
             reject(nonError);
             return {};
           },
-        } as ReturnType<typeof childProcess.execFile>;
-      }) as typeof childProcess.execFile);
+        } as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
 
       await openclawConfig.reloadGateway();
 

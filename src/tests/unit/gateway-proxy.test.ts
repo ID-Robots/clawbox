@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import * as fsp from "fs/promises";
+import fsp from "fs/promises";
 import { NextRequest } from "next/server";
 
 vi.mock("fs/promises", () => ({
@@ -8,7 +8,7 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
-const mockFs = vi.mocked(fsp.default);
+const mockFs = vi.mocked(fsp);
 
 describe("gateway-proxy", () => {
   let gatewayProxy: typeof import("@/lib/gateway-proxy");

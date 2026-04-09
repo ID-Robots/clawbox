@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import type { UpdateState } from "@/lib/updater";
 
 vi.mock("@/lib/updater", () => ({
   getUpdateState: vi.fn(),
@@ -17,7 +18,7 @@ const mockGetVersionInfo = vi.mocked(getVersionInfo);
 describe("GET /setup-api/update/status", () => {
   let updateStatusGet: () => Promise<Response>;
 
-  const defaultState = {
+  const defaultState: UpdateState = {
     phase: "idle" as const,
     steps: [
       { id: "check", status: "pending" as const, label: "Check for updates" },
@@ -25,7 +26,7 @@ describe("GET /setup-api/update/status", () => {
       { id: "build", status: "pending" as const, label: "Build" },
       { id: "restart", status: "pending" as const, label: "Restart" },
     ],
-    error: null,
+    currentStepIndex: 0,
   };
 
   beforeEach(async () => {
@@ -76,7 +77,7 @@ describe("GET /setup-api/update/status", () => {
       .mockReturnValueOnce({
         phase: "running" as const,
         steps: defaultState.steps.map(s => ({ ...s, status: "completed" as const })),
-        error: null,
+        currentStepIndex: defaultState.steps.length - 1,
       });
     mockCheckContinuation.mockResolvedValue(true);
 
@@ -96,7 +97,7 @@ describe("GET /setup-api/update/status", () => {
         { id: "build", status: "pending" as const, label: "Build" },
         { id: "restart", status: "pending" as const, label: "Restart" },
       ],
-      error: null,
+      currentStepIndex: 1,
     });
 
     const res = await updateStatusGet();
@@ -109,16 +110,17 @@ describe("GET /setup-api/update/status", () => {
 
   it("returns error state", async () => {
     mockGetUpdateState.mockReturnValue({
-      phase: "error" as const,
+      phase: "failed" as const,
       steps: defaultState.steps,
       error: "Build failed",
+      currentStepIndex: 2,
     });
 
     const res = await updateStatusGet();
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.phase).toBe("error");
+    expect(body.phase).toBe("failed");
     expect(body.error).toBe("Build failed");
   });
 

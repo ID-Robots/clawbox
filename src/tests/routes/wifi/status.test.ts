@@ -24,7 +24,7 @@ describe("GET /setup-api/wifi/status", () => {
       ssid: "HomeNetwork",
       signal: 80,
       ip: "192.168.1.100",
-    });
+    } as unknown as Awaited<ReturnType<typeof getWifiStatus>>);
 
     const res = await wifiStatusGet();
     const body = await res.json();
@@ -39,7 +39,7 @@ describe("GET /setup-api/wifi/status", () => {
   it("returns disconnected status", async () => {
     mockGetWifiStatus.mockResolvedValue({
       connected: false,
-    });
+    } as unknown as Awaited<ReturnType<typeof getWifiStatus>>);
 
     const res = await wifiStatusGet();
     const body = await res.json();

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import * as fs from "fs/promises";
+import fs from "fs/promises";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -28,7 +28,7 @@ import { resetUpdateState } from "@/lib/updater";
 
 const mockResetUpdateState = vi.mocked(resetUpdateState);
 const mockExecFile = vi.mocked(childProcess.execFile);
-const mockFs = vi.mocked(fs.default);
+const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExecFile.mockImplementation(((
@@ -57,7 +57,7 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
       }
     }
     return {} as ReturnType<typeof childProcess.execFile>;
-  }) as typeof childProcess.execFile);
+  }) as unknown as typeof childProcess.execFile);
 }
 
 describe("POST /setup-api/setup/reset", () => {
@@ -117,7 +117,9 @@ describe("POST /setup-api/setup/reset", () => {
   });
 
   it("deletes data directory contents except preserved files", async () => {
-    mockFs.readdir.mockResolvedValueOnce(["config.json", "oauth-state.json", "network.env"] as unknown as string[]);
+    mockFs.readdir.mockResolvedValueOnce(
+      ["config.json", "oauth-state.json", "network.env"] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+    );
 
     await resetPost();
 
@@ -199,7 +201,9 @@ describe("POST /setup-api/setup/reset", () => {
   });
 
   it("returns 500 when file deletion has failures", async () => {
-    mockFs.readdir.mockResolvedValueOnce(["file1.json", "file2.json"] as unknown as string[]);
+    mockFs.readdir.mockResolvedValueOnce(
+      ["file1.json", "file2.json"] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+    );
     mockFs.rm
       .mockResolvedValueOnce()
       .mockRejectedValueOnce(new Error("Permission denied"));

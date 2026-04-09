@@ -31,7 +31,7 @@ describe("POST /setup-api/wifi/connect", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    mockSwitchToClient.mockResolvedValue();
+    mockSwitchToClient.mockResolvedValue({ message: "connected" });
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
 

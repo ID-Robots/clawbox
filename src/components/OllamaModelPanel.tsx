@@ -160,7 +160,13 @@ export default function OllamaModelPanel({
             <input
               type="text"
               value={ollamaSearch}
-              onChange={(e) => handleOllamaSearchChange(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                handleOllamaSearchChange(v);
+                if (v.includes(":") && v.trim().length > 3) {
+                  setSelectedOllamaModel(v.trim());
+                }
+              }}
               placeholder={t("ollama.searchPlaceholder")}
               spellCheck={false}
               autoComplete="off"
@@ -224,9 +230,21 @@ export default function OllamaModelPanel({
             </div>
           )}
           {ollamaSearch && !ollamaSearching && ollamaSearchResults.length === 0 && (
-            <p className="mt-1 text-xs text-[var(--text-muted)]">
-              {t("ollama.noModelsFound", { query: ollamaSearch })}
-            </p>
+            <div className="mt-2">
+              <p className="text-xs text-[var(--text-muted)] mb-1.5">
+                {t("ollama.noModelsFound", { query: ollamaSearch })}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedOllamaModel(ollamaSearch.trim());
+                  clearSearch();
+                }}
+                className="px-3 py-1.5 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
+              >
+                Use &quot;{ollamaSearch.trim()}&quot; anyway
+              </button>
+            </div>
           )}
         </div>
 

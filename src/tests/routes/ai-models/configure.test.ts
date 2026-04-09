@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import * as fsp from "fs/promises";
+import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 
@@ -33,7 +33,7 @@ import { restartGateway } from "@/lib/openclaw-config";
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockSetMany = vi.mocked(setMany);
 const mockRestartGateway = vi.mocked(restartGateway);
-const mockFs = vi.mocked(fsp.default);
+const mockFs = vi.mocked(fsp);
 
 // Create a mock child process that immediately succeeds
 function createSuccessfulChildProcess(): ChildProcess {
@@ -297,7 +297,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
-    expect(commands).toContain("config set agents.defaults.model.fallback deepseek/deepseek-chat");
+    expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-chat"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
     const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
