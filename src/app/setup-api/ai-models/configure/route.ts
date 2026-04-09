@@ -28,6 +28,25 @@ const OLLAMA_MAX_TOKENS = 8192;
 const CLAWBOX_AI_CONTEXT_WINDOW = 65536;
 const CLAWBOX_AI_MAX_TOKENS = 8192;
 
+/** Query Ollama for available models and return the best one for ClawBox AI fallback. */
+async function detectOllamaModel(): Promise<string> {
+  try {
+    const res = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return "llama3.2:3b";
+    const data = await res.json() as { models?: Array<{ name: string; size?: number }> };
+    const models = data.models ?? [];
+    if (models.length === 0) return "llama3.2:3b";
+    // Prefer gemma4 > gemma > llama > first available
+    const preferred = models.find(m => m.name.startsWith("gemma4:"))
+      ?? models.find(m => m.name.startsWith("gemma"))
+      ?? models.find(m => m.name.startsWith("llama"))
+      ?? models[0];
+    return preferred.name;
+  } catch {
+    return "llama3.2:3b";
+  }
+}
+
 interface ProviderConfig {
   defaultModel: string;
   profileKey: string;
@@ -214,12 +233,9 @@ export async function POST(request: Request) {
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
     const isClawAI = provider === "clawai";
-    if (isClawAI && !CLAWBOX_AI_API_KEY) {
-      return NextResponse.json(
-        { error: "ClawBox AI is not configured on this device. Set CLAWBOX_AI_API_KEY first." },
-        { status: 503 }
-      );
-    }
+    // When no CLAWBOX_AI_API_KEY is set, ClawBox AI falls back to local Ollama.
+    // This allows ClawBox to work out of the box for free without any API key.
+    const clawAiFallbackToOllama = isClawAI && !CLAWBOX_AI_API_KEY;
     if (!provider || (!apiKey && !isOllama && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
@@ -248,10 +264,26 @@ export async function POST(request: Request) {
       config.defaultModel = `ollama/${modelName}`;
     }
 
+    // ClawBox AI fallback: use local Ollama when no cloud API key is available.
+    // This allows ClawBox to work completely free out of the box.
+    if (clawAiFallbackToOllama) {
+      const ollamaModel = await detectOllamaModel();
+      config.defaultModel = `ollama/${ollamaModel}`;
+      config.profileKey = "ollama:default";
+      console.log(`[AI Config] ClawBox AI falling back to local Ollama model: ${ollamaModel}`);
+    }
+
     // 1. Write token to auth-profiles.json
     {
       const authProfiles = await readAuthProfiles();
-      if (isClawAI) {
+      if (clawAiFallbackToOllama) {
+        // No cloud API key — use local Ollama as ClawBox AI backend
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: "ollama",
+          key: "ollama-local",
+        };
+      } else if (isClawAI) {
         // ClawBox AI uses the device-provided DeepSeek API key.
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
@@ -299,13 +331,14 @@ export async function POST(request: Request) {
     // 3. Set auth profile and primary model sequentially (parallel writes cause
     //    ConfigMutationConflictError because openclaw config set reads/writes the
     //    same file).
+    const profileProvider = clawAiFallbackToOllama ? "ollama" : ocProvider;
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
       JSON.stringify((isOllama || isClawAI)
-        ? { provider: ocProvider, mode: "api_key" }
-        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+        ? { provider: profileProvider, mode: "api_key" }
+        : { provider: profileProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
     await runCommand(OPENCLAW_BIN, [
@@ -344,7 +377,37 @@ export async function POST(request: Request) {
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
-    if (isClawAI) {
+    if (clawAiFallbackToOllama) {
+      // ClawBox AI without cloud key — configure Ollama as the backend
+      const modelName = config.defaultModel.replace(/^ollama\//, "");
+      const providerDef = JSON.stringify({
+        baseUrl: "http://127.0.0.1:11434",
+        api: "ollama",
+        apiKey: "ollama-local",
+        models: [{
+          id: modelName,
+          name: `ClawBox AI (${modelName})`,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: OLLAMA_CONTEXT_WINDOW,
+          maxTokens: OLLAMA_MAX_TOKENS,
+        }],
+      });
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.ollama", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "replace",
+      ]);
+      // Ensure Ollama service has memory optimizations
+      try {
+        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+      } catch (err) {
+        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
+      }
+      console.log(`[AI Config] ClawBox AI using local Ollama: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+    } else if (isClawAI) {
       await configureClawboxAi(false);
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",

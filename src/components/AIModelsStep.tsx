@@ -947,6 +947,9 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
               {t("ai.clawaiHint")}
             </p>
+            <p className="text-xs text-emerald-400 mt-2 leading-relaxed">
+              {t("ai.clawaiFree")}
+            </p>
           </div>
         )}
 
