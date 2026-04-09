@@ -27,10 +27,13 @@ describe("oauth-utils", () => {
     });
 
     it("closes window and returns tabClosed true when close succeeds", () => {
+      const popupState = { closed: false };
       const mockWindow = {
-        closed: false,
+        get closed() {
+          return popupState.closed;
+        },
         close: vi.fn(() => {
-          mockWindow.closed = true;
+          popupState.closed = true;
         }),
       } as unknown as Window;
       const ref: MutableRefObject<Window | null> = { current: mockWindow };

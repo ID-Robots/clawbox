@@ -499,7 +499,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             if (resetPollRef.current) clearInterval(resetPollRef.current);
             if (resetDotsRef.current) clearInterval(resetDotsRef.current);
             setResetPhase("done");
-            setTimeout(() => { window.location.href = "/setup"; }, 1500);
+            setTimeout(() => { window.location.href = "/"; }, 1500);
           }
         } catch { /* still offline */ }
       }, 3000);

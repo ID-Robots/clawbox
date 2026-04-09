@@ -18,11 +18,11 @@ const CLAWBOX_AI_PROVIDER = "deepseek";
 const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
-// context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
-// OpenClaw requires minimum 16K context. At Q4_K_M this uses ~3.5-4 GB total.
+// context would need ~12.5 GB, exceeding the Jetson's 8 GB RAM.
+// 32K is the practical max — fits in RAM+swap without excessive thrashing.
 // We define the model in openclaw.json with a capped contextWindow so the
 // gateway generates models.json with the correct value on every restart.
-const OLLAMA_CONTEXT_WINDOW = 16384;
+const OLLAMA_CONTEXT_WINDOW = 32768;
 const OLLAMA_MAX_TOKENS = 8192;
 
 const CLAWBOX_AI_CONTEXT_WINDOW = 65536;
@@ -187,8 +187,9 @@ async function configureClawboxAi(setFallback: boolean) {
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
-      "agents.defaults.model.fallback",
-      CLAWBOX_AI_MODEL,
+      "agents.defaults.model.fallbacks",
+      JSON.stringify([CLAWBOX_AI_MODEL]),
+      "--json",
     ]);
   }
 
@@ -376,6 +377,13 @@ export async function POST(request: Request) {
         const fallbackConfigured = await configureClawboxAi(true);
         if (fallbackConfigured) {
           console.log("[AI Config] Configured ClawBox AI as fallback model");
+        } else {
+          // No ClawBox AI key — clear any stale fallback (e.g. leftover OpenAI)
+          // so the gateway doesn't silently switch to a different provider.
+          await runCommand(OPENCLAW_BIN, [
+            "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
+          ]);
+          console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
         }
       } catch (err) {
         console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
@@ -403,6 +411,11 @@ export async function POST(request: Request) {
         const fallbackConfigured = await configureClawboxAi(true);
         if (fallbackConfigured) {
           console.log("[AI Config] Configured ClawBox AI as fallback model");
+        } else {
+          await runCommand(OPENCLAW_BIN, [
+            "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
+          ]);
+          console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
         }
       } catch (err) {
         console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);

@@ -36,6 +36,7 @@ fi
 "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins '["http://clawbox.local","http://localhost","http://127.0.0.1","http://10.42.0.1"]' --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.bind lan 2>/dev/null || true
+"$OPENCLAW_BIN" config set gateway.mode local 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.token clawbox 2>/dev/null || true
 

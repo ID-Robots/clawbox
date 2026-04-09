@@ -68,8 +68,8 @@ function setupExecMock(results: Record<string, { stdout: string; stderr: string 
         return returnObj;
       },
     };
-    return returnObj as ReturnType<typeof childProcess.exec>;
-  }) as typeof childProcess.exec);
+    return returnObj as unknown as ReturnType<typeof childProcess.exec>;
+  }) as unknown as typeof childProcess.exec);
 }
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -117,8 +117,8 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
         return returnObj;
       },
     };
-    return returnObj as ReturnType<typeof childProcess.execFile>;
-  }) as typeof childProcess.execFile);
+    return returnObj as unknown as ReturnType<typeof childProcess.execFile>;
+  }) as unknown as typeof childProcess.execFile);
 }
 
 describe("updater", () => {

@@ -71,8 +71,8 @@ function setupExecFileMock(
       });
     }
 
-    return thenable;
-  }) as typeof childProcess.execFile);
+    return thenable as unknown as ReturnType<typeof childProcess.execFile>;
+  }) as unknown as typeof childProcess.execFile);
 }
 
 describe("network", () => {

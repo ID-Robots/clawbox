@@ -58,8 +58,8 @@ describe("/setup-api/wifi/scan", () => {
       mockGetScanStatus.mockReturnValue({
         scanning: false,
         networks: [
-          { ssid: "Network1", signal: 80, security: "WPA2" },
-          { ssid: "Network2", signal: 60, security: "WPA3" },
+          { ssid: "Network1", signal: 80, security: "WPA2", freq: "5 GHz" },
+          { ssid: "Network2", signal: 60, security: "WPA3", freq: "2.4 GHz" },
         ],
       });
 
@@ -91,7 +91,7 @@ describe("/setup-api/wifi/scan", () => {
         networks: null,
       });
       mockGetCachedScan.mockReturnValue([
-        { ssid: "CachedNet", signal: 70, security: "WPA2" },
+        { ssid: "CachedNet", signal: 70, security: "WPA2", freq: "5 GHz" },
       ]);
 
       const res = await wifiScanGet();

@@ -13,7 +13,10 @@ let filesPathGet: RouteHandler;
 let filesPathPut: RouteHandler;
 let filesPathDelete: RouteHandler;
 
-function createRequest(pathname: string, options?: RequestInit): NextRequest {
+function createRequest(
+  pathname: string,
+  options?: ConstructorParameters<typeof NextRequest>[1],
+): NextRequest {
   return new NextRequest(new URL(`http://localhost${pathname}`), options);
 }
 

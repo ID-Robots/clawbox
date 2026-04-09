@@ -752,7 +752,13 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#wifi-password").fill("wireless-pass");
   await page.getByRole("button", { name: "Connect" }).click();
 
-  await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
+  const updateStep = page.getByTestId("setup-step-update");
+  await expect(updateStep).toBeVisible({ timeout: 10_000 });
+  const continueButton = updateStep.getByRole("button", { name: "Continue" });
+  if (await continueButton.isVisible().catch(() => false)) {
+    await continueButton.click();
+  }
+  await expect(page.getByTestId("setup-step-credentials")).toBeVisible({ timeout: 10_000 });
 
   await page.locator("#cred-password").fill("clawbox-pass");
   await page.locator("#cred-confirm").fill("clawbox-pass");

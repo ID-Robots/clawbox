@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import * as fsp from "fs/promises";
+import fsp from "fs/promises";
 
 vi.mock("fs/promises", () => ({
   default: {
@@ -42,7 +42,7 @@ vi.mock("@/lib/oauth-config", () => ({
   },
 }));
 
-const mockFs = vi.mocked(fsp.default);
+const mockFs = vi.mocked(fsp);
 
 describe("POST /setup-api/ai-models/oauth/device-start", () => {
   let deviceStartPost: (req: Request) => Promise<Response>;
