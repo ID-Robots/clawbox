@@ -33,7 +33,31 @@ const ButtonSpinner = (
   <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
 );
 
+const PROVIDER_ICONS: Record<string, string> = {
+  clawai: "🐾",
+  anthropic: "🧠",
+  openai: "⚡",
+  google: "✨",
+  openrouter: "🔀",
+  ollama: "🦙",
+};
+
+const PRIMARY_PROVIDER_IDS = new Set(["clawai", "anthropic", "openai", "google"]);
+
 const PROVIDERS: Provider[] = [
+  {
+    id: "clawai",
+    name: "ClawBox AI",
+    description: "Most affordable — start for free",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Free",
+        placeholder: "",
+        hint: "Pre-configured and ready to use. No API key or account needed.",
+      },
+    ],
+  },
   {
     id: "anthropic",
     name: "Anthropic Claude",
@@ -143,7 +167,7 @@ const DEVICE_AUTH_LABELS: Record<string, {
 };
 
 export default function AIModelsStep({ onNext }: AIModelsStepProps) {
-  const [selectedProvider, setSelectedProvider] = useState<string | null>("anthropic");
+  const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
   const [authMode, setAuthMode] = useState<AuthMode>("subscription");
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");
@@ -288,6 +312,37 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
       if (controller.signal.aborted) return;
       if (data.success) {
         showSuccessAndContinue("AI model configured! Continuing...");
+      } else {
+        showError(data.error || "Failed to configure");
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      if (!controller.signal.aborted) setSaving(false);
+    }
+  };
+
+  const saveClawAI = async () => {
+    saveControllerRef.current?.abort();
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
+
+    setSaving(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/setup-api/ai-models/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "clawai" }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) return showError(await extractError(res, "Failed to configure"));
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+      if (data.success) {
+        showSuccessAndContinue("ClawBox AI configured!");
       } else {
         showError(data.error || "Failed to configure");
       }
@@ -766,6 +821,17 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           })}
         </div>
 
+        {selected?.id === "clawai" && (
+          <div className="mt-5">
+            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+              ClawBox AI is pre-configured and ready to go. Just click below to get started &mdash; no API key or account needed.
+            </p>
+            <p className="text-xs text-emerald-400 mt-2 leading-relaxed">
+              ✓ Free &mdash; powered by our cloud proxy. No setup required.
+            </p>
+          </div>
+        )}
+
         {selected?.id === "ollama" && (
           <div className="mt-5 space-y-4">
             <OllamaModelPanel
@@ -791,7 +857,7 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
           </div>
         )}
 
-        {selected && selected.id !== "ollama" && activeAuth && (
+        {selected && selected.id !== "ollama" && selected.id !== "clawai" && activeAuth && (
           <div className="mt-5">
             {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -888,7 +954,17 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
         )}
 
         <div className="flex items-center gap-3 mt-5">
-          {selected?.id === "ollama" ? (
+          {selected?.id === "clawai" ? (
+            <button
+              type="button"
+              onClick={saveClawAI}
+              disabled={saving}
+              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+            >
+              {saving && ButtonSpinner}
+              {saving ? "Configuring..." : embedded ? "Save" : "Get Started — Free"}
+            </button>
+          ) : selected?.id === "ollama" ? (
             null /* Ollama has its own buttons above */
           ) : isSubscription ? (
             useDeviceAuth ? (
@@ -917,14 +993,28 @@ export default function AIModelsStep({ onNext }: AIModelsStepProps) {
               {saving ? "Saving..." : "Save & Continue"}
             </button>
           )}
-          <button
-            type="button"
-            onClick={onNext}
-            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-          >
-            Skip for now
-          </button>
+          {selectedProvider !== "clawai" && (
+            <button
+              type="button"
+              onClick={onNext}
+              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
+            >
+              Skip for now
+            </button>
+          )}
         </div>
+        {!embedded && selectedProvider !== "clawai" && (
+          <div className="mt-3 text-center">
+            <button
+              type="button"
+              onClick={saveClawAI}
+              disabled={saving}
+              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
+            >
+              Or use ClawBox AI for free
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

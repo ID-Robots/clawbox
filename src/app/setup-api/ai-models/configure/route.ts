@@ -13,6 +13,14 @@ const AUTH_PROFILES_PATH =
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 
+// ClawBox AI proxy: devices connect to our proxy at openclawhardware.dev/api/ai
+// which forwards to DeepSeek. The default proxy token allows free usage.
+const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
+const CLAWBOX_AI_DEFAULT_TOKEN = "claw-d3eps33k-v1-2026";
+const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() || CLAWBOX_AI_DEFAULT_TOKEN;
+const CLAWBOX_AI_CONTEXT_WINDOW = 65536;
+const CLAWBOX_AI_MAX_TOKENS = 8192;
+
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB on a 3B model, exceeding the Jetson's 8 GB.
 // OpenClaw requires minimum 16K context. At Q4_K_M this uses ~3.5-4 GB total.
@@ -29,6 +37,10 @@ interface ProviderConfig {
 }
 
 const PROVIDERS: Record<string, ProviderConfig> = {
+  clawai: {
+    defaultModel: "deepseek/deepseek-chat",
+    profileKey: "deepseek:default",
+  },
   anthropic: {
     defaultModel: "anthropic/claude-sonnet-4-6",
     profileKey: "anthropic:default",
@@ -125,9 +137,10 @@ export async function POST(request: Request) {
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
-    if (!provider || (!apiKey && !isOllama)) {
+    const isClawAI = provider === "clawai";
+    if (!provider || (!apiKey && !isOllama && !isClawAI)) {
       return NextResponse.json(
-        { error: "Provider is required; API key required for non-Ollama providers" },
+        { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
       );
     }
@@ -165,7 +178,14 @@ export async function POST(request: Request) {
       } catch {
         authProfiles = { version: 1, profiles: {} };
       }
-      if (isOllama) {
+      if (isClawAI) {
+        // ClawBox AI uses the proxy token (default or from env)
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: ocProvider,
+          key: CLAWBOX_AI_API_KEY,
+        };
+      } else if (isOllama) {
         // Ollama runs locally — use a dummy api_key entry
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
@@ -211,13 +231,14 @@ export async function POST(request: Request) {
     }
 
     // 3. Set auth profile in main config
+    const authProfileMode = (isOllama || isClawAI)
+      ? "api_key"
+      : authMode === "subscription" ? "oauth" : "token";
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify(isOllama
-        ? { provider: ocProvider, mode: "api_key" }
-        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      JSON.stringify({ provider: ocProvider, mode: authProfileMode }),
       "--json",
     ]);
 
@@ -256,11 +277,31 @@ export async function POST(request: Request) {
       ai_model_configured_at: new Date().toISOString(),
     });
 
-    // 7. For Ollama, define the model in openclaw.json with a capped contextWindow
-    // and set models.mode=replace so the gateway uses our definition instead of
-    // auto-detecting the native context length from Ollama (which would be 128K).
-    // Also ensure the Ollama systemd service is optimized for 8GB RAM.
-    if (isOllama) {
+    // 7. For ClawBox AI or Ollama, define custom provider in openclaw.json.
+    if (isClawAI) {
+      // ClawBox AI: proxy to our server (DeepSeek under the hood)
+      const providerDef = JSON.stringify({
+        baseUrl: CLAWBOX_AI_PROXY_URL,
+        api: "openai-completions",
+        apiKey: CLAWBOX_AI_API_KEY,
+        models: [{
+          id: "deepseek-chat",
+          name: "ClawBox AI",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+          maxTokens: CLAWBOX_AI_MAX_TOKENS,
+        }],
+      });
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.deepseek", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "merge",
+      ]);
+      console.log(`[AI Config] ClawBox AI configured via proxy: ${CLAWBOX_AI_PROXY_URL}`);
+    } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
         baseUrl: "http://127.0.0.1:11434",
