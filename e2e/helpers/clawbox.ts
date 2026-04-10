@@ -755,10 +755,12 @@ export async function completeSetupWizard(page: Page) {
   const updateStep = page.getByTestId("setup-step-update");
   await expect(updateStep).toBeVisible({ timeout: 10_000 });
   const continueButton = updateStep.getByRole("button", { name: "Continue" });
-  if (await continueButton.isVisible().catch(() => false)) {
-    await continueButton.click();
+  const credentialsStep = page.getByTestId("setup-step-credentials");
+  const advancedAutomatically = await credentialsStep.isVisible({ timeout: 2_000 }).catch(() => false);
+  if (!advancedAutomatically && await continueButton.isVisible().catch(() => false)) {
+    await continueButton.click({ force: true });
   }
-  await expect(page.getByTestId("setup-step-credentials")).toBeVisible({ timeout: 10_000 });
+  await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
   await page.locator("#cred-password").fill("clawbox-pass");
   await page.locator("#cred-confirm").fill("clawbox-pass");
