@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
@@ -572,6 +573,113 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+  const resetProgressSteps = [
+    {
+      id: "erase",
+      label: t("settings.erasingSettings"),
+      status: resetPhase === "waiting" ? "running" : resetPhase ? "completed" : "pending",
+    },
+    {
+      id: "reconnect",
+      label: t("settings.waitingOnline"),
+      status:
+        resetPhase === "reconnecting"
+          ? "running"
+          : resetPhase === "done"
+            ? "completed"
+            : "pending",
+    },
+    {
+      id: "setup",
+      label: t("settings.startingSetup"),
+      status: resetPhase === "done" ? "running" : "pending",
+    },
+  ] satisfies Array<{ id: string; label: string; status: "pending" | "running" | "completed" }>;
+
+  const resetOverlayTitle =
+    resetPhase === "waiting"
+      ? `${t("settings.resetting")}${".".repeat(resetDots)}`
+      : resetPhase === "reconnecting"
+        ? `${t("settings.reconnecting")}${".".repeat(resetDots)}`
+        : t("settings.backOnline");
+
+  const resetOverlayDescription =
+    resetPhase === "waiting"
+      ? t("settings.erasingSettings")
+      : resetPhase === "reconnecting"
+        ? t("settings.waitingOnline")
+        : t("settings.startingSetup");
+
+  const resetOverlay = resetting && resetPhase && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
+          role="status"
+          aria-live="polite"
+        >
+          <style>{`
+            @keyframes factory-reset-pulse {
+              0%, 100% { opacity: 0.25; transform: scale(1); }
+              50% { opacity: 0.1; transform: scale(1.18); }
+            }
+          `}</style>
+          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
+            {resetPhase === "done" ? (
+              <div className="relative w-28 h-28 flex items-center justify-center">
+                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
+                <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316] shadow-[0_0_40px_rgba(249,115,22,0.28)]">
+                  <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }} aria-hidden="true">check</span>
+                </div>
+              </div>
+            ) : (
+              <div className="relative w-32 h-32 flex items-center justify-center">
+                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+                <div className="absolute inset-3 rounded-full border border-[#f97316]/15" style={{ animation: "factory-reset-pulse 2.5s ease-in-out infinite" }} />
+                <Image
+                  src="/clawbox-crab.png"
+                  alt="ClawBox"
+                  width={96}
+                  height={96}
+                  className="w-24 h-24 object-contain animate-welcome-powerup relative z-10"
+                />
+              </div>
+            )}
+
+            <div>
+              <h2 className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
+              <p className="text-sm text-white/45">{resetOverlayDescription}</p>
+            </div>
+
+            <div className="w-full max-w-sm space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
+              {resetProgressSteps.map((step) => (
+                <div key={step.id} className="flex items-start gap-3 text-sm">
+                  {step.status === "completed" ? (
+                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden="true">
+                        <path d="M5 12l5 5L19 7" />
+                      </svg>
+                    </span>
+                  ) : step.status === "running" ? (
+                    <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" aria-hidden="true" />
+                    </span>
+                  ) : (
+                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white/20" aria-hidden="true" />
+                    </span>
+                  )}
+                  <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : "text-white/25"}>
+                    {step.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )
+    : null;
 
   const renderContent = () => (
     <>
@@ -1769,41 +1877,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
-      {/* Factory Reset full-screen overlay */}
-      {resetting && resetPhase && (
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
-          <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
-            {resetPhase === "done" ? (
-              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
-                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
-              </div>
-            ) : (
-              <div className="w-16 h-16 rounded-full border-[3px] border-[var(--border-subtle)] animate-spin" style={{ borderTopColor: "#f97316" }} />
-            )}
-
-            {resetPhase === "waiting" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.resetting")}{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.erasingSettings")}</p>
-              </>
-            )}
-            {resetPhase === "reconnecting" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.reconnecting")}{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.waitingOnline")}</p>
-              </>
-            )}
-            {resetPhase === "done" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.backOnline")}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.startingSetup")}</p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+        {resetOverlay}
+      </div>
+    );
   }
 
   // ─── Desktop layout: sidebar + content ───
@@ -2031,39 +2107,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         document.body
       )}
 
-      {/* Factory Reset full-screen overlay */}
-      {resetting && resetPhase && (
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(0, 0, 0, 0.92)" }}>
-          <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
-            {resetPhase === "done" ? (
-              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316]">
-                <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }}>check</span>
-              </div>
-            ) : (
-              <div className="w-16 h-16 rounded-full border-[3px] border-[var(--border-subtle)] animate-spin" style={{ borderTopColor: "#f97316" }} />
-            )}
-
-            {resetPhase === "waiting" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.resetting")}{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.erasingSettings")}</p>
-              </>
-            )}
-            {resetPhase === "reconnecting" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.reconnecting")}{".".repeat(resetDots)}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.waitingOnline")}</p>
-              </>
-            )}
-            {resetPhase === "done" && (
-              <>
-                <h2 className="text-xl font-semibold text-white">{t("settings.backOnline")}</h2>
-                <p className="text-sm text-[var(--text-muted)]">{t("settings.startingSetup")}</p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {resetOverlay}
     </div>
   );
 }
