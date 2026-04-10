@@ -20,14 +20,13 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
 
-  // If setup isn't complete, send the user to the desktop UI, which opens
-  // the setup wizard in a window on boot.
+  // Incomplete setups should always resume on the dedicated setup route.
   useEffect(() => {
     fetch("/setup-api/setup/status")
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data && !data.setup_complete) {
-          window.location.href = "/";
+          window.location.replace("/setup");
           return;
         }
         setReady(true);
