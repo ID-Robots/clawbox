@@ -3,9 +3,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
+import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
+import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
+import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 
 interface AIModelsStepProps {
@@ -43,6 +46,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   google: "✨",
   openrouter: "🔀",
   ollama: "🦙",
+  llamacpp: "⚙️",
 };
 
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
@@ -174,6 +178,19 @@ const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]
 
 const PROVIDERS: Provider[] = [
   {
+    id: "clawai",
+    name: "ClawBox AI",
+    description: "Most affordable — start for free",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Free",
+        placeholder: "",
+        hint: "Pre-configured and ready to use. No API key or account needed.",
+      },
+    ],
+  },
+  {
     id: "openai",
     name: "OpenAI GPT",
     description: "Best for business",
@@ -225,19 +242,6 @@ const PROVIDERS: Provider[] = [
     ],
   },
   {
-    id: "clawai",
-    name: "ClawBox AI",
-    description: "Most affordable — start for free",
-    authOptions: [
-      {
-        mode: "local" as AuthMode,
-        label: "Free",
-        placeholder: "",
-        hint: "Pre-configured and ready to use. No API key or account needed.",
-      },
-    ],
-  },
-  {
     id: "openrouter",
     name: "OpenRouter",
     description: "Multi-provider AI gateway",
@@ -265,6 +269,19 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
+  {
+    id: "llamacpp",
+    name: "llama.cpp Local",
+    description: "Recommended for Gemma 4 E2B Q4/INT4 on 8GB devices",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Local",
+        placeholder: "",
+        hint: "No API key needed. Connect to a local llama-server endpoint serving a GGUF quant.",
+      },
+    ],
+  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
@@ -286,6 +303,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
   } | null>(null);
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+  const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
   const [configuring, setConfiguring] = useState(false);
 
   // OAuth redirect flow state (Anthropic)
@@ -307,6 +325,17 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
   const pollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
 
+  const clearPendingTimers = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
     if (pollRef.current) {
@@ -325,14 +354,13 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
         setAvailableOAuth([]);
       });
     return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      if (pollRef.current) clearTimeout(pollRef.current);
+      clearPendingTimers();
       saveControllerRef.current?.abort();
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
       pollControllerRef.current?.abort();
     };
-  }, []);
+  }, [clearPendingTimers]);
 
   const showError = (message: string) => {
     setConfiguring(false);
@@ -347,7 +375,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     setConfiguring(true);
   };
 
-  const showSuccessAndContinue = (_message: string) => {
+  const showSuccessAndContinue = () => {
     tryCloseOAuthWindow(oauthWindowRef);
     // Overlay is already showing — it will call handleConfiguringDone when done
   };
@@ -359,11 +387,11 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
 
   // Ollama hook
   const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
-    onSaveSuccess: (model: string) => showSuccessAndContinue(`Ollama configured with ${model}!`),
+    onSaveSuccess: () => showSuccessAndContinue(),
     onSaveError: (message: string) => showError(message),
     onPullError: (message: string) => showError(message),
     onClearStatus: () => setStatus(null),
-  }), []); // eslint-disable-line react-hooks/exhaustive-deps
+  }), []);
 
   const {
     ollamaRunning,
@@ -382,6 +410,22 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     formatOllamaBytes,
     clearSearch,
   } = useOllamaModels(ollamaCallbacks);
+
+  const llamaCppCallbacks = useMemo<LlamaCppCallbacks>(() => ({
+    onSaveSuccess: () => showSuccessAndContinue(),
+    onSaveError: (message: string) => showError(message),
+    onClearStatus: () => setStatus(null),
+  }), []);
+
+  const {
+    llamaCppRunning,
+    llamaCppModels,
+    llamaCppEndpoint,
+    llamaCppSaving,
+    llamaCppProgress,
+    checkLlamaCppStatus,
+    saveLlamaCppConfig,
+  } = useLlamaCppModels(llamaCppCallbacks);
 
   const selectProvider = (id: string) => {
     stopPolling();
@@ -404,9 +448,10 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     setDeviceUrl(null);
     setDeviceSaving(false);
     if (id === "ollama") checkOllamaStatus();
+    if (id === "llamacpp") checkLlamaCppStatus();
   };
 
-  const saveProviderConfig = async (payload: Record<string, unknown>, successMessage: string) => {
+  const saveProviderConfig = async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -425,7 +470,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        showSuccessAndContinue(successMessage);
+        showSuccessAndContinue();
       } else {
         showError(data.error || "Failed to configure");
       }
@@ -442,19 +487,17 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     if (!apiKey.trim()) return showError(t("ai.enterKey"));
     await saveProviderConfig(
       { provider: selectedProvider, apiKey: apiKey.trim(), authMode },
-      t("ai.configured"),
     );
   };
 
   const saveClawAI = async () => {
     setSelectedProvider("clawai");
-    await saveProviderConfig({ provider: "clawai" }, t("ai.clawaiConfigured"));
+    await saveProviderConfig({ provider: "clawai" });
   };
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; refresh_token?: string; expires_in?: number; projectId?: string },
-    successMessage: string
+    tokenData: { access_token: string; refresh_token?: string; expires_in?: number; projectId?: string }
   ) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -481,7 +524,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        showSuccessAndContinue(successMessage);
+        showSuccessAndContinue();
       } else {
         showError(saveData.error || "Failed to save token");
       }
@@ -489,21 +532,21 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [selectedProvider]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedProvider]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
-  const deviceAuthLabels: Record<string, {
+  const deviceAuthLabels = useMemo<Record<string, {
     description: string;
     button: string;
     success: string;
-  }> = {
+  }>>(() => ({
     openai: {
       description: t("ai.openaiConnectDesc"),
       button: t("ai.openaiConnect"),
       success: t("ai.openaiSuccess"),
     },
-  };
+  }), [t]);
   const currentDevice = deviceAuthLabels[selectedProvider ?? "openai"] ?? deviceAuthLabels.openai;
 
   const pollDeviceAuth = useCallback(async (interval: number) => {
@@ -532,9 +575,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       if (data.status === "complete" && data.access_token) {
         stopPolling();
         setDeviceSaving(true);
-        const successMsg = deviceAuthLabels[selectedProvider ?? "openai"]?.success
-          ?? "Subscription connected! Continuing...";
-        await saveOAuthToken(data, successMsg);
+        await saveOAuthToken(data);
         return;
       }
 
@@ -554,7 +595,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       // Network error — retry
       pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
     }
-  }, [stopPolling, saveOAuthToken, selectedProvider]);
+  }, [stopPolling, saveOAuthToken]);
 
   const startDeviceAuth = async () => {
     stopPolling();
@@ -651,7 +692,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       if (controller.signal.aborted) return;
       if (!tokenData.access_token) return showError("No access token received");
 
-      await saveOAuthToken(tokenData, currentOAuth.success);
+      await saveOAuthToken(tokenData);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
@@ -667,6 +708,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     google: t("ai.geminiModels"),
     openrouter: t("ai.multiProvider"),
     ollama: t("ai.runLocally"),
+    llamacpp: "GGUF + llama.cpp for 8GB devices",
   };
 
   const selected = PROVIDERS.find((p) => p.id === selectedProvider);
@@ -975,7 +1017,23 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
           </div>
         )}
 
-        {selected && selected.id !== "ollama" && selected.id !== "clawai" && activeAuth && (
+        {selected?.id === "llamacpp" && (
+          <div className="mt-5 space-y-4">
+            <LlamaCppModelPanel
+              llamaCppRunning={llamaCppRunning}
+              llamaCppModels={llamaCppModels}
+              llamaCppEndpoint={llamaCppEndpoint}
+              llamaCppSaving={llamaCppSaving}
+              llamaCppProgress={llamaCppProgress}
+              selectedLlamaCppModel={selectedLlamaCppModel}
+              setSelectedLlamaCppModel={setSelectedLlamaCppModel}
+              saveLlamaCppConfig={saveLlamaCppConfig}
+              buttonSpinner={ButtonSpinner}
+            />
+          </div>
+        )}
+
+        {selected && selected.id !== "ollama" && selected.id !== "llamacpp" && selected.id !== "clawai" && activeAuth && (
           <div className="mt-5">
             {effectiveAuthOptions.length > 1 && (
               <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
@@ -1078,6 +1136,8 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
             </button>
           ) : selected?.id === "ollama" ? (
             null /* Ollama has its own buttons above */
+          ) : selected?.id === "llamacpp" ? (
+            null /* llama.cpp has its own button above */
           ) : isSubscription ? (
             useDeviceAuth ? (
               /* Device auth has no manual submit button — it auto-completes via polling */

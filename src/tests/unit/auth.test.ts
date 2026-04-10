@@ -85,6 +85,25 @@ describe("auth", () => {
     });
   });
 
+  describe("getSessionSigningSecret", () => {
+    it("prefers SESSION_SECRET from the running server", async () => {
+      process.env.SESSION_SECRET = "live-session-secret";
+      await fs.writeFile(SECRET_PATH, crypto.randomBytes(32).toString("hex"), "utf-8");
+
+      await expect(auth.getSessionSigningSecret()).resolves.toBe("live-session-secret");
+
+      delete process.env.SESSION_SECRET;
+    });
+
+    it("falls back to the persisted secret when SESSION_SECRET is absent", async () => {
+      delete process.env.SESSION_SECRET;
+
+      const secret = await auth.getSessionSigningSecret();
+      const onDisk = (await fs.readFile(SECRET_PATH, "utf-8")).trim();
+      expect(secret).toBe(onDisk);
+    });
+  });
+
   // ─── verifyPassword ─────────────────────────────────────────────────
 
   describe("verifyPassword", () => {

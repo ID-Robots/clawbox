@@ -60,6 +60,16 @@ as_user_login() {
   sudo -iu "$CLAWBOX_USER" bash -lc "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
 }
 
+ensure_env_setting() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    echo "  Added ${key} to ${env_file}"
+  fi
+}
+
 wait_for_apt() {
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -80,7 +90,7 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl python3-pip
+  apt-get install -y -qq git curl python3-pip build-essential cmake ninja-build
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
@@ -262,7 +272,8 @@ step_openclaw_config() {
     return
   fi
 
-  as_user "$OPENCLAW_BIN" config set gateway.auth.mode none 2>/dev/null || true
+  as_user "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
+  as_user "$OPENCLAW_BIN" config set gateway.auth.token clawbox 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
 
@@ -290,10 +301,13 @@ if(!c.agents)c.agents={};
 if(!c.agents.defaults)c.agents.defaults={};
 if(!c.agents.defaults.model)c.agents.defaults.model={};
 c.agents.defaults.model.primary='anthropic/claude-sonnet-4-20250514';
+if(!c.agents.defaults.compaction)c.agents.defaults.compaction={};
+c.agents.defaults.compaction.reserveTokensFloor=24000;
 
 if(!c.gateway)c.gateway={};
 if(!c.gateway.auth)c.gateway.auth={};
-c.gateway.auth.mode='none';
+c.gateway.auth.mode='token';
+c.gateway.auth.token='clawbox';
 if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
@@ -351,6 +365,15 @@ step_directories_permissions() {
     printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
   echo "  Done"
 }
 
@@ -367,6 +390,51 @@ step_ollama_install() {
     systemctl start ollama 2>/dev/null || true
   fi
   echo "  Ollama installed and running"
+}
+
+step_llamacpp_install() {
+  local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
+  local CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
+
+  if [ -d /usr/local/cuda ] || command -v nvcc &>/dev/null; then
+    CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA=ON"
+  fi
+
+  if ! as_user_login "command -v hf" &>/dev/null; then
+    echo "  Installing Hugging Face CLI..."
+    if ! as_user_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"; then
+      echo "Error: failed to install Hugging Face CLI" >&2
+      return 1
+    fi
+  else
+    echo "  Hugging Face CLI already installed"
+  fi
+
+  if [ ! -x /usr/local/bin/llama-server ]; then
+    echo "  Installing llama.cpp server..."
+    if [ ! -d "$LLAMA_DIR/.git" ]; then
+      if ! as_user git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"; then
+        echo "Error: failed to clone llama.cpp into $LLAMA_DIR" >&2
+        return 1
+      fi
+    fi
+    if ! as_user_login "cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
+      echo "Error: failed to configure llama.cpp build in $LLAMA_DIR" >&2
+      return 1
+    fi
+    if ! as_user_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"; then
+      echo "Error: failed to build llama-server in $LLAMA_DIR" >&2
+      return 1
+    fi
+    if ! install -m 755 "$LLAMA_DIR/build/bin/llama-server" /usr/local/bin/llama-server; then
+      echo "Error: failed to install llama-server to /usr/local/bin/llama-server" >&2
+      return 1
+    fi
+  else
+    echo "  llama-server already installed"
+  fi
+
+  echo "  llama.cpp runtime ready"
 }
 
 step_chromium_install() {
@@ -469,7 +537,7 @@ DISPATCH_STEPS=(
   apt_update install_bun git_pull build
   openclaw_setup openclaw_install openclaw_patch openclaw_config
   directories_permissions
-  ollama_install chromium_install ai_tools_install
+  ollama_install llamacpp_install chromium_install ai_tools_install
   vnc_install ffmpeg_install fix_git_perms
   start_gateway start_ui
 )
@@ -494,7 +562,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=15
+TOTAL_STEPS=16
 step=0
 log() {
   step=$((step + 1))
@@ -529,6 +597,9 @@ step_directories_permissions
 
 log "Installing Ollama..."
 step_ollama_install
+
+log "Installing llama.cpp runtime..."
+step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install

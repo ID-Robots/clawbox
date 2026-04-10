@@ -8,17 +8,17 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/auth", () => ({
   verifyPassword: vi.fn(),
   createSessionCookie: vi.fn().mockReturnValue("session.cookie"),
-  getOrCreateSecret: vi.fn().mockResolvedValue("secret"),
+  getSessionSigningSecret: vi.fn().mockResolvedValue("secret"),
 }));
 
 import * as config from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getOrCreateSecret } from "@/lib/auth";
+import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 
 const mockGet = vi.mocked(config.get);
 const mockSet = vi.mocked(config.set);
 const mockVerifyPassword = vi.mocked(verifyPassword);
 const mockCreateSessionCookie = vi.mocked(createSessionCookie);
-const mockGetOrCreateSecret = vi.mocked(getOrCreateSecret);
+const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
 
 describe("/login-api", () => {
   let POST: (req: Request) => Promise<Response>;
@@ -29,7 +29,7 @@ describe("/login-api", () => {
     mockGet.mockResolvedValue(true as never);
     mockVerifyPassword.mockResolvedValue(false);
     mockCreateSessionCookie.mockReturnValue("session.cookie");
-    mockGetOrCreateSecret.mockResolvedValue("secret");
+    mockGetSessionSigningSecret.mockResolvedValue("secret");
     const mod = await import("@/app/login-api/route");
     POST = mod.POST;
   });

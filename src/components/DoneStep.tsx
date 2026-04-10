@@ -6,8 +6,11 @@ import StatusMessage from "./StatusMessage";
 
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import OllamaModelPanel from "./OllamaModelPanel";
+import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
+import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
+import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 
 /* ── Types ── */
 
@@ -58,6 +61,7 @@ const AI_PROVIDERS = [
   { id: "google", name: "Google Gemini", hasSubscription: true, placeholder: "AIza...", hint: "Get your API key from Google AI Studio.", tokenUrl: "https://aistudio.google.com/apikey" },
   { id: "openrouter", name: "OpenRouter", hasSubscription: false, placeholder: "sk-or-v1-...", hint: "Get your API key from OpenRouter.", tokenUrl: "https://openrouter.ai/keys" },
   { id: "ollama", name: "Ollama Local", hasSubscription: false, isLocal: true, placeholder: "", hint: "Run AI models locally on this device.", tokenUrl: "" },
+  { id: "llamacpp", name: "llama.cpp Local", hasSubscription: false, isLocal: true, placeholder: "", hint: "Recommended for Gemma 4 E2B Q4/INT4-class GGUF runtimes on 8GB devices.", tokenUrl: "" },
 ] as const;
 
 /* ── Helper functions ── */
@@ -212,6 +216,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
 
   /* ── Ollama Local ── */
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
+  const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
 
   /* ── Security (system password + hotspot) ── */
   const [password, setPassword] = useState("");
@@ -659,7 +664,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     onSaveError: (message: string) => setAiStatus({ type: "error", message }),
     onPullError: (message: string) => setAiStatus({ type: "error", message }),
     onClearStatus: () => setAiStatus(null),
-  }), []); // eslint-disable-line react-hooks/exhaustive-deps
+  }), []);
 
   const {
     ollamaRunning,
@@ -678,6 +683,27 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     formatOllamaBytes,
     clearSearch,
   } = useOllamaModels(ollamaCallbacks);
+
+  const llamaCppCallbacks = useMemo<LlamaCppCallbacks>(() => ({
+    onSaveSuccess: (model: string) => {
+      setAiStatus({ type: "success", message: `llama.cpp configured with ${model}!` });
+      setProviderDone(true);
+      setProviderName("llamacpp");
+      setTimeout(() => { setOpenSection(null); setAiStatus(null); }, 1500);
+    },
+    onSaveError: (message: string) => setAiStatus({ type: "error", message }),
+    onClearStatus: () => setAiStatus(null),
+  }), []);
+
+  const {
+    llamaCppRunning,
+    llamaCppModels,
+    llamaCppEndpoint,
+    llamaCppSaving,
+    llamaCppProgress,
+    checkLlamaCppStatus,
+    saveLlamaCppConfig,
+  } = useLlamaCppModels(llamaCppCallbacks);
 
   const startAiOAuth = async () => {
     aiOauthStartControllerRef.current?.abort();
@@ -1033,6 +1059,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                       setAiAuthMode(provider.hasSubscription ? "subscription" : "token");
                       resetAiFields();
                       if (provider.id === "ollama") checkOllamaStatus();
+                      if (provider.id === "llamacpp") checkLlamaCppStatus();
                     }}
                     className="sr-only"
                   />
@@ -1065,6 +1092,22 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                 pullOllamaModel={pullOllamaModel}
                 formatOllamaBytes={formatOllamaBytes}
                 radioGroupName="ollama-model-dash"
+                inputClassName={INPUT_CLASS}
+                buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+                buttonSpinner={ButtonSpinner}
+              />
+            </div>
+          ) : aiProvider === "llamacpp" ? (
+            <div className="space-y-3">
+              <LlamaCppModelPanel
+                llamaCppRunning={llamaCppRunning}
+                llamaCppModels={llamaCppModels}
+                llamaCppEndpoint={llamaCppEndpoint}
+                llamaCppSaving={llamaCppSaving}
+                llamaCppProgress={llamaCppProgress}
+                selectedLlamaCppModel={selectedLlamaCppModel}
+                setSelectedLlamaCppModel={setSelectedLlamaCppModel}
+                saveLlamaCppConfig={saveLlamaCppConfig}
                 inputClassName={INPUT_CLASS}
                 buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
                 buttonSpinner={ButtonSpinner}

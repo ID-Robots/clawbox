@@ -101,6 +101,20 @@ describe("openclaw-config", () => {
     vi.clearAllMocks();
   });
 
+  describe("ensureCompactionReserveFloor", () => {
+    it("writes the default reserve floor when compaction config is missing", async () => {
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);
+
+      await openclawConfig.ensureCompactionReserveFloor();
+
+      expect(mockFs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining("openclaw.json.tmp"),
+        expect.stringContaining('"reserveTokensFloor": 24000'),
+        "utf-8"
+      );
+    });
+  });
+
   describe("CONFIG_PATH", () => {
     it("exports CONFIG_PATH pointing to openclaw.json", () => {
       expect(openclawConfig.CONFIG_PATH).toMatch(/openclaw\.json$/);

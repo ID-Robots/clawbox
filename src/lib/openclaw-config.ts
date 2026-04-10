@@ -7,6 +7,7 @@ import { promisify } from "util";
 const exec = promisify(execFile);
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
+export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
 
 export interface OpenClawConfig {
   [key: string]: unknown;
@@ -26,7 +27,11 @@ export interface OpenClawConfig {
     profiles?: Record<string, { provider?: string; mode?: string }>;
   };
   agents?: {
-    defaults?: { model?: { primary?: string }; workspace?: string };
+    defaults?: {
+      model?: { primary?: string };
+      workspace?: string;
+      compaction?: { reserveTokensFloor?: number };
+    };
   };
 }
 
@@ -44,6 +49,22 @@ async function writeConfig(config: OpenClawConfig): Promise<void> {
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
+}
+
+export async function ensureCompactionReserveFloor(
+  reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
+): Promise<void> {
+  const config = await readConfig();
+  config.agents ??= {};
+  config.agents.defaults ??= {};
+  config.agents.defaults.compaction ??= {};
+  if (
+    typeof config.agents.defaults.compaction.reserveTokensFloor !== "number" ||
+    config.agents.defaults.compaction.reserveTokensFloor < reserveTokensFloor
+  ) {
+    config.agents.defaults.compaction.reserveTokensFloor = reserveTokensFloor;
+    await writeConfig(config);
+  }
 }
 
 export async function setTelegramToken(botToken: string): Promise<void> {

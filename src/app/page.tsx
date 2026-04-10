@@ -175,6 +175,7 @@ function ChromeDesktopInner() {
   const [trayOpen, setTrayOpen] = useState(false);
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
   const [nextZIndex, setNextZIndex] = useState(100);
+  const nextZIndexRef = useRef(100);
   const [time, setTime] = useState("");
   const [date, setDate] = useState("");
   const [installedApps, setInstalledApps] = useState<string[]>([]);
@@ -220,6 +221,10 @@ function ChromeDesktopInner() {
   const [wpOpacity, setWpOpacity] = useState(50);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
+  useEffect(() => {
+    nextZIndexRef.current = nextZIndex;
+  }, [nextZIndex]);
+
   useEffect(() => {
     fetch("/setup-api/preferences?all=1")
       .then(r => r.json())
@@ -869,10 +874,11 @@ function ChromeDesktopInner() {
     if (!setupChecked || !setupRequired) return;
     setOpenWindows((prev) => {
       if (prev.some((w) => w.appId === "setup")) return prev;
-      return [...prev, { id: `setup-${Date.now()}`, appId: "setup", zIndex: nextZIndex, minimized: false }];
+      const z = nextZIndexRef.current;
+      return [...prev, { id: `setup-${Date.now()}`, appId: "setup", zIndex: z, minimized: false }];
     });
     setNextZIndex((z) => z + 1);
-  }, [setupChecked, setupRequired, nextZIndex]);
+  }, [setupChecked, setupRequired]);
 
   const handleSetupComplete = useCallback(() => {
     setSetupRequired(false);

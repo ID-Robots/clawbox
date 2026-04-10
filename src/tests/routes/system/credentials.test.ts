@@ -18,9 +18,15 @@ vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
 }));
 
+vi.mock("@/lib/auth", () => ({
+  getSystemUsername: vi.fn(() => process.env.CLAWBOX_USER || "clawbox"),
+}));
+
 import { set } from "@/lib/config-store";
+import { getSystemUsername } from "@/lib/auth";
 
 const mockSet = vi.mocked(set);
+const mockGetSystemUsername = vi.mocked(getSystemUsername);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fs);
 
@@ -75,6 +81,7 @@ describe("POST /setup-api/system/credentials", () => {
     mockFs.writeFile.mockResolvedValue();
     mockFs.unlink.mockResolvedValue();
     mockSet.mockResolvedValue();
+    mockGetSystemUsername.mockImplementation(() => process.env.CLAWBOX_USER || "clawbox");
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
     });
@@ -85,6 +92,7 @@ describe("POST /setup-api/system/credentials", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    delete process.env.CLAWBOX_USER;
   });
 
   it("sets password successfully", async () => {
@@ -95,6 +103,21 @@ describe("POST /setup-api/system/credentials", () => {
     expect(body.success).toBe(true);
     expect(mockFs.writeFile).toHaveBeenCalled();
     expect(mockSet).toHaveBeenCalledWith("password_configured", true);
+  });
+
+  it("writes the password for the configured install user", async () => {
+    process.env.CLAWBOX_USER = "desktopuser";
+
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect.any(String),
+      "desktopuser:securepassword123\n",
+      expect.objectContaining({ mode: 0o600 })
+    );
   });
 
   it("returns 400 for invalid JSON", async () => {

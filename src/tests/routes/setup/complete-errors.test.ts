@@ -5,15 +5,15 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/auth", () => ({
-  getOrCreateSecret: vi.fn(),
+  getSessionSigningSecret: vi.fn(),
   createSessionCookie: vi.fn(),
 }));
 
 import { set } from "@/lib/config-store";
-import { createSessionCookie, getOrCreateSecret } from "@/lib/auth";
+import { createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 
 const mockSet = vi.mocked(set);
-const mockGetOrCreateSecret = vi.mocked(getOrCreateSecret);
+const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
 const mockCreateSessionCookie = vi.mocked(createSessionCookie);
 
 describe("POST /setup-api/setup/complete error paths", () => {
@@ -24,7 +24,7 @@ describe("POST /setup-api/setup/complete error paths", () => {
     vi.clearAllMocks();
 
     mockSet.mockResolvedValue();
-    mockGetOrCreateSecret.mockResolvedValue("test-secret");
+    mockGetSessionSigningSecret.mockResolvedValue("test-secret");
     mockCreateSessionCookie.mockReturnValue("signed-cookie");
 
     const mod = await import("@/app/setup-api/setup/complete/route");
@@ -32,7 +32,7 @@ describe("POST /setup-api/setup/complete error paths", () => {
   });
 
   it("still succeeds when auto-login cookie creation fails", async () => {
-    mockGetOrCreateSecret.mockRejectedValueOnce(new Error("secret unavailable"));
+    mockGetSessionSigningSecret.mockRejectedValueOnce(new Error("secret unavailable"));
 
     const response = await completePost();
 

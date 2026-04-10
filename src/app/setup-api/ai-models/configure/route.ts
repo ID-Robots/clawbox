@@ -5,14 +5,26 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { setMany } from "@/lib/config-store";
-import { restartGateway, findOpenclawBin } from "@/lib/openclaw-config";
+import {
+  restartGateway,
+  findOpenclawBin,
+  DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+} from "@/lib/openclaw-config";
+import {
+  getDefaultLlamaCppModel,
+  getLlamaCppBaseUrl,
+  getLlamaCppContextWindow,
+  getLlamaCppMaxTokens,
+} from "@/lib/llamacpp";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
-const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() ?? "";
+const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
+const CLAWBOX_AI_DEFAULT_TOKEN = "claw-d3eps33k-v1-2026";
+const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() || CLAWBOX_AI_DEFAULT_TOKEN;
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
 const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
@@ -63,6 +75,10 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   ollama: {
     defaultModel: "ollama/llama3.2:3b",
     profileKey: "ollama:default",
+  },
+  llamacpp: {
+    defaultModel: `llamacpp/${getDefaultLlamaCppModel()}`,
+    profileKey: "llamacpp:default",
   },
 };
 
@@ -140,7 +156,7 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
 
 function buildClawboxAiProviderDefinition() {
   return JSON.stringify({
-    baseUrl: "https://api.deepseek.com",
+    baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey: CLAWBOX_AI_API_KEY,
     models: [{
@@ -214,14 +230,9 @@ export async function POST(request: Request) {
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
+    const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
-    if (isClawAI && !CLAWBOX_AI_API_KEY) {
-      return NextResponse.json(
-        { error: "ClawBox AI is not configured on this device. Set CLAWBOX_AI_API_KEY first." },
-        { status: 503 }
-      );
-    }
-    if (!provider || (!apiKey && !isOllama && !isClawAI)) {
+    if (!provider || (!apiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
@@ -240,13 +251,34 @@ export async function POST(request: Request) {
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
       ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
+    const llamaCppContextWindow = getLlamaCppContextWindow();
+    const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+    const ensureClawboxFallback = async () => {
+      try {
+        const fallbackConfigured = await configureClawboxAi(true);
+        if (fallbackConfigured) {
+          console.log("[AI Config] Configured ClawBox AI as fallback model");
+          return;
+        }
+
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
+        ]);
+        console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
+      } catch (err) {
+        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
+      }
+    };
 
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
       const modelName = apiKey || "llama3.2:3b";
       config.defaultModel = `ollama/${modelName}`;
+    } else if (isLlamaCpp) {
+      const modelName = apiKey || getDefaultLlamaCppModel();
+      config.defaultModel = `llamacpp/${modelName}`;
     }
 
     // 1. Write token to auth-profiles.json
@@ -265,6 +297,12 @@ export async function POST(request: Request) {
           type: "api_key",
           provider: ocProvider,
           key: "ollama-local",
+        };
+      } else if (isLlamaCpp) {
+        authProfiles.profiles[config.profileKey] = {
+          type: "api_key",
+          provider: ocProvider,
+          key: "llamacpp-local",
         };
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
@@ -304,7 +342,7 @@ export async function POST(request: Request) {
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify((isOllama || isClawAI)
+      JSON.stringify((isOllama || isLlamaCpp || isClawAI)
         ? { provider: ocProvider, mode: "api_key" }
         : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
@@ -315,13 +353,22 @@ export async function POST(request: Request) {
       "agents.defaults.model.primary",
       config.defaultModel,
     ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config",
+      "set",
+      "agents.defaults.compaction.reserveTokensFloor",
+      `${DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR}`,
+    ]);
 
-    // 4c. Local device gateway setup: disable gateway auth (no HTTPS for browser
-    // token exchange) and disable device identity checks (no secure context for
-    // browser crypto key-pair). The gateway is only reachable via local proxy.
+    // 4c. Local device gateway setup: keep token auth enabled for LAN binding,
+    // but relax Control UI browser checks because the setup surface runs over
+    // plain HTTP on the local device.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
     await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.auth.mode", "none",
+      "config", "set", "gateway.auth.mode", "token",
+    ]);
+    await runCommand(OPENCLAW_BIN, [
+      "config", "set", "gateway.auth.token", "clawbox",
     ]);
     await runCommand(OPENCLAW_BIN, [
       "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
@@ -350,7 +397,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",
       ]);
-      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
+      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
@@ -373,21 +420,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "replace",
       ]);
-      try {
-        const fallbackConfigured = await configureClawboxAi(true);
-        if (fallbackConfigured) {
-          console.log("[AI Config] Configured ClawBox AI as fallback model");
-        } else {
-          // No ClawBox AI key — clear any stale fallback (e.g. leftover OpenAI)
-          // so the gateway doesn't silently switch to a different provider.
-          await runCommand(OPENCLAW_BIN, [
-            "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
-          ]);
-          console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
-        }
-      } catch (err) {
-        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
-      }
+      await ensureClawboxFallback();
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
         await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
@@ -396,6 +429,30 @@ export async function POST(request: Request) {
         console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
       }
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+    } else if (isLlamaCpp) {
+      const modelName = config.defaultModel.replace(/^llamacpp\//, "");
+      const providerDef = JSON.stringify({
+        baseUrl: getLlamaCppBaseUrl(),
+        api: "openai-completions",
+        apiKey: "llamacpp-local",
+        models: [{
+          id: modelName,
+          name: modelName,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: llamaCppContextWindow,
+          maxTokens: llamaCppMaxTokens,
+        }],
+      });
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.llamacpp", providerDef, "--json",
+      ]);
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.mode", "replace",
+      ]);
+      await ensureClawboxFallback();
+      console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
@@ -407,19 +464,7 @@ export async function POST(request: Request) {
         // Non-fatal: merge is the default behavior anyway
       }
 
-      try {
-        const fallbackConfigured = await configureClawboxAi(true);
-        if (fallbackConfigured) {
-          console.log("[AI Config] Configured ClawBox AI as fallback model");
-        } else {
-          await runCommand(OPENCLAW_BIN, [
-            "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
-          ]);
-          console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
-        }
-      } catch (err) {
-        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
-      }
+      await ensureClawboxFallback();
     }
 
     // 8. Restart OpenClaw gateway so it picks up the new auth profile and model

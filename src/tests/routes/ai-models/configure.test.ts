@@ -23,6 +23,7 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
@@ -199,6 +200,22 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
   });
 
+  it("configures llama.cpp without apiKey", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "llamacpp",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
+    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
+    expect(commands).toContain("config set gateway.auth.mode token");
+    expect(commands).toContain("config set gateway.auth.token clawbox");
+  });
+
   it("configures subscription auth mode for oauth", async () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -290,6 +307,17 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(writtenContent.profiles["ollama:default"].key).toBe("ollama-local");
   });
 
+  it("writes auth profile with dummy key for llama.cpp", async () => {
+    await configurePost(jsonRequest({
+      provider: "llamacpp",
+      apiKey: "gemma-q4",
+    }));
+
+    const writeCall = mockFs.writeFile.mock.calls[0];
+    const writtenContent = JSON.parse(writeCall[1] as string);
+    expect(writtenContent.profiles["llamacpp:default"].key).toBe("llamacpp-local");
+  });
+
   it("configures ClawBox AI as a fallback model when the device key is present", async () => {
     await configurePost(jsonRequest({
       provider: "anthropic",
@@ -310,7 +338,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
-  it("returns 503 for ClawBox AI when the device key is missing", async () => {
+  it("configures ClawBox AI with the default proxy token when no device key is set", async () => {
     delete process.env.CLAWBOX_AI_API_KEY;
     vi.resetModules();
     const mod = await import("@/app/setup-api/ai-models/configure/route");
@@ -321,8 +349,14 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     const body = await res.json();
 
-    expect(res.status).toBe(503);
-    expect(body.error).toContain("CLAWBOX_AI_API_KEY");
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+
+    expect(providerDef.baseUrl).toBe("https://openclawhardware.dev/api/ai");
+    expect(providerDef.apiKey).toBe("claw-d3eps33k-v1-2026");
   });
 
   it("restarts gateway after configuration", async () => {
@@ -332,5 +366,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(mockRestartGateway).toHaveBeenCalled();
+  });
+
+  it("configures llama.cpp provider definition in openclaw", async () => {
+    await configurePost(jsonRequest({
+      provider: "llamacpp",
+      apiKey: "gemma-q4",
+    }));
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands.some((command) => command.includes("config set models.providers.llamacpp"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma-q4");
+
+    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.llamacpp");
+    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    const modelDef = providerDef?.models?.[0] ?? {};
+
+    expect(modelDef.contextWindow).toBe(131072);
+    expect(modelDef.maxTokens).toBe(131072);
   });
 });

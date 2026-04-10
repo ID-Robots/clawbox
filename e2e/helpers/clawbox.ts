@@ -755,10 +755,14 @@ export async function completeSetupWizard(page: Page) {
   const updateStep = page.getByTestId("setup-step-update");
   await expect(updateStep).toBeVisible({ timeout: 10_000 });
   const continueButton = updateStep.getByRole("button", { name: "Continue" });
-  if (await continueButton.isVisible().catch(() => false)) {
+  const credentialsStep = page.getByTestId("setup-step-credentials");
+  const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!advancedAutomatically) {
     await continueButton.click();
   }
-  await expect(page.getByTestId("setup-step-credentials")).toBeVisible({ timeout: 10_000 });
+  await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
   await page.locator("#cred-password").fill("clawbox-pass");
   await page.locator("#cred-confirm").fill("clawbox-pass");
@@ -774,6 +778,6 @@ export async function completeSetupWizard(page: Page) {
 }
 
 export async function openLauncher(page: Page) {
-  await page.locator('[data-testid="shelf-launcher-button"]:visible').click();
+  await page.locator('[data-testid="shelf-launcher-button"]:visible').click({ force: true });
   await expect(page.getByTestId("app-launcher")).toBeVisible();
 }

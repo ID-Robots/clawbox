@@ -1,7 +1,7 @@
 "use client";
 
 import type { OllamaModel, OllamaSearchResult } from "@/hooks/useOllamaModels";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 
 const PRESET_MODELS = [
@@ -67,6 +67,19 @@ export default function OllamaModelPanel({
   buttonSpinner = DEFAULT_SPINNER,
 }: OllamaModelPanelProps) {
   const { t } = useT();
+  const commitTypedModel = (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed.includes(":") && trimmed.length > 3) {
+      setSelectedOllamaModel(trimmed);
+    }
+  };
+
+  const handleTypedModelKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    commitTypedModel(ollamaSearch);
+  };
+
   if (!ollamaRunning) {
     return (
       <p className="text-xs text-yellow-400">
@@ -161,12 +174,10 @@ export default function OllamaModelPanel({
               type="text"
               value={ollamaSearch}
               onChange={(e) => {
-                const v = e.target.value;
-                handleOllamaSearchChange(v);
-                if (v.includes(":") && v.trim().length > 3) {
-                  setSelectedOllamaModel(v.trim());
-                }
+                handleOllamaSearchChange(e.target.value);
               }}
+              onBlur={() => commitTypedModel(ollamaSearch)}
+              onKeyDown={handleTypedModelKeyDown}
               placeholder={t("ollama.searchPlaceholder")}
               spellCheck={false}
               autoComplete="off"
@@ -242,7 +253,7 @@ export default function OllamaModelPanel({
                 }}
                 className="px-3 py-1.5 text-xs font-semibold text-white btn-gradient rounded cursor-pointer"
               >
-                Use &quot;{ollamaSearch.trim()}&quot; anyway
+                {t("ollama.useAnyway", { model: ollamaSearch.trim() })}
               </button>
             </div>
           )}

@@ -1,6 +1,8 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { set } from "@/lib/config-store";
-import { getOrCreateSecret, createSessionCookie } from "@/lib/auth";
+import { getSessionSigningSecret, createSessionCookie } from "@/lib/auth";
 
 export async function POST() {
   try {
@@ -11,7 +13,7 @@ export async function POST() {
     // Auto-login after first setup so user isn't shown the login screen
     const res = NextResponse.json({ success: true });
     try {
-      const secret = await getOrCreateSecret();
+      const secret = await getSessionSigningSecret();
       const cookie = createSessionCookie(86400, secret); // 24h session
       res.cookies.set("clawbox_session", cookie, {
         httpOnly: true,

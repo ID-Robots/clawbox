@@ -10,6 +10,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   google: "Google Gemini",
   openrouter: "OpenRouter",
   ollama: "Ollama Local",
+  llamacpp: "llama.cpp Local",
 };
 
 export async function GET() {

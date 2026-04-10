@@ -104,21 +104,38 @@ export async function POST(req: NextRequest) {
       const result = await new Promise<{ name: string }>((resolve, reject) => {
         const busboy = Busboy({ headers: { "content-type": contentType } });
         let fileName = "";
+        const fileWrites: Promise<void>[] = [];
+        let settled = false;
+
+        const rejectOnce = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+
+        const resolveOnce = () => {
+          if (settled) return;
+          settled = true;
+          resolve({ name: fileName });
+        };
 
         busboy.on("file", (_field, fileStream, info) => {
           fileName = info.filename;
           const destPath = safePath(path.join(dir, fileName));
           if (!destPath) {
             fileStream.resume();
-            reject(new Error("Invalid destination"));
+            rejectOnce(new Error("Invalid destination"));
             return;
           }
           const ws = fs.createWriteStream(destPath);
-          fileStream.pipe(ws);
-          ws.on("error", reject);
+          const writePromise = pipeline(fileStream, ws).then(() => {});
+          fileWrites.push(writePromise);
+          writePromise.catch(rejectOnce);
         });
-        busboy.on("finish", () => resolve({ name: fileName }));
-        busboy.on("error", reject);
+        busboy.on("finish", () => {
+          void Promise.all(fileWrites).then(resolveOnce).catch(rejectOnce);
+        });
+        busboy.on("error", rejectOnce);
 
         const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
         nodeStream.pipe(busboy);

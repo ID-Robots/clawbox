@@ -316,6 +316,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "ollama.select": "Select",
     "ollama.selected": "Selected:",
     "ollama.noModelsFound": "No models found matching \"{query}\" for 8GB devices",
+    "ollama.useAnyway": "Use \"{model}\" anyway",
     "ollama.downloading": "Downloading...",
     "ollama.configuring": "Configuring...",
     "ollama.downloadAndConfigure": "Download & Configure",

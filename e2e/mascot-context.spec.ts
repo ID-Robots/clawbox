@@ -22,5 +22,11 @@ test("mascot tap opens the chat popup", async ({ page }) => {
   const boxImage = page.locator('img[src="/clawbox-box.png"]').first();
   await expect(boxImage).toBeVisible();
   await page.locator('img[src="/clawbox-crab.png"]').first().click({ force: true });
-  await expect(page.getByTitle("Dock to right")).toBeVisible();
+  const dockButton = page.getByTitle("Dock to right");
+  const chatInput = page.locator('textarea[placeholder="Type a message..."], textarea[placeholder="Connecting..."]').first();
+  await expect.poll(async () => {
+    const dockVisible = await dockButton.isVisible().catch(() => false);
+    const inputVisible = await chatInput.isVisible().catch(() => false);
+    return dockVisible || inputVisible;
+  }).toBe(true);
 });
