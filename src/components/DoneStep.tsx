@@ -872,7 +872,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         setResetProgress(100);
         // Device is rebooting — wait then try to reload (page will come back after reboot)
         await new Promise((r) => setTimeout(r, 3000));
-        window.location.href = "/";
+        window.location.replace("/setup");
         return;
       }
       setCompleteError("Factory reset failed");

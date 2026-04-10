@@ -113,6 +113,15 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockResetUpdateState).toHaveBeenCalled();
   });
 
+  it("clears the session cookie in the reset response", async () => {
+    const res = await resetPost();
+    const setCookie = res.headers.get("set-cookie");
+
+    expect(setCookie).toContain("clawbox_session=");
+    expect(setCookie).toContain("Max-Age=0");
+    expect(setCookie).toContain("Path=/");
+  });
+
   it("resets update state", async () => {
     await resetPost();
     expect(mockResetUpdateState).toHaveBeenCalled();
