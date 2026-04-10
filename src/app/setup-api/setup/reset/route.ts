@@ -116,13 +116,22 @@ export async function POST() {
       console.warn(`[Reset] ${allFailures.length} file deletion(s) failed — continuing with reboot`);
     }
 
-    // 4. Seed minimal openclaw.json with auth disabled so the gateway
-    // is accessible after reboot without requiring a browser token exchange
+    // 4. Seed minimal openclaw.json with token-based gateway auth
+    // (gateway.auth.mode="token", token="clawbox") so the gateway can still
+    // bind on LAN after reboot. This is a predictable recovery token; keep it
+    // only as a short-lived recovery default and replace it during setup.
     try {
       await fs.mkdir(OPENCLAW_DIR, { recursive: true });
       const seed = {
+        agents: {
+          defaults: {
+            compaction: {
+              reserveTokensFloor: 24000,
+            },
+          },
+        },
         gateway: {
-          auth: { mode: "none" },
+          auth: { mode: "token", token: "clawbox" },
           controlUi: {
             allowInsecureAuth: true,
             dangerouslyDisableDeviceAuth: true,
@@ -137,7 +146,7 @@ export async function POST() {
       const uid = process.getuid?.() ?? 1000;
       const gid = process.getgid?.() ?? 1000;
       await fs.chown(path.join(OPENCLAW_DIR, "openclaw.json"), uid, gid);
-      console.log("[Reset] Seeded openclaw.json with auth disabled");
+      console.log("[Reset] Seeded openclaw.json with token auth");
     } catch (err) {
       console.warn("[Reset] Failed to seed openclaw.json:", err instanceof Error ? err.message : err);
     }

@@ -26,6 +26,8 @@ vi.mock("@/lib/config-store", () => ({
 
 import { resetUpdateState } from "@/lib/updater";
 
+type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
+
 const mockResetUpdateState = vi.mocked(resetUpdateState);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fs);
@@ -118,7 +120,7 @@ describe("POST /setup-api/setup/reset", () => {
 
   it("deletes data directory contents except preserved files", async () => {
     mockFs.readdir.mockResolvedValueOnce(
-      ["config.json", "oauth-state.json", "network.env"] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      ["config.json", "oauth-state.json", "network.env"] as unknown as ReaddirResult,
     );
 
     await resetPost();
@@ -180,12 +182,12 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockExecFile).toHaveBeenCalled();
   });
 
-  it("seeds openclaw.json with auth disabled", async () => {
+  it("seeds openclaw.json with token auth", async () => {
     await resetPost();
 
     expect(mockFs.writeFile).toHaveBeenCalledWith(
       expect.stringContaining("openclaw.json"),
-      expect.stringContaining('"mode": "none"'),
+      expect.stringContaining('"mode": "token"'),
       expect.any(Object)
     );
   });
@@ -202,7 +204,7 @@ describe("POST /setup-api/setup/reset", () => {
 
   it("returns 500 when file deletion has failures", async () => {
     mockFs.readdir.mockResolvedValueOnce(
-      ["file1.json", "file2.json"] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      ["file1.json", "file2.json"] as unknown as ReaddirResult,
     );
     mockFs.rm
       .mockResolvedValueOnce()

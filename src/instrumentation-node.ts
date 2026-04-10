@@ -9,8 +9,34 @@ import fs from 'fs'
 
 let terminalChild: ChildProcess | null = null
 let terminalStopping = false
+let llamaCppChild: ChildProcess | null = null
+let llamaCppStopping = false
+let llamaCppStartPromise: Promise<void> | null = null
+let cleanupRegistered = false
+
+function cleanupChildren() {
+  terminalStopping = true
+  if (terminalChild) {
+    try { terminalChild.kill('SIGTERM') } catch {}
+    terminalChild = null
+  }
+  llamaCppStopping = true
+  if (llamaCppChild) {
+    try { llamaCppChild.kill('SIGTERM') } catch {}
+    llamaCppChild = null
+  }
+}
+
+function registerCleanupHandlers() {
+  if (cleanupRegistered) return
+  cleanupRegistered = true
+  process.on('exit', cleanupChildren)
+  process.on('SIGTERM', cleanupChildren)
+  process.on('SIGINT', cleanupChildren)
+}
 
 export function startTerminalServer() {
+  registerCleanupHandlers()
   const PORT = process.env.TERMINAL_WS_PORT || '3006'
   const serverPath = path.resolve('scripts', 'terminal-server.ts')
   terminalStopping = false
@@ -83,17 +109,105 @@ export function startTerminalServer() {
       console.log(`[instrumentation] Terminal server starting on port ${PORT} (pid=${child.pid})`)
     }
 
-    const cleanup = () => {
-      terminalStopping = true
-      if (terminalChild) {
-        try { terminalChild.kill('SIGTERM') } catch {}
-        terminalChild = null
-      }
-    }
-    process.on('exit', cleanup)
-    process.on('SIGTERM', cleanup)
-    process.on('SIGINT', cleanup)
-
     startServer()
   }
+}
+
+export async function startLlamaCppServer() {
+  llamaCppStopping = false
+  registerCleanupHandlers()
+  if (llamaCppStartPromise) return await llamaCppStartPromise
+
+  llamaCppStartPromise = bootLlamaCppServer().finally(() => {
+    llamaCppStartPromise = null
+  })
+  return await llamaCppStartPromise
+}
+
+async function bootLlamaCppServer() {
+  const [{ readConfig }, llamaCpp] = await Promise.all([
+    import('./lib/openclaw-config'),
+    import('./lib/llamacpp-server'),
+  ])
+
+  const config = await readConfig()
+  const alias = llamaCpp.getConfiguredLlamaCppModelAlias(config)
+  if (!alias) {
+    console.log('[instrumentation] llama.cpp auto-start skipped (primary model is not llamacpp)')
+    return
+  }
+
+  const spec = llamaCpp.getLlamaCppLaunchSpec(alias)
+  const runningModels = await llamaCpp.queryLlamaCppModels(spec.baseUrl)
+  if (runningModels.includes(alias)) {
+    console.log(`[instrumentation] llama.cpp already running for ${alias}`)
+    return
+  }
+
+  const existingPid = await llamaCpp.readLlamaCppPid(spec.pidPath)
+  if (existingPid && llamaCpp.isLlamaCppPidRunning(existingPid)) {
+    console.log(`[instrumentation] llama.cpp already starting for ${alias} (pid=${existingPid})`)
+    return
+  }
+  if (existingPid) {
+    await llamaCpp.clearLlamaCppPid(spec.pidPath)
+  }
+
+  await llamaCpp.ensureLlamaCppRuntimeDir()
+
+  const child = spawn(
+    'bash',
+    [
+      spec.scriptPath,
+      spec.modelDir,
+      spec.hfRepo,
+      spec.hfFile,
+      alias,
+      spec.host,
+      `${spec.port}`,
+      spec.logPath,
+      spec.binPath,
+      spec.hfBinPath,
+      `${spec.contextWindow}`,
+    ],
+    {
+      cwd: '/home/clawbox',
+      detached: false,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        HOME: '/home/clawbox',
+        LLAMACPP_PID_PATH: spec.pidPath,
+      },
+    },
+  )
+
+  if (!child.pid) {
+    throw new Error('Failed to start llama.cpp')
+  }
+
+  llamaCppChild = child
+  await llamaCpp.writeLlamaCppPid(child.pid, spec.pidPath)
+  console.log(`[instrumentation] llama.cpp auto-starting ${alias} (pid=${child.pid})`)
+
+  child.on('exit', (code) => {
+    void (async () => {
+      try {
+        if (llamaCppChild === child) {
+          llamaCppChild = null
+        }
+        await llamaCpp.clearLlamaCppPid(spec.pidPath)
+        if (llamaCppStopping) return
+
+        console.log(`[instrumentation] llama.cpp exited (code=${code}), retrying in 5s...`)
+        setTimeout(() => {
+          void startLlamaCppServer().catch((err) => {
+            console.error('[instrumentation] Failed to restart llama.cpp:', err instanceof Error ? err.message : err)
+          })
+        }, 5000)
+      } catch (err) {
+        console.error('[instrumentation] llama.cpp exit handling failed:', err instanceof Error ? err.message : err)
+      }
+    })()
+  })
 }

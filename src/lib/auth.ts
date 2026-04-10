@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import crypto from "crypto";
 import fs from "fs/promises";
+import os from "os";
 import path from "path";
 import { DATA_DIR } from "./config-store";
 
@@ -19,10 +20,33 @@ export async function getOrCreateSecret(): Promise<string> {
   return secret;
 }
 
-/** Verify password against the Linux user `clawbox` using unix_chkpwd (PAM helper). */
+/** Prefer the live session secret used by middleware when available. */
+export async function getSessionSigningSecret(): Promise<string> {
+  const envSecret = process.env.SESSION_SECRET?.trim();
+  if (envSecret) return envSecret;
+  return getOrCreateSecret();
+}
+
+/** Resolve the install user across default, sudo-launched, and x64 setups. */
+export function getSystemUsername(): string {
+  let osUsername: string | undefined;
+  try {
+    osUsername = os.userInfo().username;
+  } catch {
+    osUsername = undefined;
+  }
+
+  return process.env.CLAWBOX_USER
+    || process.env.SUDO_USER
+    || process.env.USER
+    || osUsername
+    || "clawbox";
+}
+
+/** Verify the configured Linux user's password using unix_chkpwd (PAM helper). */
 export async function verifyPassword(password: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn("/usr/sbin/unix_chkpwd", ["clawbox", "nullok"], {
+    const child = spawn("/usr/sbin/unix_chkpwd", [getSystemUsername(), "nullok"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
     });

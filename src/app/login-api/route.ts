@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getOrCreateSecret } from "@/lib/auth";
+import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -77,7 +77,7 @@ export async function POST(request: Request) {
   // Reset rate limit on success
   attempts.delete(ip);
 
-  const secret = await getOrCreateSecret();
+  const secret = await getSessionSigningSecret();
   const cookie = createSessionCookie(duration, secret);
 
   const res = NextResponse.json({ success: true });

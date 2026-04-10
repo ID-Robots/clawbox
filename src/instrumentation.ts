@@ -12,6 +12,7 @@ export async function register() {
 
   // Dynamic require avoids Next.js Edge Runtime static analysis of Node.js APIs
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { startTerminalServer } = require('./instrumentation-node')
+  const { startTerminalServer, startLlamaCppServer } = require('./instrumentation-node')
   startTerminalServer()
+  void startLlamaCppServer()
 }

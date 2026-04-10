@@ -4,12 +4,14 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { set } from "@/lib/config-store";
+import { getSystemUsername } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
+const PROJECT_ROOT = process.env.CLAWBOX_ROOT || process.env.CONFIG_ROOT || "/home/clawbox/clawbox";
 const execFile = promisify(execFileCb);
 const CHPASSWD_INPUT_PATH = path.join(
-  process.env.CONFIG_ROOT || "/home/clawbox/clawbox",
+  PROJECT_ROOT,
   "data",
   ".chpasswd-input"
 );
@@ -87,7 +89,7 @@ export async function POST(request: Request) {
     // systemd service (clawbox-root-update@chpasswd) since the main
     // service runs as clawbox with NoNewPrivileges=true.
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
-    await fs.writeFile(CHPASSWD_INPUT_PATH, `clawbox:${password}\n`, {
+    await fs.writeFile(CHPASSWD_INPUT_PATH, `${getSystemUsername()}:${password}\n`, {
       mode: 0o600,
     });
     try {

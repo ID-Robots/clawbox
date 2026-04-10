@@ -49,6 +49,16 @@ as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 # Explicit PATH ensures bun/node are found even inside systemd services
 as_clawbox_login() { su - "$CLAWBOX_USER" -c "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"; }
 
+ensure_env_setting() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    echo "  Added ${key} to ${env_file}"
+  fi
+}
+
 # Stop the setup service, clear cache, reinstall, and rebuild
 do_rebuild() {
   echo "Stopping clawbox-setup.service for rebuild..."
@@ -98,7 +108,7 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip gh
+  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip gh build-essential cmake ninja-build
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
@@ -332,6 +342,8 @@ step_openclaw_config() {
   # Sequential config set calls to avoid ConfigMutationConflictError
   as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
   echo "  Default model set"
+  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.compaction.reserveTokensFloor 24000
+  echo "  Compaction reserve floor set"
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -347,8 +359,9 @@ step_openclaw_config() {
     echo "  ClawBox AI fallback model configured"
   fi
 
-  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode none
-  echo "  Gateway auth mode set to none"
+  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode token
+  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token clawbox
+  echo "  Gateway auth mode set to token"
 
   as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
   echo "  allowInsecureAuth enabled"
@@ -415,6 +428,15 @@ step_directories_permissions() {
     printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
   echo "  Done"
 }
 
@@ -525,6 +547,36 @@ step_ollama_install() {
   # Apply Jetson memory optimizations
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   echo "  Ollama installed and running"
+}
+
+step_llamacpp_install() {
+  local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
+  local ENABLE_GGML_CUDA="OFF"
+
+  if [ -d /usr/local/cuda ] || command -v nvcc &>/dev/null || command -v nvidia-smi &>/dev/null; then
+    ENABLE_GGML_CUDA="ON"
+  fi
+
+  if ! as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Installing Hugging Face CLI..."
+    as_clawbox_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"
+  else
+    echo "  Hugging Face CLI already installed"
+  fi
+
+  if [ ! -x /usr/local/bin/llama-server ]; then
+    echo "  Installing llama.cpp server..."
+    if [ ! -d "$LLAMA_DIR/.git" ]; then
+      as_clawbox git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
+    fi
+    as_clawbox_login "cd $LLAMA_DIR && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=$ENABLE_GGML_CUDA"
+    as_clawbox_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"
+    install -m 755 "$LLAMA_DIR/build/bin/llama-server" /usr/local/bin/llama-server
+  else
+    echo "  llama-server already installed"
+  fi
+
+  echo "  llama.cpp runtime ready"
 }
 
 step_chpasswd() {
@@ -705,7 +757,7 @@ step_browser_launch() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode jtop_install ollama_install
+  apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
   chromium_install ai_tools_install vnc_install
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
   network_setup setup_config system_config
@@ -736,7 +788,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -787,6 +839,9 @@ step_jtop_install
 
 log "Installing Ollama..."
 step_ollama_install
+
+log "Installing llama.cpp runtime..."
+step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
