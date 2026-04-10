@@ -831,7 +831,7 @@ export async function completeSetupWizard(page: Page) {
   await page.getByRole("button", { name: "Save" }).click();
 
   await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
-  await page.getByRole("button", { name: /Install & Use llama\.cpp/i }).click();
+  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByRole("button", { name: "Start for free" }).click();
@@ -841,6 +841,11 @@ export async function completeSetupWizard(page: Page) {
 }
 
 export async function openLauncher(page: Page) {
-  await page.locator('[data-testid="shelf-launcher-button"]:visible').click({ force: true });
-  await expect(page.getByTestId("app-launcher")).toBeVisible();
+  const launcher = page.getByTestId("app-launcher");
+  const alreadyOpen = await launcher.isVisible().catch(() => false);
+  if (alreadyOpen) return;
+
+  const button = page.locator('[data-testid="shelf-launcher-button"]:visible').first();
+  await button.click({ force: true });
+  await expect(launcher).toBeVisible();
 }

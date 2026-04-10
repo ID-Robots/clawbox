@@ -20,7 +20,7 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
   await page.getByRole("button", { name: "Save" }).click();
 
   await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
-  await page.getByRole("button", { name: /Install & Use llama\.cpp/i }).click();
+  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByText("OpenAI GPT").click();

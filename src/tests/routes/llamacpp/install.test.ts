@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 vi.mock("child_process", () => ({
   spawn: vi.fn(),
+  execFile: vi.fn(),
 }));
 
 vi.mock("fs/promises", () => ({

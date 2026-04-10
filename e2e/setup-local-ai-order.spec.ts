@@ -22,19 +22,19 @@ test("setup configures Local AI before the primary AI provider step", async ({ p
   const localAiStep = page.getByTestId("setup-step-local-ai");
   const localProviderGroup = localAiStep.getByRole("radiogroup", { name: "AI Provider" });
   await expect(localAiStep).toBeVisible();
-  await expect(localProviderGroup.getByText("llama.cpp Local")).toBeVisible();
-  await expect(localProviderGroup.getByText("Ollama Local")).toBeVisible();
-  await expect(localAiStep.getByRole("button", { name: /Install & Use llama\.cpp/i })).toBeVisible();
+  await expect(localProviderGroup.getByText("Gemma 4")).toBeVisible();
+  await expect(localProviderGroup.getByText("Ollama")).toBeVisible();
+  await expect(localAiStep.getByRole("button", { name: /Enable Gemma 4/i })).toBeVisible();
   await expect(localProviderGroup.getByText("ClawBox AI")).toHaveCount(0);
   await expect(localProviderGroup.getByText("OpenAI GPT")).toHaveCount(0);
 
-  await localAiStep.getByRole("button", { name: /Install & Use llama\.cpp/i }).click();
+  await localAiStep.getByRole("button", { name: /Enable Gemma 4/i }).click();
 
   const providerStep = page.getByTestId("setup-step-ai-models");
   const providerGroup = providerStep.getByRole("radiogroup", { name: "AI Provider" });
   await expect(providerStep).toBeVisible();
   await expect(providerGroup.getByText("ClawBox AI")).toBeVisible();
   await expect(providerGroup.getByText("OpenAI GPT")).toBeVisible();
-  await expect(providerGroup.getByText("llama.cpp Local")).toHaveCount(0);
-  await expect(providerGroup.getByText("Ollama Local")).toHaveCount(0);
+  await expect(providerGroup.getByText("Gemma 4")).toHaveCount(0);
+  await expect(providerGroup.getByText("Ollama")).toHaveCount(0);
 });

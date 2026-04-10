@@ -51,8 +51,8 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await expect(settingsWindow.getByText("Gemma 4 Local")).toBeVisible();
   await expect(settingsWindow.getByText("gemma4-e2b-it-q4_0").first()).toBeVisible();
   const localProviderGroup = settingsWindow.getByRole("radiogroup", { name: "AI Provider" });
-  await expect(localProviderGroup.getByText("llama.cpp Local")).toBeVisible();
-  await expect(localProviderGroup.getByText("Ollama Local")).toBeVisible();
+  await expect(localProviderGroup.getByText("Gemma 4")).toBeVisible();
+  await expect(localProviderGroup.getByText("Ollama")).toBeVisible();
   await expect(localProviderGroup.getByText("ClawBox AI")).toHaveCount(0);
 
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();
