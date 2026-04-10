@@ -756,9 +756,11 @@ export async function completeSetupWizard(page: Page) {
   await expect(updateStep).toBeVisible({ timeout: 10_000 });
   const continueButton = updateStep.getByRole("button", { name: "Continue" });
   const credentialsStep = page.getByTestId("setup-step-credentials");
-  const advancedAutomatically = await credentialsStep.isVisible({ timeout: 2_000 }).catch(() => false);
-  if (!advancedAutomatically && await continueButton.isVisible().catch(() => false)) {
-    await continueButton.click({ force: true });
+  const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!advancedAutomatically) {
+    await continueButton.click();
   }
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
