@@ -178,6 +178,19 @@ const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]
 
 const PROVIDERS: Provider[] = [
   {
+    id: "clawai",
+    name: "ClawBox AI",
+    description: "Most affordable — start for free",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Free",
+        placeholder: "",
+        hint: "Pre-configured and ready to use. No API key or account needed.",
+      },
+    ],
+  },
+  {
     id: "openai",
     name: "OpenAI GPT",
     description: "Best for business",
@@ -225,19 +238,6 @@ const PROVIDERS: Provider[] = [
         hint: "Get your API key from Google AI Studio.",
         tokenUrl: "https://aistudio.google.com/apikey",
         tokenUrlLabel: "Get API Key",
-      },
-    ],
-  },
-  {
-    id: "clawai",
-    name: "ClawBox AI",
-    description: "Most affordable — start for free",
-    authOptions: [
-      {
-        mode: "local" as AuthMode,
-        label: "Free",
-        placeholder: "",
-        hint: "Pre-configured and ready to use. No API key or account needed.",
       },
     ],
   },

@@ -22,7 +22,9 @@ const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
-const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() ?? "";
+const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
+const CLAWBOX_AI_DEFAULT_TOKEN = "claw-d3eps33k-v1-2026";
+const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() || CLAWBOX_AI_DEFAULT_TOKEN;
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
 const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
@@ -154,7 +156,7 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
 
 function buildClawboxAiProviderDefinition() {
   return JSON.stringify({
-    baseUrl: "https://api.deepseek.com",
+    baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey: CLAWBOX_AI_API_KEY,
     models: [{
@@ -230,12 +232,6 @@ export async function POST(request: Request) {
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
-    if (isClawAI && !CLAWBOX_AI_API_KEY) {
-      return NextResponse.json(
-        { error: "ClawBox AI is not configured on this device. Set CLAWBOX_AI_API_KEY first." },
-        { status: 503 }
-      );
-    }
     if (!provider || (!apiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
@@ -401,7 +397,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",
       ]);
-      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
+      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({

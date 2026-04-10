@@ -338,7 +338,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
-  it("returns 503 for ClawBox AI when the device key is missing", async () => {
+  it("configures ClawBox AI with the default proxy token when no device key is set", async () => {
     delete process.env.CLAWBOX_AI_API_KEY;
     vi.resetModules();
     const mod = await import("@/app/setup-api/ai-models/configure/route");
@@ -349,8 +349,14 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     const body = await res.json();
 
-    expect(res.status).toBe(503);
-    expect(body.error).toContain("CLAWBOX_AI_API_KEY");
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+
+    expect(providerDef.baseUrl).toBe("https://openclawhardware.dev/api/ai");
+    expect(providerDef.apiKey).toBe("claw-d3eps33k-v1-2026");
   });
 
   it("restarts gateway after configuration", async () => {
