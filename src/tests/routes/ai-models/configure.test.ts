@@ -310,7 +310,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
-  it("returns 503 for ClawBox AI when the device key is missing", async () => {
+  it("uses default proxy token for ClawBox AI when env key is missing", async () => {
     delete process.env.CLAWBOX_AI_API_KEY;
     vi.resetModules();
     const mod = await import("@/app/setup-api/ai-models/configure/route");
@@ -321,8 +321,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     const body = await res.json();
 
-    expect(res.status).toBe(503);
-    expect(body.error).toContain("CLAWBOX_AI_API_KEY");
+    // Should succeed — falls back to default proxy token
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
   });
 
   it("restarts gateway after configuration", async () => {

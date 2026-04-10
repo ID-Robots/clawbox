@@ -12,7 +12,11 @@ const AUTH_PROFILES_PATH =
   "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
-const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() ?? "";
+// ClawBox AI proxy: devices connect to our proxy at openclawhardware.dev/api/ai
+// which forwards to DeepSeek. The default proxy token allows free usage.
+const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
+const CLAWBOX_AI_DEFAULT_TOKEN = "claw-d3eps33k-v1-2026";
+const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() || CLAWBOX_AI_DEFAULT_TOKEN;
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
 const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
@@ -159,7 +163,7 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
 
 function buildClawboxAiProviderDefinition() {
   return JSON.stringify({
-    baseUrl: "https://api.deepseek.com",
+    baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey: CLAWBOX_AI_API_KEY,
     models: [{
@@ -233,9 +237,9 @@ export async function POST(request: Request) {
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
     const isOllama = provider === "ollama";
     const isClawAI = provider === "clawai";
-    // When no CLAWBOX_AI_API_KEY is set, ClawBox AI falls back to local Ollama.
-    // This allows ClawBox to work out of the box for free without any API key.
-    const clawAiFallbackToOllama = isClawAI && !CLAWBOX_AI_API_KEY;
+    // ClawBox AI always connects to our proxy (CLAWBOX_AI_API_KEY defaults
+    // to the shared proxy token, so it's always available).
+    const clawAiFallbackToOllama = false;
     if (!provider || (!apiKey && !isOllama && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
