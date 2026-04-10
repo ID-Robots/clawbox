@@ -697,8 +697,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
 
   const {
     llamaCppRunning,
-    llamaCppModels,
-    llamaCppEndpoint,
     llamaCppSaving,
     llamaCppProgress,
     checkLlamaCppStatus,
@@ -1101,14 +1099,11 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             <div className="space-y-3">
               <LlamaCppModelPanel
                 llamaCppRunning={llamaCppRunning}
-                llamaCppModels={llamaCppModels}
-                llamaCppEndpoint={llamaCppEndpoint}
                 llamaCppSaving={llamaCppSaving}
                 llamaCppProgress={llamaCppProgress}
                 selectedLlamaCppModel={selectedLlamaCppModel}
                 setSelectedLlamaCppModel={setSelectedLlamaCppModel}
                 saveLlamaCppConfig={saveLlamaCppConfig}
-                inputClassName={INPUT_CLASS}
                 buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
                 buttonSpinner={ButtonSpinner}
               />

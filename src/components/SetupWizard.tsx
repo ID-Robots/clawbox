@@ -34,6 +34,8 @@ function applyStatusData(
     return;
   }
   if (data.ai_model_configured) {
+    setCurrentStep(6);
+  } else if (data.local_ai_configured) {
     setCurrentStep(5);
   } else if (data.password_configured) {
     setCurrentStep(4);
@@ -148,10 +150,14 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
       body: t("wizard.help3Body"),
     },
     4: {
+      title: "Local AI Setup",
+      body: "Install a local model first so ClawBox always has an on-device backup. Gemma 4 on llama.cpp is the recommended default for 8GB devices, and Ollama stays available if you prefer it.",
+    },
+    5: {
       title: t("wizard.help4Title"),
       body: t("wizard.help4Body"),
     },
-    5: {
+    6: {
       title: t("wizard.help5Title"),
       body: t("wizard.help5Body"),
     },
@@ -202,7 +208,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         if (!cancelled) setIsLoading(false);
       });
     return () => { cancelled = true; controller.abort(); };
-  }, [retryCount]);
+  }, [onComplete, retryCount]);
 
   if (isLoading) {
     return (
@@ -290,9 +296,26 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
           <CredentialsStep onNext={() => setCurrentStep(4)} />
         )}
         {currentStep === 4 && (
-          <AIModelsStep onNext={() => setCurrentStep(5)} />
+          <AIModelsStep
+            providerIds={["llamacpp", "ollama"]}
+            defaultProviderId="llamacpp"
+            title="Set Up Local AI"
+            description="Install a local model first so OpenClaw always has a private on-device fallback. Gemma 4 on llama.cpp is recommended by default, with Ollama available if you prefer it."
+            configureScope="local"
+            testId="setup-step-local-ai"
+            onNext={() => setCurrentStep(5)}
+          />
         )}
         {currentStep === 5 && (
+          <AIModelsStep
+            providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+            defaultProviderId="clawai"
+            title="Connect AI Provider"
+            description={t("ai.description")}
+            onNext={() => setCurrentStep(6)}
+          />
+        )}
+        {currentStep === 6 && (
           <TelegramStep onNext={() => completeSetup(onComplete)} />
         )}
       </main>

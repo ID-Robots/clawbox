@@ -4,7 +4,7 @@ import { readConfig } from "@/lib/openclaw-config";
 export const dynamic = "force-dynamic";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  deepseek: "ClawBox AI",
+  clawai: "ClawBox AI",
   anthropic: "Anthropic Claude",
   openai: "OpenAI GPT",
   google: "Google Gemini",
@@ -12,6 +12,19 @@ const PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   llamacpp: "llama.cpp Local",
 };
+
+function normalizeProvider(provider: string | null): string | null {
+  if (!provider) return null;
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "deepseek" || normalized === "clawai") return "clawai";
+  if (normalized.startsWith("openai")) return "openai";
+  if (normalized.startsWith("google")) return "google";
+  if (normalized.startsWith("anthropic")) return "anthropic";
+  if (normalized.startsWith("openrouter")) return "openrouter";
+  if (normalized.startsWith("ollama")) return "ollama";
+  if (normalized.startsWith("llamacpp")) return "llamacpp";
+  return normalized;
+}
 
 export async function GET() {
   try {
@@ -42,15 +55,27 @@ export async function GET() {
       provider = entry?.provider ?? activeKey.split(":")[0];
       mode = entry?.mode ?? null;
     }
+    const normalizedProvider = normalizeProvider(provider);
 
     return NextResponse.json({
-      connected: !!provider,
-      provider,
-      providerLabel: provider ? (PROVIDER_LABELS[provider] ?? provider) : null,
+      connected: !!normalizedProvider,
+      provider: normalizedProvider,
+      providerLabel: normalizedProvider ? (PROVIDER_LABELS[normalizedProvider] ?? normalizedProvider) : null,
       mode,
       model,
+    }, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
     });
   } catch {
-    return NextResponse.json({ connected: false, provider: null, providerLabel: null, mode: null, model: null });
+    return NextResponse.json(
+      { connected: false, provider: null, providerLabel: null, mode: null, model: null },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      },
+    );
   }
 }

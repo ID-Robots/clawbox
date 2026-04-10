@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
+import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
@@ -52,14 +53,15 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "telegram", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "system", "about"] as const;
 type Section = typeof SECTIONS[number];
 
 /* ── Sidebar nav items ── */
-const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
+const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string }[] = [
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
+  { id: "localAi", icon: "memory", label: "Local AI" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
@@ -97,6 +99,7 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
+  const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
@@ -403,11 +406,65 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; providerLabel: string | null; mode: string | null; model: string | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null } | null>(null);
   useEffect(() => {
     if (section !== "ai") return;
-    fetch("/setup-api/ai-models/status").then(r => r.json()).then(setAiProvider).catch(() => {});
+    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section]);
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null } | null>(null);
+  const [localAiDisabling, setLocalAiDisabling] = useState(false);
+  const [localAiError, setLocalAiError] = useState<string | null>(null);
+  const refreshLocalAiStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/setup/status", { cache: "no-store" });
+      const data = await res.json();
+      const configured = !!data.local_ai_configured;
+      const provider = typeof data.local_ai_provider === "string" ? data.local_ai_provider : null;
+      const model = typeof data.local_ai_model === "string" ? data.local_ai_model : null;
+
+      let running: boolean | null = null;
+      if (configured && provider === "llamacpp") {
+        const llamaRes = await fetch("/setup-api/llamacpp/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
+        running = !!llamaRes?.running;
+      } else if (configured && provider === "ollama") {
+        const ollamaRes = await fetch("/setup-api/ollama/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
+        running = !!ollamaRes?.running;
+      }
+
+      setLocalAiStatus({ configured, provider, model, running });
+      setLocalAiError(null);
+    } catch {
+      setLocalAiStatus({ configured: false, provider: null, model: null, running: null });
+    }
+  }, []);
+  const disableLocalAi = useCallback(async () => {
+    setLocalAiDisabling(true);
+    setLocalAiError(null);
+    try {
+      const res = await fetch("/setup-api/local-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "disable" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(typeof data.error === "string" ? data.error : "Failed to disable Local AI");
+      }
+      await refreshLocalAiStatus();
+    } catch (err) {
+      setLocalAiError(err instanceof Error ? err.message : "Failed to disable Local AI");
+    } finally {
+      setLocalAiDisabling(false);
+    }
+  }, [refreshLocalAiStatus]);
+  useEffect(() => {
+    if (section !== "localAi") return;
+    refreshLocalAiStatus();
+    const interval = setInterval(() => {
+      refreshLocalAiStatus().catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [refreshLocalAiStatus, section]);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -929,8 +986,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               ) : aiProvider.connected ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                  <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
+                    <AIProviderIcon provider={aiProvider.provider} size={24} />
+                    <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
+                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
+                    </span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-[var(--text-primary)] font-medium">{aiProvider.providerLabel}</div>
@@ -955,9 +1015,141 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
-            <I18nProvider><AIModelsStep embedded onConfigured={() => {
-              fetch("/setup-api/ai-models/status").then(r => r.json()).then(setAiProvider).catch(() => {});
-            }} /></I18nProvider>
+            <I18nProvider><AIModelsStep
+              embedded
+              providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+              defaultProviderId="clawai"
+              currentProviderId={aiProvider?.provider ?? null}
+              currentModel={aiProvider?.model ?? null}
+              title="Connect AI Provider"
+              description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
+              onConfigured={() => {
+              fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+            }}
+            /></I18nProvider>
+          </div>
+        )}
+
+        {/* ─── Local AI ─── */}
+        {activeSection === "localAi" && (
+          <div className="max-w-lg space-y-5">
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Local AI</h2>
+
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>memory</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+              </div>
+              {localAiStatus === null ? (
+                <div className="flex items-center gap-3 text-[var(--text-muted)] text-sm">
+                  <div className="w-5 h-5 border-2 border-white/15 border-t-[var(--coral-bright)] rounded-full animate-spin" />
+                  {t("settings.checking")}
+                </div>
+              ) : localAiStatus.configured ? (
+                <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
+                  localAiStatus.running === false
+                    ? "bg-amber-500/[0.06] border-amber-500/15"
+                    : "bg-cyan-500/[0.06] border-cyan-500/15"
+                }`}>
+                  <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
+                    localAiStatus.running === false
+                      ? "bg-amber-500/10 border-amber-400/10"
+                      : "bg-cyan-500/10 border-cyan-400/10"
+                  }`}>
+                    <AIProviderIcon provider={localAiStatus.provider} size={24} />
+                    <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
+                      localAiStatus.running === false
+                        ? "bg-[#2a1d10] border-amber-500/25"
+                        : "bg-[#10212a] border-cyan-500/25"
+                    }`}>
+                      <span className={`material-symbols-rounded ${
+                        localAiStatus.running === false ? "text-amber-300" : "text-cyan-300"
+                      }`} style={{ fontSize: 14 }}>
+                        {localAiStatus.running === false ? "warning" : "check"}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-[var(--text-primary)] font-medium">
+                      {localAiStatus.provider === "llamacpp" ? "Gemma 4 Local" : localAiStatus.provider === "ollama" ? "Ollama Local" : "Local AI"}
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                        localAiStatus.running === false ? "bg-amber-300" : "bg-cyan-300"
+                      }`} />
+                      <span className={`text-xs ${
+                        localAiStatus.running === false ? "text-amber-300/80" : "text-cyan-300/80"
+                      }`}>
+                        {localAiStatus.running === false
+                          ? `${localAiStatus.model ? localAiStatus.model.split("/").pop() : "Configured"} · endpoint not responding`
+                          : (localAiStatus.model ? localAiStatus.model.split("/").pop() : "Ready as fallback")}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>memory</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-[var(--text-muted)]">No local model configured</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Turn on Gemma 4 or Ollama to add a private on-device backup.</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {localAiError && (
+              <div className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
+                {localAiError}
+              </div>
+            )}
+
+            {localAiStatus?.configured && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-lg font-semibold text-[var(--text-primary)]">
+                      {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
+                    </div>
+                    <p className="text-sm text-[var(--text-secondary)] mt-1">
+                      {localAiStatus.running === false
+                        ? "Configured, but currently offline."
+                        : "Enabled and ready as your local backup model."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={disableLocalAi}
+                    disabled={localAiDisabling}
+                    className="px-4 py-2.5 bg-red-500/10 text-red-300 border border-red-500/20 rounded-xl text-sm font-semibold cursor-pointer hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                  >
+                    {localAiDisabling ? "Disabling..." : "Disable"}
+                  </button>
+                </div>
+                <p className="text-xs text-[var(--text-muted)] mt-3">
+                  Disabling Local AI stops the local model and frees the memory it is using.
+                </p>
+              </div>
+            )}
+
+            <I18nProvider><AIModelsStep
+              embedded
+              providerIds={["llamacpp", "ollama"]}
+              defaultProviderId="llamacpp"
+              currentProviderId={localAiStatus?.provider ?? null}
+              currentModel={localAiStatus?.model ?? null}
+              title="Set Up Local AI"
+              description={localAiStatus?.configured
+                ? "Choose a different local engine if you want to switch your on-device fallback."
+                : "Turn on a local model so ClawBox always has a private on-device backup."}
+              configureScope="local"
+              testId="settings-local-ai-step"
+              onConfigured={() => {
+                refreshLocalAiStatus().catch(() => {});
+              }}
+            /></I18nProvider>
           </div>
         )}
 
@@ -1451,7 +1643,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="flex items-center gap-3 px-5 py-3.5 text-sm border-none cursor-pointer transition-colors text-[var(--text-secondary)] hover:bg-white/[0.04] active:bg-white/[0.08]"
                 >
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }}>{item.icon}</span>
-                  <span className="flex-1 text-left">{t(item.labelKey)}</span>
+                  <span className="flex-1 text-left">{navLabel(item)}</span>
                   <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>chevron_right</span>
                 </button>
               ))}
@@ -1468,7 +1660,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
               </button>
               <span className="text-sm font-medium text-[var(--text-primary)]">
-                {(() => { const nav = NAV_ITEMS.find(i => i.id === mobileSection); return nav ? t(nav.labelKey) : t("settings.title"); })()}
+                {(() => { const nav = NAV_ITEMS.find(i => i.id === mobileSection); return nav ? navLabel(nav) : t("settings.title"); })()}
               </span>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
@@ -1632,7 +1824,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               }`}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 18, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
-              {t(item.labelKey)}
+              {navLabel(item)}
             </button>
           );
         })}

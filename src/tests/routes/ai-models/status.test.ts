@@ -84,7 +84,7 @@ describe("/setup-api/ai-models/status", () => {
     } as never);
     const res = await GET();
     const body = await res.json();
-    expect(body.provider).toBe("deepseek");
+    expect(body.provider).toBe("clawai");
     expect(body.providerLabel).toBe("ClawBox AI");
     expect(body.mode).toBe("api_key");
     expect(body.model).toBe("deepseek/deepseek-chat");
@@ -108,5 +108,25 @@ describe("/setup-api/ai-models/status", () => {
     expect(body.provider).toBe("llamacpp");
     expect(body.providerLabel).toBe("llama.cpp Local");
     expect(body.model).toBe("llamacpp/gemma-q4");
+  });
+
+  it("normalizes provider aliases like openai-codex for the UI", async () => {
+    mockReadConfig.mockResolvedValue({
+      auth: {
+        profiles: {
+          "openai-codex:default": { provider: "openai-codex", mode: "oauth" },
+        },
+      },
+      agents: {
+        defaults: { model: { primary: "openai-codex/gpt-5.4" } },
+      },
+    } as never);
+
+    const res = await GET();
+    const body = await res.json();
+
+    expect(body.provider).toBe("openai");
+    expect(body.providerLabel).toBe("OpenAI GPT");
+    expect(body.model).toBe("openai-codex/gpt-5.4");
   });
 });

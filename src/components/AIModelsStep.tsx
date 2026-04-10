@@ -4,7 +4,12 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
+import AIProviderIcon from "./AIProviderIcon";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
+import {
+  getLlamaCppOverlayProgress,
+  getOllamaOverlayProgress,
+} from "@/lib/ai-provider-progress";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
@@ -15,6 +20,14 @@ interface AIModelsStepProps {
   onNext?: () => void;
   embedded?: boolean;
   onConfigured?: () => void;
+  providerIds?: string[];
+  defaultProviderId?: string;
+  currentProviderId?: string | null;
+  currentModel?: string | null;
+  title?: string;
+  description?: string;
+  configureScope?: "primary" | "local";
+  testId?: string;
 }
 
 type AuthMode = "token" | "subscription" | "local";
@@ -35,51 +48,62 @@ interface Provider {
   authOptions: AuthOption[];
 }
 
+function normalizeSelectableProvider(provider: string | null | undefined): string | null {
+  if (!provider) return null;
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "deepseek" || normalized === "clawai") return "clawai";
+  if (normalized.startsWith("openai")) return "openai";
+  if (normalized.startsWith("google")) return "google";
+  if (normalized.startsWith("anthropic")) return "anthropic";
+  if (normalized.startsWith("openrouter")) return "openrouter";
+  if (normalized.startsWith("ollama")) return "ollama";
+  if (normalized.startsWith("llamacpp")) return "llamacpp";
+  return normalized;
+}
+
 const ButtonSpinner = (
   <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
 );
 
-const PROVIDER_ICONS: Record<string, string> = {
-  clawai: "🐾",
-  anthropic: "🧠",
-  openai: "⚡",
-  google: "✨",
-  openrouter: "🔀",
-  ollama: "🦙",
-  llamacpp: "⚙️",
-};
-
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
-function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone: () => void; t: (key: string, params?: Record<string, string | number>) => string }) {
-  const [phase, setPhase] = useState(0);
+type ConfiguringKind = "generic" | "ollama" | "llamacpp";
+
+interface ConfiguringState {
+  provider: string;
+  kind: ConfiguringKind;
+  phase: number;
+  detail: string | null;
+  progressPercent: number | null;
+  completed: boolean;
+}
+
+function ConfiguringOverlay({
+  provider,
+  steps,
+  phase,
+  detail,
+  progressPercent,
+  completed,
+  t,
+}: {
+  provider: string;
+  steps: string[];
+  phase: number;
+  detail: string | null;
+  progressPercent: number | null;
+  completed: boolean;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}) {
   const [dots, setDots] = useState("");
   const providerName = PROVIDERS.find((p) => p.id === provider)?.name ?? "AI";
-  const icon = PROVIDER_ICONS[provider] ?? "🤖";
-
-  const CONFIGURING_STEPS = [
-    { label: t("ai.credentialsVerified"), delay: 0 },
-    { label: t("ai.updatingConfig"), delay: 2000 },
-    { label: t("ai.restartingGateway"), delay: 5000 },
-    { label: t("ai.warmingUp"), delay: 12000 },
-    { label: t("ai.almostReady"), delay: 22000 },
-  ];
 
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const timers = CONFIGURING_STEP_DELAYS.map((delay, i) =>
-      i > 0 ? setTimeout(() => setPhase(i), delay) : null
-    );
-    const lastDelay = CONFIGURING_STEP_DELAYS[CONFIGURING_STEP_DELAYS.length - 1];
-    const done = setTimeout(onDone, lastDelay + 10000);
     // Trap focus inside overlay
     overlayRef.current?.focus();
-    return () => {
-      timers.forEach((t) => t && clearTimeout(t));
-      clearTimeout(done);
-    };
-  }, [onDone]);
+  }, []);
 
   useEffect(() => {
     const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
@@ -105,46 +129,45 @@ function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone:
         <div className="absolute inset-2 rounded-full border border-emerald-500/10" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite 0.5s" }} />
 
         {/* Orbiting dots */}
-        {phase >= 1 && [0, 1, 2].map((i) => (
+        {!completed && phase >= 1 && [0, 1, 2].map((i) => (
           <div key={i} className="absolute inset-0 flex items-center justify-center" style={{ animation: `aimodels-orbit ${3 + i * 0.5}s linear infinite`, animationDelay: `${i * 0.4}s` }}>
             <div className="w-2 h-2 rounded-full bg-[var(--coral-bright)]" style={{ opacity: 0.4 + i * 0.2 }} />
           </div>
         ))}
 
-        {/* Check circle (phase 0) then provider icon (phase 1+) */}
-        {phase === 0 ? (
+        {completed ? (
           <svg width="48" height="48" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
             <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-circle 0.6s ease-out 0.1s forwards" }} />
             <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw 0.4s ease-out 0.5s forwards" }} />
           </svg>
         ) : (
-          <span className="text-5xl aimodels-fade-in">{icon}</span>
+          <AIProviderIcon provider={provider} size={56} className="aimodels-fade-in" />
         )}
       </div>
 
       {/* Provider name */}
       <div className="text-center aimodels-fade-in" style={{ animationDelay: "0.3s" }}>
         <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
-          {phase === 0 ? t("connected") : t("ai.settingUp", { provider: providerName })}
+          {completed ? t("connected") : t("ai.settingUp", { provider: providerName })}
         </h2>
         <p className="text-sm text-[var(--text-muted)]">
-          {phase === 0
-            ? t("ai.credentialsVerifiedDesc")
-            : `${t("ai.configuringAssistant")}${dots}`}
+          {completed
+            ? detail || t("ai.configured")
+            : detail || `${t("ai.configuringAssistant")}${dots}`}
         </p>
       </div>
 
       {/* Progress steps */}
       <div className="w-full max-w-[280px] space-y-2.5 mt-2">
-        {CONFIGURING_STEPS.map((step, i) => (
+        {steps.map((step, i) => (
           <div
             key={i}
             className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
-              i <= phase ? "opacity-100" : "opacity-0 translate-y-1"
+              completed || i <= phase ? "opacity-100" : "opacity-0 translate-y-1"
             }`}
-            style={i <= phase ? { animation: "aimodels-fade-in 0.3s ease-out both", animationDelay: `${i * 0.1}s` } : undefined}
+            style={completed || i <= phase ? { animation: "aimodels-fade-in 0.3s ease-out both", animationDelay: `${i * 0.1}s` } : undefined}
           >
-            {i < phase ? (
+            {completed || i < phase ? (
               <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
               </span>
@@ -157,15 +180,30 @@ function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone:
                 <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
               </span>
             )}
-            <span className={i <= phase ? (i < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
-              {step.label}
+            <span className={completed || i <= phase ? (completed || i < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+              {step}
             </span>
           </div>
         ))}
       </div>
 
+      {progressPercent !== null && !completed && (
+        <div className="w-full max-w-[280px] mt-1">
+          <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] mb-1.5">
+            <span>{providerName}</span>
+            <span>{progressPercent}%</span>
+          </div>
+          <div className="w-full h-2 bg-[var(--bg-deep)] rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all duration-300"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Reassuring footer */}
-      {phase >= 1 && (
+      {!completed && phase >= 1 && (
         <p className="text-xs text-[var(--text-muted)] text-center mt-2 aimodels-step-enter">
           {t("ai.pleaseDontClose")}
         </p>
@@ -177,6 +215,32 @@ function ConfiguringOverlay({ provider, onDone, t }: { provider: string; onDone:
 const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]);
 
 const PROVIDERS: Provider[] = [
+  {
+    id: "llamacpp",
+    name: "Gemma 4",
+    description: "Fast local AI for this device",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Local",
+        placeholder: "",
+        hint: "No API key needed. ClawBox manages the local Gemma 4 model for you.",
+      },
+    ],
+  },
+  {
+    id: "ollama",
+    name: "Ollama",
+    description: "Use Ollama models locally",
+    authOptions: [
+      {
+        mode: "local" as AuthMode,
+        label: "Local",
+        placeholder: "",
+        hint: "No API key needed. Models run on this device.",
+      },
+    ],
+  },
   {
     id: "clawai",
     name: "ClawBox AI",
@@ -256,41 +320,87 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
-  {
-    id: "ollama",
-    name: "Ollama Local",
-    description: "Run AI models locally on device",
-    authOptions: [
-      {
-        mode: "local" as AuthMode,
-        label: "Local",
-        placeholder: "",
-        hint: "No API key needed. Models run on this device.",
-      },
-    ],
-  },
-  {
-    id: "llamacpp",
-    name: "llama.cpp Local",
-    description: "Recommended for Gemma 4 E2B Q4/INT4 on 8GB devices",
-    authOptions: [
-      {
-        mode: "local" as AuthMode,
-        label: "Local",
-        placeholder: "",
-        hint: "No API key needed. Connect to a local llama-server endpoint serving a GGUF quant.",
-      },
-    ],
-  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
 
-export default function AIModelsStep({ onNext, embedded = false, onConfigured }: AIModelsStepProps) {
+export default function AIModelsStep({
+  onNext,
+  embedded = false,
+  onConfigured,
+  providerIds,
+  defaultProviderId,
+  currentProviderId = null,
+  currentModel = null,
+  title,
+  description,
+  configureScope = "primary",
+  testId = "setup-step-ai-models",
+}: AIModelsStepProps) {
   const { t } = useT();
-  const [selectedProvider, setSelectedProvider] = useState<string | null>("clawai");
+  const normalizedCurrentProvider = useMemo(
+    () => normalizeSelectableProvider(currentProviderId),
+    [currentProviderId],
+  );
+  const providerIdSet = useMemo(() => providerIds ? new Set(providerIds) : null, [providerIds]);
+  const allowedProviders = useMemo(
+    () => providerIdSet ? PROVIDERS.filter((provider) => providerIdSet.has(provider.id)) : PROVIDERS,
+    [providerIdSet],
+  );
+  const resolvedDefaultProvider = useMemo(
+    () => {
+      if (defaultProviderId && allowedProviders.some((provider) => provider.id === defaultProviderId)) {
+        return defaultProviderId;
+      }
+      return allowedProviders[0]?.id ?? "clawai";
+    },
+    [allowedProviders, defaultProviderId],
+  );
+  const genericSteps = useMemo(
+    () => [
+      t("ai.credentialsVerified"),
+      t("ai.updatingConfig"),
+      t("ai.restartingGateway"),
+      t("ai.warmingUp"),
+      t("ai.almostReady"),
+    ],
+    [t],
+  );
+  const ollamaInstallSteps = useMemo(
+    () => [
+      "Preparing Ollama",
+      "Downloading model files",
+      "Applying ClawBox configuration",
+      "Warming up local model",
+    ],
+    [],
+  );
+  const llamaCppInstallSteps = useMemo(
+    () => [
+      "Preparing llama.cpp runtime",
+      "Downloading Gemma model",
+      "Starting llama.cpp runtime",
+      "Applying ClawBox configuration",
+      "Warming up local model",
+    ],
+    [],
+  );
+  const getStepsForKind = useCallback(
+    (kind: ConfiguringKind) => {
+      switch (kind) {
+        case "ollama":
+          return ollamaInstallSteps;
+        case "llamacpp":
+          return llamaCppInstallSteps;
+        default:
+          return genericSteps;
+      }
+    },
+    [genericSteps, llamaCppInstallSteps, ollamaInstallSteps],
+  );
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(resolvedDefaultProvider);
   const [authMode, setAuthMode] = useState<AuthMode>("local");
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
@@ -304,7 +414,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
-  const [configuring, setConfiguring] = useState(false);
+  const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
 
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
@@ -317,7 +427,6 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
   const [devicePolling, setDevicePolling] = useState(false);
   const [deviceSaving, setDeviceSaving] = useState(false);
 
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
   const exchangeControllerRef = useRef<AbortController | null>(null);
@@ -325,16 +434,26 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
   const pollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
 
-  const clearPendingTimers = useCallback(() => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
+  useEffect(() => {
+    if (!allowedProviders.some((provider) => provider.id === selectedProvider)) {
+      setSelectedProvider(resolvedDefaultProvider);
     }
-    if (pollRef.current) {
-      clearTimeout(pollRef.current);
-      pollRef.current = null;
+  }, [allowedProviders, resolvedDefaultProvider, selectedProvider]);
+
+  useEffect(() => {
+    if (!normalizedCurrentProvider) return;
+    if (!allowedProviders.some((provider) => provider.id === normalizedCurrentProvider)) return;
+
+    setSelectedProvider(normalizedCurrentProvider);
+
+    if (typeof currentModel === "string") {
+      if (currentModel.startsWith("ollama/")) {
+        setSelectedOllamaModel(currentModel.replace(/^ollama\//, ""));
+      } else if (currentModel.startsWith("llamacpp/")) {
+        setSelectedLlamaCppModel(currentModel.replace(/^llamacpp\//, ""));
+      }
     }
-  }, []);
+  }, [allowedProviders, currentModel, normalizedCurrentProvider]);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -354,36 +473,60 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
         setAvailableOAuth([]);
       });
     return () => {
-      clearPendingTimers();
       saveControllerRef.current?.abort();
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
       pollControllerRef.current?.abort();
     };
-  }, [clearPendingTimers]);
+  }, []);
 
-  const showError = (message: string) => {
-    setConfiguring(false);
+  const showError = useCallback((message: string) => {
+    setConfiguringState(null);
     setStatus({ type: "error", message });
-  };
+  }, []);
 
-  const showConfiguring = () => {
+  const showConfiguring = useCallback((kind: ConfiguringKind = "generic") => {
     tryCloseOAuthWindow(oauthWindowRef);
     setSaving(false);
     setExchanging(false);
     setDeviceSaving(false);
-    setConfiguring(true);
-  };
+    setConfiguringState({
+      provider: selectedProvider ?? "anthropic",
+      kind,
+      phase: 0,
+      detail: null,
+      progressPercent: null,
+      completed: false,
+    });
+  }, [selectedProvider]);
 
-  const showSuccessAndContinue = () => {
+  const completeConfiguring = useCallback((providerOverride?: string) => {
+    const fallbackProvider = providerOverride ?? selectedProvider ?? "anthropic";
+    setConfiguringState((current) => {
+      const nextProvider = current?.provider ?? fallbackProvider;
+      const nextKind = current?.kind
+        ?? (nextProvider === "ollama" ? "ollama" : nextProvider === "llamacpp" ? "llamacpp" : "generic");
+      const steps = getStepsForKind(nextKind);
+      return {
+        provider: nextProvider,
+        kind: nextKind,
+        phase: Math.max(0, steps.length - 1),
+        detail: current?.detail ?? null,
+        progressPercent: current?.progressPercent ?? null,
+        completed: true,
+      };
+    });
+  }, [getStepsForKind, selectedProvider]);
+
+  const showSuccessAndContinue = useCallback(() => {
     tryCloseOAuthWindow(oauthWindowRef);
-    // Overlay is already showing — it will call handleConfiguringDone when done
-  };
+    completeConfiguring();
+  }, [completeConfiguring]);
 
-  const extractError = async (res: Response, fallback: string) => {
+  const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
     return typeof data.error === "string" ? data.error : fallback;
-  };
+  }, []);
 
   // Ollama hook
   const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
@@ -391,7 +534,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     onSaveError: (message: string) => showError(message),
     onPullError: (message: string) => showError(message),
     onClearStatus: () => setStatus(null),
-  }), []);
+  }), [showError, showSuccessAndContinue]);
 
   const {
     ollamaRunning,
@@ -409,27 +552,92 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     deleteOllamaModel,
     formatOllamaBytes,
     clearSearch,
-  } = useOllamaModels(ollamaCallbacks);
+  } = useOllamaModels(ollamaCallbacks, configureScope);
 
   const llamaCppCallbacks = useMemo<LlamaCppCallbacks>(() => ({
     onSaveSuccess: () => showSuccessAndContinue(),
     onSaveError: (message: string) => showError(message),
     onClearStatus: () => setStatus(null),
-  }), []);
+  }), [showError, showSuccessAndContinue]);
 
   const {
     llamaCppRunning,
-    llamaCppModels,
-    llamaCppEndpoint,
     llamaCppSaving,
     llamaCppProgress,
     checkLlamaCppStatus,
     saveLlamaCppConfig,
-  } = useLlamaCppModels(llamaCppCallbacks);
+  } = useLlamaCppModels(llamaCppCallbacks, configureScope);
+
+  const configuringKind = configuringState?.kind;
+  const configuringCompleted = configuringState?.completed ?? false;
+
+  useEffect(() => {
+    if (configuringKind !== "generic" || configuringCompleted) return;
+
+    const timers = CONFIGURING_STEP_DELAYS.map((delay, index) =>
+      index === 0
+        ? null
+        : setTimeout(() => {
+            setConfiguringState((current) => {
+              if (!current || current.kind !== "generic" || current.completed) return current;
+              return { ...current, phase: Math.max(current.phase, index) };
+            });
+          }, delay),
+    );
+
+    return () => {
+      timers.forEach((timer) => {
+        if (timer) clearTimeout(timer);
+      });
+    };
+  }, [configuringCompleted, configuringKind]);
+
+  useEffect(() => {
+    if (selectedProvider !== "ollama") return;
+    if (!ollamaPulling && !ollamaSaving) return;
+
+    const next = getOllamaOverlayProgress(
+      {
+        pulling: ollamaPulling,
+        saving: !!ollamaSaving,
+        pullProgress: ollamaPullProgress,
+      },
+      ollamaInstallSteps.length,
+    );
+
+    setConfiguringState({
+      provider: "ollama",
+      kind: "ollama",
+      phase: next.phase,
+      detail: next.detail,
+      progressPercent: next.progressPercent,
+      completed: false,
+    });
+  }, [
+    ollamaInstallSteps.length,
+    ollamaPullProgress,
+    ollamaPulling,
+    ollamaSaving,
+    selectedProvider,
+  ]);
+
+  useEffect(() => {
+    if (selectedProvider !== "llamacpp" || !llamaCppSaving) return;
+
+    const next = getLlamaCppOverlayProgress(llamaCppProgress, llamaCppInstallSteps.length);
+    setConfiguringState({
+      provider: "llamacpp",
+      kind: "llamacpp",
+      phase: next.phase,
+      detail: next.detail,
+      progressPercent: next.progressPercent,
+      completed: false,
+    });
+  }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving, selectedProvider]);
 
   const selectProvider = (id: string) => {
     stopPolling();
-    const provider = PROVIDERS.find((p) => p.id === id);
+    const provider = allowedProviders.find((p) => p.id === id);
     setSelectedProvider(id);
     // Pick the first auth mode that's actually available
     const options = provider?.authOptions.filter((opt) => {
@@ -447,6 +655,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     setDeviceCode(null);
     setDeviceUrl(null);
     setDeviceSaving(false);
+    setConfiguringState(null);
     if (id === "ollama") checkOllamaStatus();
     if (id === "llamacpp") checkLlamaCppStatus();
   };
@@ -462,7 +671,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ scope: configureScope, ...payload }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -510,6 +719,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          scope: configureScope,
           provider: selectedProvider,
           apiKey: tokenData.access_token,
           authMode: "subscription",
@@ -532,7 +742,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [selectedProvider]);
+  }, [configureScope, extractError, selectedProvider, showConfiguring, showError, showSuccessAndContinue]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
@@ -595,7 +805,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
       // Network error — retry
       pollRef.current = setTimeout(() => pollDeviceAuth(interval), interval * 1000);
     }
-  }, [stopPolling, saveOAuthToken]);
+  }, [extractError, showError, stopPolling, saveOAuthToken]);
 
   const startDeviceAuth = async () => {
     stopPolling();
@@ -711,7 +921,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
     llamacpp: "GGUF + llama.cpp for 8GB devices",
   };
 
-  const selected = PROVIDERS.find((p) => p.id === selectedProvider);
+  const selected = allowedProviders.find((p) => p.id === selectedProvider);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
   const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
     if (opt.mode === "subscription" && availableOAuth !== null) {
@@ -904,31 +1114,55 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
 
   const handleConfiguringDone = useCallback(() => {
     if (embedded) {
-      setConfiguring(false);
+      setConfiguringState(null);
       setStatus({ type: "success", message: t("ai.configured") });
       onConfigured?.();
     } else if (onNext) {
       onNext();
+    } else {
+      setConfiguringState(null);
+      setStatus({ type: "success", message: t("ai.configured") });
     }
   }, [embedded, onNext, onConfigured, t]);
 
+  useEffect(() => {
+    if (!configuringState?.completed) return;
+    const timer = setTimeout(handleConfiguringDone, 900);
+    return () => clearTimeout(timer);
+  }, [configuringState?.completed, handleConfiguringDone]);
+
+  const displayedProviders = providerIdSet
+    ? allowedProviders
+    : PROVIDERS.filter((provider) => PRIMARY_PROVIDER_IDS.has(provider.id) || showMoreProviders || selectedProvider === provider.id);
+  const shouldShowMoreProviders = !providerIdSet && !showMoreProviders && PROVIDERS.some((provider) => !PRIMARY_PROVIDER_IDS.has(provider.id));
+  const resolvedTitle = title ?? t("ai.title");
+  const resolvedDescription = description ?? t("ai.description");
+
   return (
-    <div className="w-full max-w-[520px]" data-testid="setup-step-ai-models">
+    <div className="w-full max-w-[520px]" data-testid={testId}>
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
-        {configuring && (
-          <ConfiguringOverlay provider={selectedProvider ?? "anthropic"} onDone={handleConfiguringDone} t={t} />
+        {configuringState && (
+          <ConfiguringOverlay
+            provider={configuringState.provider}
+            steps={getStepsForKind(configuringState.kind)}
+            phase={configuringState.phase}
+            detail={configuringState.detail}
+            progressPercent={configuringState.progressPercent}
+            completed={configuringState.completed}
+            t={t}
+          />
         )}
         {/* Hide form content when configuring overlay is shown */}
-        <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
+        <div className={configuringState ? "invisible h-0 overflow-hidden" : ""}>
         <h1 className="text-2xl font-bold font-display mb-2">
-          {t("ai.title")}
+          {resolvedTitle}
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
-          {t("ai.description")}
+          {resolvedDescription}
         </p>
 
         <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
-          {PROVIDERS.filter((p) => PRIMARY_PROVIDER_IDS.has(p.id) || showMoreProviders || selectedProvider === p.id).map((provider) => {
+          {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
             return (
               <label
@@ -962,9 +1196,6 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "openai" && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
-                    )}
                   </span>
                   <span className="block text-xs text-[var(--text-muted)]">
                     {providerDesc[provider.id] ?? provider.description}
@@ -973,7 +1204,7 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
               </label>
             );
           })}
-          {!showMoreProviders && (
+          {shouldShowMoreProviders && (
             <button
               type="button"
               onClick={() => setShowMoreProviders(true)}
@@ -1021,8 +1252,6 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
           <div className="mt-5 space-y-4">
             <LlamaCppModelPanel
               llamaCppRunning={llamaCppRunning}
-              llamaCppModels={llamaCppModels}
-              llamaCppEndpoint={llamaCppEndpoint}
               llamaCppSaving={llamaCppSaving}
               llamaCppProgress={llamaCppProgress}
               selectedLlamaCppModel={selectedLlamaCppModel}
@@ -1059,9 +1288,6 @@ export default function AIModelsStep({ onNext, embedded = false, onConfigured }:
                     }`}
                   >
                     {opt.mode === "token" ? t("ai.apiKey") : opt.mode === "subscription" ? t("ai.subscription") : opt.mode === "local" && selected?.id === "clawai" ? t("ai.free") : opt.mode === "local" ? t("ai.local") : opt.label}
-                    {opt.mode === "subscription" && selectedProvider === "openai" && (
-                      <span className="ml-1 px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
-                    )}
                   </button>
                 ))}
               </div>

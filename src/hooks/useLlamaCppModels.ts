@@ -13,7 +13,9 @@ export interface LlamaCppCallbacks {
   onClearStatus?: () => void;
 }
 
-export function useLlamaCppModels(callbacks: LlamaCppCallbacks) {
+type ConfigureScope = "primary" | "local";
+
+export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: ConfigureScope = "primary") {
   const { onSaveSuccess, onSaveError, onClearStatus } = callbacks;
   const [llamaCppRunning, setLlamaCppRunning] = useState(false);
   const [llamaCppModels, setLlamaCppModels] = useState<LlamaCppModel[]>([]);
@@ -57,6 +59,7 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: trimmedModel,
+          scope: configureScope,
         }),
       });
 
@@ -123,7 +126,7 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks) {
       setLlamaCppSaving(false);
       setLlamaCppProgress(null);
     }
-  }, [checkLlamaCppStatus, onClearStatus, onSaveError, onSaveSuccess]);
+  }, [checkLlamaCppStatus, configureScope, onClearStatus, onSaveError, onSaveSuccess]);
 
   return {
     llamaCppRunning,

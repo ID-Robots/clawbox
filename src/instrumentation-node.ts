@@ -125,15 +125,25 @@ export async function startLlamaCppServer() {
 }
 
 async function bootLlamaCppServer() {
-  const [{ readConfig }, llamaCpp] = await Promise.all([
+  const [{ getAll }, { readConfig }, llamaCpp] = await Promise.all([
+    import('./lib/config-store'),
     import('./lib/openclaw-config'),
     import('./lib/llamacpp-server'),
   ])
 
-  const config = await readConfig()
+  const [config, state] = await Promise.all([readConfig(), getAll().catch(() => ({} as Record<string, unknown>))])
+  const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(state, 'local_ai_configured')
+  if (hasExplicitLocalAiFlag && state['local_ai_configured'] === false) {
+    const primaryModel = config.agents?.defaults?.model?.primary?.trim()
+    if (!primaryModel || !primaryModel.startsWith('llamacpp/')) {
+      console.log('[instrumentation] llama.cpp auto-start skipped (Local AI explicitly disabled)')
+      return
+    }
+  }
+
   const alias = llamaCpp.getConfiguredLlamaCppModelAlias(config)
   if (!alias) {
-    console.log('[instrumentation] llama.cpp auto-start skipped (primary model is not llamacpp)')
+    console.log('[instrumentation] llama.cpp auto-start skipped (no llama.cpp primary or local fallback configured)')
     return
   }
 

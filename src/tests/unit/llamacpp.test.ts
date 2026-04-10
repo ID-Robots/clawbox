@@ -73,4 +73,26 @@ describe("llamacpp config helpers", () => {
       },
     })).toBeNull();
   });
+
+  it("infers the auto-start alias from a configured local llama.cpp fallback", async () => {
+    const mod = await import("@/lib/llamacpp-server");
+
+    expect(mod.getConfiguredLlamaCppModelAlias({
+      agents: {
+        defaults: {
+          model: {
+            primary: "deepseek/deepseek-chat",
+            fallbacks: ["deepseek/deepseek-chat"],
+          },
+        },
+      },
+      models: {
+        providers: {
+          llamacpp: {
+            models: [{ id: "gemma4-e2b-it-q4_0" }],
+          },
+        },
+      },
+    })).toBe("gemma4-e2b-it-q4_0");
+  });
 });

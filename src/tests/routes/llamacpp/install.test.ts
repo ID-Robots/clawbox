@@ -144,4 +144,28 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Starting llama.cpp");
     expect(text).toContain("installed, running, and configured");
   });
+
+  it("forwards local scope to the configure route during llama.cpp install", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+    mockSpawn.mockReturnValue(createSpawnedProcess());
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+    await readStream(res);
+
+    expect(mockConfigureAiModel).toHaveBeenCalledTimes(1);
+    const configureRequest = mockConfigureAiModel.mock.calls[0]?.[0] as Request;
+    expect(configureRequest).toBeDefined();
+    const payload = await configureRequest.json();
+    expect(payload.scope).toBe("local");
+    expect(payload.provider).toBe("llamacpp");
+  });
 });

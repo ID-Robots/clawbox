@@ -19,6 +19,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("@/lib/config-store", () => ({
+  getAll: vi.fn(),
   setMany: vi.fn(),
 }));
 
@@ -26,13 +27,18 @@ vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
+  readConfig: vi.fn(),
+  inferConfiguredLocalModel: vi.fn(),
 }));
 
-import { setMany } from "@/lib/config-store";
-import { restartGateway } from "@/lib/openclaw-config";
+import { getAll, setMany } from "@/lib/config-store";
+import { inferConfiguredLocalModel, readConfig, restartGateway } from "@/lib/openclaw-config";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
+const mockGetAll = vi.mocked(getAll);
 const mockSetMany = vi.mocked(setMany);
+const mockInferConfiguredLocalModel = vi.mocked(inferConfiguredLocalModel);
+const mockReadOpenClawConfig = vi.mocked(readConfig);
 const mockRestartGateway = vi.mocked(restartGateway);
 const mockFs = vi.mocked(fsp);
 
@@ -88,6 +94,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.rename.mockResolvedValue();
     mockFs.chown.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
+    mockGetAll.mockResolvedValue({});
+    mockReadOpenClawConfig.mockResolvedValue({});
+    mockInferConfiguredLocalModel.mockReturnValue(null);
     mockSetMany.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
@@ -216,6 +225,29 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set gateway.auth.token clawbox");
   });
 
+  it("stores local AI state separately when configuring llama.cpp as Local AI", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "llamacpp",
+      scope: "local",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(mockSetMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        local_ai_configured: true,
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      }),
+    );
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).not.toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
+    expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+    expect(commands).toContain("config set models.mode merge");
+  });
+
   it("configures subscription auth mode for oauth", async () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -336,6 +368,55 @@ describe("POST /setup-api/ai-models/configure", () => {
         key: "test-clawbox-ai-key",
       })
     );
+  });
+
+  it("prefers the configured local AI model as the OpenClaw fallback", async () => {
+    mockGetAll.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+    expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(false);
+  });
+
+  it("falls back to an inferred local model from openclaw config when config-store state is missing", async () => {
+    mockInferConfiguredLocalModel.mockReturnValue({
+      provider: "llamacpp",
+      model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+  });
+
+  it("does not use inferred local fallback when local AI is explicitly disabled", async () => {
+    mockGetAll.mockResolvedValue({
+      local_ai_configured: false,
+    });
+    mockInferConfiguredLocalModel.mockReturnValue({
+      provider: "llamacpp",
+      model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
   it("configures ClawBox AI with the default proxy token when no device key is set", async () => {

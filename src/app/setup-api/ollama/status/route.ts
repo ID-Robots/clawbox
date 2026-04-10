@@ -19,8 +19,16 @@ export async function GET() {
       size: m.size,
       modified_at: m.modified_at,
     }));
-    return NextResponse.json({ running: true, models });
+    return NextResponse.json({ running: true, models }, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    });
   } catch {
-    return NextResponse.json({ running: false, models: [] });
+    return NextResponse.json({ running: false, models: [] }, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    });
   }
 }

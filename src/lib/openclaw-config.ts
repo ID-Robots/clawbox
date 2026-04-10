@@ -26,13 +26,64 @@ export interface OpenClawConfig {
   auth?: {
     profiles?: Record<string, { provider?: string; mode?: string }>;
   };
+  models?: {
+    mode?: string;
+    providers?: Record<string, {
+      models?: Array<{ id?: string; name?: string }>;
+      [key: string]: unknown;
+    }>;
+  };
   agents?: {
     defaults?: {
-      model?: { primary?: string };
+      model?: { primary?: string; fallbacks?: string[] };
       workspace?: string;
       compaction?: { reserveTokensFloor?: number };
     };
   };
+}
+
+function normalizeLocalProvider(provider: string | null | undefined): "llamacpp" | "ollama" | null {
+  if (!provider) return null;
+  const normalized = provider.trim().toLowerCase();
+  if (normalized.startsWith("llamacpp")) return "llamacpp";
+  if (normalized.startsWith("ollama")) return "ollama";
+  return null;
+}
+
+function toLocalModel(provider: "llamacpp" | "ollama", modelId: string | null | undefined): string | null {
+  const trimmed = modelId?.trim();
+  if (!trimmed) return null;
+  return `${provider}/${trimmed}`;
+}
+
+export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "llamacpp" | "ollama"; model: string } | null {
+  const modelDefaults = config.agents?.defaults?.model;
+  const localCandidates = [
+    ...(Array.isArray(modelDefaults?.fallbacks) ? modelDefaults.fallbacks : []),
+    modelDefaults?.primary,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => {
+      const [provider, ...rest] = value.split("/");
+      const normalizedProvider = normalizeLocalProvider(provider);
+      if (!normalizedProvider || rest.length === 0) return null;
+      return { provider: normalizedProvider, model: value };
+    })
+    .filter((value): value is { provider: "llamacpp" | "ollama"; model: string } => value !== null);
+
+  if (localCandidates.length > 0) {
+    return localCandidates[0];
+  }
+
+  const providerDefs = config.models?.providers ?? {};
+  for (const provider of ["llamacpp", "ollama"] as const) {
+    const candidate = toLocalModel(provider, providerDefs[provider]?.models?.[0]?.id);
+    if (candidate) {
+      return { provider, model: candidate };
+    }
+  }
+
+  return null;
 }
 
 export async function readConfig(): Promise<OpenClawConfig> {

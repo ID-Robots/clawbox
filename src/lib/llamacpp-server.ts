@@ -9,7 +9,7 @@ import {
   getLlamaCppBaseUrl,
   getLlamaCppServerContextSize,
 } from "./llamacpp";
-import type { OpenClawConfig } from "./openclaw-config";
+import { inferConfiguredLocalModel, type OpenClawConfig } from "./openclaw-config";
 
 const LLAMACPP_RUNTIME_DIR = path.join(DATA_DIR, "llamacpp");
 const LLAMACPP_PID_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.pid");
@@ -38,10 +38,17 @@ export interface LlamaCppLaunchSpec {
 
 export function getConfiguredLlamaCppModelAlias(config: OpenClawConfig): string | null {
   const primaryModel = config.agents?.defaults?.model?.primary?.trim();
-  if (!primaryModel || !primaryModel.startsWith("llamacpp/")) return null;
+  if (primaryModel && primaryModel.startsWith("llamacpp/")) {
+    const alias = primaryModel.slice("llamacpp/".length).trim();
+    return alias || getDefaultLlamaCppModel();
+  }
 
-  const alias = primaryModel.slice("llamacpp/".length).trim();
-  return alias || getDefaultLlamaCppModel();
+  const localFallback = inferConfiguredLocalModel(config);
+  if (localFallback?.provider === "llamacpp") {
+    return localFallback.model.replace(/^llamacpp\//, "") || getDefaultLlamaCppModel();
+  }
+
+  return null;
 }
 
 export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaCppLaunchSpec {

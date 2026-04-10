@@ -594,4 +594,49 @@ describe("openclaw-config", () => {
       }
     });
   });
+
+  describe("inferConfiguredLocalModel", () => {
+    it("prefers a local fallback model when present", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        agents: {
+          defaults: {
+            model: {
+              primary: "deepseek/deepseek-chat",
+              fallbacks: ["llamacpp/gemma4-e2b-it-q4_0"],
+            },
+          },
+        },
+      });
+
+      expect(result).toEqual({
+        provider: "llamacpp",
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+      });
+    });
+
+    it("falls back to local provider definitions when config-store style state is missing", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        agents: {
+          defaults: {
+            model: {
+              primary: "deepseek/deepseek-chat",
+              fallbacks: ["deepseek/deepseek-chat"],
+            },
+          },
+        },
+        models: {
+          providers: {
+            llamacpp: {
+              models: [{ id: "gemma4-e2b-it-q4_0" }],
+            },
+          },
+        },
+      });
+
+      expect(result).toEqual({
+        provider: "llamacpp",
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+      });
+    });
+  });
 });
