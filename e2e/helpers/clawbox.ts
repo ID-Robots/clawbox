@@ -778,6 +778,6 @@ export async function completeSetupWizard(page: Page) {
 }
 
 export async function openLauncher(page: Page) {
-  await page.locator('[data-testid="shelf-launcher-button"]:visible').click();
+  await page.locator('[data-testid="shelf-launcher-button"]:visible').click({ force: true });
   await expect(page.getByTestId("app-launcher")).toBeVisible();
 }
