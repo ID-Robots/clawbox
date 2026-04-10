@@ -4,11 +4,13 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { setMany } from "@/lib/config-store";
+import { getAll, setMany } from "@/lib/config-store";
 import {
   restartGateway,
   findOpenclawBin,
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+  inferConfiguredLocalModel,
+  readConfig as readOpenClawConfig,
 } from "@/lib/openclaw-config";
 import {
   getDefaultLlamaCppModel,
@@ -46,6 +48,8 @@ interface ProviderConfig {
   /** Override config used when authMode is "subscription" (OAuth). */
   subscriptionOverride?: { defaultModel: string; profileKey?: string };
 }
+
+type ConfigureScope = "primary" | "local";
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   clawai: {
@@ -212,6 +216,62 @@ async function configureClawboxAi(setFallback: boolean) {
   return true;
 }
 
+async function setFallbackModels(models: string[]) {
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    "agents.defaults.model.fallbacks",
+    JSON.stringify(models),
+    "--json",
+  ]);
+}
+
+async function getStoredLocalFallbackModel(): Promise<string | null> {
+  try {
+    const config = await getAll();
+    if (Object.prototype.hasOwnProperty.call(config, "local_ai_configured") && config.local_ai_configured === false) {
+      return null;
+    }
+    const stored = config.local_ai_configured && typeof config.local_ai_model === "string"
+      ? config.local_ai_model
+      : null;
+    if (stored) return stored;
+  } catch {
+    // Fall through to OpenClaw config inference.
+  }
+
+  try {
+    const openclawConfig = await readOpenClawConfig();
+    return inferConfiguredLocalModel(openclawConfig)?.model ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureFallbackModel(primaryModel?: string | null, preferredLocalModel?: string) {
+  const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
+    .filter((model): model is string => !!model && model !== primaryModel);
+
+  if (fallbackCandidates.length > 0) {
+    await setFallbackModels([fallbackCandidates[0]]);
+    console.log(`[AI Config] Configured local fallback model: ${fallbackCandidates[0]}`);
+    return;
+  }
+
+  try {
+    const fallbackConfigured = await configureClawboxAi(true);
+    if (fallbackConfigured) {
+      console.log("[AI Config] Configured ClawBox AI as fallback model");
+      return;
+    }
+
+    await setFallbackModels([]);
+    console.log("[AI Config] Cleared stale fallback (no local or ClawBox AI backup available)");
+  } catch (err) {
+    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function POST(request: Request) {
   try {
     let body: {
@@ -221,6 +281,7 @@ export async function POST(request: Request) {
       refreshToken?: string;
       expiresIn?: number;
       projectId?: string;
+      scope?: ConfigureScope;
     };
     try {
       body = await request.json();
@@ -228,13 +289,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary" } = body;
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
+    const isLocalScope = scope === "local";
     if (!provider || (!apiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
+        { status: 400 }
+      );
+    }
+    if (isLocalScope && !isOllama && !isLlamaCpp) {
+      return NextResponse.json(
+        { error: "Local AI scope is only supported for Ollama and llama.cpp" },
         { status: 400 }
       );
     }
@@ -254,23 +322,6 @@ export async function POST(request: Request) {
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
-    const ensureClawboxFallback = async () => {
-      try {
-        const fallbackConfigured = await configureClawboxAi(true);
-        if (fallbackConfigured) {
-          console.log("[AI Config] Configured ClawBox AI as fallback model");
-          return;
-        }
-
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "agents.defaults.model.fallbacks", "[]", "--json",
-        ]);
-        console.log("[AI Config] Cleared stale fallback (no ClawBox AI key)");
-      } catch (err) {
-        console.warn("[AI Config] Failed to configure ClawBox AI fallback:", err instanceof Error ? err.message : err);
-      }
-    };
-
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -347,12 +398,14 @@ export async function POST(request: Request) {
         : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.model.primary",
-      config.defaultModel,
-    ]);
+    if (!isLocalScope) {
+      await runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "agents.defaults.model.primary",
+        config.defaultModel,
+      ]);
+    }
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
@@ -384,11 +437,20 @@ export async function POST(request: Request) {
     );
 
     // 6. Persist to ClawBox config store
-    await setMany({
-      ai_model_configured: true,
-      ai_model_provider: ocProvider,
-      ai_model_configured_at: new Date().toISOString(),
-    });
+    if (isLocalScope) {
+      await setMany({
+        local_ai_configured: true,
+        local_ai_provider: ocProvider,
+        local_ai_model: config.defaultModel,
+        local_ai_configured_at: new Date().toISOString(),
+      });
+    } else {
+      await setMany({
+        ai_model_configured: true,
+        ai_model_provider: ocProvider,
+        ai_model_configured_at: new Date().toISOString(),
+      });
+    }
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
@@ -397,6 +459,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",
       ]);
+      await ensureFallbackModel(config.defaultModel);
       console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
@@ -418,9 +481,9 @@ export async function POST(request: Request) {
         "config", "set", "models.providers.ollama", providerDef, "--json",
       ]);
       await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", "replace",
+        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
-      await ensureClawboxFallback();
+      await ensureFallbackModel(isLocalScope ? null : config.defaultModel, config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
         await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
@@ -449,9 +512,9 @@ export async function POST(request: Request) {
         "config", "set", "models.providers.llamacpp", providerDef, "--json",
       ]);
       await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", "replace",
+        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
-      await ensureClawboxFallback();
+      await ensureFallbackModel(isLocalScope ? null : config.defaultModel, config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
@@ -464,7 +527,7 @@ export async function POST(request: Request) {
         // Non-fatal: merge is the default behavior anyway
       }
 
-      await ensureClawboxFallback();
+      await ensureFallbackModel(config.defaultModel);
     }
 
     // 8. Restart OpenClaw gateway so it picks up the new auth profile and model

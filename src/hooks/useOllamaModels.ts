@@ -22,7 +22,9 @@ export interface OllamaCallbacks {
   onClearStatus?: () => void;
 }
 
-export function useOllamaModels(callbacks: OllamaCallbacks) {
+type ConfigureScope = "primary" | "local";
+
+export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: ConfigureScope = "primary") {
   const [ollamaRunning, setOllamaRunning] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
   const [ollamaSearch, setOllamaSearch] = useState("");
@@ -115,6 +117,7 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
             provider: "ollama",
             apiKey: model,
             authMode: "local",
+            scope: configureScope,
           }),
         });
         const data = await res.json();
@@ -131,7 +134,7 @@ export function useOllamaModels(callbacks: OllamaCallbacks) {
         setOllamaSaving(false);
       }
     },
-    [callbacks]
+    [callbacks, configureScope]
   );
 
   const pullOllamaModel = useCallback(

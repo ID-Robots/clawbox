@@ -11,6 +11,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      found: ${{ steps.coverage.outputs.found }}
+      statements: ${{ steps.coverage.outputs.statements }}
+      branches: ${{ steps.coverage.outputs.branches }}
+      functions: ${{ steps.coverage.outputs.functions }}
+      lines: ${{ steps.coverage.outputs.lines }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,14 +61,40 @@ jobs:
         uses: actions/github-script@v7
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_FOUND: ${{ needs.test.outputs.found }}
+          COVERAGE_STATEMENTS: ${{ needs.test.outputs.statements }}
+          COVERAGE_BRANCHES: ${{ needs.test.outputs.branches }}
+          COVERAGE_FUNCTIONS: ${{ needs.test.outputs.functions }}
+          COVERAGE_LINES: ${{ needs.test.outputs.lines }}
         with:
           script: |
-            const marker = '<!-- clawbox-tests -->';
+            const marker = '<!-- clawbox-ci-summary -->';
+            const testsStart = '<!-- clawbox-ci-tests:start -->';
+            const testsEnd = '<!-- clawbox-ci-tests:end -->';
+            const e2eStart = '<!-- clawbox-ci-e2e:start -->';
+            const e2eEnd = '<!-- clawbox-ci-e2e:end -->';
             const ok = process.env.TEST_RESULT === 'success';
             const icon = ok ? '✅' : '❌';
-            const body = `${marker}\n## ${icon} Test Report\n- Result: **${ok ? 'passed' : 'failed'}**\n\n[View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let section = `## ${icon} Tests\n- Result: **${ok ? 'passed' : 'failed'}**\n- [View run](${runUrl})`;
+            if (process.env.COVERAGE_FOUND === 'true') {
+              section += `\n- Coverage: statements **${process.env.COVERAGE_STATEMENTS}%**, branches **${process.env.COVERAGE_BRANCHES}%**, functions **${process.env.COVERAGE_FUNCTIONS}%**, lines **${process.env.COVERAGE_LINES}%**`;
+            }
+            const wrappedSection = `${testsStart}\n${section}\n${testsEnd}`;
+            const defaultBody = `${marker}\n# CI Summary\n\n${wrappedSection}\n\n${e2eStart}\n## ⏳ E2E\n- Waiting for E2E workflow to finish.\n${e2eEnd}`;
+
             const {owner, repo} = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: context.issue.number, per_page: 100});
             const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, replacement) : `${body}\n\n${replacement}`;
+            };
+
+            const body = existing
+              ? updateSection(existing.body, testsStart, testsEnd, wrappedSection)
+              : defaultBody;
+
             if (existing) await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
             else await github.rest.issues.createComment({owner, repo, issue_number: context.issue.number, body});

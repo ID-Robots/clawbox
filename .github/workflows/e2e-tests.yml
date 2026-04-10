@@ -86,12 +86,28 @@ jobs:
           E2E_RESULT: ${{ needs.e2e.result }}
         with:
           script: |
-            const marker = '<!-- clawbox-e2e -->';
+            const marker = '<!-- clawbox-ci-summary -->';
+            const testsStart = '<!-- clawbox-ci-tests:start -->';
+            const testsEnd = '<!-- clawbox-ci-tests:end -->';
+            const e2eStart = '<!-- clawbox-ci-e2e:start -->';
+            const e2eEnd = '<!-- clawbox-ci-e2e:end -->';
             const ok = process.env.E2E_RESULT === 'success';
             const icon = ok ? '✅' : '❌';
-            const body = `${marker}\n## ${icon} E2E Test Report\n- Result: **${ok ? 'passed' : 'failed'}**\n\n[View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const wrappedSection = `${e2eStart}\n## ${icon} E2E\n- Result: **${ok ? 'passed' : 'failed'}**\n- [View run](${runUrl})\n${e2eEnd}`;
+            const defaultBody = `${marker}\n# CI Summary\n\n${testsStart}\n## ⏳ Tests\n- Waiting for test workflow to finish.\n${testsEnd}\n\n${wrappedSection}`;
             const { owner, repo } = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: context.issue.number, per_page: 100 });
             const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, replacement) : `${body}\n\n${replacement}`;
+            };
+
+            const body = existing
+              ? updateSection(existing.body, e2eStart, e2eEnd, wrappedSection)
+              : defaultBody;
+
             if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             else await github.rest.issues.createComment({ owner, repo, issue_number: context.issue.number, body });

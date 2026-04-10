@@ -5,6 +5,9 @@ type SetupState = {
   wifi_configured: boolean;
   update_completed: boolean;
   password_configured: boolean;
+  local_ai_configured: boolean;
+  local_ai_provider?: string | null;
+  local_ai_model?: string | null;
   ai_model_configured: boolean;
   telegram_configured: boolean;
 };
@@ -51,6 +54,9 @@ const DEFAULT_SETUP: SetupState = {
   wifi_configured: false,
   update_completed: false,
   password_configured: false,
+  local_ai_configured: false,
+  local_ai_provider: null,
+  local_ai_model: null,
   ai_model_configured: false,
   telegram_configured: false,
 };
@@ -272,6 +278,9 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
         wifi_configured: true,
         update_completed: true,
         password_configured: true,
+        local_ai_configured: true,
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
         ai_model_configured: true,
         telegram_configured: true,
       });
@@ -559,15 +568,57 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    if (path === "/setup-api/llamacpp/status") {
+      await fulfillJson(route, {
+        running: setupState.local_ai_provider === "llamacpp",
+        models: setupState.local_ai_provider === "llamacpp" && setupState.local_ai_model
+          ? [{ id: setupState.local_ai_model.split("/").pop(), owned_by: "llama.cpp" }]
+          : [],
+        baseUrl: "http://127.0.0.1:8080/v1",
+      });
+      return;
+    }
+
+    if (path === "/setup-api/llamacpp/install" && method === "POST") {
+      const payload = await readRequestJson<{ model?: string; scope?: "primary" | "local" }>(route);
+      const model = payload.model || "gemma4-e2b-it-q4_0";
+      setupState.local_ai_configured = true;
+      setupState.local_ai_provider = "llamacpp";
+      setupState.local_ai_model = `llamacpp/${model}`;
+
+      if (payload.scope !== "local") {
+        setupState.ai_model_configured = true;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body: `${JSON.stringify({ status: `Preparing llama.cpp for ${model}...` })}\n${JSON.stringify({ status: "llama.cpp is ready. Applying ClawBox configuration..." })}\n${JSON.stringify({ success: true, model, status: `${model} is installed, running, and configured.` })}\n`,
+      });
+      return;
+    }
+
+    if (path === "/setup-api/ollama/status") {
+      await fulfillJson(route, {
+        running: true,
+        models: setupState.local_ai_provider === "ollama" && setupState.local_ai_model
+          ? [{ name: setupState.local_ai_model.split("/").pop(), size: 3_400_000_000 }]
+          : [],
+      });
+      return;
+    }
+
     if (path === "/setup-api/ai-models/status") {
       await fulfillJson(route, setupState.ai_model_configured
         ? {
             connected: true,
+            provider: "deepseek",
             providerLabel: "ClawBox AI",
             model: "clawai/deepseek-r1",
           }
         : {
             connected: false,
+            provider: null,
             providerLabel: null,
             model: null,
           });
@@ -575,7 +626,16 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     }
 
     if (path === "/setup-api/ai-models/configure" && method === "POST") {
-      setupState.ai_model_configured = true;
+      const payload = await readRequestJson<{ provider?: string; apiKey?: string; scope?: "primary" | "local" }>(route);
+      if (payload.scope === "local") {
+        setupState.local_ai_configured = true;
+        setupState.local_ai_provider = payload.provider ?? "llamacpp";
+        setupState.local_ai_model = payload.provider === "ollama"
+          ? `ollama/${payload.apiKey || "llama3.2:3b"}`
+          : `llamacpp/${payload.apiKey || "gemma4-e2b-it-q4_0"}`;
+      } else {
+        setupState.ai_model_configured = true;
+      }
       await fulfillJson(route, { success: true });
       return;
     }
@@ -770,6 +830,9 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
   await page.getByRole("button", { name: "Save" }).click();
 
+  await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
+  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
+
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByRole("button", { name: "Start for free" }).click();
 
@@ -778,6 +841,11 @@ export async function completeSetupWizard(page: Page) {
 }
 
 export async function openLauncher(page: Page) {
-  await page.locator('[data-testid="shelf-launcher-button"]:visible').click({ force: true });
-  await expect(page.getByTestId("app-launcher")).toBeVisible();
+  const launcher = page.getByTestId("app-launcher");
+  const alreadyOpen = await launcher.isVisible().catch(() => false);
+  if (alreadyOpen) return;
+
+  const button = page.locator('[data-testid="shelf-launcher-button"]:visible').first();
+  await button.click({ force: true });
+  await expect(launcher).toBeVisible();
 }

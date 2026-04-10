@@ -31,7 +31,9 @@ function getLastLogLine(logText: string): string | null {
   return lines.length > 0 ? lines[lines.length - 1] : null;
 }
 
-async function configureLlamaCpp(alias: string): Promise<{ ok: boolean; error?: string }> {
+type ConfigureScope = "primary" | "local";
+
+async function configureLlamaCpp(alias: string, scope: ConfigureScope): Promise<{ ok: boolean; error?: string }> {
   const req = new Request("http://localhost/setup-api/ai-models/configure", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -39,6 +41,7 @@ async function configureLlamaCpp(alias: string): Promise<{ ok: boolean; error?: 
       provider: "llamacpp",
       apiKey: alias,
       authMode: "local",
+      scope,
     }),
   });
   const res = await configureAiModel(req);
@@ -50,7 +53,7 @@ async function configureLlamaCpp(alias: string): Promise<{ ok: boolean; error?: 
 }
 
 export async function POST(request: Request) {
-  let body: { model?: string };
+  let body: { model?: string; scope?: ConfigureScope };
   try {
     body = await request.json();
   } catch {
@@ -58,6 +61,7 @@ export async function POST(request: Request) {
   }
 
   const alias = body.model?.trim() || getDefaultLlamaCppModel();
+  const scope = body.scope === "local" ? "local" : "primary";
   if (!MODEL_ID_RE.test(alias)) {
     return NextResponse.json({ error: "Invalid llama.cpp model ID" }, { status: 400 });
   }
@@ -73,7 +77,7 @@ export async function POST(request: Request) {
         const existingModels = await queryLlamaCppModels(spec.baseUrl);
         if (existingModels.includes(alias)) {
           emit(controller, { status: "llama.cpp is already running. Applying configuration..." });
-          const configured = await configureLlamaCpp(alias);
+          const configured = await configureLlamaCpp(alias, scope);
           if (!configured.ok) {
             emit(controller, { error: configured.error });
             controller.close();
@@ -136,7 +140,7 @@ export async function POST(request: Request) {
           const models = await queryLlamaCppModels(spec.baseUrl);
           if (models.includes(alias)) {
             emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
-            const configured = await configureLlamaCpp(alias);
+            const configured = await configureLlamaCpp(alias, scope);
             if (!configured.ok) {
               emit(controller, { error: configured.error });
               controller.close();

@@ -18,7 +18,14 @@ function badgeColor(isDone: boolean, isActive: boolean): string {
 
 export default function ProgressBar({ currentStep }: ProgressBarProps) {
   const { t } = useT();
-  const STEP_LABELS = [t("progress.wifi"), t("progress.update"), t("progress.security"), t("progress.aiModel"), t("progress.telegram")];
+  const STEP_LABELS = [
+    t("progress.wifi"),
+    t("progress.update"),
+    t("progress.security"),
+    "Local AI",
+    t("settings.aiProvider"),
+    t("progress.telegram"),
+  ];
 
   return (
     <div
@@ -32,7 +39,6 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
       {STEP_LABELS.map((label, i) => {
         const num = i + 1;
         const isCurrent = num === currentStep;
-        const isActive = num <= currentStep;
         const isDone = num < currentStep;
         return (
           <div
