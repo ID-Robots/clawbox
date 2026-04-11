@@ -230,6 +230,12 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     enabled: true,
   };
   let updateBranch: string | null = null;
+  let gatewayHealthChecksRemaining = 0;
+  let chatActiveSource: "primary" | "local" | null = setupState.ai_model_configured
+    ? "primary"
+    : setupState.local_ai_configured
+      ? "local"
+      : null;
   const browserStatus = {
     chromium: {
       installed: false,
@@ -261,6 +267,100 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       .values()
   );
 
+  const getPrimaryChatModel = () => (setupState.ai_model_configured ? "clawai/deepseek-r1" : null);
+  const getLocalChatModel = () => (setupState.local_ai_configured ? setupState.local_ai_model ?? null : null);
+  const getLocalChatLabel = () => {
+    if (setupState.local_ai_provider === "ollama") return "Ollama Local";
+    if (setupState.local_ai_provider === "llamacpp") return "Gemma 4 Local";
+    return "Local AI";
+  };
+  const buildChatModelState = () => {
+    const primaryModel = getPrimaryChatModel();
+    const localModel = getLocalChatModel();
+    let activeSource = chatActiveSource;
+
+    if (activeSource === "primary" && !primaryModel) {
+      activeSource = localModel ? "local" : null;
+    } else if (activeSource === "local" && !localModel) {
+      activeSource = primaryModel ? "primary" : null;
+    } else if (!activeSource) {
+      activeSource = primaryModel ? "primary" : localModel ? "local" : null;
+    }
+
+    chatActiveSource = activeSource;
+
+    const options = [
+      ...(primaryModel
+        ? [{
+            id: primaryModel,
+            label: "ClawBox AI",
+            model: primaryModel,
+            provider: "clawai",
+            available: true,
+            settingsSection: "ai",
+            isLocal: false,
+          }]
+        : [{
+            id: "__setup_ai__",
+            label: "AI Provider",
+            model: null,
+            provider: null,
+            available: false,
+            settingsSection: "ai",
+            isLocal: false,
+          }]),
+      ...(localModel
+        ? [{
+            id: localModel,
+            label: getLocalChatLabel(),
+            model: localModel,
+            provider: setupState.local_ai_provider,
+            available: true,
+            settingsSection: "localAi",
+            isLocal: true,
+          }]
+        : [{
+            id: "__setup_local__",
+            label: "Local AI",
+            model: null,
+            provider: null,
+            available: false,
+            settingsSection: "localAi",
+            isLocal: true,
+          }]),
+    ];
+
+    const activeModel =
+      activeSource === "primary"
+        ? primaryModel
+        : activeSource === "local"
+          ? localModel
+          : null;
+
+    return {
+      activeOptionId: options.find((option) => option.model === activeModel)?.id ?? null,
+      activeSource,
+      activeLabel:
+        activeSource === "primary"
+          ? (primaryModel ? "ClawBox AI" : null)
+          : activeSource === "local"
+            ? (localModel ? getLocalChatLabel() : null)
+            : null,
+      activeModel,
+      options,
+      primary: {
+        available: !!primaryModel,
+        label: primaryModel ? "ClawBox AI" : null,
+        model: primaryModel,
+      },
+      local: {
+        available: !!localModel,
+        label: localModel ? getLocalChatLabel() : null,
+        model: localModel,
+      },
+    };
+  };
+
   await page.route("**/setup-api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -284,7 +384,18 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
         ai_model_configured: true,
         telegram_configured: true,
       });
+      chatActiveSource = "primary";
+      gatewayHealthChecksRemaining = Math.max(gatewayHealthChecksRemaining, 2);
       await fulfillJson(route, { success: true });
+      return;
+    }
+
+    if (path === "/setup-api/gateway/health") {
+      const available = gatewayHealthChecksRemaining <= 0;
+      if (gatewayHealthChecksRemaining > 0) {
+        gatewayHealthChecksRemaining -= 1;
+      }
+      await fulfillJson(route, { available, port: 18789 });
       return;
     }
 
@@ -625,6 +736,45 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    if (path === "/setup-api/chat/model") {
+      if (method === "GET") {
+        await fulfillJson(route, buildChatModelState());
+        return;
+      }
+
+      if (method === "POST") {
+        const payload = await readRequestJson<{ source?: "primary" | "local"; model?: string }>(route);
+        const state = buildChatModelState();
+        const target = typeof payload.model === "string" && payload.model
+          ? state.options.find((option) => option.model === payload.model) ?? null
+          : payload.source === "primary"
+            ? {
+                available: state.primary.available,
+                model: state.primary.model,
+                settingsSection: "ai" as const,
+              }
+            : payload.source === "local"
+              ? {
+                  available: state.local.available,
+                  model: state.local.model,
+                  settingsSection: "localAi" as const,
+                }
+              : null;
+        if (!target) {
+          await fulfillJson(route, { error: "Invalid chat model source" }, 400);
+          return;
+        }
+        if (!target.available || !target.model) {
+          await fulfillJson(route, { error: target.settingsSection === "localAi" ? "Local AI is not configured" : "AI provider is not configured" }, 400);
+          return;
+        }
+
+        chatActiveSource = target.settingsSection === "localAi" ? "local" : "primary";
+        await fulfillJson(route, buildChatModelState());
+        return;
+      }
+    }
+
     if (path === "/setup-api/ai-models/configure" && method === "POST") {
       const payload = await readRequestJson<{ provider?: string; apiKey?: string; scope?: "primary" | "local" }>(route);
       if (payload.scope === "local") {
@@ -635,6 +785,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           : `llamacpp/${payload.apiKey || "gemma4-e2b-it-q4_0"}`;
       } else {
         setupState.ai_model_configured = true;
+        if (!chatActiveSource) chatActiveSource = "primary";
       }
       await fulfillJson(route, { success: true });
       return;
@@ -647,6 +798,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/telegram/configure" && method === "POST") {
       setupState.telegram_configured = true;
+      gatewayHealthChecksRemaining = Math.max(gatewayHealthChecksRemaining, 2);
       await fulfillJson(route, { success: true });
       return;
     }
@@ -793,10 +945,11 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     }
 
     if (path === "/setup-api/gateway/ws-config") {
+      const state = buildChatModelState();
       await fulfillJson(route, {
         token: "test-gateway-token",
         wsUrl: "ws://localhost:12345/mock-gateway",
-        model: "clawai/deepseek-r1",
+        model: state.activeSource === "local" ? state.local.model : state.primary.model,
       });
       return;
     }

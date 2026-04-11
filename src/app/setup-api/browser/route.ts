@@ -1,6 +1,12 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const exec = promisify(execFile);
+const CDP_PORT = 18800;
+const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
 
 // Playwright key name mapping (browser KeyboardEvent.key → Playwright key names)
 const KEY_MAP: Record<string, string> = {
@@ -50,6 +56,30 @@ setInterval(() => {
   }
 }, 60_000);
 
+async function isDesktopBrowserReady(): Promise<boolean> {
+  try {
+    const res = await fetch(`${CDP_ENDPOINT}/json/version`, { signal: AbortSignal.timeout(1000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureDesktopBrowserRunning(): Promise<void> {
+  if (await isDesktopBrowserReady()) return;
+
+  try {
+    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "start", "clawbox-browser.service"], { timeout: 5000 });
+  } catch {}
+
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (await isDesktopBrowserReady()) return;
+  }
+
+  throw new Error(`Desktop Chromium is not available on CDP port ${CDP_PORT}`);
+}
+
 async function getPlaywright() {
   try {
     return await import("playwright");
@@ -65,16 +95,22 @@ export async function POST(req: Request) {
 
     if (action === "launch") {
       const pw = await getPlaywright();
-      const browser = await pw.chromium.launch({
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-      const context = await browser.newContext({
-        viewport: { width: 1280, height: 720 },
-        userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      });
-      const page = await context.newPage();
-      await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+      await ensureDesktopBrowserRunning();
+
+      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT);
+      const context = browser.contexts()[0];
+      if (!context) {
+        await browser.close().catch(() => {});
+        throw new Error("Desktop Chromium did not expose a browser context");
+      }
+
+      const page = context.pages().at(-1) ?? await context.newPage();
+      await page.bringToFront().catch(() => {});
+
+      const { url } = body;
+      if (url) {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+      }
 
       const id = `browser-${++sessionCounter}`;
       sessions.set(id, { browser, context, page, lastActivity: Date.now() });

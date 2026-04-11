@@ -1,77 +1,168 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Mock playwright before importing the route
-vi.mock("playwright", () => {
-  const mockPage = {
-    goto: vi.fn().mockResolvedValue(undefined),
-    url: vi.fn().mockReturnValue("https://www.google.com"),
-    title: vi.fn().mockResolvedValue("Google"),
-    screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
-    mouse: {
-      click: vi.fn().mockResolvedValue(undefined),
-      dblclick: vi.fn().mockResolvedValue(undefined),
-      move: vi.fn().mockResolvedValue(undefined),
-      wheel: vi.fn().mockResolvedValue(undefined),
-    },
-    keyboard: {
-      type: vi.fn().mockResolvedValue(undefined),
-      press: vi.fn().mockResolvedValue(undefined),
-    },
-    waitForTimeout: vi.fn().mockResolvedValue(undefined),
-    evaluate: vi.fn().mockResolvedValue(false),
-    goBack: vi.fn().mockResolvedValue(undefined),
-    goForward: vi.fn().mockResolvedValue(undefined),
-    reload: vi.fn().mockResolvedValue(undefined),
-  };
-  const mockContext = {
-    newPage: vi.fn().mockResolvedValue(mockPage),
-  };
-  const mockBrowser = {
-    newContext: vi.fn().mockResolvedValue(mockContext),
-    close: vi.fn().mockResolvedValue(undefined),
-  };
+const execFileMock = vi.hoisted(() => vi.fn((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
+  const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
+  cb?.(null, "", "");
+  return undefined;
+}));
+
+const mockPage = vi.hoisted(() => ({
+  goto: vi.fn().mockResolvedValue(undefined),
+  url: vi.fn().mockReturnValue("https://www.google.com"),
+  title: vi.fn().mockResolvedValue("Google"),
+  screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
+  bringToFront: vi.fn().mockResolvedValue(undefined),
+  mouse: {
+    click: vi.fn().mockResolvedValue(undefined),
+    dblclick: vi.fn().mockResolvedValue(undefined),
+    move: vi.fn().mockResolvedValue(undefined),
+    wheel: vi.fn().mockResolvedValue(undefined),
+  },
+  keyboard: {
+    type: vi.fn().mockResolvedValue(undefined),
+    press: vi.fn().mockResolvedValue(undefined),
+  },
+  waitForTimeout: vi.fn().mockResolvedValue(undefined),
+  evaluate: vi.fn().mockResolvedValue(false),
+  goBack: vi.fn().mockResolvedValue(undefined),
+  goForward: vi.fn().mockResolvedValue(undefined),
+  reload: vi.fn().mockResolvedValue(undefined),
+}));
+
+const mockContext = vi.hoisted(() => ({
+  pages: vi.fn(() => [mockPage]),
+  newPage: vi.fn().mockResolvedValue(mockPage),
+}));
+
+const mockBrowser = vi.hoisted(() => ({
+  contexts: vi.fn(() => [mockContext]),
+  close: vi.fn().mockResolvedValue(undefined),
+}));
+
+const connectOverCDP = vi.hoisted(() => vi.fn().mockResolvedValue(mockBrowser));
+
+vi.mock("child_process", () => ({
+  execFile: execFileMock,
+}));
+
+vi.mock("playwright", () => ({
+  chromium: {
+    connectOverCDP,
+  },
+}));
+
+function cdpVersionResponse() {
   return {
-    chromium: {
-      launch: vi.fn().mockResolvedValue(mockBrowser),
-    },
-  };
-});
+    ok: true,
+    json: async () => ({ Browser: "Chromium 146" }),
+  } as Response;
+}
 
 describe("/setup-api/browser", () => {
   let POST: (req: Request) => Promise<Response>;
 
+  const setDesktopBrowserReady = (failuresBeforeReady = 0) => {
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (!url.includes("/json/version")) {
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+      attempts += 1;
+      if (attempts <= failuresBeforeReady) {
+        throw new Error("CDP offline");
+      }
+      return cdpVersionResponse();
+    }));
+  };
+
+  const importRoute = async () => {
+    const mod = await import("@/app/setup-api/browser/route");
+    POST = mod.POST;
+  };
+
+  const launchSession = async (extra: Record<string, unknown> = {}) => {
+    const req = new Request("http://localhost/setup-api/browser", {
+      method: "POST",
+      body: JSON.stringify({ action: "launch", ...extra }),
+    });
+    const res = await POST(req);
+    return { res, body: await res.json() };
+  };
+
+  const sendAction = async (action: string, sessionId: string, extra: Record<string, unknown> = {}) => {
+    const req = new Request("http://localhost/setup-api/browser", {
+      method: "POST",
+      body: JSON.stringify({ action, sessionId, ...extra }),
+    });
+    const res = await POST(req);
+    return { res, body: await res.json() };
+  };
+
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    // Re-mock playwright after reset
-    const pw = await import("playwright");
-    const mockPage = {
-      goto: vi.fn().mockResolvedValue(undefined),
-      url: vi.fn().mockReturnValue("https://www.google.com"),
-      title: vi.fn().mockResolvedValue("Google"),
-      screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
-      mouse: { click: vi.fn().mockResolvedValue(undefined), dblclick: vi.fn().mockResolvedValue(undefined), move: vi.fn().mockResolvedValue(undefined), wheel: vi.fn().mockResolvedValue(undefined) },
-      keyboard: { type: vi.fn().mockResolvedValue(undefined), press: vi.fn().mockResolvedValue(undefined) },
-      waitForTimeout: vi.fn().mockResolvedValue(undefined),
-      evaluate: vi.fn().mockResolvedValue(false),
-      goBack: vi.fn().mockResolvedValue(undefined), goForward: vi.fn().mockResolvedValue(undefined), reload: vi.fn().mockResolvedValue(undefined),
-    };
-    const mockContext = { newPage: vi.fn().mockResolvedValue(mockPage) };
-    const mockBrowser = { newContext: vi.fn().mockResolvedValue(mockContext), close: vi.fn().mockResolvedValue(undefined) };
-    vi.mocked(pw.chromium.launch).mockResolvedValue(mockBrowser as never);
-    const mod = await import("@/app/setup-api/browser/route");
-    POST = mod.POST;
+
+    mockPage.goto.mockResolvedValue(undefined);
+    mockPage.url.mockReturnValue("https://www.google.com");
+    mockPage.title.mockResolvedValue("Google");
+    mockPage.screenshot.mockResolvedValue(Buffer.from("PNG"));
+    mockPage.bringToFront.mockResolvedValue(undefined);
+    mockPage.mouse.click.mockResolvedValue(undefined);
+    mockPage.mouse.dblclick.mockResolvedValue(undefined);
+    mockPage.mouse.move.mockResolvedValue(undefined);
+    mockPage.mouse.wheel.mockResolvedValue(undefined);
+    mockPage.keyboard.type.mockResolvedValue(undefined);
+    mockPage.keyboard.press.mockResolvedValue(undefined);
+    mockPage.waitForTimeout.mockResolvedValue(undefined);
+    mockPage.evaluate.mockResolvedValue(false);
+    mockPage.goBack.mockResolvedValue(undefined);
+    mockPage.goForward.mockResolvedValue(undefined);
+    mockPage.reload.mockResolvedValue(undefined);
+
+    mockContext.pages.mockReturnValue([mockPage]);
+    mockContext.newPage.mockResolvedValue(mockPage);
+    mockBrowser.contexts.mockReturnValue([mockContext]);
+    mockBrowser.close.mockResolvedValue(undefined);
+    connectOverCDP.mockResolvedValue(mockBrowser);
+    execFileMock.mockImplementation((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
+      const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
+      cb?.(null, "", "");
+      return undefined;
+    });
+
+    setDesktopBrowserReady();
+    await importRoute();
   });
 
-  it("launches a browser session", async () => {
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+  it("launches a browser session by attaching to desktop Chromium over CDP", async () => {
+    const { body } = await launchSession();
+
+    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800");
+    expect(mockPage.bringToFront).toHaveBeenCalled();
     expect(body.sessionId).toBeDefined();
     expect(body.url).toBe("https://www.google.com");
+  });
+
+  it("starts the desktop browser service when CDP is not ready yet", async () => {
+    setDesktopBrowserReady(2);
+
+    const { body } = await launchSession();
+
+    expect(body.sessionId).toBeDefined();
+    expect(execFileMock).toHaveBeenCalledWith(
+      "/usr/bin/sudo",
+      ["/usr/bin/systemctl", "start", "clawbox-browser.service"],
+      expect.any(Object),
+      expect.any(Function),
+    );
+  });
+
+  it("navigates the real desktop browser when launch receives a url", async () => {
+    const { body } = await launchSession({ url: "https://example.com" });
+
+    expect(mockPage.goto).toHaveBeenCalledWith("https://example.com", expect.any(Object));
+    expect(body.sessionId).toBeDefined();
   });
 
   it("returns error for action without session", async () => {
@@ -84,302 +175,134 @@ describe("/setup-api/browser", () => {
   });
 
   it("returns error for unknown action with session", async () => {
-    // First launch
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "unknown-action", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("unknown-action", launchBody.sessionId);
     expect(res.status).toBe(400);
   });
 
   it("handles navigate action", async () => {
-    // Launch first
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "navigate", sessionId, url: "https://example.com" }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+    const { body } = await sendAction("navigate", launchBody.sessionId, { url: "https://example.com" });
     expect(body.url).toBeDefined();
   });
 
-  it("handles close action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+  it("disconnects the automation session on close", async () => {
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "close", sessionId }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+    const { body } = await sendAction("close", launchBody.sessionId);
     expect(body.ok).toBe(true);
+    expect(mockBrowser.close).toHaveBeenCalled();
   });
 
   it("handles click action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "click", sessionId, x: 100, y: 200 }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+    const { body } = await sendAction("click", launchBody.sessionId, { x: 100, y: 200 });
     expect(body.url).toBeDefined();
   });
 
   it("handles type action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "type", sessionId, text: "hello" }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("type", launchBody.sessionId, { text: "hello" });
     expect(res.status).toBe(200);
   });
 
   it("handles screenshot action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "screenshot", sessionId }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+    const { body } = await sendAction("screenshot", launchBody.sessionId);
     expect(body.screenshot).toBeDefined();
   });
 
   it("handles hover action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "hover", sessionId, x: 10, y: 20 }),
-    });
-    const res = await POST(req);
-    const body = await res.json();
+    const { body } = await sendAction("hover", launchBody.sessionId, { x: 10, y: 20 });
     expect(body.ok).toBe(true);
   });
 
   it("handles dblclick action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "dblclick", sessionId, x: 100, y: 200 }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("dblclick", launchBody.sessionId, { x: 100, y: 200 });
     expect(res.status).toBe(200);
   });
 
   it("handles scroll action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "scroll", sessionId, x: 100, y: 200, deltaY: 300 }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("scroll", launchBody.sessionId, { x: 100, y: 200, deltaY: 300 });
     expect(res.status).toBe(200);
   });
 
   it("handles keydown action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "keydown", sessionId, key: "Enter" }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("keydown", launchBody.sessionId, { key: "Enter" });
     expect(res.status).toBe(200);
   });
 
   it("handles keydown with printable character", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "keydown", sessionId, key: "a" }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("keydown", launchBody.sessionId, { key: "a" });
     expect(res.status).toBe(200);
   });
 
   it("handles back action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "back", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("back", launchBody.sessionId);
     expect(res.status).toBe(200);
   });
 
   it("handles forward action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "forward", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("forward", launchBody.sessionId);
     expect(res.status).toBe(200);
   });
 
   it("handles refresh action", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "refresh", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("refresh", launchBody.sessionId);
     expect(res.status).toBe(200);
   });
 
   it("rejects navigate without url", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "navigate", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("navigate", launchBody.sessionId);
     expect(res.status).toBe(400);
   });
 
   it("rejects type without text", async () => {
-    const launchReq = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const launchRes = await POST(launchReq);
-    const { sessionId } = await launchRes.json();
+    const { body: launchBody } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "type", sessionId }),
-    });
-    const res = await POST(req);
+    const { res } = await sendAction("type", launchBody.sessionId);
     expect(res.status).toBe(400);
   });
 
-  it("handles launch with screenshot failure", async () => {
-    // Override mock to make screenshot throw
-    const pw = await import("playwright");
-    const failPage = {
-      goto: vi.fn().mockRejectedValue(new Error("nav error")),
-      url: vi.fn().mockReturnValue("about:blank"),
-      title: vi.fn().mockRejectedValue(new Error("no title")),
-      screenshot: vi.fn().mockRejectedValue(new Error("screenshot failed")),
-      mouse: { click: vi.fn(), dblclick: vi.fn(), move: vi.fn(), wheel: vi.fn() },
-      keyboard: { type: vi.fn(), press: vi.fn() },
-      waitForTimeout: vi.fn().mockResolvedValue(undefined),
-      evaluate: vi.fn().mockRejectedValue(new Error("eval failed")),
-      goBack: vi.fn().mockRejectedValue(new Error("err")),
-      goForward: vi.fn().mockRejectedValue(new Error("err")),
-      reload: vi.fn().mockRejectedValue(new Error("err")),
-    };
-    const failContext = { newPage: vi.fn().mockResolvedValue(failPage) };
-    const failBrowser = { newContext: vi.fn().mockResolvedValue(failContext), close: vi.fn().mockResolvedValue(undefined) };
-    vi.mocked(pw.chromium.launch).mockResolvedValue(failBrowser as never);
+  it("handles launch when screenshots fail", async () => {
+    mockPage.screenshot.mockRejectedValue(new Error("screenshot failed"));
+    mockPage.title.mockRejectedValue(new Error("no title"));
 
-    // Need fresh import to get new module state
-    vi.resetModules();
-    const mod = await import("@/app/setup-api/browser/route");
-    const freshPOST = mod.POST;
+    const { body } = await launchSession();
 
-    const req = new Request("http://localhost/setup-api/browser", {
-      method: "POST",
-      body: JSON.stringify({ action: "launch" }),
-    });
-    const res = await freshPOST(req);
-    const body = await res.json();
     expect(body.sessionId).toBeDefined();
     expect(body.screenshot).toBeNull();
   });
+
+  it("returns an error if desktop Chromium never becomes available", async () => {
+    setDesktopBrowserReady(Number.POSITIVE_INFINITY);
+
+    const { res } = await launchSession();
+    expect(res.status).toBe(500);
+  }, 15000);
 
   it("handles invalid JSON", async () => {
     const req = new Request("http://localhost/setup-api/browser", {

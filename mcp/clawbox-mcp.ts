@@ -1452,13 +1452,14 @@ async function browserAction(action: string, params: Record<string, unknown> = {
 }
 
 server.tool("browser_launch",
-  `Launch a headless Chromium browser and navigate to a URL. Returns a screenshot.
-The browser runs server-side via Playwright (1280x720 viewport). Use browser_screenshot to see the page,
+  `Attach to the live Chromium window running on the ClawBox desktop via CDP and optionally navigate to a URL. Returns a screenshot.
+This controls the real browser visible in VNC, not a separate hidden browser.
+Use browser_screenshot to see the current page,
 browser_click to interact with elements at x,y coordinates visible in the screenshot,
 browser_type to enter text, and browser_keypress for special keys.
 
 Workflow: browser_launch → browser_screenshot → browser_click/type → browser_screenshot → ...`,
-  { url: z.string().optional().describe("URL to navigate to (default: google.com)") },
+  { url: z.string().optional().describe("Optional URL to navigate to after attaching") },
   async ({ url }) => {
     // Force new session
     if (currentSessionId) {
@@ -1481,7 +1482,7 @@ server.tool("browser_navigate",
 );
 
 server.tool("browser_click",
-  "Click at x,y coordinates in the browser viewport (1280x720). Use screenshot to find element positions.",
+  "Click at x,y coordinates in the current desktop browser screenshot. Use browser_screenshot to find element positions.",
   { x: z.number().describe("X coordinate"), y: z.number().describe("Y coordinate"), button: z.enum(["left", "right", "middle"]).optional().describe("Mouse button (default: left)") },
   async ({ x, y, button }) => {
     const result = await browserAction("click", { x, y, ...(button ? { button } : {}) });
@@ -1517,19 +1518,19 @@ server.tool("browser_scroll",
 );
 
 server.tool("browser_screenshot",
-  "Take a screenshot of the current browser page (1280x720). Use this to see what's on screen before clicking.",
+  "Take a screenshot of the current desktop browser page. Use this to see what's on screen before clicking.",
   async () => {
     const result = await browserAction("screenshot");
     return browserResult("Screenshot captured.", result);
   }
 );
 
-server.tool("browser_close", "Close the browser and end the session.", async () => {
+server.tool("browser_close", "End the current browser control session. The desktop Chromium window stays open.", async () => {
   if (currentSessionId) {
     try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
     currentSessionId = null;
   }
-  return { content: [{ type: "text", text: "Browser closed." }] };
+  return { content: [{ type: "text", text: "Browser session ended. The desktop Chromium window is still running." }] };
 });
 
 // ══════════════════════════════════════════════════════════════════════

@@ -20,6 +20,16 @@ mkdir -p "$(dirname "$LOG_PATH")"
 exec >>"$LOG_PATH" 2>&1
 
 MODEL_PATH="${MODEL_DIR}/${HF_FILE}"
+if [ ! -x "$HF_BIN" ]; then
+  echo "[llamacpp] Missing Hugging Face CLI at ${HF_BIN}. Run the llama.cpp install step to repair the local runtime."
+  exit 1
+fi
+
+if [ ! -x "$BIN_PATH" ]; then
+  echo "[llamacpp] Missing llama-server at ${BIN_PATH}. Run the llama.cpp install step to repair the local runtime."
+  exit 1
+fi
+
 if [ ! -f "$MODEL_PATH" ]; then
   echo "[llamacpp] Downloading ${HF_REPO}/${HF_FILE}"
   "$HF_BIN" download "$HF_REPO" "$HF_FILE" --local-dir "$MODEL_DIR"

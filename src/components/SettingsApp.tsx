@@ -101,6 +101,9 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
   const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
+  const notifyChatModelStateChanged = useCallback(() => {
+    window.dispatchEvent(new Event("clawbox:chat-model-state-changed"));
+  }, []);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
@@ -452,12 +455,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         throw new Error(typeof data.error === "string" ? data.error : "Failed to disable Local AI");
       }
       await refreshLocalAiStatus();
+      notifyChatModelStateChanged();
     } catch (err) {
       setLocalAiError(err instanceof Error ? err.message : "Failed to disable Local AI");
     } finally {
       setLocalAiDisabling(false);
     }
-  }, [refreshLocalAiStatus]);
+  }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
   useEffect(() => {
     if (section !== "localAi") return;
     refreshLocalAiStatus();
@@ -1132,8 +1136,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               title="Connect AI Provider"
               description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
               onConfigured={() => {
-              fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
-            }}
+                fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+                notifyChatModelStateChanged();
+              }}
             /></I18nProvider>
           </div>
         )}
@@ -1256,6 +1261,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               testId="settings-local-ai-step"
               onConfigured={() => {
                 refreshLocalAiStatus().catch(() => {});
+                notifyChatModelStateChanged();
               }}
             /></I18nProvider>
           </div>

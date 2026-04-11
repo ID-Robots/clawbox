@@ -39,6 +39,7 @@ interface ChatPopupProps {
   isOpen: boolean
   onClose: () => void
   onOpenFull?: () => void
+  onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
   onThinkingChange?: (thinking: boolean) => void
   onPanelModeChange?: (panelWidth: number) => void
   initialPanelWidth?: number
@@ -54,8 +55,19 @@ interface ChatMessage {
 }
 
 interface ChatModelState {
+  activeOptionId: string | null
+  activeModel: string | null
   activeSource: 'primary' | 'local' | null
   activeLabel: string | null
+  options: Array<{
+    id: string
+    label: string
+    model: string | null
+    provider: string | null
+    available: boolean
+    settingsSection: 'ai' | 'localAi'
+    isLocal: boolean
+  }>
   primary: { available: boolean; label: string | null; model: string | null }
   local: { available: boolean; label: string | null; model: string | null }
 }
@@ -105,7 +117,7 @@ function uuid(): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   const panelMode = panelWidth !== null
@@ -509,6 +521,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     refreshChatModelState()
   }, [isOpen, refreshChatModelState])
 
+  useEffect(() => {
+    if (!isOpen) return
+    const handleModelStateChanged = () => {
+      refreshChatModelState()
+    }
+    window.addEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
+    return () => window.removeEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
+  }, [isOpen, refreshChatModelState])
+
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
   const loadHistory = useCallback(async () => {
@@ -621,15 +642,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     } catch {}
   }, [wsRequest])
 
-  const switchChatModel = useCallback(async (source: 'primary' | 'local') => {
-    if (switchingModel || chatModelState?.activeSource === source) return
+  const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
+    if (switchingModel || chatModelState?.activeModel === target.model) return
     setSwitchingModel(true)
     setErrorMsg('')
     try {
       const res = await fetch('/setup-api/chat/model', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source }),
+        body: JSON.stringify({ model: target.model }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
@@ -640,7 +661,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
       }
       setMessages(prev => [...prev, {
         role: 'system',
-        text: `Switched chat to ${(data as ChatModelState).activeLabel || (source === 'local' ? 'Local AI' : 'AI Provider')}.`,
+        text: `Switched chat to ${(data as ChatModelState).activeLabel || target.label}.`,
         timestamp: Date.now(),
       }])
       retryCountRef.current = 0
@@ -655,6 +676,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
       setSwitchingModel(false)
     }
   }, [chatModelState, connect, switchingModel])
+
+  const handleChatSourceChange = useCallback(async (optionId: string) => {
+    const target = chatModelState?.options.find(option => option.id === optionId)
+    if (!target) return
+
+    if (!target.available || !target.model) {
+      onOpenSettingsSection?.(target.settingsSection)
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `${target.label} is not configured. Opened Settings so you can set it up.`,
+        timestamp: Date.now(),
+      }])
+      return
+    }
+
+    await switchChatModel({ model: target.model, label: target.label })
+  }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
   // Connect/disconnect on open/close
   useEffect(() => {
@@ -736,6 +774,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     }
   }, [sendMessage])
 
+  const stopHeaderDrag = useCallback((e: React.PointerEvent<HTMLElement>) => {
+    e.stopPropagation()
+  }, [])
+
   if (!isOpen) return null
 
   // Default position: above mascot (desktop only)
@@ -789,52 +831,59 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState?.primary?.available && chatModelState?.local?.available ? 5 : 0, minWidth: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState ? 5 : 0, minWidth: 0 }}>
           {modelName && status === 'connected' && (
             <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
               {modelName}
             </span>
           )}
-          {chatModelState?.primary?.available && chatModelState?.local?.available && (
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              padding: 3,
-              borderRadius: 999,
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.08)',
-            }}>
-              {([
-                { source: 'primary' as const, label: chatModelState.primary.label || 'AI Provider' },
-                { source: 'local' as const, label: chatModelState.local.label || 'Local AI' },
-              ]).map((option) => {
-                const active = chatModelState.activeSource === option.source
-                return (
-                  <button
-                    key={option.source}
-                    onClick={() => switchChatModel(option.source)}
-                    disabled={switchingModel || sending || status !== 'connected'}
-                    title={option.label}
-                    style={{
-                      background: active ? 'rgba(249,115,22,0.24)' : 'transparent',
-                      border: 'none',
-                      color: active ? '#FDBA74' : 'rgba(255,255,255,0.55)',
-                      padding: '4px 8px',
-                      borderRadius: 999,
-                      fontSize: 10,
-                      fontWeight: 600,
-                      cursor: switchingModel || sending || status !== 'connected' ? 'default' : 'pointer',
-                      maxWidth: 112,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                )
-              })}
+          {chatModelState && (
+            <div
+              onPointerDown={stopHeaderDrag}
+              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', maxWidth: 190 }}
+            >
+              <select
+                aria-label="Chat model"
+                value={chatModelState.activeOptionId ?? ''}
+                onChange={(e) => handleChatSourceChange(e.target.value)}
+                onPointerDown={stopHeaderDrag}
+                disabled={switchingModel}
+                style={{
+                  appearance: 'none',
+                  WebkitAppearance: 'none',
+                  MozAppearance: 'none',
+                  width: '100%',
+                  background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  color: '#fff',
+                  borderRadius: 10,
+                  padding: '6px 28px 6px 10px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  outline: 'none',
+                  cursor: switchingModel ? 'default' : 'pointer',
+                }}
+              >
+                <option value="" disabled style={{ background: '#111827', color: '#fff' }}>Select AI</option>
+                {chatModelState.options.map((option) => (
+                  <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
+                    {option.label}{option.available ? '' : ' - Set up in Settings'}
+                  </option>
+                ))}
+              </select>
+              <span
+                className="material-symbols-rounded"
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  right: 8,
+                  fontSize: 16,
+                  color: 'rgba(255,255,255,0.35)',
+                  pointerEvents: 'none',
+                }}
+              >
+                unfold_more
+              </span>
             </div>
           )}
         </div>
@@ -853,6 +902,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         )}
         {onOpenFull && (
           <button
+            onPointerDown={stopHeaderDrag}
             onClick={() => { onOpenFull(); onClose() }}
             title="Open full UI"
             style={{
@@ -870,6 +920,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         )}
         {!mobile && (
           <button
+            onPointerDown={stopHeaderDrag}
             onClick={togglePanelMode}
             title={panelMode ? "Undock panel" : "Dock to right"}
             style={{
@@ -889,6 +940,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           </button>
         )}
         <button
+          onPointerDown={stopHeaderDrag}
           onClick={onClose}
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import ProgressBar from "./ProgressBar";
@@ -9,19 +9,20 @@ import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
 import TelegramStep from "./TelegramStep";
+import StatusMessage from "./StatusMessage";
 import { useT, I18nProvider } from "@/lib/i18n";
 
-async function completeSetup(onComplete?: () => void) {
-  try {
-    await fetch("/setup-api/setup/complete", { method: "POST" });
-  } catch {}
-  if (onComplete) onComplete();
-  else window.location.href = "/";
+const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 45;
+
+async function extractErrorMessage(res: Response, fallback: string) {
+  const data = await res.json().catch(() => ({}));
+  return typeof data.error === "string" ? data.error : fallback;
 }
 
 function applyStatusData(
   data: Record<string, unknown>,
   setCurrentStep: (v: number) => void,
+  beginCompletion: () => void,
   onComplete?: () => void
 ) {
   if (data.setup_complete) {
@@ -30,7 +31,8 @@ function applyStatusData(
     return;
   }
   if (data.telegram_configured) {
-    completeSetup(onComplete);
+    setCurrentStep(6);
+    beginCompletion();
     return;
   }
   if (data.ai_model_configured) {
@@ -171,6 +173,115 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
   );
 }
 
+function SetupCompletionOverlay({
+  phase,
+  completed,
+  t,
+}: {
+  phase: number;
+  completed: boolean;
+  t: (key: string) => string;
+}) {
+  const steps = [
+    t("ai.restartingGateway"),
+    t("telegram.waitingGateway"),
+    t("ai.almostReady"),
+  ];
+
+  return (
+    <div className="w-full max-w-[520px]" data-testid="setup-completion-overlay">
+      <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
+        <style>{`
+          @keyframes setup-finish-check-draw { to { stroke-dashoffset: 0 } }
+          @keyframes setup-finish-check-circle { to { stroke-dashoffset: 0 } }
+          @keyframes setup-finish-fade-in { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
+          @keyframes setup-finish-pulse-ring { 0% { transform: scale(0.85); opacity: 0.55 } 50% { transform: scale(1.15); opacity: 0 } 100% { transform: scale(0.85); opacity: 0.55 } }
+          @keyframes setup-finish-orbit { from { transform: rotate(0deg) translateX(38px) rotate(0deg) } to { transform: rotate(360deg) translateX(38px) rotate(-360deg) } }
+          .setup-finish-fade-in { animation: setup-finish-fade-in 0.4s ease-out both }
+        `}</style>
+
+        <div className="flex flex-col items-center gap-6 px-4 py-4">
+          <div className="relative w-24 h-24 flex items-center justify-center">
+            <div className="absolute inset-0 rounded-full border-2 border-[var(--coral-bright)]/20" style={{ animation: "setup-finish-pulse-ring 2s ease-in-out infinite" }} />
+            <div className="absolute inset-2 rounded-full border border-[var(--coral-bright)]/10" style={{ animation: "setup-finish-pulse-ring 2s ease-in-out infinite 0.45s" }} />
+
+            {!completed && [0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="absolute inset-0 flex items-center justify-center"
+                style={{ animation: `setup-finish-orbit ${3 + i * 0.45}s linear infinite`, animationDelay: `${i * 0.35}s` }}
+              >
+                <div className="w-2 h-2 rounded-full bg-[var(--coral-bright)]" style={{ opacity: 0.35 + i * 0.2 }} />
+              </div>
+            ))}
+
+            {completed ? (
+              <svg width="48" height="48" viewBox="0 0 56 56" fill="none" className="setup-finish-fade-in">
+                <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "setup-finish-check-circle 0.6s ease-out 0.1s forwards" }} />
+                <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "setup-finish-check-draw 0.4s ease-out 0.5s forwards" }} />
+              </svg>
+            ) : (
+              <div className="relative z-10 flex h-16 w-16 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] setup-finish-fade-in">
+                <Image
+                  src="/clawbox-icon.png"
+                  alt="ClawBox"
+                  width={40}
+                  height={40}
+                  className="h-10 w-10 object-contain"
+                  priority
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="text-center setup-finish-fade-in" style={{ animationDelay: "0.2s" }}>
+            <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
+              {completed ? t("connected") : t("openclaw.connecting")}
+            </h2>
+            <p className="text-sm text-[var(--text-muted)]">
+              {completed ? t("ai.almostReady") : t("ai.pleaseDontClose")}
+            </p>
+          </div>
+
+          <div className="w-full max-w-[280px] space-y-2.5 mt-1">
+            {steps.map((step, index) => (
+              <div
+                key={step}
+                className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
+                  completed || index <= phase ? "opacity-100" : "opacity-0 translate-y-1"
+                }`}
+              >
+                {completed || index < phase ? (
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+                  </span>
+                ) : index === phase ? (
+                  <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+                  </span>
+                ) : (
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                  </span>
+                )}
+                <span className={completed || index <= phase ? (completed || index < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+                  {step}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {!completed && (
+            <p className="text-xs text-[var(--text-muted)] text-center mt-2 setup-finish-fade-in" style={{ animationDelay: "0.3s" }}>
+              {t("telegram.pleaseWait")}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main wizard ── */
 
 interface SetupWizardProps {
@@ -182,9 +293,22 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [currentStep, setCurrentStep] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [completionStarted, setCompletionStarted] = useState(false);
+  const [completionPhase, setCompletionPhase] = useState(0);
+  const [completionComplete, setCompletionComplete] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [showPower, setShowPower] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+
+  const startCompletion = useCallback(() => {
+    setCompletionError(null);
+    setShowHelp(false);
+    setShowPower(false);
+    setCompletionPhase(0);
+    setCompletionComplete(false);
+    setCompletionStarted(true);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -195,7 +319,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         return r.json();
       })
       .then((data) => {
-        if (!cancelled) applyStatusData(data, setCurrentStep, onComplete);
+        if (!cancelled) applyStatusData(data, setCurrentStep, startCompletion, onComplete);
       })
       .catch((err) => {
         if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -206,7 +330,79 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         if (!cancelled) setIsLoading(false);
       });
     return () => { cancelled = true; controller.abort(); };
-  }, [onComplete, retryCount]);
+  }, [onComplete, retryCount, startCompletion]);
+
+  useEffect(() => {
+    if (!completionStarted) return;
+
+    let cancelled = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+
+    function delay(ms: number): Promise<void> {
+      return new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        timers.push(timer);
+      });
+    }
+
+    async function pollGatewayHealth() {
+      for (let attempt = 0; attempt < SETUP_COMPLETION_MAX_HEALTH_CHECKS; attempt += 1) {
+        if (cancelled) return false;
+        try {
+          const res = await fetch("/setup-api/gateway/health");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.available) return true;
+          }
+        } catch {
+          // Gateway is still booting.
+        }
+        await delay(2000);
+      }
+      return false;
+    }
+
+    async function runCompletion() {
+      try {
+        const res = await fetch("/setup-api/setup/complete", { method: "POST" });
+        if (!res.ok) {
+          throw new Error(await extractErrorMessage(res, `Failed to complete setup (${res.status})`));
+        }
+        if (cancelled) return;
+
+        await delay(900);
+        if (cancelled) return;
+        setCompletionPhase(1);
+
+        const gatewayAvailable = await pollGatewayHealth();
+        if (!gatewayAvailable) {
+          throw new Error(t("openclaw.offline"));
+        }
+        if (cancelled) return;
+
+        setCompletionPhase(2);
+        setCompletionComplete(true);
+        await delay(900);
+        if (cancelled) return;
+
+        if (onComplete) onComplete();
+        else window.location.href = "/";
+      } catch (err) {
+        if (cancelled) return;
+        setCompletionStarted(false);
+        setCompletionComplete(false);
+        setCompletionPhase(0);
+        setCompletionError(err instanceof Error ? err.message : "Failed to finish setup");
+      }
+    }
+
+    runCompletion();
+
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => clearTimeout(timer));
+    };
+  }, [completionStarted, onComplete, t]);
 
   if (isLoading) {
     return (
@@ -284,37 +480,48 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       <main
         className="flex-1 flex flex-col items-center justify-start sm:justify-center px-4 pt-2 pb-4 sm:p-6"
       >
-        {currentStep === 1 && (
-          <WifiStep onNext={() => setCurrentStep(2)} />
-        )}
-        {currentStep === 2 && (
-          <UpdateStep onNext={() => setCurrentStep(3)} />
-        )}
-        {currentStep === 3 && (
-          <CredentialsStep onNext={() => setCurrentStep(4)} />
-        )}
-        {currentStep === 4 && (
-          <AIModelsStep
-            providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
-            defaultProviderId="clawai"
-            title="Connect AI Provider"
-            description={t("ai.description")}
-            onNext={() => setCurrentStep(5)}
-          />
-        )}
-        {currentStep === 5 && (
-          <AIModelsStep
-            providerIds={["llamacpp", "ollama"]}
-            defaultProviderId="llamacpp"
-            title="Set Up Local AI"
-            description="Install a local model so OpenClaw always has a private on-device fallback. Gemma 4 on llama.cpp is recommended by default, with Ollama available if you prefer it."
-            configureScope="local"
-            testId="setup-step-local-ai"
-            onNext={() => setCurrentStep(6)}
-          />
-        )}
-        {currentStep === 6 && (
-          <TelegramStep onNext={() => completeSetup(onComplete)} />
+        {completionStarted ? (
+          <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
+        ) : (
+          <>
+            {completionError && currentStep === 6 && (
+              <div className="w-full max-w-[520px] mb-4">
+                <StatusMessage type="error" message={completionError} />
+              </div>
+            )}
+            {currentStep === 1 && (
+              <WifiStep onNext={() => setCurrentStep(2)} />
+            )}
+            {currentStep === 2 && (
+              <UpdateStep onNext={() => setCurrentStep(3)} />
+            )}
+            {currentStep === 3 && (
+              <CredentialsStep onNext={() => setCurrentStep(4)} />
+            )}
+            {currentStep === 4 && (
+              <AIModelsStep
+                providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+                defaultProviderId="clawai"
+                title="Connect AI Provider"
+                description={t("ai.description")}
+                onNext={() => setCurrentStep(5)}
+              />
+            )}
+            {currentStep === 5 && (
+              <AIModelsStep
+                providerIds={["llamacpp", "ollama"]}
+                defaultProviderId="llamacpp"
+                title="Set Up Local AI"
+                description="Install a local model so OpenClaw always has a private on-device fallback. Gemma 4 on llama.cpp is recommended by default, with Ollama available if you prefer it."
+                configureScope="local"
+                testId="setup-step-local-ai"
+                onNext={() => setCurrentStep(6)}
+              />
+            )}
+            {currentStep === 6 && (
+              <TelegramStep onNext={startCompletion} />
+            )}
+          </>
         )}
       </main>
 

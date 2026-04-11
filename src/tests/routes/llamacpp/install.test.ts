@@ -12,6 +12,7 @@ vi.mock("child_process", () => ({
 vi.mock("fs/promises", () => ({
   default: {
     mkdir: vi.fn(),
+    open: vi.fn(),
     readFile: vi.fn(),
     writeFile: vi.fn(),
     unlink: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("@/app/setup-api/ai-models/configure/route", () => ({
 }));
 
 const mockSpawn = vi.mocked(childProcess.spawn);
+const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fsp);
 let mockConfigureAiModel: ReturnType<typeof vi.fn>;
 
@@ -56,6 +58,40 @@ async function readStream(res: Response): Promise<string> {
   return text;
 }
 
+function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
+  mockExecFile.mockImplementation(((
+    cmd: string,
+    args: string[],
+    optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+    maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+  ) => {
+    const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+    const key = `${cmd} ${args.join(" ")}`;
+
+    let result = results[key];
+    if (!result) {
+      for (const candidate of Object.keys(results)) {
+        if (key.includes(candidate) || candidate.includes(cmd)) {
+          result = results[candidate];
+          break;
+        }
+      }
+    }
+
+    if (callback) {
+      if (result instanceof Error) {
+        callback(result, { stdout: "", stderr: "" });
+      } else if (result) {
+        callback(null, result);
+      } else {
+        callback(null, { stdout: "", stderr: "" });
+      }
+    }
+
+    return {} as ReturnType<typeof childProcess.execFile>;
+  }) as unknown as typeof childProcess.execFile);
+}
+
 describe("POST /setup-api/llamacpp/install", () => {
   let installPost: (req: Request) => Promise<Response>;
 
@@ -65,10 +101,15 @@ describe("POST /setup-api/llamacpp/install", () => {
     const configureMod = await import("@/app/setup-api/ai-models/configure/route");
     mockConfigureAiModel = vi.mocked(configureMod.POST);
     mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.open.mockRejectedValue(new Error("ENOENT"));
     mockFs.writeFile.mockResolvedValue();
     mockFs.unlink.mockResolvedValue(undefined);
     mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
     mockFs.stat.mockRejectedValue(new Error("ENOENT"));
+    setupExecFileMock({
+      systemctl: { stdout: "", stderr: "" },
+      journalctl: { stdout: "", stderr: "" },
+    });
     mockConfigureAiModel.mockResolvedValue(
       NextResponse.json({ success: true })
     );
@@ -168,5 +209,72 @@ describe("POST /setup-api/llamacpp/install", () => {
     const payload = await configureRequest.json();
     expect(payload.scope).toBe("local");
     expect(payload.provider).toBe("llamacpp");
+  });
+
+  it("repairs the llama.cpp runtime and retries when hf is missing", async () => {
+    const runtimeError = "[llamacpp] Missing Hugging Face CLI at /home/clawbox/.local/bin/hf. Run the llama.cpp install step to repair the local runtime.\n";
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    mockSpawn.mockReturnValue(createSpawnedProcess(12345));
+    let pidReadCount = 0;
+    mockFs.readFile.mockImplementation(async (target: string) => {
+      if (String(target).endsWith("server.pid")) {
+        pidReadCount += 1;
+        if (pidReadCount === 1) {
+          throw new Error("ENOENT");
+        }
+        return "12345\n";
+      }
+      throw new Error("ENOENT");
+    });
+    mockFs.stat.mockImplementation(async (target: string) => {
+      if (String(target).endsWith("server.log")) {
+        return { size: Buffer.byteLength(runtimeError) } as never;
+      }
+      throw new Error("ENOENT");
+    });
+    mockFs.open.mockResolvedValue({
+      stat: vi.fn().mockResolvedValue({ size: Buffer.byteLength(runtimeError) }),
+      read: vi.fn().mockImplementation(async (buffer: Buffer) => {
+        buffer.write(runtimeError);
+        return { bytesRead: buffer.length, buffer };
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const killSpy = vi.spyOn(process, "kill")
+      .mockImplementationOnce(() => {
+        throw new Error("ESRCH");
+      })
+      .mockImplementation(() => true);
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    expect(text).toContain("Repairing the llama.cpp runtime");
+    expect(text).toContain("runtime repaired");
+    expect(text).toContain("\"success\":true");
+    expect(mockExecFile).toHaveBeenCalledWith(
+      "/usr/bin/sudo",
+      ["/usr/bin/systemctl", "start", "clawbox-root-update@llamacpp_install.service"],
+      expect.any(Object),
+      expect.any(Function),
+    );
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    killSpy.mockRestore();
   });
 });

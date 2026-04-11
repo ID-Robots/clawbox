@@ -1,7 +1,8 @@
+import type { Page } from "@playwright/test";
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-test("chat popup connects, streams a reply, and supports panel docking", async ({ page }) => {
+async function installFakeGatewaySocket(page: Page) {
   await page.addInitScript(() => {
     class FakeWebSocket {
       static CONNECTING = 0;
@@ -124,6 +125,10 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
       value: FakeWebSocket,
     });
   });
+}
+
+test("chat popup connects, streams a reply, and supports panel docking", async ({ page }) => {
+  await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
     initialSetup: {
@@ -154,4 +159,75 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await expect(page.getByTitle("Undock panel")).toBeVisible();
   await page.getByTitle("Undock panel").click();
   await expect(page.getByTitle("Dock to right")).toBeVisible();
+});
+
+test("chat popup lets you switch to Local AI when it is configured", async ({ page }) => {
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      telegram_configured: true,
+    },
+    preferences: {
+      ui_mascot_hidden: 1,
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+
+  const sourceSelect = page.getByLabel("Chat model");
+  await expect(sourceSelect).toBeVisible();
+  await expect(sourceSelect).toHaveValue("clawai/deepseek-r1");
+  await sourceSelect.click();
+  await expect(sourceSelect).toBeFocused();
+  await page.keyboard.press("Escape");
+
+  await sourceSelect.selectOption({ label: "Gemma 4 Local" });
+  await expect(sourceSelect).toHaveValue("llamacpp/gemma4-e2b-it-q4_0");
+  await expect(page.getByText("Switched chat to Gemma 4 Local.")).toBeVisible();
+});
+
+test("chat popup opens Local AI settings when local AI is not configured", async ({ page }) => {
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      local_ai_configured: false,
+      local_ai_provider: null,
+      local_ai_model: null,
+      telegram_configured: true,
+    },
+    preferences: {
+      ui_mascot_hidden: 1,
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+
+  await page.getByLabel("Chat model").selectOption({ label: "Local AI - Set up in Settings" });
+
+  const settingsWindow = page.getByTestId("chrome-window-settings");
+  await expect(settingsWindow).toBeVisible();
+  await expect(settingsWindow.getByText("No local model configured")).toBeVisible();
 });

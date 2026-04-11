@@ -5,18 +5,79 @@ import { useT } from "@/lib/i18n";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 type TrackedKey = {
-  key: string;
-  code: string;
-  location: number;
-  ctrlKey: boolean;
-  shiftKey: boolean;
-  altKey: boolean;
-  metaKey: boolean;
+  code: string | null;
+  keysym: number;
+};
+
+const SPECIAL_KEYSYMS: Record<string, number> = {
+  Backspace: 0xff08,
+  Tab: 0xff09,
+  Enter: 0xff0d,
+  Escape: 0xff1b,
+  Delete: 0xffff,
+  Home: 0xff50,
+  End: 0xff57,
+  PageUp: 0xff55,
+  PageDown: 0xff56,
+  ArrowLeft: 0xff51,
+  ArrowUp: 0xff52,
+  ArrowRight: 0xff53,
+  ArrowDown: 0xff54,
+  Insert: 0xff63,
+  F1: 0xffbe,
+  F2: 0xffbf,
+  F3: 0xffc0,
+  F4: 0xffc1,
+  F5: 0xffc2,
+  F6: 0xffc3,
+  F7: 0xffc4,
+  F8: 0xffc5,
+  F9: 0xffc6,
+  F10: 0xffc7,
+  F11: 0xffc8,
+  F12: 0xffc9,
+  ShiftLeft: 0xffe1,
+  ShiftRight: 0xffe2,
+  ControlLeft: 0xffe3,
+  ControlRight: 0xffe4,
+  AltLeft: 0xffe9,
+  AltRight: 0xffea,
+  MetaLeft: 0xffe7,
+  MetaRight: 0xffe8,
+  CapsLock: 0xffe5,
+  NumLock: 0xff7f,
+  ScrollLock: 0xff14,
+  " ": 0x0020,
+};
+
+const MODIFIER_KEYSYMS: Record<string, number> = {
+  Shift: 0xffe1,
+  Control: 0xffe3,
+  Alt: 0xffe9,
+  Meta: 0xffe7,
 };
 
 function isEditableTarget(target: EventTarget | null): target is HTMLElement {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+function getTrackedKey(event: KeyboardEvent): TrackedKey | null {
+  const code = event.code || null;
+  let keysym: number | null = null;
+
+  if (code && code in SPECIAL_KEYSYMS) {
+    keysym = SPECIAL_KEYSYMS[code];
+  } else if (event.key in MODIFIER_KEYSYMS) {
+    keysym = MODIFIER_KEYSYMS[event.key];
+  } else if (event.key in SPECIAL_KEYSYMS) {
+    keysym = SPECIAL_KEYSYMS[event.key];
+  } else if (event.key.length === 1) {
+    keysym = event.key.charCodeAt(0);
+  }
+
+  if (keysym === null) return null;
+  return { code, keysym };
 }
 
 export default function VNCApp() {
@@ -62,30 +123,13 @@ export default function VNCApp() {
     canvas.focus({ preventScroll: true });
   }, [getInputCanvas]);
 
-  const dispatchKeyToCanvas = useCallback((type: "keydown" | "keyup", key: TrackedKey) => {
-    const canvas = getInputCanvas();
-    if (!canvas) return false;
-
-    return canvas.dispatchEvent(new KeyboardEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      key: key.key,
-      code: key.code,
-      location: key.location,
-      ctrlKey: key.ctrlKey,
-      shiftKey: key.shiftKey,
-      altKey: key.altKey,
-      metaKey: key.metaKey,
-    }));
-  }, [getInputCanvas]);
-
   const releaseTrackedKeys = useCallback(() => {
     const pressedKeys = [...pressedKeysRef.current.values()];
     pressedKeysRef.current.clear();
     for (const key of pressedKeys) {
-      dispatchKeyToCanvas("keyup", key);
+      rfbRef.current?.sendKey(key.keysym, key.code, false);
     }
-  }, [dispatchKeyToCanvas]);
+  }, []);
 
   const activateVncInput = useCallback(() => {
     vncFocusedRef.current = true;
@@ -211,7 +255,8 @@ export default function VNCApp() {
   }, [activateVncInput, deactivateVncInput, focusVncSurface, status]);
 
   // Keep noVNC's own keyboard handler as the single source of truth by routing
-  // active desktop keystrokes back to its canvas when window-level focus drifts.
+  // active desktop keystrokes straight to the RFB connection when focus drifts
+  // outside the noVNC canvas.
   useEffect(() => {
     if (status !== "connected") return;
 
@@ -223,15 +268,8 @@ export default function VNCApp() {
       if (!inputCanvas) return;
       if (e.target === inputCanvas) return;
 
-      const trackedKey: TrackedKey = {
-        key: e.key,
-        code: e.code,
-        location: e.location,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-      };
+      const trackedKey = getTrackedKey(e);
+      if (!trackedKey) return;
 
       const keyId = e.code || e.key;
       if (e.type === "keydown") {
@@ -242,7 +280,7 @@ export default function VNCApp() {
 
       e.preventDefault();
       e.stopPropagation();
-      dispatchKeyToCanvas(e.type as "keydown" | "keyup", trackedKey);
+      rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code, e.type === "keydown");
     };
 
     window.addEventListener("keydown", handler, true);
@@ -251,7 +289,7 @@ export default function VNCApp() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKeyToCanvas, getInputCanvas, status]);
+  }, [getInputCanvas, status]);
 
   const handleReconnect = useCallback(() => {
     setStatus("connecting");

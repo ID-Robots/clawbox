@@ -424,8 +424,15 @@ step_llamacpp_install() {
   local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
   local CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
 
-  if [ -d /usr/local/cuda ] || command -v nvcc &>/dev/null; then
+  if command -v nvcc &>/dev/null; then
     CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA=ON"
+  fi
+
+  if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
+    echo "  Installing llama.cpp build prerequisites..."
+    wait_for_apt
+    apt-get update -qq
+    apt-get install -y -qq git curl python3 python3-pip build-essential cmake ninja-build pkg-config
   fi
 
   if ! as_user_login "command -v hf" &>/dev/null; then
@@ -446,7 +453,7 @@ step_llamacpp_install() {
         return 1
       fi
     fi
-    if ! as_user_login "cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
+    if ! as_user_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
       echo "Error: failed to configure llama.cpp build in $LLAMA_DIR" >&2
       return 1
     fi

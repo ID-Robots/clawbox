@@ -1036,6 +1036,12 @@ function ChromeDesktopInner() {
     dismissUpdateNotification();
   }, [dismissUpdateNotification]);
 
+  const openSettingsSection = useCallback((section: "ai" | "localAi") => {
+    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
+    openApp("settings");
+  }, [openApp]);
+
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
       prev.map((w) => w.id === windowId ? { ...w, x: geo.x, y: geo.y, width: geo.width, height: geo.height } : w)
@@ -1652,7 +1658,7 @@ function ChromeDesktopInner() {
       {chatPanelWidth === 0 && (
         <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
       )}
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (

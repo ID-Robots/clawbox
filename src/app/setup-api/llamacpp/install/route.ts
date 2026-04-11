@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
-import { spawn } from "child_process";
+import { execFile as execFileCb, spawn } from "child_process";
 import fs from "fs/promises";
 import { NextResponse } from "next/server";
+import { promisify } from "util";
 import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import {
@@ -18,6 +19,9 @@ import {
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
+const execFile = promisify(execFileCb);
+const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
+const LLAMACPP_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 
 function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
   controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
@@ -32,6 +36,70 @@ function getLastLogLine(logText: string): string | null {
 }
 
 type ConfigureScope = "primary" | "local";
+
+function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
+  if (!logLine) return false;
+  const normalized = logLine.toLowerCase();
+  return normalized.includes("[llamacpp] missing hugging face cli")
+    || normalized.includes("[llamacpp] missing llama-server");
+}
+
+async function readLlamaCppInstallFailure(): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-u", LLAMACPP_INSTALL_SERVICE, "-n", "40", "--no-pager", "-o", "cat"],
+      { timeout: 10_000 },
+    );
+    return getLastLogLine(stdout);
+  } catch {
+    return null;
+  }
+}
+
+async function repairLlamaCppRuntime(): Promise<{ ok: boolean; error?: string }> {
+  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", LLAMACPP_INSTALL_SERVICE], {
+    timeout: 10_000,
+  }).catch(() => {});
+
+  try {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", LLAMACPP_INSTALL_SERVICE], {
+      timeout: LLAMACPP_INSTALL_TIMEOUT_MS,
+    });
+    return { ok: true };
+  } catch (err) {
+    const failureLine = await readLlamaCppInstallFailure();
+    return {
+      ok: false,
+      error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
+    };
+  }
+}
+
+function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
+  return spawn(
+    "bash",
+    [
+      spec.scriptPath,
+      spec.modelDir,
+      spec.hfRepo,
+      spec.hfFile,
+      alias,
+      spec.host,
+      `${spec.port}`,
+      spec.logPath,
+      spec.binPath,
+      spec.hfBinPath,
+      `${spec.contextWindow}`,
+    ],
+    {
+      cwd: "/home/clawbox",
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, HOME: "/home/clawbox" },
+    }
+  );
+}
 
 async function configureLlamaCpp(alias: string, scope: ConfigureScope): Promise<{ ok: boolean; error?: string }> {
   const req = new Request("http://localhost/setup-api/ai-models/configure", {
@@ -93,50 +161,38 @@ export async function POST(request: Request) {
           await clearLlamaCppPid(spec.pidPath);
           pid = null;
         }
-
-        if (!pid) {
-          emit(controller, { status: `Starting llama.cpp and downloading ${alias}...` });
-          await fs.writeFile(spec.logPath, "", "utf-8").catch(() => {});
-          const child = spawn(
-            "bash",
-            [
-              spec.scriptPath,
-              spec.modelDir,
-              spec.hfRepo,
-              spec.hfFile,
-              alias,
-              spec.host,
-              `${spec.port}`,
-              spec.logPath,
-              spec.binPath,
-              spec.hfBinPath,
-              `${spec.contextWindow}`,
-            ],
-            {
-              cwd: "/home/clawbox",
-              detached: true,
-              stdio: "ignore",
-              env: { ...process.env, HOME: "/home/clawbox" },
-            }
-          );
-
-          if (!child.pid) {
-            emit(controller, { error: "Failed to start llama.cpp" });
-            controller.close();
-            return;
-          }
-
-          child.unref();
-          await writeLlamaCppPid(child.pid, spec.pidPath);
-          pid = child.pid;
-        } else {
-          emit(controller, { status: "llama.cpp is already starting. Waiting for it to become ready..." });
-        }
+        let attemptedRuntimeRepair = false;
+        let waitingForExistingStart = !!pid;
 
         const deadline = Date.now() + spec.startupTimeoutMs;
         let lastLogLine = "";
 
         while (Date.now() < deadline) {
+          if (!pid) {
+            emit(controller, {
+              status: attemptedRuntimeRepair
+                ? `Restarting llama.cpp after repairing the local runtime...`
+                : `Starting llama.cpp and downloading ${alias}...`,
+            });
+            await fs.writeFile(spec.logPath, "", "utf-8").catch(() => {});
+            const child = startLlamaCpp(spec, alias);
+
+            if (!child.pid) {
+              emit(controller, { error: "Failed to start llama.cpp" });
+              controller.close();
+              return;
+            }
+
+            child.unref();
+            await writeLlamaCppPid(child.pid, spec.pidPath);
+            pid = child.pid;
+            waitingForExistingStart = false;
+            lastLogLine = "";
+          } else if (waitingForExistingStart) {
+            emit(controller, { status: "llama.cpp is already starting. Waiting for it to become ready..." });
+            waitingForExistingStart = false;
+          }
+
           const models = await queryLlamaCppModels(spec.baseUrl);
           if (models.includes(alias)) {
             emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
@@ -154,8 +210,23 @@ export async function POST(request: Request) {
           const currentPid = await readLlamaCppPid(spec.pidPath);
           if (currentPid && !isLlamaCppPidRunning(currentPid)) {
             await clearLlamaCppPid(spec.pidPath);
+            pid = null;
             const logText = await tailLlamaCppLog(spec.logPath);
-            emit(controller, { error: getLastLogLine(logText) || "llama.cpp exited before becoming ready." });
+            const logLine = getLastLogLine(logText);
+            if (!attemptedRuntimeRepair && shouldRepairLlamaCppRuntime(logLine)) {
+              emit(controller, { status: "Repairing the llama.cpp runtime so Gemma can start..." });
+              attemptedRuntimeRepair = true;
+              const repaired = await repairLlamaCppRuntime();
+              if (!repaired.ok) {
+                emit(controller, { error: repaired.error || "Failed to repair llama.cpp runtime" });
+                controller.close();
+                return;
+              }
+              emit(controller, { status: "llama.cpp runtime repaired. Restarting Gemma..." });
+              continue;
+            }
+
+            emit(controller, { error: logLine || "llama.cpp exited before becoming ready." });
             controller.close();
             return;
           }

@@ -47,6 +47,11 @@ describe("/setup-api/chat/model", () => {
       local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
     });
     vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+        },
+      },
       agents: {
         defaults: {
           model: {
@@ -70,8 +75,29 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(body.activeOptionId).toBe("deepseek/deepseek-chat");
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
+    expect(body.options).toEqual([
+      {
+        id: "deepseek/deepseek-chat",
+        label: "ClawBox AI",
+        model: "deepseek/deepseek-chat",
+        provider: "clawai",
+        available: true,
+        settingsSection: "ai",
+        isLocal: false,
+      },
+      {
+        id: "llamacpp/gemma4-e2b-it-q4_0",
+        label: "Gemma 4 Local",
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+        provider: "llamacpp",
+        available: true,
+        settingsSection: "localAi",
+        isLocal: true,
+      },
+    ]);
     expect(body.primary).toEqual({
       available: true,
       label: "ClawBox AI",
@@ -85,9 +111,50 @@ describe("/setup-api/chat/model", () => {
     expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-chat");
   });
 
+  it("lists every configured cloud provider alongside Local AI", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:default": { provider: "openai", mode: "token" },
+          "anthropic:default": { provider: "anthropic", mode: "token" },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "deepseek/deepseek-chat",
+          },
+        },
+      },
+    } as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.options.map((option: { label: string }) => option.label)).toEqual([
+      "ClawBox AI",
+      "OpenAI GPT",
+      "Anthropic Claude",
+      "Gemma 4 Local",
+    ]);
+    expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
+      "deepseek/deepseek-chat",
+      "openai/gpt-5.4",
+      "anthropic/claude-sonnet-4-6",
+      "llamacpp/gemma4-e2b-it-q4_0",
+    ]);
+  });
+
   it("switches the active chat model to Local AI and restarts the gateway", async () => {
     vi.mocked(readConfig)
       .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -97,6 +164,11 @@ describe("/setup-api/chat/model", () => {
         },
       } as never)
       .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -112,7 +184,7 @@ describe("/setup-api/chat/model", () => {
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "local" }),
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
     }));
     const body = await response.json();
 
@@ -135,6 +207,11 @@ describe("/setup-api/chat/model", () => {
     });
     vi.mocked(readConfig)
       .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -144,6 +221,11 @@ describe("/setup-api/chat/model", () => {
         },
       } as never)
       .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -159,7 +241,7 @@ describe("/setup-api/chat/model", () => {
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "primary" }),
+      body: JSON.stringify({ model: "deepseek/deepseek-chat" }),
     }));
     const body = await response.json();
 

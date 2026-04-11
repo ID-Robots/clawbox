@@ -10,6 +10,7 @@ class MockRFB {
   canvas: HTMLCanvasElement;
   listeners = new Map<string, RfbListener[]>();
   disconnect = vi.fn();
+  sendKey = vi.fn();
   focus = vi.fn(() => {
     this.canvas.focus();
   });
@@ -73,7 +74,7 @@ describe("VNCApp", () => {
     })));
   });
 
-  it("forwards keyboard events to the noVNC canvas when the surface is active", async () => {
+  it("forwards keyboard events to the RFB connection when focus drifts off the noVNC canvas", async () => {
     const { queryByText } = render(
       <div data-chrome-window-content="true">
         <VNCApp />
@@ -94,15 +95,12 @@ describe("VNCApp", () => {
       expect(queryByText("vnc.connectingDesktop")).not.toBeInTheDocument();
     });
 
-    const dispatchSpy = vi.spyOn(rfb.canvas, "dispatchEvent");
-
     fireEvent.pointerDown(rfb.target);
     fireEvent.keyDown(document.body, { key: "a", code: "KeyA" });
     fireEvent.keyUp(document.body, { key: "a", code: "KeyA" });
 
-    const dispatchedEvents = dispatchSpy.mock.calls.map(([event]) => event as KeyboardEvent);
-    expect(dispatchedEvents.some((event) => event.type === "keydown" && event.key === "a" && event.code === "KeyA")).toBe(true);
-    expect(dispatchedEvents.some((event) => event.type === "keyup" && event.key === "a" && event.code === "KeyA")).toBe(true);
+    expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA", true);
+    expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA", false);
   });
 
   it("re-focuses the VNC canvas after the window content stops suppressing pointer events", async () => {
