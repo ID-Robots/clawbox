@@ -752,6 +752,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
 
   return (
     <div
+      data-testid="chat-popup"
       ref={popupRef}
       style={{
         position: 'fixed',
@@ -788,13 +789,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState?.primary.available && chatModelState?.local.available ? 5 : 0, minWidth: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState?.primary?.available && chatModelState?.local?.available ? 5 : 0, minWidth: 0 }}>
           {modelName && status === 'connected' && (
             <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
               {modelName}
             </span>
           )}
-          {chatModelState?.primary.available && chatModelState?.local.available && (
+          {chatModelState?.primary?.available && chatModelState?.local?.available && (
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',

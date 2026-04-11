@@ -830,11 +830,13 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
   await page.getByRole("button", { name: "Save" }).click();
 
+  await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
+  await page.getByText("OpenAI GPT").click();
+  await page.locator("#ai-api-key").fill("sk-test-openai-key");
+  await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
+
   await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
   await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
-
-  await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
-  await page.getByRole("button", { name: "Start for free" }).click();
 
   await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
   await page.getByRole("button", { name: "Skip for now" }).click();

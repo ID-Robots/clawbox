@@ -80,7 +80,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
   // ─── All mutable state in refs to avoid stale closures ───
-  const DEFAULT_POS = { x: 50, bx: 85 }
+  const DEFAULT_POS = { x: 85, bx: 85 }
   const savedPos = useRef<{ x: number; bx: number } | null>(null)
   if (savedPos.current === null) {
     savedPos.current = kv.getJSON<{ x: number; bx: number }>('clawbox-crab-pos') ?? DEFAULT_POS
@@ -776,6 +776,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     updateBoxPos()
     setMounted(true)
   }, [updateCrabPos, updateBoxPos])
+
+  useEffect(() => {
+    if (!mounted || !onPositionChange) return
+    onPositionChange(onBoxRef.current ? boxXRef.current : xRef.current)
+  }, [mounted, onPositionChange])
 
   useEffect(() => {
     const FRENZY_QUOTES = [

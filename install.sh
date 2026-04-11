@@ -755,6 +755,8 @@ step_vnc_install() {
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
 
   # Systemd service for VNC
   cat > /etc/systemd/system/clawbox-vnc.service <<VNCSVC
@@ -791,14 +793,34 @@ RestartSec=5
 WantedBy=multi-user.target
 WSSVC
 
+  # One-shot first-boot service to bring VNC back up after the first reboot
+  mkdir -p /var/lib/clawbox
+  touch /var/lib/clawbox/ensure-vnc-on-first-boot.pending
+  cat > /etc/systemd/system/clawbox-firstboot-vnc.service <<FIRSTBOOTVNC
+[Unit]
+Description=ClawBox first boot VNC bring-up
+After=network-online.target display-manager.service multi-user.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/clawbox/ensure-vnc-on-first-boot.pending
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 10
+ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh
+
+[Install]
+WantedBy=multi-user.target
+FIRSTBOOTVNC
+
   # Browser CDP service (launched on demand, not auto-started)
   chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
   cp "$PROJECT_DIR/config/clawbox-browser.service" /etc/systemd/system/
 
   systemctl daemon-reload
-  systemctl enable clawbox-vnc.service clawbox-websockify.service
+  systemctl enable clawbox-vnc.service clawbox-websockify.service clawbox-firstboot-vnc.service
   systemctl restart clawbox-vnc.service clawbox-websockify.service || true
   echo "  VNC (x11vnc + Xvfb fallback) and websockify installed and started"
+  echo "  First reboot will re-ensure VNC services are active"
 }
 
 step_ffmpeg_install() {

@@ -19,13 +19,13 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
   await page.getByRole("button", { name: "Save" }).click();
 
-  await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
-  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
-
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByText("OpenAI GPT").click();
   await page.locator("#ai-api-key").fill("sk-test-openai-key");
-  await page.getByRole("button", { name: /Save/i }).click();
+  await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
+
+  await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
+  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
 
   await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
   await page.locator("#telegram-bot-token").fill("123456789:ABCdefGHI");

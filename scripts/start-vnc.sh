@@ -4,6 +4,16 @@
 
 VNC_PORT="${VNC_PORT:-5900}"
 
+display_ready() {
+  local display="$1"
+  local auth="${2:-}"
+  if [ -n "$auth" ]; then
+    XAUTHORITY="$auth" xset -display "$display" q >/dev/null 2>&1
+  else
+    xset -display "$display" q >/dev/null 2>&1
+  fi
+}
+
 # ─── Try to mirror the physical/GDM display :0 ───────────────────────────────
 
 find_xauth() {
@@ -21,7 +31,7 @@ find_xauth() {
 }
 
 XAUTH=$(find_xauth 2>/dev/null)
-if [ -n "$XAUTH" ] && XAUTHORITY="$XAUTH" xdpyinfo -display :0 >/dev/null 2>&1; then
+if [ -n "$XAUTH" ] && display_ready :0 "$XAUTH"; then
   echo "[vnc] Display :0 found — mirroring"
   exec x11vnc -display :0 -auth "$XAUTH" -rfbport "$VNC_PORT" -forever -shared -nopw -localhost -noxdamage
 fi
@@ -31,16 +41,16 @@ fi
 VDISPLAY=99
 echo "[vnc] Starting virtual desktop on :${VDISPLAY}"
 
-if ! xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
+if ! display_ready ":${VDISPLAY}"; then
   Xvfb ":${VDISPLAY}" -screen 0 1280x720x24 &
   # Poll for Xvfb readiness instead of a fixed sleep
   for _ in $(seq 1 50); do
-    if xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
+    if display_ready ":${VDISPLAY}"; then
       break
     fi
     sleep 0.1
   done
-  if ! xdpyinfo -display ":${VDISPLAY}" >/dev/null 2>&1; then
+  if ! display_ready ":${VDISPLAY}"; then
     echo "[vnc] Error: Xvfb did not become ready on :${VDISPLAY} within 5s" >&2
     exit 1
   fi
