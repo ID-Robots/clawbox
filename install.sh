@@ -59,6 +59,88 @@ ensure_env_setting() {
   fi
 }
 
+print_native_build_preflight() {
+  local node_version node_abi npm_version python_version make_version gpp_version node_header_dir
+
+  node_version=$(as_clawbox_login "node -p 'process.version'" 2>/dev/null || echo "missing")
+  node_abi=$(as_clawbox_login "node -p 'process.versions.modules'" 2>/dev/null || echo "unknown")
+  npm_version=$(as_clawbox_login "npm --version" 2>/dev/null || echo "missing")
+  python_version=$(/usr/bin/python3 --version 2>/dev/null || echo "python3 missing")
+
+  if command -v make >/dev/null 2>&1; then
+    make_version=$(make --version | head -1)
+  else
+    make_version="make missing"
+  fi
+
+  if command -v g++ >/dev/null 2>&1; then
+    gpp_version=$(g++ --version | head -1)
+  else
+    gpp_version="g++ missing"
+  fi
+
+  if [ -d /usr/include/nodejs ]; then
+    node_header_dir="/usr/include/nodejs"
+  elif [ -d /usr/include/node ]; then
+    node_header_dir="/usr/include/node"
+  else
+    node_header_dir="not found"
+  fi
+
+  echo "  Native build preflight:"
+  echo "    Node.js: $node_version (ABI $node_abi)"
+  echo "    npm: $npm_version"
+  echo "    Python: $python_version"
+  echo "    make: $make_version"
+  echo "    g++: $gpp_version"
+  echo "    Node headers: $node_header_dir"
+}
+
+ensure_node_pty() {
+  local verify_cmd="cd $PROJECT_DIR && node -e \"require('node-pty')\""
+  if as_clawbox_login "$verify_cmd" &>/dev/null; then
+    echo "  node-pty is already loadable"
+    return 0
+  fi
+
+  echo "  node-pty is missing or built for the wrong Node ABI; preparing native build prerequisites..."
+  print_native_build_preflight
+  wait_for_apt
+  apt-get install -y -qq python3 python3-pip python-is-python3 build-essential pkg-config
+
+  mkdir -p "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" \
+    "$CLAWBOX_HOME/.npm" \
+    "$CLAWBOX_HOME/.cache/node-gyp" \
+    "$PROJECT_DIR/node_modules" 2>/dev/null || true
+
+  local rebuild_cmd="
+    cd $PROJECT_DIR &&
+    export npm_config_python=/usr/bin/python3 &&
+    export npm_config_build_from_source=true &&
+    if [ -d /usr/include/nodejs ]; then
+      export npm_config_nodedir=/usr/include/nodejs
+    elif [ -d /usr/include/node ]; then
+      export npm_config_nodedir=/usr/include/node
+    fi &&
+    npm rebuild node-pty --foreground-scripts
+  "
+
+  echo "  Rebuilding native modules (node-pty)..."
+  if ! as_clawbox_login "$rebuild_cmd"; then
+    echo "  Initial node-pty rebuild failed; clearing stale build output and retrying once..."
+    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin"
+    as_clawbox_login "$rebuild_cmd"
+  fi
+
+  if ! as_clawbox_login "$verify_cmd" &>/dev/null; then
+    echo "Error: node-pty is still not loadable after rebuild. Check the node-gyp output above." >&2
+    exit 1
+  fi
+
+  echo "  node-pty rebuilt and verified"
+}
+
 # Stop the setup service, clear cache, reinstall, and rebuild
 do_rebuild() {
   echo "Stopping clawbox-setup.service for rebuild..."
@@ -67,10 +149,7 @@ do_rebuild() {
   rm -rf "$PROJECT_DIR/.next"
   echo "Running bun install..."
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
-  if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
-    echo "Rebuilding native modules (node-pty)..."
-    as_clawbox_login "cd $PROJECT_DIR && npm rebuild node-pty"
-  fi
+  ensure_node_pty
   echo "Running bun build..."
   as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
 }
@@ -108,7 +187,7 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3-pip gh build-essential cmake ninja-build
+  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
@@ -207,10 +286,7 @@ step_install_bun() {
 step_build() {
   cd "$PROJECT_DIR"
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
-  if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
-    echo "  Rebuilding native modules (node-pty)..."
-    as_clawbox_login "cd $PROJECT_DIR && npm rebuild node-pty"
-  fi
+  ensure_node_pty
   as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"

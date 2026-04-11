@@ -61,8 +61,8 @@ export function getLlamaCppOverlayProgress(
   status: string | null,
   stepCount: number,
 ): OverlayProgressState {
-  const detail = status?.trim() || "Preparing llama.cpp runtime...";
-  const normalized = detail.toLowerCase();
+  const normalizedStatus = status?.trim() || "Preparing llama.cpp runtime...";
+  const normalized = normalizedStatus.toLowerCase();
 
   let phase = 0;
   if (
@@ -87,7 +87,7 @@ export function getLlamaCppOverlayProgress(
 
   return {
     phase: clampPhase(phase, stepCount),
-    detail,
+    detail: null,
     progressPercent: null,
   };
 }

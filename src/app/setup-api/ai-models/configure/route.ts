@@ -25,8 +25,7 @@ const AUTH_PROFILES_PATH =
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
-const CLAWBOX_AI_DEFAULT_TOKEN = "claw-d3eps33k-v1-2026";
-const CLAWBOX_AI_API_KEY = process.env.CLAWBOX_AI_API_KEY?.trim() || CLAWBOX_AI_DEFAULT_TOKEN;
+const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
 const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
@@ -158,11 +157,32 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
   await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 }
 
-function buildClawboxAiProviderDefinition() {
+async function getConfiguredClawboxAiToken(preferredToken?: string) {
+  const trimmedPreferred = preferredToken?.trim();
+  if (trimmedPreferred) {
+    return trimmedPreferred;
+  }
+
+  try {
+    const config = await getAll();
+    const storedToken = typeof config[CLAWBOX_AI_TOKEN_CONFIG_KEY] === "string"
+      ? config[CLAWBOX_AI_TOKEN_CONFIG_KEY].trim()
+      : "";
+    if (storedToken) {
+      return storedToken;
+    }
+  } catch {
+    // Fall through to the empty-token return below.
+  }
+
+  return "";
+}
+
+function buildClawboxAiProviderDefinition(apiKey: string) {
   return JSON.stringify({
     baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
-    apiKey: CLAWBOX_AI_API_KEY,
+    apiKey,
     models: [{
       id: "deepseek-chat",
       name: "ClawBox AI",
@@ -175,8 +195,9 @@ function buildClawboxAiProviderDefinition() {
   });
 }
 
-async function configureClawboxAi(setFallback: boolean) {
-  if (!CLAWBOX_AI_API_KEY) {
+async function configureClawboxAi(setFallback: boolean, preferredToken?: string) {
+  const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
+  if (!clawboxAiToken) {
     return false;
   }
 
@@ -184,7 +205,7 @@ async function configureClawboxAi(setFallback: boolean) {
   authProfiles.profiles[CLAWBOX_AI_PROFILE_KEY] = {
     type: "api_key",
     provider: CLAWBOX_AI_PROVIDER,
-    key: CLAWBOX_AI_API_KEY,
+    key: clawboxAiToken,
   };
   await writeAuthProfiles(authProfiles);
 
@@ -199,7 +220,7 @@ async function configureClawboxAi(setFallback: boolean) {
     "config",
     "set",
     `models.providers.${CLAWBOX_AI_PROVIDER}`,
-    buildClawboxAiProviderDefinition(),
+    buildClawboxAiProviderDefinition(clawboxAiToken),
     "--json",
   ]);
 
@@ -248,7 +269,11 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
   }
 }
 
-async function ensureFallbackModel(primaryModel?: string | null, preferredLocalModel?: string) {
+async function ensureFallbackModel(
+  primaryModel?: string | null,
+  preferredLocalModel?: string,
+  preferredClawboxAiToken?: string,
+) {
   const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
     .filter((model): model is string => !!model && model !== primaryModel);
 
@@ -259,7 +284,7 @@ async function ensureFallbackModel(primaryModel?: string | null, preferredLocalM
   }
 
   try {
-    const fallbackConfigured = await configureClawboxAi(true);
+    const fallbackConfigured = await configureClawboxAi(true, preferredClawboxAiToken);
     if (fallbackConfigured) {
       console.log("[AI Config] Configured ClawBox AI as fallback model");
       return;
@@ -290,11 +315,12 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary" } = body;
+    const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
     const isLocalScope = scope === "local";
-    if (!provider || (!apiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
+    if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
@@ -319,16 +345,25 @@ export async function POST(request: Request) {
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
       ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
+    const clawboxAiToken = isClawAI
+      ? await getConfiguredClawboxAiToken(normalizedApiKey)
+      : "";
+    if (isClawAI && !clawboxAiToken) {
+      return NextResponse.json(
+        { error: "ClawBox AI token is required" },
+        { status: 400 },
+      );
+    }
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
-      const modelName = apiKey || "llama3.2:3b";
+      const modelName = normalizedApiKey || "llama3.2:3b";
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
-      const modelName = apiKey || getDefaultLlamaCppModel();
+      const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     }
 
@@ -336,11 +371,11 @@ export async function POST(request: Request) {
     {
       const authProfiles = await readAuthProfiles();
       if (isClawAI) {
-        // ClawBox AI uses the device-provided DeepSeek API key.
+        // ClawBox AI uses the portal token generated by the user.
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
-          key: CLAWBOX_AI_API_KEY,
+          key: clawboxAiToken,
         };
       } else if (isOllama) {
         // Ollama runs locally — use a dummy api_key entry
@@ -361,7 +396,7 @@ export async function POST(request: Request) {
         authProfiles.profiles[config.profileKey] = {
           type: "oauth",
           provider: ocProvider,
-          access: apiKey,
+          access: normalizedApiKey,
           refresh: refreshToken || "",
           expires: expiresIn
             ? Date.now() + expiresIn * 1000
@@ -372,7 +407,7 @@ export async function POST(request: Request) {
         authProfiles.profiles[config.profileKey] = {
           type: "token",
           provider: ocProvider,
-          token: apiKey,
+          token: normalizedApiKey,
         };
       }
       await writeAuthProfiles(authProfiles);
@@ -443,23 +478,25 @@ export async function POST(request: Request) {
         local_ai_provider: ocProvider,
         local_ai_model: config.defaultModel,
         local_ai_configured_at: new Date().toISOString(),
+        ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
       });
     } else {
       await setMany({
         ai_model_configured: true,
         ai_model_provider: ocProvider,
         ai_model_configured_at: new Date().toISOString(),
+        ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
       });
     }
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
-      await configureClawboxAi(false);
+      await configureClawboxAi(false, clawboxAiToken);
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",
       ]);
-      await ensureFallbackModel(config.defaultModel);
+      await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
       console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
