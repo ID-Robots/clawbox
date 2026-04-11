@@ -57,7 +57,9 @@ if command -v openbox &>/dev/null; then
   OB_CONFIG_DIR="$HOME/.config/openbox"
   mkdir -p "$OB_CONFIG_DIR"
 
-  # Openbox config: disable desktop right-click menu, dark theme
+  # Openbox config: disable desktop right-click menu, dark theme.
+  # We rely on focus-follows-mouse so client-area left clicks pass through to
+  # apps like Chromium instead of being consumed by Openbox focus bindings.
   cat > "$OB_CONFIG_DIR/rc.xml" <<'OBXML'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
@@ -81,12 +83,6 @@ if command -v openbox &>/dev/null; then
       <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
       <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
       <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
-    </context>
-    <context name="Frame">
-      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
-    </context>
-    <context name="Client">
-      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
     </context>
   </mouse>
 </openbox_config>

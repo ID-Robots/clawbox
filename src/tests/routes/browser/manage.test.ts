@@ -21,26 +21,35 @@ vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
 
+vi.mock("@/lib/sqlite-store", () => ({
+  sqliteGet: vi.fn(),
+  sqliteSet: vi.fn(),
+}));
+
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 import { readConfig } from "@/lib/openclaw-config";
+import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import fs from "fs/promises";
 import { promisify } from "util";
 
 describe("/setup-api/browser/manage", () => {
   let GET: () => Promise<Response>;
   let POST: (req: Request) => Promise<Response>;
+  let mockExec: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.mocked(readConfig).mockResolvedValue({ tools: { profile: "full" } } as never);
+    vi.mocked(sqliteGet).mockResolvedValue(null);
+    vi.mocked(sqliteSet).mockResolvedValue();
     vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
     mockFetch.mockRejectedValue(new Error("connection refused"));
-    const mockExec = vi.fn();
+    mockExec = vi.fn();
     vi.mocked(promisify).mockReturnValue(mockExec as never);
     // checkChromium: "which chromium-browser" etc will all fail
     mockExec.mockRejectedValue(new Error("not found"));
@@ -63,6 +72,25 @@ describe("/setup-api/browser/manage", () => {
       const res = await GET();
       const body = await res.json();
       expect(body.enabled).toBe(true);
+    });
+
+    it("returns the persisted enabled state from sqlite when present", async () => {
+      vi.mocked(readConfig).mockResolvedValue({ tools: { profile: "coding" } } as never);
+      vi.mocked(sqliteGet).mockResolvedValue("true");
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.enabled).toBe(true);
+    });
+
+    it("returns the persisted disabled state from sqlite when present", async () => {
+      vi.mocked(sqliteGet).mockResolvedValue("false");
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.enabled).toBe(false);
     });
 
     it("handles errors gracefully", async () => {
@@ -105,8 +133,7 @@ describe("/setup-api/browser/manage", () => {
     });
 
     it("handles disable action", async () => {
-      const mockExec = vi.fn().mockRejectedValue(new Error("not found"));
-      vi.mocked(promisify).mockReturnValue(mockExec as never);
+      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
       const req = new Request("http://localhost/setup-api/browser/manage", {
         method: "POST",
         body: JSON.stringify({ action: "disable" }),
@@ -115,6 +142,7 @@ describe("/setup-api/browser/manage", () => {
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(body.enabled).toBe(false);
+      expect(sqliteSet).toHaveBeenCalledWith("browser:integration-enabled", "false");
     });
 
     it("handles close-browser action", async () => {
@@ -131,8 +159,7 @@ describe("/setup-api/browser/manage", () => {
 
     it("handles open-browser without chromium", async () => {
       mockFetch.mockRejectedValue(new Error("refused"));
-      const mockExec = vi.fn().mockRejectedValue(new Error("not found"));
-      vi.mocked(promisify).mockReturnValue(mockExec as never);
+      mockExec.mockRejectedValue(new Error("not found"));
       const req = new Request("http://localhost/setup-api/browser/manage", {
         method: "POST",
         body: JSON.stringify({ action: "open-browser" }),
@@ -148,6 +175,30 @@ describe("/setup-api/browser/manage", () => {
       });
       const res = await POST(req);
       expect(res.status).toBe(500);
+    });
+
+    it("persists the enabled state to sqlite when browser integration is enabled", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined as never);
+      mockExec.mockImplementation(async (...args: unknown[]) => {
+        const [command, commandArgs] = args as [string, string[]];
+        if (command === "/usr/bin/chromium-browser" && commandArgs[0] === "--version") {
+          return { stdout: "Chromium 146.0.0", stderr: "" };
+        }
+        return { stdout: "", stderr: "" };
+      });
+
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "enable" }),
+      });
+
+      const res = await POST(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.enabled).toBe(true);
+      expect(sqliteSet).toHaveBeenCalledWith("browser:integration-enabled", "true");
     });
   });
 });

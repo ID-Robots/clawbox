@@ -353,7 +353,7 @@ export default function ChromeWindow({
       window.removeEventListener("touchmove", handleMove);
       window.removeEventListener("touchend", handleEnd);
     };
-  }, []);
+  }, [appId, onGeometryChange]);
 
   const handleClose = useCallback(() => {
     // Save window size per app
@@ -471,7 +471,7 @@ export default function ChromeWindow({
       </div>
 
       {/* Content */}
-      <div ref={contentRef} className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
+      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
 
       {/* Resize handles — hidden when maximized/snapped */}
       {!maximized && !snapped && (

@@ -6,12 +6,14 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
+import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
 const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
 const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
 const CDP_PORT = 18800;
+const BROWSER_ENABLED_KEY = "browser:integration-enabled";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -83,17 +85,34 @@ async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdp
 
 const readOpenClawConfig = readConfig;
 
+async function getPersistedBrowserEnabled(): Promise<boolean | null> {
+  try {
+    const stored = await sqliteGet(BROWSER_ENABLED_KEY);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+    return null;
+  } catch (err) {
+    console.warn("[browser] Failed to read persisted browser state:", err);
+    return null;
+  }
+}
+
+async function persistBrowserEnabled(enabled: boolean): Promise<void> {
+  await sqliteSet(BROWSER_ENABLED_KEY, enabled ? "true" : "false");
+}
+
 // ─── GET — status ────────────────────────────────────────────────────────────
 
 export async function GET() {
   try {
-    const [chromium, browser, config] = await Promise.all([
+    const [chromium, browser, config, persistedEnabled] = await Promise.all([
       checkChromium(),
       getBrowserStatus(),
       readOpenClawConfig(),
+      getPersistedBrowserEnabled(),
     ]);
 
-    const enabled = config.tools?.profile === "full";
+    const enabled = persistedEnabled ?? (config.tools?.profile === "full");
 
     return NextResponse.json({
       chromium,
@@ -143,6 +162,7 @@ export async function POST(req: Request) {
         try {
           await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 });
           await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 });
+          await persistBrowserEnabled(true);
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
         }
@@ -162,6 +182,7 @@ export async function POST(req: Request) {
         const openclawBin = findOpenclawBin();
         try {
           await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 10000 });
+          await persistBrowserEnabled(false);
         } catch (err) {
           console.error("[browser] Failed to unset tools config:", err);
         }

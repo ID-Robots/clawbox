@@ -53,6 +53,13 @@ interface ChatMessage {
   timestamp: number
 }
 
+interface ChatModelState {
+  activeSource: 'primary' | 'local' | null
+  activeLabel: string | null
+  primary: { available: boolean; label: string | null; model: string | null }
+  local: { available: boolean; label: string | null; model: string | null }
+}
+
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
 
@@ -110,6 +117,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
   const [sending, setSending] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [modelName, setModelName] = useState('')
+  const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
+  const [switchingModel, setSwitchingModel] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
@@ -271,6 +280,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const refreshChatModelState = useCallback(async () => {
+    try {
+      const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
+      if (!res.ok) return
+      const data = await res.json() as ChatModelState
+      setChatModelState(data)
+      if (data.activeLabel) setModelName(data.activeLabel)
+    } catch {
+      // Ignore toggle-state refresh failures and keep the current model label.
+    }
+  }, [])
+
   const connect = useCallback(async () => {
     if (wsRef.current) {
       wsRef.current.close()
@@ -311,7 +332,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     let connectSent = false
     let ws: WebSocket
 
-    const sendConnect = (nonce: string) => {
+    const sendConnect = () => {
       if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
@@ -414,9 +435,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         const eventName = data.event as string
 
         if (eventName === 'connect.challenge') {
-          const payload = data.payload as Record<string, unknown> | undefined
-          const nonce = (payload?.nonce as string) || ''
-          sendConnect(nonce)
+          sendConnect()
           return
         }
 
@@ -484,6 +503,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
     ws.onclose = onClose
     ws.onerror = () => {}
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!isOpen) return
+    refreshChatModelState()
+  }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
@@ -596,6 +620,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
       await wsRequest('chat.abort', { sessionKey: sessionKeyRef.current })
     } catch {}
   }, [wsRequest])
+
+  const switchChatModel = useCallback(async (source: 'primary' | 'local') => {
+    if (switchingModel || chatModelState?.activeSource === source) return
+    setSwitchingModel(true)
+    setErrorMsg('')
+    try {
+      const res = await fetch('/setup-api/chat/model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
+
+      setChatModelState(data as ChatModelState)
+      if ((data as ChatModelState).activeLabel) {
+        setModelName((data as ChatModelState).activeLabel || '')
+      }
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `Switched chat to ${(data as ChatModelState).activeLabel || (source === 'local' ? 'Local AI' : 'AI Provider')}.`,
+        timestamp: Date.now(),
+      }])
+      retryCountRef.current = 0
+      connect()
+    } catch (err) {
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `Error: ${err instanceof Error ? err.message : 'Failed to switch chat model'}`,
+        timestamp: Date.now(),
+      }])
+    } finally {
+      setSwitchingModel(false)
+    }
+  }, [chatModelState, connect, switchingModel])
 
   // Connect/disconnect on open/close
   useEffect(() => {
@@ -719,7 +778,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           gap: 10,
           padding: '8px 12px',
           background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
@@ -729,13 +788,57 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        {modelName && status === 'connected' && (
-          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
-            {modelName}
-          </span>
-        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState?.primary.available && chatModelState?.local.available ? 5 : 0, minWidth: 0 }}>
+          {modelName && status === 'connected' && (
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+              {modelName}
+            </span>
+          )}
+          {chatModelState?.primary.available && chatModelState?.local.available && (
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: 3,
+              borderRadius: 999,
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}>
+              {([
+                { source: 'primary' as const, label: chatModelState.primary.label || 'AI Provider' },
+                { source: 'local' as const, label: chatModelState.local.label || 'Local AI' },
+              ]).map((option) => {
+                const active = chatModelState.activeSource === option.source
+                return (
+                  <button
+                    key={option.source}
+                    onClick={() => switchChatModel(option.source)}
+                    disabled={switchingModel || sending || status !== 'connected'}
+                    title={option.label}
+                    style={{
+                      background: active ? 'rgba(249,115,22,0.24)' : 'transparent',
+                      border: 'none',
+                      color: active ? '#FDBA74' : 'rgba(255,255,255,0.55)',
+                      padding: '4px 8px',
+                      borderRadius: 999,
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: switchingModel || sending || status !== 'connected' ? 'default' : 'pointer',
+                      maxWidth: 112,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
         <div style={{ flex: 1 }} />
-        {status === 'connecting' && (
+        {(status === 'connecting' || switchingModel) && (
           <div style={{
             width: 12, height: 12,
             border: '2px solid rgba(249,115,22,0.3)',
@@ -744,7 +847,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onThinkingChange, onPanelModeC
             animation: 'spin 0.8s linear infinite',
           }} />
         )}
-        {status === 'connected' && (
+        {status === 'connected' && !switchingModel && (
           <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
         )}
         {onOpenFull && (

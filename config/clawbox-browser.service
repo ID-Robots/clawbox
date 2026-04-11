@@ -15,6 +15,3 @@ TimeoutStartSec=30
 # the main chrome, dbus-launch helpers) when the unit stops — no ExecStopPost
 # pgrep needed (and the prior pattern was broad enough to kill unrelated procs).
 KillMode=control-group
-
-[Install]
-WantedBy=multi-user.target

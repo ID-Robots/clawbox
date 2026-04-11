@@ -104,6 +104,14 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     }
   }, [fetchStatus]);
 
+  const openVncApp = useCallback(() => {
+    if (onOpenApp) {
+      onOpenApp("vnc");
+      return;
+    }
+    window.open("/app/vnc", "_blank");
+  }, [onOpenApp]);
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-[#0f1219] text-white/70 gap-4">
@@ -283,18 +291,17 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               )}
             </div>
             <div className="flex gap-2 shrink-0">
+              <button
+                onClick={openVncApp}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/80 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-1.5">
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
+                  {t("browser.openInVNC")}
+                </span>
+              </button>
               {browserRunning ? (
                 <>
-                  <button
-                    onClick={() => onOpenApp ? onOpenApp("vnc") : window.open("/app/vnc", "_blank")}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
-                    style={{ backgroundColor: BRAND_ORANGE }}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
-                      {t("browser.openInVNC")}
-                    </span>
-                  </button>
                   <button
                     onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
                     disabled={!!actionLoading}

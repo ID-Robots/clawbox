@@ -4,11 +4,27 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+type TrackedKey = {
+  key: string;
+  code: string;
+  location: number;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+};
+
+function isEditableTarget(target: EventTarget | null): target is HTMLElement {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
 
 export default function VNCApp() {
   const { t } = useT();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null>(null);
+  const vncFocusedRef = useRef(false);
+  const pressedKeysRef = useRef<Map<string, TrackedKey>>(new Map());
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [vncInfo, setVncInfo] = useState<{ host: string; wsPort: number } | null>(null);
@@ -29,12 +45,66 @@ export default function VNCApp() {
     }
   }, []);
 
-  useEffect(() => { checkVnc(); }, [checkVnc]);
+  useEffect(() => {
+    checkVnc();
+  }, [checkVnc]);
+
+  const getInputCanvas = useCallback(() => (
+    canvasContainerRef.current?.querySelector("canvas") ?? null
+  ), []);
+
+  const focusVncSurface = useCallback(() => {
+    const canvas = getInputCanvas();
+    if (!canvas) return;
+
+    canvas.tabIndex = 0;
+    rfbRef.current?.focus();
+    canvas.focus({ preventScroll: true });
+  }, [getInputCanvas]);
+
+  const dispatchKeyToCanvas = useCallback((type: "keydown" | "keyup", key: TrackedKey) => {
+    const canvas = getInputCanvas();
+    if (!canvas) return false;
+
+    return canvas.dispatchEvent(new KeyboardEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      key: key.key,
+      code: key.code,
+      location: key.location,
+      ctrlKey: key.ctrlKey,
+      shiftKey: key.shiftKey,
+      altKey: key.altKey,
+      metaKey: key.metaKey,
+    }));
+  }, [getInputCanvas]);
+
+  const releaseTrackedKeys = useCallback(() => {
+    const pressedKeys = [...pressedKeysRef.current.values()];
+    pressedKeysRef.current.clear();
+    for (const key of pressedKeys) {
+      dispatchKeyToCanvas("keyup", key);
+    }
+  }, [dispatchKeyToCanvas]);
+
+  const activateVncInput = useCallback(() => {
+    vncFocusedRef.current = true;
+    focusVncSurface();
+  }, [focusVncSurface]);
+
+  const deactivateVncInput = useCallback(() => {
+    if (!vncFocusedRef.current) return;
+    vncFocusedRef.current = false;
+    releaseTrackedKeys();
+    rfbRef.current?.blur();
+  }, [releaseTrackedKeys]);
 
   useEffect(() => {
     if (!vncInfo || !canvasContainerRef.current) return;
 
     let rfb: InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null = null;
+    let canvas: HTMLCanvasElement | null = null;
+    let handleContextMenu: ((event: Event) => void) | null = null;
 
     const connect = async () => {
       try {
@@ -52,14 +122,16 @@ export default function VNCApp() {
         rfb.addEventListener("connect", () => {
           setStatus("connected");
           setError(null);
-          rfb?.focus();
-          const canvas = canvasContainerRef.current?.querySelector("canvas");
-          if (canvas) { canvas.tabIndex = 0; canvas.focus(); }
-          canvasContainerRef.current?.addEventListener("contextmenu", (e) => e.preventDefault());
+          focusVncSurface();
+
+          canvas = getInputCanvas();
+          handleContextMenu = (event: Event) => event.preventDefault();
+          canvas?.addEventListener("contextmenu", handleContextMenu);
         });
 
         rfb.addEventListener("disconnect", (e: CustomEvent) => {
           setStatus("disconnected");
+          deactivateVncInput();
           if (e.detail?.clean === false) setError("Connection lost unexpectedly");
         });
 
@@ -71,94 +143,106 @@ export default function VNCApp() {
     };
 
     connect();
-    return () => { if (rfb) { rfb.disconnect(); rfbRef.current = null; } };
-  }, [vncInfo]);
 
-  // Track whether VNC has focus (user clicked inside VNC area)
-  const vncFocusedRef = useRef(false);
+    return () => {
+      if (canvas && handleContextMenu) {
+        canvas.removeEventListener("contextmenu", handleContextMenu);
+      }
+      deactivateVncInput();
+      if (rfb) {
+        rfb.disconnect();
+        rfbRef.current = null;
+      }
+    };
+  }, [deactivateVncInput, focusVncSurface, getInputCanvas, vncInfo]);
 
   useEffect(() => {
     if (status !== "connected") return;
     const container = canvasContainerRef.current;
     if (!container) return;
 
-    // Find the parent ChromeWindow element (contains both title bar and VNC content)
     const chromeWindow = container.closest('[class*="chrome-window"]') || container.parentElement?.parentElement;
+    const interactionHost = container.closest("[data-chrome-window-content]") ?? container.parentElement;
 
-    // Use capture phase — noVNC's canvas calls stopPropagation() on mouse events,
-    // so bubble-phase listeners on the container never fire.
     const onFocusIn = () => {
-      vncFocusedRef.current = true;
-      rfbRef.current?.focus();
+      activateVncInput();
     };
-    const onFocusOut = (e: MouseEvent) => {
-      const target = e.target as Node;
-      // Keep focus if click is anywhere inside the ChromeWindow (title bar, resize handles, etc.)
+
+    const onFocusOut = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
       if (chromeWindow?.contains(target)) return;
       if (container.contains(target)) return;
-      vncFocusedRef.current = false;
+      deactivateVncInput();
     };
+
     container.addEventListener("mousedown", onFocusIn, true);
     container.addEventListener("pointerdown", onFocusIn, true);
-    document.addEventListener("mousedown", onFocusOut);
-    // Re-focus VNC after resize/drag ends (pointerEvents go from "none" back to "")
-    const observer = new MutationObserver(() => {
-      if (container.style.pointerEvents !== "none" && vncFocusedRef.current) {
-        rfbRef.current?.focus();
+    container.addEventListener("mouseenter", onFocusIn);
+    container.addEventListener("focusin", onFocusIn);
+    document.addEventListener("mousedown", onFocusOut, true);
+    document.addEventListener("pointerdown", onFocusOut, true);
+    window.addEventListener("blur", deactivateVncInput);
+
+    // ChromeWindow disables pointer events on its content host during drag/resize.
+    // Re-focus the VNC canvas as soon as the content host becomes interactive again.
+    const observer = interactionHost ? new MutationObserver(() => {
+      if (interactionHost instanceof HTMLElement && interactionHost.style.pointerEvents !== "none" && vncFocusedRef.current) {
+        focusVncSurface();
       }
-    });
-    observer.observe(container, { attributes: true, attributeFilter: ["style"] });
-    vncFocusedRef.current = true; // auto-focus on connect
+    }) : null;
+    if (observer && interactionHost) {
+      observer.observe(interactionHost, { attributes: true, attributeFilter: ["style"] });
+    }
+
+    activateVncInput();
 
     return () => {
       container.removeEventListener("mousedown", onFocusIn, true);
       container.removeEventListener("pointerdown", onFocusIn, true);
-      document.removeEventListener("mousedown", onFocusOut);
-      observer.disconnect();
+      container.removeEventListener("mouseenter", onFocusIn);
+      container.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("mousedown", onFocusOut, true);
+      document.removeEventListener("pointerdown", onFocusOut, true);
+      window.removeEventListener("blur", deactivateVncInput);
+      observer?.disconnect();
+      deactivateVncInput();
     };
-  }, [status]);
+  }, [activateVncInput, deactivateVncInput, focusVncSurface, status]);
 
-  // Forward keyboard events to VNC when focused
-  // noVNC's own keyboard grab doesn't work reliably inside nested DOM (ChromeWindow)
+  // Keep noVNC's own keyboard handler as the single source of truth by routing
+  // active desktop keystrokes back to its canvas when window-level focus drifts.
   useEffect(() => {
     if (status !== "connected") return;
 
-    const SPECIAL: Record<string, number> = {
-      Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b,
-      Delete: 0xffff, Home: 0xff50, End: 0xff57,
-      PageUp: 0xff55, PageDown: 0xff56,
-      ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54,
-      Insert: 0xff63, F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1,
-      F5: 0xffc2, F6: 0xffc3, F7: 0xffc4, F8: 0xffc5,
-      F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
-      ShiftLeft: 0xffe1, ShiftRight: 0xffe2,
-      ControlLeft: 0xffe3, ControlRight: 0xffe4,
-      AltLeft: 0xffe9, AltRight: 0xffea,
-      MetaLeft: 0xffe7, MetaRight: 0xffe8,
-      CapsLock: 0xffe5, NumLock: 0xff7f, ScrollLock: 0xff14,
-      " ": 0x0020,
-    };
-    // Also map by e.key for modifiers
-    const KEY_SPECIAL: Record<string, number> = {
-      Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, Meta: 0xffe7,
-    };
-
     const handler = (e: KeyboardEvent) => {
       if (!vncFocusedRef.current || !rfbRef.current) return;
-      // Don't intercept if user is typing in a ClawBox input field
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (isEditableTarget(e.target)) return;
 
-      let keysym: number | null = null;
-      if (e.code in SPECIAL) keysym = SPECIAL[e.code];
-      else if (e.key in KEY_SPECIAL) keysym = KEY_SPECIAL[e.key];
-      else if (e.key in SPECIAL) keysym = SPECIAL[e.key];
-      else if (e.key.length === 1) keysym = e.key.charCodeAt(0);
-      if (keysym === null) return;
+      const inputCanvas = getInputCanvas();
+      if (!inputCanvas) return;
+      if (e.target === inputCanvas) return;
+
+      const trackedKey: TrackedKey = {
+        key: e.key,
+        code: e.code,
+        location: e.location,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+      };
+
+      const keyId = e.code || e.key;
+      if (e.type === "keydown") {
+        if (!e.repeat) pressedKeysRef.current.set(keyId, trackedKey);
+      } else {
+        pressedKeysRef.current.delete(keyId);
+      }
 
       e.preventDefault();
       e.stopPropagation();
-      rfbRef.current.sendKey(keysym, e.code || null, e.type === "keydown");
+      dispatchKeyToCanvas(e.type as "keydown" | "keyup", trackedKey);
     };
 
     window.addEventListener("keydown", handler, true);
@@ -167,7 +251,7 @@ export default function VNCApp() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [status]);
+  }, [dispatchKeyToCanvas, getInputCanvas, status]);
 
   const handleReconnect = useCallback(() => {
     setStatus("connecting");
@@ -194,6 +278,7 @@ export default function VNCApp() {
   return (
     <div
       ref={canvasContainerRef}
+      tabIndex={0}
       className="h-full overflow-hidden bg-black relative"
     >
       {(status === "connecting" || status === "disconnected") && (

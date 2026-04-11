@@ -533,11 +533,14 @@ step_systemd_services() {
     cp "$src" /etc/systemd/system/
   done
   systemctl daemon-reload
-  # Enable all services except the template (@ services cannot be enabled directly)
+  # Enable all services except templates and the on-demand browser unit.
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
+    [[ "$svc" == "clawbox-browser.service" ]] && continue
     systemctl enable "$svc"
   done
+  # Clean up older installs that enabled Chromium on boot.
+  systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
@@ -794,7 +797,7 @@ WSSVC
 
   systemctl daemon-reload
   systemctl enable clawbox-vnc.service clawbox-websockify.service
-  systemctl start clawbox-vnc.service clawbox-websockify.service || true
+  systemctl restart clawbox-vnc.service clawbox-websockify.service || true
   echo "  VNC (x11vnc + Xvfb fallback) and websockify installed and started"
 }
 
