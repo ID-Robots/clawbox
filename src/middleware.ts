@@ -53,6 +53,7 @@ const PUBLIC_EXACT = new Set([
   "/clawbox-crab.png",
   "/clawbox-icon.png",
   "/clawbox-logo.png",
+  "/portal/subscribe",
 ]);
 
 function isPublicPath(pathname: string): boolean {

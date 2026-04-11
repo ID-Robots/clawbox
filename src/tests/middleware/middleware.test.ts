@@ -227,7 +227,7 @@ describe("middleware", () => {
       expect(response.status).toBe(401);
     });
 
-    it.each(["/login", "/setup", "/setup-api/test", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico"])("allows public path %s", async (p) => {
+    it.each(["/login", "/setup", "/setup-api/test", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
       const mod = await import("@/middleware");

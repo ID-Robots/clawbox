@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import AIModelsStep from "@/components/AIModelsStep";
 
 vi.mock("@/lib/i18n", () => ({
@@ -15,6 +15,8 @@ vi.mock("@/lib/i18n", () => ({
         "ai.title": "Connect AI Model",
         "ai.description": "Select your AI provider and enter your API key or subscription token.",
         "ai.clawaiDesc": "Most affordable - start for free",
+        "ai.clawaiHint": "ClawBox AI is pre-configured and ready to go. Just click below to get started — no API key or account needed.",
+        "ai.useClawai": "Start for free",
         "ai.claudeModels": "Claude models by Anthropic",
         "ai.gptModels": "GPT models by OpenAI",
         "ai.geminiModels": "Gemini models by Google",
@@ -98,7 +100,7 @@ describe("AIModelsStep variants", () => {
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
-    const { getByText, queryByText } = render(
+    const { getByRole, getByText, queryByRole, queryByText } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -115,6 +117,16 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Connect AI Provider")).toBeInTheDocument();
     expect(getByText("ClawBox AI")).toBeInTheDocument();
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
+    expect(getByText("Click continue to review the Max subscription offer or keep going with the free ClawBox AI tier.")).toBeInTheDocument();
+    expect(queryByRole("dialog", { name: /ClawBox AI subscription offer/i })).not.toBeInTheDocument();
+
+    fireEvent.click(getByRole("button", { name: /Save/i }));
+
+    expect(getByRole("dialog", { name: /ClawBox AI subscription offer/i })).toBeInTheDocument();
+    expect(getByText("Upgrade your ClawBox before you continue")).toBeInTheDocument();
+    expect(getByText("Use the same email address as your ClawBox purchase to unlock the bonus.")).toBeInTheDocument();
+    expect(getByRole("link", { name: /View Max subscription/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/subscribe");
+    expect(getByRole("button", { name: /Continue with free ClawBox AI/i })).toBeInTheDocument();
     expect(queryByText("llama.cpp Local")).not.toBeInTheDocument();
     expect(queryByText("Ollama Local")).not.toBeInTheDocument();
   });

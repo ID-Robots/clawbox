@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
@@ -15,6 +16,12 @@ import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
+import {
+  MAX_PLAN_BONUSES,
+  MAX_PLAN_FEATURES,
+  PORTAL_SUBSCRIBE_URL,
+  PURCHASE_EMAIL_NOTE,
+} from "@/lib/max-subscription";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -209,6 +216,115 @@ function ConfiguringOverlay({
         </p>
       )}
     </div>
+  );
+}
+
+function ClawAIOfferModal({
+  open,
+  onClose,
+  onContinueFree,
+  saving,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onContinueFree: () => void;
+  saving: boolean;
+}) {
+  if (!open) return null;
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[999999] flex items-center justify-center p-4">
+      <div
+        className="absolute inset-0 bg-[rgba(3,7,18,0.78)] backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="ClawBox AI subscription offer"
+        className="relative z-10 w-full max-w-[680px] overflow-hidden rounded-[28px] border border-fuchsia-400/20 bg-[linear-gradient(160deg,rgba(17,24,39,0.98),rgba(31,19,46,0.96)_65%,rgba(17,24,39,0.98))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)] sm:p-7"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close offer"
+          className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/75 transition hover:bg-white/10 hover:text-white"
+        >
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>close</span>
+        </button>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/90">
+            ClawBox AI Max
+          </span>
+          <span className="inline-flex items-center rounded-full bg-fuchsia-400/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-fuchsia-200">
+            Powered by DeepSeek
+          </span>
+        </div>
+
+        <h2 className="mt-4 max-w-xl text-3xl font-bold leading-tight text-white sm:text-4xl">
+          Upgrade your ClawBox before you continue
+        </h2>
+        <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/75 sm:text-base">
+          Max gives your ClawBox the highest usage tier, top priority, and real human support, while ClawBox owners can unlock bonus perks with the purchase email.
+        </p>
+
+        <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <div className="rounded-2xl border border-fuchsia-400/20 bg-black/20 p-5">
+            <div className="text-sm font-semibold text-fuchsia-100">What Max includes</div>
+            <ul className="mt-4 space-y-3">
+              {MAX_PLAN_FEATURES.map((item) => (
+                <li key={item} className="flex items-start gap-3 text-sm text-white/90">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20 text-fuchsia-100">
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>check_circle</span>
+                  </span>
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="rounded-2xl border border-orange-400/20 bg-orange-500/10 p-5">
+            <div className="text-sm font-semibold text-orange-100">ClawBox owner bonus</div>
+            <ul className="mt-4 space-y-3">
+              {MAX_PLAN_BONUSES.map((item) => (
+                <li key={item} className="flex items-start gap-3 text-sm text-orange-50/95">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-100">
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>redeem</span>
+                  </span>
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-xs leading-relaxed text-white/75">
+              {PURCHASE_EMAIL_NOTE}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+          <a
+            href={PORTAL_SUBSCRIBE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,#a855f7,#ec4899)] px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+          >
+            View Max subscription
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
+          </a>
+          <button
+            type="button"
+            onClick={onContinueFree}
+            disabled={saving}
+            className="inline-flex flex-1 items-center justify-center rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+          >
+            {saving ? "Connecting..." : "Continue with free ClawBox AI"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -415,6 +531,7 @@ export default function AIModelsStep({
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
+  const [showClawAIOffer, setShowClawAIOffer] = useState(false);
 
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
@@ -439,6 +556,12 @@ export default function AIModelsStep({
       setSelectedProvider(resolvedDefaultProvider);
     }
   }, [allowedProviders, resolvedDefaultProvider, selectedProvider]);
+
+  useEffect(() => {
+    if (selectedProvider !== "clawai") {
+      setShowClawAIOffer(false);
+    }
+  }, [selectedProvider]);
 
   useEffect(() => {
     if (!normalizedCurrentProvider) return;
@@ -660,7 +783,7 @@ export default function AIModelsStep({
     if (id === "llamacpp") checkLlamaCppStatus();
   };
 
-  const saveProviderConfig = async (payload: Record<string, unknown>) => {
+  const saveProviderConfig = useCallback(async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -689,7 +812,7 @@ export default function AIModelsStep({
     } finally {
       if (!controller.signal.aborted) setSaving(false);
     }
-  };
+  }, [configureScope, extractError, showConfiguring, showError, showSuccessAndContinue]);
 
   const saveModel = async () => {
     if (!selectedProvider) return showError(t("ai.selectProvider"));
@@ -699,10 +822,20 @@ export default function AIModelsStep({
     );
   };
 
-  const saveClawAI = async () => {
+  const saveClawAI = useCallback(async () => {
     setSelectedProvider("clawai");
     await saveProviderConfig({ provider: "clawai" });
-  };
+  }, [saveProviderConfig]);
+
+  const handleClawAIPrimaryAction = useCallback(() => {
+    setStatus(null);
+    setShowClawAIOffer(true);
+  }, []);
+
+  const handleClawAIContinueFree = useCallback(async () => {
+    setShowClawAIOffer(false);
+    await saveClawAI();
+  }, [saveClawAI]);
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
@@ -1141,6 +1274,12 @@ export default function AIModelsStep({
   return (
     <div className="w-full max-w-[520px]" data-testid={testId}>
       <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
+        <ClawAIOfferModal
+          open={showClawAIOffer && !configuringState}
+          onClose={() => setShowClawAIOffer(false)}
+          onContinueFree={handleClawAIContinueFree}
+          saving={saving}
+        />
         {configuringState && (
           <ConfiguringOverlay
             provider={configuringState.provider}
@@ -1214,14 +1353,6 @@ export default function AIModelsStep({
             </button>
           )}
         </div>
-
-        {selected?.id === "clawai" && (
-          <div className="mt-5">
-            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              {t("ai.clawaiHint")}
-            </p>
-          </div>
-        )}
 
         {selected?.id === "ollama" && (
           <div className="mt-5 space-y-4">
@@ -1345,6 +1476,17 @@ export default function AIModelsStep({
           </div>
         )}
 
+        {selected?.id === "clawai" && (
+          <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+            <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
+              {t("ai.clawaiHint")}
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
+              Click continue to review the Max subscription offer or keep going with the free ClawBox AI tier.
+            </p>
+          </div>
+        )}
+
         {status && (
           <StatusMessage type={status.type} message={status.message} />
         )}
@@ -1353,7 +1495,7 @@ export default function AIModelsStep({
           {selected?.id === "clawai" ? (
             <button
               type="button"
-              onClick={saveClawAI}
+              onClick={handleClawAIPrimaryAction}
               disabled={saving}
               className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
             >

@@ -56,7 +56,7 @@ describe("ai-provider-progress", () => {
         getLlamaCppOverlayProgress("Preparing llama.cpp for gemma4-e2b-it-q4_0...", 5),
       ).toEqual({
         phase: 0,
-        detail: "Preparing llama.cpp for gemma4-e2b-it-q4_0...",
+        detail: null,
         progressPercent: null,
       });
 
@@ -64,7 +64,7 @@ describe("ai-provider-progress", () => {
         getLlamaCppOverlayProgress("[llamacpp] Downloading gguf-org/gemma-4-e2b-it-gguf/file.gguf", 5),
       ).toEqual({
         phase: 1,
-        detail: "[llamacpp] Downloading gguf-org/gemma-4-e2b-it-gguf/file.gguf",
+        detail: null,
         progressPercent: null,
       });
 
@@ -72,7 +72,7 @@ describe("ai-provider-progress", () => {
         getLlamaCppOverlayProgress("[llamacpp] Starting llama-server with /models/gemma.gguf", 5),
       ).toEqual({
         phase: 2,
-        detail: "[llamacpp] Starting llama-server with /models/gemma.gguf",
+        detail: null,
         progressPercent: null,
       });
 
@@ -80,7 +80,7 @@ describe("ai-provider-progress", () => {
         getLlamaCppOverlayProgress("llama.cpp is ready. Applying ClawBox configuration...", 5),
       ).toEqual({
         phase: 3,
-        detail: "llama.cpp is ready. Applying ClawBox configuration...",
+        detail: null,
         progressPercent: null,
       });
     });
