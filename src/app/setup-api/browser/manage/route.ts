@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { constants as fsConstants } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
@@ -12,17 +13,65 @@ const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
 const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
 const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
+const PLAYWRIGHT_BROWSERS_DIR = path.join(HOME, ".cache", "ms-playwright");
 const CDP_PORT = 18800;
 const BROWSER_ENABLED_KEY = "browser:integration-enabled";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+async function findPlaywrightChromium(): Promise<string | null> {
+  try {
+    const entries = await fs.readdir(PLAYWRIGHT_BROWSERS_DIR, { withFileTypes: true });
+    const candidates: string[] = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      for (const relativePath of ["chrome-linux/chrome", "chrome-linux-arm64/chrome"]) {
+        const candidate = path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name, relativePath);
+        try {
+          await fs.access(candidate, fsConstants.X_OK);
+          candidates.push(candidate);
+          break;
+        } catch {}
+      }
+    }
+
+    return candidates.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function installPlaywrightChromium(): Promise<void> {
+  const playwrightBin = path.join(process.cwd(), "node_modules", ".bin", "playwright");
+  await fs.access(playwrightBin, fsConstants.X_OK);
+  await exec(playwrightBin, ["install", "chromium"], {
+    timeout: 300000,
+    env: {
+      ...process.env,
+      HOME,
+      PLAYWRIGHT_BROWSERS_PATH: PLAYWRIGHT_BROWSERS_DIR,
+    },
+  });
+}
+
 async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
+  const playwrightChromium = await findPlaywrightChromium();
+  if (playwrightChromium) {
+    try {
+      const { stdout: ver } = await exec(playwrightChromium, ["--version"], { timeout: 5000 });
+      return { installed: true, path: playwrightChromium, version: ver.trim() };
+    } catch {
+      return { installed: true, path: playwrightChromium };
+    }
+  }
+
   // Check known paths directly first (fast, no subprocess), then fall back to `which`
   const knownPaths = ["/usr/bin/chromium-browser", "/snap/bin/chromium", "/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
   for (const p of knownPaths) {
     try {
-      await fs.access(p, 1 /* fs.constants.X_OK */);
+      await fs.access(p, fsConstants.X_OK);
       try {
         const { stdout: ver } = await exec(p, ["--version"], { timeout: 5000 });
         return { installed: true, path: p, version: ver.trim() };
@@ -133,6 +182,7 @@ export async function POST(req: Request) {
 
     switch (action) {
       case "install-chromium": {
+        let installError: Error | null = null;
         try {
           await exec("/usr/bin/sudo", ["apt-get", "update", "-qq"], { timeout: 30000 });
           await exec("/usr/bin/sudo", ["apt-get", "install", "-y", "-qq", "chromium-browser"], { timeout: 120000 });
@@ -143,11 +193,24 @@ export async function POST(req: Request) {
             try {
               await exec("/usr/bin/sudo", ["apt-get", "install", "-y", "-qq", "chromium"], { timeout: 120000 });
             } catch {
-              throw new Error(`Failed to install Chromium: ${snapErr instanceof Error ? snapErr.message : "unknown error"}`);
+              installError = new Error(`Failed to install Chromium: ${snapErr instanceof Error ? snapErr.message : "unknown error"}`);
             }
           }
         }
-        return NextResponse.json({ ok: true, chromium: await checkChromium() });
+
+        try {
+          await installPlaywrightChromium();
+        } catch (err) {
+          if (installError) throw installError;
+          console.warn("[browser] Playwright Chromium install failed:", err);
+        }
+
+        const chromium = await checkChromium();
+        if (!chromium.installed) {
+          throw installError ?? new Error("Chromium install finished but no browser binary was detected");
+        }
+
+        return NextResponse.json({ ok: true, chromium });
       }
 
       case "enable": {

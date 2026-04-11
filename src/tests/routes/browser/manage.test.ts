@@ -11,6 +11,7 @@ vi.mock("util", () => ({
 vi.mock("fs/promises", () => ({
   default: {
     access: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    readdir: vi.fn().mockRejectedValue(new Error("ENOENT")),
     mkdir: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
   },
@@ -46,6 +47,7 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(sqliteGet).mockResolvedValue(null);
     vi.mocked(sqliteSet).mockResolvedValue();
     vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+    vi.mocked(fs.readdir).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
     mockFetch.mockRejectedValue(new Error("connection refused"));
@@ -72,6 +74,29 @@ describe("/setup-api/browser/manage", () => {
       const res = await GET();
       const body = await res.json();
       expect(body.enabled).toBe(true);
+    });
+
+    it("detects the Playwright Chromium runtime when it is installed", async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "chromium-1180", isDirectory: () => true },
+      ] as never);
+      vi.mocked(fs.access).mockImplementation(async (target: string) => {
+        if (target.includes("chrome-linux/chrome")) return undefined as never;
+        throw new Error("ENOENT");
+      });
+      mockExec.mockImplementation(async (...args: unknown[]) => {
+        const [command, commandArgs] = args as [string, string[]];
+        if (String(command).includes("chrome-linux/chrome") && commandArgs[0] === "--version") {
+          return { stdout: "Chromium 146.0.0", stderr: "" };
+        }
+        throw new Error("not found");
+      });
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.chromium.installed).toBe(true);
+      expect(body.chromium.path).toContain("chrome-linux/chrome");
     });
 
     it("returns the persisted enabled state from sqlite when present", async () => {

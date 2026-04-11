@@ -70,6 +70,34 @@ ensure_env_setting() {
   fi
 }
 
+has_playwright_chromium() {
+  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
+}
+
+ensure_playwright_chromium() {
+  if has_playwright_chromium; then
+    echo "  Playwright Chromium runtime already installed"
+    return 0
+  fi
+
+  local PLAYWRIGHT_BIN="$PROJECT_DIR/node_modules/.bin/playwright"
+  local PLAYWRIGHT_PATH="$CLAWBOX_HOME/.cache/ms-playwright"
+
+  echo "  Installing Playwright Chromium runtime for the desktop browser service..."
+  if [ -x "$PLAYWRIGHT_BIN" ]; then
+    as_user_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$PLAYWRIGHT_BIN\" install chromium"
+  else
+    as_user_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" $BUN x playwright install chromium"
+  fi
+
+  if ! has_playwright_chromium; then
+    echo "Error: Playwright Chromium install completed but no service-safe browser binary was found." >&2
+    exit 1
+  fi
+
+  echo "  Playwright Chromium runtime ready"
+}
+
 wait_for_apt() {
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -440,18 +468,22 @@ step_llamacpp_install() {
 step_chromium_install() {
   if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null || command -v google-chrome &>/dev/null; then
     echo "  Chromium/Chrome already installed"
-    return
-  fi
-  # Try snap first (Ubuntu), fall back to apt
-  if command -v snap &>/dev/null; then
-    if snap list chromium &>/dev/null 2>&1; then
-      echo "  Chromium already installed (snap)"
-      return
+  else
+    # Try snap first (Ubuntu), fall back to apt
+    if command -v snap &>/dev/null; then
+      if snap list chromium &>/dev/null 2>&1; then
+        echo "  Chromium already installed (snap)"
+      else
+        snap install chromium 2>/dev/null && echo "  Chromium installed (snap)"
+      fi
     fi
-    snap install chromium 2>/dev/null && echo "  Chromium installed (snap)" && return
+    if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/null && ! command -v google-chrome &>/dev/null; then
+      wait_for_apt
+      apt-get install -y -qq chromium-browser 2>/dev/null || apt-get install -y -qq chromium 2>/dev/null || echo "  Warning: Could not install Chromium — install manually"
+    fi
   fi
-  wait_for_apt
-  apt-get install -y -qq chromium-browser 2>/dev/null || apt-get install -y -qq chromium 2>/dev/null || echo "  Warning: Could not install Chromium — install manually"
+
+  ensure_playwright_chromium
 }
 
 step_ai_tools_install() {

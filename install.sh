@@ -59,6 +59,34 @@ ensure_env_setting() {
   fi
 }
 
+has_playwright_chromium() {
+  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
+}
+
+ensure_playwright_chromium() {
+  if has_playwright_chromium; then
+    echo "  Playwright Chromium runtime already installed"
+    return 0
+  fi
+
+  local PLAYWRIGHT_BIN="$PROJECT_DIR/node_modules/.bin/playwright"
+  local PLAYWRIGHT_PATH="$CLAWBOX_HOME/.cache/ms-playwright"
+
+  echo "  Installing Playwright Chromium runtime for the desktop browser service..."
+  if [ -x "$PLAYWRIGHT_BIN" ]; then
+    as_clawbox_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$PLAYWRIGHT_BIN\" install chromium"
+  else
+    as_clawbox_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" $BUN x playwright install chromium"
+  fi
+
+  if ! has_playwright_chromium; then
+    echo "Error: Playwright Chromium install completed but no service-safe browser binary was found." >&2
+    exit 1
+  fi
+
+  echo "  Playwright Chromium runtime ready"
+}
+
 print_native_build_preflight() {
   local node_version node_abi npm_version python_version make_version gpp_version node_header_dir
 
@@ -701,25 +729,26 @@ step_gateway_setup() {
 step_chromium_install() {
   if snap list chromium &>/dev/null 2>&1; then
     echo "  Chromium already installed (snap)"
-    return
+  else
+    # Ubuntu 22.04 ARM64 only ships Chromium as a snap — no native .deb available.
+    # Ensure snapd is running, install chromium, then continue.
+    systemctl enable --now snapd snapd.socket 2>/dev/null || true
+
+    # Wait for snapd to be ready (can take a few seconds after enable)
+    local retries=0
+    while ! snap version &>/dev/null && [ $retries -lt 30 ]; do
+      sleep 1
+      retries=$((retries + 1))
+    done
+
+    # Clean up any leftover Debian repo config from earlier install attempts
+    rm -f /etc/apt/sources.list.d/debian-chromium.list /etc/apt/preferences.d/debian-chromium /usr/share/keyrings/debian-bookworm.gpg
+
+    snap install chromium
+    echo "  Chromium installed (snap)"
   fi
 
-  # Ubuntu 22.04 ARM64 only ships Chromium as a snap — no native .deb available.
-  # Ensure snapd is running, install chromium, then continue.
-  systemctl enable --now snapd snapd.socket 2>/dev/null || true
-
-  # Wait for snapd to be ready (can take a few seconds after enable)
-  local retries=0
-  while ! snap version &>/dev/null && [ $retries -lt 30 ]; do
-    sleep 1
-    retries=$((retries + 1))
-  done
-
-  # Clean up any leftover Debian repo config from earlier install attempts
-  rm -f /etc/apt/sources.list.d/debian-chromium.list /etc/apt/preferences.d/debian-chromium /usr/share/keyrings/debian-bookworm.gpg
-
-  snap install chromium
-  echo "  Chromium installed (snap)"
+  ensure_playwright_chromium
 }
 
 
@@ -823,6 +852,53 @@ FIRSTBOOTVNC
   echo "  First reboot will re-ensure VNC services are active"
 }
 
+step_desktop_theme() {
+  local theme_script="$PROJECT_DIR/scripts/apply-desktop-theme.sh"
+  local autostart_dir="$CLAWBOX_HOME/.config/autostart"
+  local autostart_file="$autostart_dir/clawbox-desktop-theme.desktop"
+
+  if [ ! -f "$theme_script" ]; then
+    echo "Error: Desktop theme script not found: $theme_script" >&2
+    exit 1
+  fi
+
+  chmod +x "$theme_script"
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$theme_script"
+
+  mkdir -p "$autostart_dir"
+  cat > "$autostart_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=ClawBox Desktop Theme
+Exec=$theme_script
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$autostart_dir" "$autostart_file"
+  chmod 644 "$autostart_file"
+
+  mkdir -p /etc/dconf/db/local.d
+  cat > /etc/dconf/db/local.d/01-clawbox-desktop-theme <<'EOF'
+[org/gnome/desktop/background]
+picture-uri=''
+picture-uri-dark=''
+picture-options='none'
+color-shading-type='solid'
+primary-color='#0a0f1a'
+secondary-color='#111827'
+EOF
+  dconf update >/dev/null 2>&1 || true
+
+  if command -v dbus-launch >/dev/null 2>&1; then
+    as_clawbox_login "dbus-launch \"$theme_script\"" >/dev/null 2>&1 || true
+  else
+    as_clawbox_login "\"$theme_script\"" >/dev/null 2>&1 || true
+  fi
+
+  echo "  ClawBox desktop background configured"
+}
+
 step_ffmpeg_install() {
   apt-get install -y ffmpeg
 }
@@ -864,7 +940,7 @@ DISPATCH_STEPS=(
   network_setup setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
-  directories_permissions captive_portal_dns
+  directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch
 )
 
@@ -889,7 +965,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
 step=0
 log() {
   step=$((step + 1))
@@ -952,6 +1028,9 @@ step_ai_tools_install
 
 log "Installing VNC server..."
 step_vnc_install
+
+log "Applying ClawBox desktop theme..."
+step_desktop_theme
 
 log "Starting services..."
 step_start_services

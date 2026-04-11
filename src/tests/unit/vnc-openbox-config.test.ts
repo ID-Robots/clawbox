@@ -23,6 +23,17 @@ describe("VNC desktop config", () => {
     expect(script).not.toContain("xdpyinfo");
   });
 
+  it("records the active VNC display and reapplies the ClawBox desktop theme", () => {
+    const script = fs.readFileSync(
+      path.join(process.cwd(), "scripts", "start-vnc.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain("vnc-display.env");
+    expect(script).toContain("record_vnc_display");
+    expect(script).toContain("apply-desktop-theme.sh");
+  });
+
   it("restarts the VNC services during the vnc_install step so config changes apply immediately", () => {
     const installScript = fs.readFileSync(
       path.join(process.cwd(), "install.sh"),
@@ -41,5 +52,16 @@ describe("VNC desktop config", () => {
     expect(installScript).toContain("clawbox-firstboot-vnc.service");
     expect(installScript).toContain("ensure-vnc-on-first-boot.pending");
     expect(installScript).toContain("systemctl enable clawbox-vnc.service clawbox-websockify.service clawbox-firstboot-vnc.service");
+  });
+
+  it("installs the ClawBox desktop theme during the main installer flow", () => {
+    const installScript = fs.readFileSync(
+      path.join(process.cwd(), "install.sh"),
+      "utf8",
+    );
+
+    expect(installScript).toContain("step_desktop_theme");
+    expect(installScript).toContain("Applying ClawBox desktop theme");
+    expect(installScript).toContain("clawbox-desktop-theme.desktop");
   });
 });

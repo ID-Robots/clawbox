@@ -5,12 +5,19 @@ After=clawbox-vnc.service
 
 [Service]
 Type=simple
+User=clawbox
+Group=clawbox
+WorkingDirectory=/home/clawbox/clawbox
 Environment=DISPLAY=:99
 Environment=CDP_PORT=18800
 Environment=HOME=/home/clawbox
+Environment=XDG_CONFIG_HOME=/home/clawbox/.config
+Environment=XDG_CACHE_HOME=/home/clawbox/.cache
 ExecStart=/home/clawbox/clawbox/scripts/launch-browser.sh
 Restart=no
-TimeoutStartSec=30
+TimeoutStartSec=45
+StandardOutput=append:/tmp/clawbox-browser.log
+StandardError=append:/tmp/clawbox-browser.log
 # KillMode=control-group already terminates all child processes (chrome_crashpad,
 # the main chrome, dbus-launch helpers) when the unit stops — no ExecStopPost
 # pgrep needed (and the prior pattern was broad enough to kill unrelated procs).

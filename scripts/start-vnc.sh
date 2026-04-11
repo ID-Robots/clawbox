@@ -1,8 +1,12 @@
 #!/bin/bash
 # Mirrors the physical display :0 if accessible,
 # otherwise starts a minimal virtual desktop (openbox) for GUI apps.
+set -uo pipefail
 
 VNC_PORT="${VNC_PORT:-5900}"
+STATE_DIR="${HOME}/.cache/clawbox"
+STATE_FILE="${STATE_DIR}/vnc-display.env"
+THEME_SCRIPT="$(cd "$(dirname "$0")" && pwd)/apply-desktop-theme.sh"
 
 display_ready() {
   local display="$1"
@@ -12,6 +16,18 @@ display_ready() {
   else
     xset -display "$display" q >/dev/null 2>&1
   fi
+}
+
+record_vnc_display() {
+  local display="$1"
+  local auth="${2:-}"
+  mkdir -p "$STATE_DIR"
+  {
+    printf 'CLAWBOX_VNC_DISPLAY=%s\n' "$display"
+    if [ -n "$auth" ]; then
+      printf 'CLAWBOX_VNC_XAUTHORITY=%s\n' "$auth"
+    fi
+  } > "$STATE_FILE"
 }
 
 # ─── Try to mirror the physical/GDM display :0 ───────────────────────────────
@@ -33,6 +49,7 @@ find_xauth() {
 XAUTH=$(find_xauth 2>/dev/null)
 if [ -n "$XAUTH" ] && display_ready :0 "$XAUTH"; then
   echo "[vnc] Display :0 found — mirroring"
+  record_vnc_display ":0" "$XAUTH"
   exec x11vnc -display :0 -auth "$XAUTH" -rfbport "$VNC_PORT" -forever -shared -nopw -localhost -noxdamage
 fi
 
@@ -59,8 +76,13 @@ fi
 export DISPLAY=":${VDISPLAY}"
 export DBUS_SESSION_BUS_ADDRESS=""
 
-# Set dark background matching ClawBox UI (#0a0f1a)
-xsetroot -solid "#0a0f1a" 2>/dev/null || true
+record_vnc_display ":${VDISPLAY}"
+
+if [ -x "$THEME_SCRIPT" ]; then
+  "$THEME_SCRIPT"
+else
+  xsetroot -solid "#0a0f1a" 2>/dev/null || true
+fi
 
 # Minimal WM with right-click menu disabled
 if command -v openbox &>/dev/null; then
