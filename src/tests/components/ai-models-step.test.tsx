@@ -23,6 +23,7 @@ vi.mock("@/lib/i18n", () => ({
         "ai.multiProvider": "Multi-provider AI gateway",
         "ai.runLocally": "Run AI models locally on device",
         "ai.showMore": "Show more providers...",
+        "ai.skipClawai": "Skip — set up ClawBox AI with a portal token",
         recommended: "Recommended",
         save: "Save",
         "settings.aiProvider": "AI Provider",
@@ -113,7 +114,35 @@ describe("AIModelsStep variants", () => {
     expect(providerGroup).toHaveTextContent("Ollama");
     expect(queryByText("ClawBox AI")).not.toBeInTheDocument();
     expect(queryByText("OpenAI GPT")).not.toBeInTheDocument();
+    expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("Enable Gemma 4")).toBeInTheDocument();
+  });
+
+  it("skips Local AI setup by advancing to the next step", async () => {
+    const onNext = vi.fn();
+    const fetchMock = vi.mocked(fetch);
+    const { getByRole } = render(
+      <AIModelsStep
+        providerIds={["llamacpp", "ollama"]}
+        defaultProviderId="llamacpp"
+        title="Set Up Local AI"
+        description="Local models first"
+        configureScope="local"
+        onNext={onNext}
+        testId="local-ai-test"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    fireEvent.click(getByRole("button", { name: /Skip/i }));
+
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
+    ).toBe(false);
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
@@ -239,5 +268,31 @@ describe("AIModelsStep variants", () => {
 
     fireEvent.click(getByRole("radio", { name: /OpenRouter/i }));
     expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
+  });
+
+  it("uses the skip action to switch back to ClawBox AI setup without posting empty credentials", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const { getByRole, queryByRole } = render(
+      <AIModelsStep
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    fireEvent.click(getByRole("radio", { name: /OpenAI GPT/i }));
+    expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
+
+    fireEvent.click(getByRole("button", { name: /Skip/i }));
+
+    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
+    ).toBe(false);
   });
 });

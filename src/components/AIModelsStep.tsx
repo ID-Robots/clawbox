@@ -803,7 +803,7 @@ export default function AIModelsStep({
     });
   }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving, selectedProvider]);
 
-  const selectProvider = (id: string) => {
+  const selectProvider = useCallback((id: string) => {
     stopPolling();
     const provider = allowedProviders.find((p) => p.id === id);
     setSelectedProvider(id);
@@ -826,7 +826,7 @@ export default function AIModelsStep({
     setConfiguringState(null);
     if (id === "ollama") checkOllamaStatus();
     if (id === "llamacpp") checkLlamaCppStatus();
-  };
+  }, [allowedProviders, availableOAuth, checkLlamaCppStatus, checkOllamaStatus, stopPolling]);
 
   const saveProviderConfig = useCallback(async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
@@ -881,6 +881,18 @@ export default function AIModelsStep({
     if (!apiKey.trim()) return showError(t("ai.enterKey"));
     await saveClawAI();
   }, [apiKey, saveClawAI, showError, t]);
+
+  const handleSkipAction = useCallback(() => {
+    setStatus(null);
+    if (configureScope === "local") {
+      stopPolling();
+      setShowClawAIOffer(false);
+      onNext?.();
+      return;
+    }
+    selectProvider("clawai");
+    setShowClawAIOffer(true);
+  }, [configureScope, onNext, selectProvider, stopPolling]);
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
@@ -1389,7 +1401,7 @@ export default function AIModelsStep({
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "clawai" && (
+                    {(provider.id === "clawai" || provider.id === "llamacpp") && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
                         {t("recommended")}
                       </span>
@@ -1600,7 +1612,7 @@ export default function AIModelsStep({
           <div className="mt-3 text-center">
             <button
               type="button"
-              onClick={saveClawAI}
+              onClick={handleSkipAction}
               disabled={saving}
               className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
             >
