@@ -2,82 +2,24 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
-type TrackedKey = {
-  code: string | null;
-  keysym: number;
-};
 
-const SPECIAL_KEYSYMS: Record<string, number> = {
-  Backspace: 0xff08,
-  Tab: 0xff09,
-  Enter: 0xff0d,
-  Escape: 0xff1b,
-  Delete: 0xffff,
-  Home: 0xff50,
-  End: 0xff57,
-  PageUp: 0xff55,
-  PageDown: 0xff56,
-  ArrowLeft: 0xff51,
-  ArrowUp: 0xff52,
-  ArrowRight: 0xff53,
-  ArrowDown: 0xff54,
-  Insert: 0xff63,
-  F1: 0xffbe,
-  F2: 0xffbf,
-  F3: 0xffc0,
-  F4: 0xffc1,
-  F5: 0xffc2,
-  F6: 0xffc3,
-  F7: 0xffc4,
-  F8: 0xffc5,
-  F9: 0xffc6,
-  F10: 0xffc7,
-  F11: 0xffc8,
-  F12: 0xffc9,
-  ShiftLeft: 0xffe1,
-  ShiftRight: 0xffe2,
-  ControlLeft: 0xffe3,
-  ControlRight: 0xffe4,
-  AltLeft: 0xffe9,
-  AltRight: 0xffea,
-  MetaLeft: 0xffe7,
-  MetaRight: 0xffe8,
-  CapsLock: 0xffe5,
-  NumLock: 0xff7f,
-  ScrollLock: 0xff14,
-  " ": 0x0020,
-};
-
-const MODIFIER_KEYSYMS: Record<string, number> = {
-  Shift: 0xffe1,
-  Control: 0xffe3,
-  Alt: 0xffe9,
-  Meta: 0xffe7,
-};
+const REMOTE_MODIFIER_RELEASES: TrackedKey[] = [
+  { code: "ControlLeft", keysym: 0xffe3 },
+  { code: "ControlRight", keysym: 0xffe4 },
+  { code: "AltLeft", keysym: 0xffe9 },
+  { code: "AltRight", keysym: 0xffea },
+  { code: "MetaLeft", keysym: 0xffe7 },
+  { code: "MetaRight", keysym: 0xffe8 },
+  { code: "ShiftLeft", keysym: 0xffe1 },
+  { code: "ShiftRight", keysym: 0xffe2 },
+];
 
 function isEditableTarget(target: EventTarget | null): target is HTMLElement {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
-}
-
-function getTrackedKey(event: KeyboardEvent): TrackedKey | null {
-  const code = event.code || null;
-  let keysym: number | null = null;
-
-  if (code && code in SPECIAL_KEYSYMS) {
-    keysym = SPECIAL_KEYSYMS[code];
-  } else if (event.key in MODIFIER_KEYSYMS) {
-    keysym = MODIFIER_KEYSYMS[event.key];
-  } else if (event.key in SPECIAL_KEYSYMS) {
-    keysym = SPECIAL_KEYSYMS[event.key];
-  } else if (event.key.length === 1) {
-    keysym = event.key.charCodeAt(0);
-  }
-
-  if (keysym === null) return null;
-  return { code, keysym };
 }
 
 export default function VNCApp() {
@@ -131,17 +73,27 @@ export default function VNCApp() {
     }
   }, []);
 
+  const releaseRemoteModifiers = useCallback(() => {
+    for (const key of REMOTE_MODIFIER_RELEASES) {
+      rfbRef.current?.sendKey(key.keysym, key.code, false);
+    }
+  }, []);
+
   const activateVncInput = useCallback(() => {
+    if (!vncFocusedRef.current) {
+      releaseRemoteModifiers();
+    }
     vncFocusedRef.current = true;
     focusVncSurface();
-  }, [focusVncSurface]);
+  }, [focusVncSurface, releaseRemoteModifiers]);
 
   const deactivateVncInput = useCallback(() => {
     if (!vncFocusedRef.current) return;
     vncFocusedRef.current = false;
     releaseTrackedKeys();
+    releaseRemoteModifiers();
     rfbRef.current?.blur();
-  }, [releaseTrackedKeys]);
+  }, [releaseRemoteModifiers, releaseTrackedKeys]);
 
   useEffect(() => {
     if (!vncInfo || !canvasContainerRef.current) return;
@@ -212,6 +164,13 @@ export default function VNCApp() {
       activateVncInput();
     };
 
+    const onWheelCapture = (event: WheelEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !container.contains(target)) return;
+      activateVncInput();
+      event.preventDefault();
+    };
+
     const onFocusOut = (e: PointerEvent | MouseEvent) => {
       const target = e.target as Node | null;
       if (!target) return;
@@ -224,6 +183,7 @@ export default function VNCApp() {
     container.addEventListener("pointerdown", onFocusIn, true);
     container.addEventListener("mouseenter", onFocusIn);
     container.addEventListener("focusin", onFocusIn);
+    container.addEventListener("wheel", onWheelCapture, { capture: true, passive: false });
     document.addEventListener("mousedown", onFocusOut, true);
     document.addEventListener("pointerdown", onFocusOut, true);
     window.addEventListener("blur", deactivateVncInput);
@@ -246,6 +206,7 @@ export default function VNCApp() {
       container.removeEventListener("pointerdown", onFocusIn, true);
       container.removeEventListener("mouseenter", onFocusIn);
       container.removeEventListener("focusin", onFocusIn);
+      container.removeEventListener("wheel", onWheelCapture, true);
       document.removeEventListener("mousedown", onFocusOut, true);
       document.removeEventListener("pointerdown", onFocusOut, true);
       window.removeEventListener("blur", deactivateVncInput);
@@ -254,9 +215,9 @@ export default function VNCApp() {
     };
   }, [activateVncInput, deactivateVncInput, focusVncSurface, status]);
 
-  // Keep noVNC's own keyboard handler as the single source of truth by routing
-  // active desktop keystrokes straight to the RFB connection when focus drifts
-  // outside the noVNC canvas.
+  // Let noVNC keep handling keyboard events whenever the canvas has focus.
+  // If a key event bubbles out to the window anyway, focus has drifted and we
+  // manually forward the same translated key data to the RFB connection.
   useEffect(() => {
     if (status !== "connected") return;
 
@@ -268,10 +229,10 @@ export default function VNCApp() {
       if (!inputCanvas) return;
       if (e.target === inputCanvas) return;
 
-      const trackedKey = getTrackedKey(e);
+      const trackedKey = getTrackedVncKey(e);
       if (!trackedKey) return;
 
-      const keyId = e.code || e.key;
+      const keyId = trackedKey.code || e.key;
       if (e.type === "keydown") {
         if (!e.repeat) pressedKeysRef.current.set(keyId, trackedKey);
       } else {

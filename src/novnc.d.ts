@@ -20,3 +20,11 @@ declare module "@novnc/novnc/lib/rfb" {
     compressionLevel: number;
   }
 }
+
+declare module "@novnc/novnc/lib/input/keysymdef" {
+  const keysymdef: {
+    lookup(codepoint: number): number;
+  };
+
+  export default keysymdef;
+}

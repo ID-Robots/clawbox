@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import VNCApp from "@/components/VNCApp";
+import { getTrackedVncKey } from "@/lib/vnc-keys";
 
 type RfbListener = (event?: Event | CustomEvent) => void;
 
@@ -103,6 +104,13 @@ describe("VNCApp", () => {
     expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA", false);
   });
 
+  it("maps non-Latin printable keys to X11 keysyms for VNC text entry", () => {
+    expect(getTrackedVncKey({ key: "\u044f", code: "KeyZ" })).toEqual({
+      code: "KeyZ",
+      keysym: 0x06d1,
+    });
+  });
+
   it("re-focuses the VNC canvas after the window content stops suppressing pointer events", async () => {
     render(
       <div data-chrome-window-content="true">
@@ -152,5 +160,58 @@ describe("VNCApp", () => {
     await waitFor(() => {
       expect(rfb.focus.mock.calls.length).toBeGreaterThan(focusCallsBeforeBlur);
     });
+  });
+
+  it("releases stale modifier keys when VNC focus is restored", async () => {
+    render(
+      <div data-chrome-window-content="true">
+        <VNCApp />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(mockRfbInstances).toHaveLength(1);
+    });
+
+    const rfb = mockRfbInstances[0];
+    rfb.emit("connect");
+
+    fireEvent.pointerDown(rfb.target);
+    fireEvent.keyDown(document.body, { key: "Control", code: "ControlLeft" });
+    fireEvent(window, new Event("blur"));
+
+    const sendKeyCallsBeforeRestore = rfb.sendKey.mock.calls.length;
+
+    fireEvent.mouseDown(rfb.target);
+
+    await waitFor(() => {
+      expect(rfb.sendKey.mock.calls.length).toBeGreaterThan(sendKeyCallsBeforeRestore);
+    });
+
+    expect(rfb.sendKey).toHaveBeenCalledWith(0xffe3, "ControlLeft", false);
+  });
+
+  it("prevents local wheel default so VNC scrolling is not hijacked by page zoom", async () => {
+    const { queryByText } = render(
+      <div data-chrome-window-content="true">
+        <VNCApp />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(mockRfbInstances).toHaveLength(1);
+    });
+
+    const rfb = mockRfbInstances[0];
+    rfb.emit("connect");
+
+    await waitFor(() => {
+      expect(queryByText("vnc.connectingDesktop")).not.toBeInTheDocument();
+    });
+
+    const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 120 });
+    rfb.canvas.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
   });
 });

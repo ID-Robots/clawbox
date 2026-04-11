@@ -72,6 +72,11 @@ interface ChatModelState {
   local: { available: boolean; label: string | null; model: string | null }
 }
 
+function getChatModelOptionText(option: ChatModelState['options'][number]) {
+  if (option.available && option.model) return option.model
+  return `${option.label} - Set up in Settings`
+}
+
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
 
@@ -128,7 +133,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
-  const [modelName, setModelName] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -298,9 +302,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!res.ok) return
       const data = await res.json() as ChatModelState
       setChatModelState(data)
-      if (data.activeLabel) setModelName(data.activeLabel)
     } catch {
-      // Ignore toggle-state refresh failures and keep the current model label.
+      // Ignore toggle-state refresh failures and keep the current option list.
     }
   }, [])
 
@@ -323,10 +326,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
-      if (config.model) {
-        const raw = config.model as string
-        setModelName(raw.startsWith('deepseek/') ? 'ClawBox AI' : raw.replace(/^.*\//, ''))
-      }
     } catch {
       // Auto-retry if gateway config not ready yet
       if (retryCountRef.current < MAX_RETRIES) {
@@ -656,12 +655,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
 
       setChatModelState(data as ChatModelState)
-      if ((data as ChatModelState).activeLabel) {
-        setModelName((data as ChatModelState).activeLabel || '')
-      }
       setMessages(prev => [...prev, {
         role: 'system',
-        text: `Switched chat to ${(data as ChatModelState).activeLabel || target.label}.`,
+        text: `Switched chat to ${target.model}.`,
         timestamp: Date.now(),
       }])
       retryCountRef.current = 0
@@ -821,7 +817,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
           display: 'flex',
-          alignItems: 'flex-start',
+          alignItems: 'center',
           gap: 10,
           padding: '8px 12px',
           background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
@@ -831,20 +827,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: chatModelState ? 5 : 0, minWidth: 0 }}>
-          {modelName && status === 'connected' && (
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
-              {modelName}
-            </span>
-          )}
+        <div style={{ display: 'flex', minWidth: 0 }}>
           {chatModelState && (
             <div
               onPointerDown={stopHeaderDrag}
-              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', maxWidth: 190 }}
+              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', maxWidth: 240 }}
             >
               <select
                 aria-label="Chat model"
-                value={chatModelState.activeOptionId ?? ''}
+                value={chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''}
                 onChange={(e) => handleChatSourceChange(e.target.value)}
                 onPointerDown={stopHeaderDrag}
                 disabled={switchingModel}
@@ -864,10 +855,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   cursor: switchingModel ? 'default' : 'pointer',
                 }}
               >
-                <option value="" disabled style={{ background: '#111827', color: '#fff' }}>Select AI</option>
                 {chatModelState.options.map((option) => (
                   <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
-                    {option.label}{option.available ? '' : ' - Set up in Settings'}
+                    {getChatModelOptionText(option)}
                   </option>
                 ))}
               </select>
@@ -889,16 +879,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (
-          <div style={{
-            width: 12, height: 12,
-            border: '2px solid rgba(249,115,22,0.3)',
-            borderTopColor: '#f97316',
-            borderRadius: '50%',
-            animation: 'spin 0.8s linear infinite',
-          }} />
+          <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <div style={{
+              width: 12, height: 12,
+              border: '2px solid rgba(249,115,22,0.3)',
+              borderTopColor: '#f97316',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+            }} />
+          </div>
         )}
         {status === 'connected' && !switchingModel && (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
+          <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
+          </div>
         )}
         {onOpenFull && (
           <button

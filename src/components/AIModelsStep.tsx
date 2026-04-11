@@ -254,22 +254,22 @@ function ClawAIOfferModal({
         role="dialog"
         aria-modal="true"
         aria-label="ClawBox AI token setup"
-        className="relative z-10 w-full max-w-[680px] overflow-hidden rounded-[28px] border border-fuchsia-400/20 bg-[linear-gradient(160deg,rgba(17,24,39,0.98),rgba(31,19,46,0.96)_65%,rgba(17,24,39,0.98))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)] sm:p-7"
+        className="relative z-10 w-full max-w-[680px] overflow-hidden rounded-[28px] border border-[var(--border-accent)] bg-[linear-gradient(160deg,rgba(17,24,39,0.985),rgba(23,32,48,0.97)_58%,rgba(13,17,23,0.985))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)] sm:p-7"
       >
         <button
           type="button"
           onClick={onClose}
           aria-label="Close offer"
-          className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/75 transition hover:bg-white/10 hover:text-white"
+          className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/75 transition hover:border-orange-400/30 hover:bg-orange-500/10 hover:text-orange-100"
         >
           <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>close</span>
         </button>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/90">
+          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/90">
             ClawBox AI
           </span>
-          <span className="inline-flex items-center rounded-full bg-fuchsia-400/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-fuchsia-200">
+          <span className="inline-flex items-center rounded-full border border-orange-400/25 bg-orange-500/12 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-orange-100">
             Portal token
           </span>
         </div>
@@ -281,7 +281,7 @@ function ClawAIOfferModal({
           Open the portal registration page, finish signup, generate a token there, and paste it here to connect ClawBox AI on this device.
         </p>
 
-        <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-5">
+        <div className="mt-6 rounded-2xl border border-[var(--border-subtle)] bg-[rgba(13,17,23,0.45)] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
           <div className="text-sm font-semibold text-white">How it works</div>
           <ol className="mt-4 space-y-3">
             {[
@@ -290,7 +290,7 @@ function ClawAIOfferModal({
               "Paste that token below to finish setup.",
             ].map((item, index) => (
               <li key={item} className="flex items-start gap-3 text-sm text-white/90">
-                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20 text-fuchsia-100">
+                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-orange-400/25 bg-orange-500/15 text-orange-100">
                   {index + 1}
                 </span>
                 <span>{item}</span>
@@ -307,7 +307,7 @@ function ClawAIOfferModal({
             href={PORTAL_REGISTER_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,#a855f7,#ec4899)] px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-orange-400/30 bg-orange-500/10 px-5 py-3 text-sm font-semibold text-orange-50 transition hover:bg-orange-500/18 hover:text-white shadow-[0_8px_30px_rgba(249,115,22,0.12)]"
           >
             Open registration
             <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
@@ -362,7 +362,7 @@ function ClawAIOfferModal({
             type="button"
             onClick={onConnectToken}
             disabled={saving}
-            className="inline-flex w-full items-center justify-center rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center rounded-xl btn-gradient px-5 py-3 text-sm font-semibold text-white transition disabled:opacity-50"
           >
             {saving ? "Connecting..." : getConnectButtonLabel("ClawBox AI")}
           </button>
