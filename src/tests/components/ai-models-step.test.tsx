@@ -67,9 +67,26 @@ vi.mock("@/hooks/useLlamaCppModels", () => ({
 
 describe("AIModelsStep variants", () => {
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ providers: [] }),
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return {
+          ok: true,
+          json: async () => ({ providers: [] }),
+        };
+      }
+
+      if (url.includes("/setup-api/ai-models/configure")) {
+        return {
+          ok: true,
+          json: async () => ({ success: true }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({}),
+      };
     }));
   });
 
@@ -100,7 +117,7 @@ describe("AIModelsStep variants", () => {
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
-    const { getByRole, getByText, queryByRole, queryByText } = render(
+    const { getByLabelText, getByRole, getByText, queryByRole, queryByText } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -117,18 +134,60 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Connect AI Provider")).toBeInTheDocument();
     expect(getByText("ClawBox AI")).toBeInTheDocument();
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
-    expect(getByText("Click continue to review the Max subscription offer or keep going with the free ClawBox AI tier.")).toBeInTheDocument();
-    expect(queryByRole("dialog", { name: /ClawBox AI subscription offer/i })).not.toBeInTheDocument();
+    expect(getByText("Recommended")).toBeInTheDocument();
+    expect(getByText("Portal token from your ClawBox AI account, plus extended warranty for ClawBox owners")).toBeInTheDocument();
+    expect(getByText("Register for ClawBox AI, generate a portal token, and paste it into the popup to connect this device.")).toBeInTheDocument();
+    expect(getByText("ClawBox owners also get an extended warranty benefit with ClawBox.")).toBeInTheDocument();
+    expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
 
     fireEvent.click(getByRole("button", { name: /Save/i }));
 
-    expect(getByRole("dialog", { name: /ClawBox AI subscription offer/i })).toBeInTheDocument();
-    expect(getByText("Upgrade your ClawBox before you continue")).toBeInTheDocument();
-    expect(getByText("Use the same email address as your ClawBox purchase to unlock the bonus.")).toBeInTheDocument();
-    expect(getByRole("link", { name: /View Max subscription/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/subscribe");
-    expect(getByRole("button", { name: /Continue with free ClawBox AI/i })).toBeInTheDocument();
+    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+    expect(getByText("Create your account and paste your ClawBox AI token")).toBeInTheDocument();
+    expect(getByRole("link", { name: /Open registration/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/register");
+    expect(getByLabelText(/ClawBox AI token/i, { selector: "input" })).toBeInTheDocument();
+    expect(getByRole("button", { name: /Connect to ClawBox AI/i })).toBeInTheDocument();
+    expect(getByText("ClawBox owners also get an extended warranty benefit when using ClawBox services.")).toBeInTheDocument();
     expect(queryByText("llama.cpp Local")).not.toBeInTheDocument();
     expect(queryByText("Ollama Local")).not.toBeInTheDocument();
+  });
+
+  it("submits the pasted ClawBox AI token to the configure route", async () => {
+    const { getByLabelText, getByRole } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    fireEvent.click(getByRole("button", { name: /Save/i }));
+    fireEvent.change(getByLabelText(/ClawBox AI token/i, { selector: "input" }), {
+      target: { value: "portal-token-123" },
+    });
+    fireEvent.click(getByRole("button", { name: /Connect to ClawBox AI/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/setup-api/ai-models/configure",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scope: "primary",
+            provider: "clawai",
+            apiKey: "portal-token-123",
+          }),
+          signal: expect.any(AbortSignal),
+        }),
+      );
+    });
   });
 
   it("selects the currently configured provider alias in settings mode", async () => {
@@ -151,5 +210,34 @@ describe("AIModelsStep variants", () => {
     await waitFor(() => {
       expect(getByRole("radio", { name: /OpenAI GPT/i })).toBeChecked();
     });
+  });
+
+  it("uses consistent setup button labels for provider connections", async () => {
+    const { getByRole } = render(
+      <AIModelsStep
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    expect(getByRole("button", { name: "Connect to ClawBox AI" })).toBeInTheDocument();
+
+    fireEvent.click(getByRole("radio", { name: /OpenAI GPT/i }));
+    expect(getByRole("button", { name: "Connect to OpenAI GPT" })).toBeInTheDocument();
+
+    fireEvent.click(getByRole("radio", { name: /Anthropic Claude/i }));
+    expect(getByRole("button", { name: "Connect to Anthropic Claude" })).toBeInTheDocument();
+
+    fireEvent.click(getByRole("radio", { name: /Google Gemini/i }));
+    expect(getByRole("button", { name: "Connect to Google Gemini" })).toBeInTheDocument();
+
+    fireEvent.click(getByRole("radio", { name: /OpenRouter/i }));
+    expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
 export const PORTAL_LOGIN_URL = "https://openclawhardware.dev/portal";
+export const PORTAL_REGISTER_URL = `${PORTAL_LOGIN_URL}/register`;
 export const PORTAL_SUBSCRIBE_URL = `${PORTAL_LOGIN_URL}/subscribe`;
 
 export const FREE_PLAN_FEATURES = [

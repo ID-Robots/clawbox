@@ -17,10 +17,7 @@ import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 import {
-  MAX_PLAN_BONUSES,
-  MAX_PLAN_FEATURES,
-  PORTAL_SUBSCRIBE_URL,
-  PURCHASE_EMAIL_NOTE,
+  PORTAL_REGISTER_URL,
 } from "@/lib/max-subscription";
 
 interface AIModelsStepProps {
@@ -66,6 +63,10 @@ function normalizeSelectableProvider(provider: string | null | undefined): strin
   if (normalized.startsWith("ollama")) return "ollama";
   if (normalized.startsWith("llamacpp")) return "llamacpp";
   return normalized;
+}
+
+function getConnectButtonLabel(providerName?: string | null) {
+  return providerName ? `Connect to ${providerName}` : "Connect";
 }
 
 const ButtonSpinner = (
@@ -222,13 +223,23 @@ function ConfiguringOverlay({
 function ClawAIOfferModal({
   open,
   onClose,
-  onContinueFree,
+  token,
+  onTokenChange,
+  onConnectToken,
+  showToken,
+  onToggleToken,
   saving,
+  errorMessage,
 }: {
   open: boolean;
   onClose: () => void;
-  onContinueFree: () => void;
+  token: string;
+  onTokenChange: (value: string) => void;
+  onConnectToken: () => void;
+  showToken: boolean;
+  onToggleToken: () => void;
   saving: boolean;
+  errorMessage: string | null;
 }) {
   if (!open) return null;
   if (typeof document === "undefined") return null;
@@ -242,7 +253,7 @@ function ClawAIOfferModal({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="ClawBox AI subscription offer"
+        aria-label="ClawBox AI token setup"
         className="relative z-10 w-full max-w-[680px] overflow-hidden rounded-[28px] border border-fuchsia-400/20 bg-[linear-gradient(160deg,rgba(17,24,39,0.98),rgba(31,19,46,0.96)_65%,rgba(17,24,39,0.98))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)] sm:p-7"
       >
         <button
@@ -256,70 +267,104 @@ function ClawAIOfferModal({
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/90">
-            ClawBox AI Max
+            ClawBox AI
           </span>
           <span className="inline-flex items-center rounded-full bg-fuchsia-400/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-fuchsia-200">
-            Powered by DeepSeek
+            Portal token
           </span>
         </div>
 
         <h2 className="mt-4 max-w-xl text-3xl font-bold leading-tight text-white sm:text-4xl">
-          Upgrade your ClawBox before you continue
+          Create your account and paste your ClawBox AI token
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/75 sm:text-base">
-          Max gives your ClawBox the highest usage tier, top priority, and real human support, while ClawBox owners can unlock bonus perks with the purchase email.
+          Open the portal registration page, finish signup, generate a token there, and paste it here to connect ClawBox AI on this device.
         </p>
 
-        <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-          <div className="rounded-2xl border border-fuchsia-400/20 bg-black/20 p-5">
-            <div className="text-sm font-semibold text-fuchsia-100">What Max includes</div>
-            <ul className="mt-4 space-y-3">
-              {MAX_PLAN_FEATURES.map((item) => (
-                <li key={item} className="flex items-start gap-3 text-sm text-white/90">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20 text-fuchsia-100">
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>check_circle</span>
-                  </span>
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="rounded-2xl border border-orange-400/20 bg-orange-500/10 p-5">
-            <div className="text-sm font-semibold text-orange-100">ClawBox owner bonus</div>
-            <ul className="mt-4 space-y-3">
-              {MAX_PLAN_BONUSES.map((item) => (
-                <li key={item} className="flex items-start gap-3 text-sm text-orange-50/95">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-100">
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>redeem</span>
-                  </span>
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-xs leading-relaxed text-white/75">
-              {PURCHASE_EMAIL_NOTE}
-            </div>
+        <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-5">
+          <div className="text-sm font-semibold text-white">How it works</div>
+          <ol className="mt-4 space-y-3">
+            {[
+              "Open the ClawBox AI registration page in a new tab.",
+              "Create your account and generate a portal token.",
+              "Paste that token below to finish setup.",
+            ].map((item, index) => (
+              <li key={item} className="flex items-start gap-3 text-sm text-white/90">
+                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20 text-fuchsia-100">
+                  {index + 1}
+                </span>
+                <span>{item}</span>
+              </li>
+            ))}
+          </ol>
+          <div className="mt-4 rounded-xl border border-orange-400/20 bg-orange-500/10 px-4 py-3 text-xs leading-relaxed text-orange-50/95">
+            ClawBox owners also get an extended warranty benefit when using ClawBox services.
           </div>
         </div>
 
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+        <div className="mt-6">
           <a
-            href={PORTAL_SUBSCRIBE_URL}
+            href={PORTAL_REGISTER_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,#a855f7,#ec4899)] px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,#a855f7,#ec4899)] px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
           >
-            View Max subscription
+            Open registration
             <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
           </a>
+        </div>
+
+        <div className="mt-6">
+          <label
+            htmlFor="clawai-portal-token"
+            className="block text-xs font-semibold text-white/80"
+          >
+            ClawBox AI token
+          </label>
+          <div className="relative mt-2">
+            <input
+              id="clawai-portal-token"
+              type={showToken ? "text" : "password"}
+              value={token}
+              onChange={(event) => onTokenChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onConnectToken();
+              }}
+              placeholder="Paste your portal token here"
+              spellCheck={false}
+              autoComplete="off"
+              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 pr-12 text-sm text-white outline-none transition focus:border-[var(--coral-bright)] placeholder:text-white/35"
+            />
+            <button
+              type="button"
+              onClick={onToggleToken}
+              aria-label={showToken ? "Hide token" : "Show token"}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-white/55 transition hover:text-white"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
+                {showToken ? "visibility_off" : "visibility"}
+              </span>
+            </button>
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-white/60">
+            After you register, generate a token in the portal and paste it here. We&apos;ll use it to configure ClawBox AI for this device.
+          </p>
+        </div>
+
+        {errorMessage && (
+          <div className="mt-4">
+            <StatusMessage type="error" message={errorMessage} />
+          </div>
+        )}
+
+        <div className="mt-6">
           <button
             type="button"
-            onClick={onContinueFree}
+            onClick={onConnectToken}
             disabled={saving}
-            className="inline-flex flex-1 items-center justify-center rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
           >
-            {saving ? "Connecting..." : "Continue with free ClawBox AI"}
+            {saving ? "Connecting..." : getConnectButtonLabel("ClawBox AI")}
           </button>
         </div>
       </div>
@@ -360,13 +405,13 @@ const PROVIDERS: Provider[] = [
   {
     id: "clawai",
     name: "ClawBox AI",
-    description: "Most affordable — start for free",
+    description: "Register once, then paste your token",
     authOptions: [
       {
         mode: "local" as AuthMode,
         label: "Free",
         placeholder: "",
-        hint: "Pre-configured and ready to use. No API key or account needed.",
+        hint: "Create a portal account, generate a token, and use it here.",
       },
     ],
   },
@@ -824,18 +869,18 @@ export default function AIModelsStep({
 
   const saveClawAI = useCallback(async () => {
     setSelectedProvider("clawai");
-    await saveProviderConfig({ provider: "clawai" });
-  }, [saveProviderConfig]);
+    await saveProviderConfig({ provider: "clawai", apiKey: apiKey.trim() });
+  }, [apiKey, saveProviderConfig]);
 
   const handleClawAIPrimaryAction = useCallback(() => {
     setStatus(null);
     setShowClawAIOffer(true);
   }, []);
 
-  const handleClawAIContinueFree = useCallback(async () => {
-    setShowClawAIOffer(false);
+  const handleClawAIConnectToken = useCallback(async () => {
+    if (!apiKey.trim()) return showError(t("ai.enterKey"));
     await saveClawAI();
-  }, [saveClawAI]);
+  }, [apiKey, saveClawAI, showError, t]);
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
@@ -1045,7 +1090,7 @@ export default function AIModelsStep({
   };
 
   const providerDesc: Record<string, string> = {
-    clawai: t("ai.clawaiDesc"),
+    clawai: "Portal token from your ClawBox AI account, plus extended warranty for ClawBox owners",
     anthropic: t("ai.claudeModels"),
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
@@ -1103,6 +1148,7 @@ export default function AIModelsStep({
   };
   const DEFAULT_OAUTH_PROVIDER = "anthropic";
   const currentOAuth = oauthLabels[selectedProvider ?? DEFAULT_OAUTH_PROVIDER] ?? oauthLabels[DEFAULT_OAUTH_PROVIDER];
+  const selectedConnectLabel = getConnectButtonLabel(selected?.name);
 
   // --- Render helpers ---
 
@@ -1118,7 +1164,7 @@ export default function AIModelsStep({
           onClick={startDeviceAuth}
           className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
         >
-          {currentDevice.button}
+          {embedded ? currentDevice.button : selectedConnectLabel}
         </button>
       ) : (
         <div>
@@ -1198,7 +1244,7 @@ export default function AIModelsStep({
           onClick={startOAuth}
           className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
         >
-          {currentOAuth.button}
+          {embedded ? currentOAuth.button : selectedConnectLabel}
         </button>
       ) : (
         <div>
@@ -1277,8 +1323,16 @@ export default function AIModelsStep({
         <ClawAIOfferModal
           open={showClawAIOffer && !configuringState}
           onClose={() => setShowClawAIOffer(false)}
-          onContinueFree={handleClawAIContinueFree}
+          token={apiKey}
+          onTokenChange={(value) => {
+            setApiKey(value);
+            if (status?.type === "error") setStatus(null);
+          }}
+          onConnectToken={handleClawAIConnectToken}
+          showToken={showKey}
+          onToggleToken={() => setShowKey((value) => !value)}
           saving={saving}
+          errorMessage={status?.type === "error" ? status.message : null}
         />
         {configuringState && (
           <ConfiguringOverlay
@@ -1335,6 +1389,11 @@ export default function AIModelsStep({
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
+                    {provider.id === "clawai" && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
+                        {t("recommended")}
+                      </span>
+                    )}
                   </span>
                   <span className="block text-xs text-[var(--text-muted)]">
                     {providerDesc[provider.id] ?? provider.description}
@@ -1479,10 +1538,13 @@ export default function AIModelsStep({
         {selected?.id === "clawai" && (
           <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
             <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
-              {t("ai.clawaiHint")}
+              Register for ClawBox AI, generate a portal token, and paste it into the popup to connect this device.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
-              Click continue to review the Max subscription offer or keep going with the free ClawBox AI tier.
+              Use the button below to open the registration flow, then come back here and paste the token you generated.
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-orange-200/90">
+              ClawBox owners also get an extended warranty benefit with ClawBox.
             </p>
           </div>
         )}
@@ -1500,7 +1562,7 @@ export default function AIModelsStep({
               className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
             >
               {saving && ButtonSpinner}
-              {saving ? t("ai.configuring") : embedded ? t("save") : t("ai.useClawai")}
+              {saving ? t("ai.configuring") : embedded ? t("save") : selectedConnectLabel}
             </button>
           ) : selected?.id === "ollama" ? (
             null /* Ollama has its own buttons above */
@@ -1519,7 +1581,7 @@ export default function AIModelsStep({
                   className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
                 >
                   {exchanging && ButtonSpinner}
-                  {exchanging ? t("connecting") : embedded ? t("save") : t("ai.saveAndContinue")}
+                  {exchanging ? t("connecting") : embedded ? t("save") : selectedConnectLabel}
                 </button>
               )
             )
@@ -1530,7 +1592,7 @@ export default function AIModelsStep({
               disabled={saving || !selectedProvider}
               className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
             >
-              {saving ? t("saving") : embedded ? t("save") : t("ai.saveAndContinue")}
+              {saving ? t("saving") : embedded ? t("save") : selectedConnectLabel}
             </button>
           )}
         </div>

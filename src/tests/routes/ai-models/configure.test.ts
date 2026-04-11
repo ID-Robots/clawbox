@@ -87,7 +87,6 @@ describe("POST /setup-api/ai-models/configure", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    process.env.CLAWBOX_AI_API_KEY = "test-clawbox-ai-key";
 
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
@@ -106,7 +105,6 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_AI_API_KEY;
     vi.clearAllMocks();
   });
 
@@ -178,14 +176,44 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
   });
 
-  it("configures ClawBox AI without a user-supplied API key", async () => {
+  it("returns 400 for ClawBox AI when no token is provided or stored", async () => {
     const res = await configurePost(jsonRequest({
       provider: "clawai",
     }));
     const body = await res.json();
 
+    expect(res.status).toBe(400);
+    expect(body.error).toBe("ClawBox AI token is required");
+  });
+
+  it("uses a user-supplied ClawBox AI token when provided", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "portal-token-123",
+    }));
+    const body = await res.json();
+
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["deepseek:default"]).toEqual(
+      expect.objectContaining({
+        type: "api_key",
+        provider: "deepseek",
+        key: "portal-token-123",
+      }),
+    );
+
+    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    expect(providerDef.apiKey).toBe("portal-token-123");
+
+    expect(mockSetMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clawai_token: "portal-token-123",
+      }),
+    );
   });
 
   it("configures ollama without apiKey", async () => {
@@ -350,7 +378,11 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(writtenContent.profiles["llamacpp:default"].key).toBe("llamacpp-local");
   });
 
-  it("configures ClawBox AI as a fallback model when the device key is present", async () => {
+  it("configures ClawBox AI as a fallback model when a stored user token is present", async () => {
+    mockGetAll.mockResolvedValue({
+      clawai_token: "stored-fallback-token",
+    });
+
     await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-test",
@@ -365,7 +397,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect.objectContaining({
         type: "api_key",
         provider: "deepseek",
-        key: "test-clawbox-ai-key",
+        key: "stored-fallback-token",
       })
     );
   });
@@ -419,11 +451,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
-  it("configures ClawBox AI with the default proxy token when no device key is set", async () => {
-    delete process.env.CLAWBOX_AI_API_KEY;
-    vi.resetModules();
-    const mod = await import("@/app/setup-api/ai-models/configure/route");
-    configurePost = mod.POST;
+  it("uses a stored ClawBox AI token when no new token is supplied", async () => {
+    mockGetAll.mockResolvedValue({
+      clawai_token: "stored-portal-token",
+    });
 
     const res = await configurePost(jsonRequest({
       provider: "clawai",
@@ -437,7 +468,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://openclawhardware.dev/api/ai");
-    expect(providerDef.apiKey).toBe("claw-d3eps33k-v1-2026");
+    expect(providerDef.apiKey).toBe("stored-portal-token");
   });
 
   it("restarts gateway after configuration", async () => {
