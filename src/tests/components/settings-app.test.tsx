@@ -106,6 +106,7 @@ describe("SettingsApp factory reset overlay", () => {
           model: null,
         });
       }
+      if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
       if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
       if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
       if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });
@@ -141,5 +142,19 @@ describe("SettingsApp factory reset overlay", () => {
     expect(within(overlay).getAllByText("settings.erasingSettings")).toHaveLength(2);
     expect(within(overlay).getByText("settings.waitingOnline")).toBeInTheDocument();
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
+  });
+
+  it("opens the ClawBox AI offer when the desktop deep-link event is fired", async () => {
+    const pendingWindow = window as Window & {
+      __clawboxPendingSettingsSection?: string;
+      __clawboxPendingClawAiOffer?: boolean;
+    };
+    pendingWindow.__clawboxPendingSettingsSection = "ai";
+    pendingWindow.__clawboxPendingClawAiOffer = true;
+
+    render(<SettingsApp ui={defaultUi} />);
+
+    expect(await screen.findByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+    expect(screen.getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
   });
 });

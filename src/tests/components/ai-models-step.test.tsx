@@ -24,8 +24,10 @@ vi.mock("@/lib/i18n", () => ({
         "ai.runLocally": "Run AI models locally on device",
         "ai.showMore": "Show more providers...",
         "ai.skipClawai": "Skip — set up ClawBox AI with a portal token",
+        skip: "Skip",
         recommended: "Recommended",
-        save: "Save",
+        connecting: "Connecting...",
+        "settings.connect": "Connect",
         "settings.aiProvider": "AI Provider",
       };
       return translations[key] ?? key;
@@ -57,6 +59,7 @@ vi.mock("@/hooks/useOllamaModels", () => ({
 vi.mock("@/hooks/useLlamaCppModels", () => ({
   useLlamaCppModels: () => ({
     llamaCppRunning: false,
+    llamaCppInstalled: true,
     llamaCppModels: [],
     llamaCppEndpoint: "http://127.0.0.1:8080/v1",
     llamaCppSaving: false,
@@ -164,21 +167,41 @@ describe("AIModelsStep variants", () => {
     expect(getByText("ClawBox AI")).toBeInTheDocument();
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
-    expect(getByText("Portal token from your ClawBox AI account, plus extended warranty for ClawBox owners")).toBeInTheDocument();
-    expect(getByText("Register for ClawBox AI, generate a portal token, and paste it into the popup to connect this device.")).toBeInTheDocument();
-    expect(getByText("ClawBox owners also get an extended warranty benefit with ClawBox.")).toBeInTheDocument();
+    expect(getByText("Recommended ClawBox AI service with simple token setup and owner benefits")).toBeInTheDocument();
+    expect(getByText("ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.")).toBeInTheDocument();
+    expect(getByText("ClawBox owners also get extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
     expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
 
-    fireEvent.click(getByRole("button", { name: /Save/i }));
+    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
 
     expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
-    expect(getByText("Create your account and paste your ClawBox AI token")).toBeInTheDocument();
-    expect(getByRole("link", { name: /Open registration/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/register");
-    expect(getByLabelText(/ClawBox AI token/i, { selector: "input" })).toBeInTheDocument();
+    expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
+    expect(getByRole("link", { name: /Open portal/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/register");
+    expect(getByLabelText(/Paste your portal token/i, { selector: "input" })).toBeInTheDocument();
     expect(getByRole("button", { name: /Connect to ClawBox AI/i })).toBeInTheDocument();
-    expect(getByText("ClawBox owners also get an extended warranty benefit when using ClawBox services.")).toBeInTheDocument();
+    expect(getByText("ClawBox owners keep access to extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
     expect(queryByText("llama.cpp Local")).not.toBeInTheDocument();
     expect(queryByText("Ollama Local")).not.toBeInTheDocument();
+  });
+
+  it("opens the ClawBox AI popup when requested externally", async () => {
+    const { getByRole, getByText } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="openai"
+        openClawAIOfferRequest={1}
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+    expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
   });
 
   it("submits the pasted ClawBox AI token to the configure route", async () => {
@@ -196,8 +219,8 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("button", { name: /Save/i }));
-    fireEvent.change(getByLabelText(/ClawBox AI token/i, { selector: "input" }), {
+    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
+    fireEvent.change(getByLabelText(/Paste your portal token/i, { selector: "input" }), {
       target: { value: "portal-token-123" },
     });
     fireEvent.click(getByRole("button", { name: /Connect to ClawBox AI/i }));
@@ -270,14 +293,16 @@ describe("AIModelsStep variants", () => {
     expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
   });
 
-  it("uses the skip action to switch back to ClawBox AI setup without posting empty credentials", async () => {
+  it("uses the skip action to continue setup without posting empty credentials", async () => {
     const fetchMock = vi.mocked(fetch);
+    const onNext = vi.fn();
     const { getByRole, queryByRole } = render(
       <AIModelsStep
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
         defaultProviderId="clawai"
         title="Connect AI Provider"
         description="Primary provider"
+        onNext={onNext}
       />,
     );
 
@@ -290,7 +315,8 @@ describe("AIModelsStep variants", () => {
 
     fireEvent.click(getByRole("button", { name: /Skip/i }));
 
-    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
     ).toBe(false);

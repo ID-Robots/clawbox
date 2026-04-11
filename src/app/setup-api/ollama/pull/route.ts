@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
 
-const OLLAMA_BASE = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+const OLLAMA_BASE = getOllamaBaseUrl();
 
 export async function POST(request: Request) {
   let body: { model?: string };
@@ -23,6 +24,8 @@ export async function POST(request: Request) {
   }
 
   try {
+    await ensureLocalAiReady("ollama");
+
     const ollamaRes = await fetch(`${OLLAMA_BASE}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

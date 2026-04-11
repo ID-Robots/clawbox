@@ -23,16 +23,16 @@ test("launcher search and context menus can pin apps and add desktop shortcuts",
   await expect(browserButton).toBeVisible();
 
   await browserButton.click({ button: "right", force: true });
-  await page.getByRole("button", { name: "Pin to Shelf" }).click();
+  await page.getByRole("button", { name: /Pin to shelf/i }).click();
   await expect(page.getByTestId("shelf-app-browser")).toBeVisible();
 
   await browserButton.click({ button: "right", force: true });
-  await page.getByRole("button", { name: "Add to Desktop" }).click();
+  await page.getByRole("button", { name: /Add to desktop/i }).click();
 
   await page.mouse.click(20, 20);
   await expect(page.getByText("Browser").first()).toBeVisible();
 
   await page.getByTestId("shelf-app-browser").click({ button: "right" });
-  await page.getByRole("button", { name: "Unpin From Shelf" }).click();
+  await page.getByRole("button", { name: /Unpin from shelf/i }).click();
   await expect(page.getByTestId("shelf-app-browser")).toHaveCount(0);
 });

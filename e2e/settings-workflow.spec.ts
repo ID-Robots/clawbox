@@ -43,7 +43,16 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
-  await settingsWindow.getByRole("button", { name: "Save" }).click();
+  await settingsWindow.getByRole("button", { name: /^Connect$/ }).click();
+  const clawAiDialog = page.getByRole("dialog", { name: "ClawBox AI token setup" });
+  await expect(clawAiDialog).toBeVisible();
+  const clawAiTokenInput = clawAiDialog.getByPlaceholder("Paste your portal token here");
+  await clawAiTokenInput.fill("cbx-test-token");
+  await clawAiTokenInput.press("Enter");
+  await expect(settingsWindow.getByText("deepseek-r1")).toBeVisible();
+  await clawAiDialog.getByRole("button", { name: "Close offer" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
   await expect(settingsWindow.getByText("ClawBox AI").first()).toBeVisible();
   await expect(settingsWindow.getByText("llama.cpp Local")).toHaveCount(0);
 
@@ -57,7 +66,7 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
 
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();
   await settingsWindow.locator("#settings-tg-token").fill("123456789:ABCdefGHI");
-  await settingsWindow.getByRole("button", { name: "Save" }).click();
+  await settingsWindow.getByRole("button", { name: /Connect$/ }).click();
   await expect(settingsWindow.getByText("Bot Connected")).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "System" }).click();

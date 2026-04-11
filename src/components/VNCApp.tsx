@@ -16,6 +16,7 @@ const REMOTE_MODIFIER_RELEASES: TrackedKey[] = [
   { code: "ShiftLeft", keysym: 0xffe1 },
   { code: "ShiftRight", keysym: 0xffe2 },
 ];
+const REMOTE_MODIFIER_CODES = new Set(REMOTE_MODIFIER_RELEASES.map((key) => key.code));
 
 function isEditableTarget(target: EventTarget | null): target is HTMLElement {
   if (!(target instanceof HTMLElement)) return false;
@@ -215,40 +216,76 @@ export default function VNCApp() {
     };
   }, [activateVncInput, deactivateVncInput, focusVncSurface, status]);
 
-  // Let noVNC keep handling keyboard events whenever the canvas has focus.
-  // If a key event bubbles out to the window anyway, focus has drifted and we
-  // manually forward the same translated key data to the RFB connection.
+  // Let noVNC handle keys directly on its canvas. If a keydown bubbles out to
+  // the document anyway, focus has drifted or the browser never handed it to
+  // noVNC, so we manually forward it. Printable and navigation keys are sent
+  // as a full press+release on keydown so missing keyup events can't wedge the
+  // remote keyboard state; only true modifiers stay held until keyup/blur.
   useEffect(() => {
     if (status !== "connected") return;
 
-    const handler = (e: KeyboardEvent) => {
+    const handleKeyDown = (e: KeyboardEvent) => {
       if (!vncFocusedRef.current || !rfbRef.current) return;
       if (isEditableTarget(e.target)) return;
 
-      const inputCanvas = getInputCanvas();
-      if (!inputCanvas) return;
-      if (e.target === inputCanvas) return;
+      if (!getInputCanvas()) return;
+      if (e.defaultPrevented) return;
 
       const trackedKey = getTrackedVncKey(e);
       if (!trackedKey) return;
 
       const keyId = trackedKey.code || e.key;
-      if (e.type === "keydown") {
-        if (!e.repeat) pressedKeysRef.current.set(keyId, trackedKey);
-      } else {
-        pressedKeysRef.current.delete(keyId);
-      }
-
       e.preventDefault();
       e.stopPropagation();
-      rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code, e.type === "keydown");
+
+      if (trackedKey.code && REMOTE_MODIFIER_CODES.has(trackedKey.code)) {
+        if (!e.repeat) pressedKeysRef.current.set(keyId, trackedKey);
+        rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code, true);
+        return;
+      }
+
+      rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code);
     };
 
-    window.addEventListener("keydown", handler, true);
-    window.addEventListener("keyup", handler, true);
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (!vncFocusedRef.current || !rfbRef.current) return;
+      if (isEditableTarget(e.target)) return;
+
+      const trackedKey = getTrackedVncKey(e);
+      if (!trackedKey) return;
+
+      const keyId = trackedKey.code || e.key;
+      if (!pressedKeysRef.current.has(keyId)) return;
+
+      pressedKeysRef.current.delete(keyId);
+      rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code, false);
+      return;
+    };
+
+    const handleCanvasKeyUp = (e: KeyboardEvent) => {
+      if (!vncFocusedRef.current || !rfbRef.current) return;
+      if (isEditableTarget(e.target)) return;
+
+      const inputCanvas = getInputCanvas();
+      if (!inputCanvas || e.target !== inputCanvas) return;
+
+      const trackedKey = getTrackedVncKey(e);
+      if (!trackedKey) return;
+      if (trackedKey.code && REMOTE_MODIFIER_CODES.has(trackedKey.code)) return;
+
+      // Some browsers let noVNC consume keydown on the canvas but lose the
+      // matching keyup as focus shifts around the surrounding window chrome.
+      // A redundant non-modifier release is harmless and prevents sticky keys.
+      rfbRef.current.sendKey(trackedKey.keysym, trackedKey.code, false);
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp, true);
+    document.addEventListener("keyup", handleCanvasKeyUp, true);
     return () => {
-      window.removeEventListener("keydown", handler, true);
-      window.removeEventListener("keyup", handler, true);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp, true);
+      document.removeEventListener("keyup", handleCanvasKeyUp, true);
     };
   }, [getInputCanvas, status]);
 

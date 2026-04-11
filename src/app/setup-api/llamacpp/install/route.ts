@@ -5,10 +5,12 @@ import fs from "fs/promises";
 import { NextResponse } from "next/server";
 import { promisify } from "util";
 import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import {
   clearLlamaCppPid,
   ensureLlamaCppRuntimeDir,
+  getLlamaCppProvisioningStatus,
   getLlamaCppLaunchSpec,
   isLlamaCppPidRunning,
   queryLlamaCppModels,
@@ -21,7 +23,7 @@ const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
 const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
-const LLAMACPP_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
+const LLAMACPP_INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
 
 function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
   controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
@@ -41,7 +43,8 @@ function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
   if (!logLine) return false;
   const normalized = logLine.toLowerCase();
   return normalized.includes("[llamacpp] missing hugging face cli")
-    || normalized.includes("[llamacpp] missing llama-server");
+    || normalized.includes("[llamacpp] missing llama-server")
+    || normalized.includes("[llamacpp] missing local model");
 }
 
 async function readLlamaCppInstallFailure(): Promise<string | null> {
@@ -140,7 +143,7 @@ export async function POST(request: Request) {
     async start(controller) {
       try {
         await ensureLlamaCppRuntimeDir();
-        emit(controller, { status: `Preparing llama.cpp for ${alias}...` });
+        emit(controller, { status: "Checking local Gemma 4 runtime..." });
 
         const existingModels = await queryLlamaCppModels(spec.baseUrl);
         if (existingModels.includes(alias)) {
@@ -156,6 +159,27 @@ export async function POST(request: Request) {
           return;
         }
 
+        let provisioning = await getLlamaCppProvisioningStatus(alias);
+        if (!provisioning.installed) {
+          emit(controller, {
+            status: provisioning.binaryAvailable
+              ? "Installing Gemma 4 for offline use..."
+              : "Installing llama.cpp and Gemma 4 for offline use...",
+          });
+          const repaired = await repairLlamaCppRuntime();
+          if (!repaired.ok) {
+            emit(controller, { error: repaired.error || "Failed to provision the local Gemma 4 runtime" });
+            controller.close();
+            return;
+          }
+          provisioning = await getLlamaCppProvisioningStatus(alias);
+          if (!provisioning.installed) {
+            emit(controller, { error: "llama.cpp install finished, but the local Gemma 4 runtime is still incomplete." });
+            controller.close();
+            return;
+          }
+        }
+
         let pid = await readLlamaCppPid(spec.pidPath);
         if (pid && !isLlamaCppPidRunning(pid)) {
           await clearLlamaCppPid(spec.pidPath);
@@ -163,6 +187,7 @@ export async function POST(request: Request) {
         }
         let attemptedRuntimeRepair = false;
         let waitingForExistingStart = !!pid;
+        let startedRuntimeHere = false;
 
         const deadline = Date.now() + spec.startupTimeoutMs;
         let lastLogLine = "";
@@ -172,7 +197,9 @@ export async function POST(request: Request) {
             emit(controller, {
               status: attemptedRuntimeRepair
                 ? `Restarting llama.cpp after repairing the local runtime...`
-                : `Starting llama.cpp and downloading ${alias}...`,
+                : provisioning.installed
+                  ? `Starting preinstalled Gemma 4...`
+                  : `Starting llama.cpp and downloading ${alias}...`,
             });
             await fs.writeFile(spec.logPath, "", "utf-8").catch(() => {});
             const child = startLlamaCpp(spec, alias);
@@ -187,6 +214,7 @@ export async function POST(request: Request) {
             await writeLlamaCppPid(child.pid, spec.pidPath);
             pid = child.pid;
             waitingForExistingStart = false;
+            startedRuntimeHere = true;
             lastLogLine = "";
           } else if (waitingForExistingStart) {
             emit(controller, { status: "llama.cpp is already starting. Waiting for it to become ready..." });
@@ -202,7 +230,17 @@ export async function POST(request: Request) {
               controller.close();
               return;
             }
-            emit(controller, { success: true, model: alias, status: `${alias} is installed, running, and configured.` });
+            if (startedRuntimeHere) {
+              emit(controller, { status: "Gemma 4 is configured. Returning it to standby to free RAM..." });
+              await stopLocalAiProvider("llamacpp").catch(() => {});
+              emit(controller, {
+                success: true,
+                model: alias,
+                status: `${alias} is installed and configured. It will wake automatically when OpenClaw needs it.`,
+              });
+            } else {
+              emit(controller, { success: true, model: alias, status: `${alias} is installed, running, and configured.` });
+            }
             controller.close();
             return;
           }

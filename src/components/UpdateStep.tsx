@@ -299,15 +299,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 >
                   {t("update.startUpdate")}
                 </button>
-                {isDowngrade && (
-                  <button
-                    type="button"
-                    onClick={onNext}
-                    className="px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-                  >
-                    {t("skip")}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={onNext}
+                  className="px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                >
+                  {isDowngrade ? t("skip") : t("update.skipUpdates")}
+                </button>
               </>
             )}
           </div>

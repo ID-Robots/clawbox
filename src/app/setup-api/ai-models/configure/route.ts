@@ -14,10 +14,11 @@ import {
 } from "@/lib/openclaw-config";
 import {
   getDefaultLlamaCppModel,
-  getLlamaCppBaseUrl,
   getLlamaCppContextWindow,
   getLlamaCppMaxTokens,
+  getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
+import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
@@ -345,6 +346,7 @@ export async function POST(request: Request) {
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
       ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
+    const configStore = await getAll().catch(() => ({} as Awaited<ReturnType<typeof getAll>>));
     const clawboxAiToken = isClawAI
       ? await getConfiguredClawboxAiToken(normalizedApiKey)
       : "";
@@ -357,6 +359,7 @@ export async function POST(request: Request) {
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+    const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -433,13 +436,16 @@ export async function POST(request: Request) {
         : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
       "--json",
     ]);
-    if (!isLocalScope) {
+    if (!isLocalScope || shouldPromoteLocalToPrimary) {
       await runCommand(OPENCLAW_BIN, [
         "config",
         "set",
         "agents.defaults.model.primary",
         config.defaultModel,
       ]);
+      if (shouldPromoteLocalToPrimary) {
+        console.log(`[AI Config] Promoted local model to active primary: ${config.defaultModel}`);
+      }
     }
     await runCommand(OPENCLAW_BIN, [
       "config",
@@ -501,7 +507,7 @@ export async function POST(request: Request) {
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
-        baseUrl: "http://127.0.0.1:11434",
+        baseUrl: getLocalAiProxyBaseUrl("ollama"),
         api: "ollama",
         apiKey: "ollama-local",
         models: [{
@@ -520,7 +526,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
-      await ensureFallbackModel(isLocalScope ? null : config.defaultModel, config.defaultModel);
+      await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
         await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
@@ -532,7 +538,7 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
       const providerDef = JSON.stringify({
-        baseUrl: getLlamaCppBaseUrl(),
+        baseUrl: getLlamaCppProxyBaseUrl(),
         api: "openai-completions",
         apiKey: "llamacpp-local",
         models: [{
@@ -551,7 +557,7 @@ export async function POST(request: Request) {
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
-      await ensureFallbackModel(isLocalScope ? null : config.defaultModel, config.defaultModel);
+      await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers

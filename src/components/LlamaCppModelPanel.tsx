@@ -6,6 +6,7 @@ import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 
 interface LlamaCppModelPanelProps {
   llamaCppRunning: boolean;
+  llamaCppInstalled: boolean;
   llamaCppSaving: string | false;
   llamaCppProgress?: string | null;
   selectedLlamaCppModel: string;
@@ -22,6 +23,7 @@ const DEFAULT_SPINNER = (
 
 export default function LlamaCppModelPanel({
   llamaCppRunning,
+  llamaCppInstalled,
   llamaCppSaving,
   llamaCppProgress,
   selectedLlamaCppModel,
@@ -52,7 +54,9 @@ export default function LlamaCppModelPanel({
         <p className="mt-3 text-sm text-[var(--text-secondary)] leading-relaxed">
           {llamaCppRunning
             ? "Gemma 4 is enabled and ready to use."
-            : "Enable Gemma 4 to give ClawBox a local model that keeps working even when cloud providers are unavailable."}
+            : llamaCppInstalled
+              ? "Gemma 4 is already installed on this device. Enable it to start the local runtime and keep ClawBox working offline."
+              : "Enable Gemma 4 to install a local model that keeps ClawBox working even when cloud providers are unavailable."}
         </p>
       </div>
 

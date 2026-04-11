@@ -3,6 +3,7 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { NextResponse } from "next/server";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 
 vi.mock("child_process", () => ({
   spawn: vi.fn(),
@@ -24,9 +25,14 @@ vi.mock("@/app/setup-api/ai-models/configure/route", () => ({
   POST: vi.fn(),
 }));
 
+vi.mock("@/lib/local-ai-runtime", () => ({
+  stopLocalAiProvider: vi.fn(),
+}));
+
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fsp);
+const mockStopLocalAiProvider = vi.mocked(stopLocalAiProvider);
 let mockConfigureAiModel: ReturnType<typeof vi.fn>;
 
 function jsonRequest(body: unknown): Request {
@@ -105,7 +111,16 @@ describe("POST /setup-api/llamacpp/install", () => {
     mockFs.writeFile.mockResolvedValue();
     mockFs.unlink.mockResolvedValue(undefined);
     mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
-    mockFs.stat.mockRejectedValue(new Error("ENOENT"));
+    mockFs.stat.mockImplementation(async (target: string) => {
+      const normalized = String(target);
+      if (
+        normalized === "/usr/local/bin/llama-server"
+        || normalized.endsWith("gemma-4-e2b-it-edited-q4_0.gguf")
+      ) {
+        return { size: 1 } as never;
+      }
+      throw new Error("ENOENT");
+    });
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
       journalctl: { stdout: "", stderr: "" },
@@ -113,6 +128,7 @@ describe("POST /setup-api/llamacpp/install", () => {
     mockConfigureAiModel.mockResolvedValue(
       NextResponse.json({ success: true })
     );
+    mockStopLocalAiProvider.mockResolvedValue();
     vi.stubGlobal("fetch", vi.fn());
 
     const mod = await import("@/app/setup-api/llamacpp/install/route");
@@ -183,8 +199,10 @@ describe("POST /setup-api/llamacpp/install", () => {
     // to load the full trained context window from the model metadata.
     expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("0");
     expect(mockConfigureAiModel).toHaveBeenCalled();
-    expect(text).toContain("Starting llama.cpp");
-    expect(text).toContain("installed, running, and configured");
+    expect(text).toContain("Starting preinstalled Gemma 4");
+    expect(text).toContain("Returning it to standby");
+    expect(text).toContain("will wake automatically");
+    expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
   });
 
   it("forwards local scope to the configure route during llama.cpp install", async () => {
@@ -241,6 +259,12 @@ describe("POST /setup-api/llamacpp/install", () => {
       throw new Error("ENOENT");
     });
     mockFs.stat.mockImplementation(async (target: string) => {
+      if (
+        String(target) === "/usr/local/bin/llama-server"
+        || String(target).endsWith("gemma-4-e2b-it-edited-q4_0.gguf")
+      ) {
+        return { size: 1 } as never;
+      }
       if (String(target).endsWith("server.log")) {
         return { size: Buffer.byteLength(runtimeError) } as never;
       }

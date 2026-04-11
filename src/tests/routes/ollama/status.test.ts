@@ -1,5 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+vi.mock("@/lib/local-ai-runtime", () => ({
+  getLocalAiRuntimeSnapshot: vi.fn(() => ({
+    idleTimeoutMs: 600000,
+    lastUsedAt: null,
+    proxyBaseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+    upstreamBaseUrl: "http://127.0.0.1:11434",
+    activeRequests: 0,
+  })),
+  getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
+}));
+
 describe("GET /setup-api/ollama/status", () => {
   let ollamaStatusGet: () => Promise<Response>;
 

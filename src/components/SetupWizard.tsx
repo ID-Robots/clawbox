@@ -12,7 +12,7 @@ import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import { useT, I18nProvider } from "@/lib/i18n";
 
-const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 45;
+const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
 
 async function extractErrorMessage(res: Response, fallback: string) {
   const data = await res.json().catch(() => ({}));
@@ -25,6 +25,20 @@ function applyStatusData(
   beginCompletion: () => void,
   onComplete?: () => void
 ) {
+  const persistedProgressStep = typeof data.setup_progress_step === "number"
+    ? data.setup_progress_step
+    : Number(data.setup_progress_step ?? 0);
+
+  let resumeStep = 1;
+  if (data.wifi_configured) resumeStep = Math.max(resumeStep, 2);
+  if (data.update_completed) resumeStep = Math.max(resumeStep, 3);
+  if (data.password_configured) resumeStep = Math.max(resumeStep, 4);
+  if (data.ai_model_configured) resumeStep = Math.max(resumeStep, 5);
+  if (data.local_ai_configured) resumeStep = Math.max(resumeStep, 6);
+  if (Number.isFinite(persistedProgressStep)) {
+    resumeStep = Math.max(resumeStep, Math.min(6, Math.max(1, Math.floor(persistedProgressStep))));
+  }
+
   if (data.setup_complete) {
     if (onComplete) onComplete();
     else window.location.href = "/";
@@ -35,13 +49,8 @@ function applyStatusData(
     beginCompletion();
     return;
   }
-  if (data.ai_model_configured) {
-    setCurrentStep(data.local_ai_configured ? 6 : 5);
-  } else if (data.password_configured) {
-    setCurrentStep(4);
-  } else if (data.update_completed || data.wifi_configured) {
-    setCurrentStep(2);
-  }
+
+  setCurrentStep(resumeStep);
 }
 
 /* ── Power menu ── */
@@ -301,14 +310,32 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [showPower, setShowPower] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
 
+  const persistSetupProgress = useCallback(async (step: number) => {
+    try {
+      await fetch("/setup-api/setup/progress", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step }),
+      });
+    } catch {
+      // Best effort only: local resume is still preserved in-memory for this session.
+    }
+  }, []);
+
+  const goToStep = useCallback((step: number) => {
+    setCurrentStep(step);
+    void persistSetupProgress(step);
+  }, [persistSetupProgress]);
+
   const startCompletion = useCallback(() => {
+    void persistSetupProgress(6);
     setCompletionError(null);
     setShowHelp(false);
     setShowPower(false);
     setCompletionPhase(0);
     setCompletionComplete(false);
     setCompletionStarted(true);
-  }, []);
+  }, [persistSetupProgress]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -376,7 +403,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
         const gatewayAvailable = await pollGatewayHealth();
         if (!gatewayAvailable) {
-          throw new Error(t("openclaw.offline"));
+          console.warn("[SetupWizard] Gateway health did not become available during setup completion; continuing offline.");
         }
         if (cancelled) return;
 
@@ -402,7 +429,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       cancelled = true;
       timers.forEach((timer) => clearTimeout(timer));
     };
-  }, [completionStarted, onComplete, t]);
+  }, [completionStarted, onComplete]);
 
   if (isLoading) {
     return (
@@ -490,13 +517,13 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               </div>
             )}
             {currentStep === 1 && (
-              <WifiStep onNext={() => setCurrentStep(2)} />
+              <WifiStep onNext={() => goToStep(2)} />
             )}
             {currentStep === 2 && (
-              <UpdateStep onNext={() => setCurrentStep(3)} />
+              <UpdateStep onNext={() => goToStep(3)} />
             )}
             {currentStep === 3 && (
-              <CredentialsStep onNext={() => setCurrentStep(4)} />
+              <CredentialsStep onNext={() => goToStep(4)} />
             )}
             {currentStep === 4 && (
               <AIModelsStep
@@ -504,7 +531,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 defaultProviderId="clawai"
                 title="Connect AI Provider"
                 description={t("ai.description")}
-                onNext={() => setCurrentStep(5)}
+                onNext={() => goToStep(5)}
               />
             )}
             {currentStep === 5 && (
@@ -515,7 +542,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 description="Install a local model so OpenClaw always has a private on-device fallback. Gemma 4 on llama.cpp is recommended by default, with Ollama available if you prefer it."
                 configureScope="local"
                 testId="setup-step-local-ai"
-                onNext={() => setCurrentStep(6)}
+                onNext={() => goToStep(6)}
               />
             )}
             {currentStep === 6 && (

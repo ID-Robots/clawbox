@@ -334,7 +334,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 : "bg-white/10 hover:bg-white/15 text-white"
             } disabled:opacity-50`}
           >
-            {saving ? "Saving..." : saved ? "Saved!" : "Save Settings"}
+            {saving ? "Connecting..." : saved ? "Connected!" : "Connect"}
           </button>
         )}
       </div>

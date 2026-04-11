@@ -697,6 +697,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
 
   const {
     llamaCppRunning,
+    llamaCppInstalled,
     llamaCppSaving,
     llamaCppProgress,
     checkLlamaCppStatus,
@@ -1099,6 +1100,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             <div className="space-y-3">
               <LlamaCppModelPanel
                 llamaCppRunning={llamaCppRunning}
+                llamaCppInstalled={llamaCppInstalled}
                 llamaCppSaving={llamaCppSaving}
                 llamaCppProgress={llamaCppProgress}
                 selectedLlamaCppModel={selectedLlamaCppModel}
@@ -1222,7 +1224,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                       />
                     </div>
                     <div className="flex items-center gap-3">
-                      <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiExchanging && ButtonSpinner}{aiExchanging ? "Connecting..." : "Save"}</button>
+                      <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiExchanging && ButtonSpinner}{aiExchanging ? "Connecting..." : "Connect"}</button>
                       <button type="button" onClick={startAiOAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Restart authorization</button>
                     </div>
                   </div>
@@ -1248,7 +1250,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                 autoComplete="off"
               />
               <p className="mt-1.5 text-xs text-[var(--text-muted)]">{selectedAiProvider?.hint}</p>
-              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Saving..." : "Save"}</button>
+              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Connecting..." : "Connect"}</button>
             </div>
           )}
 
@@ -1323,7 +1325,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             />
           </div>
           {secStatus && <StatusMessage type={secStatus.type} message={secStatus.message} />}
-          <button type="button" onClick={saveSecurity} disabled={secSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{secSaving && ButtonSpinner}{secSaving ? "Saving..." : "Save"}</button>
+          <button type="button" onClick={saveSecurity} disabled={secSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{secSaving && ButtonSpinner}{secSaving ? "Connecting..." : "Connect"}</button>
         </CollapsibleSection>
 
         {/* Telegram */}
@@ -1351,7 +1353,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             />
           </div>
           {tgStatus && <StatusMessage type={tgStatus.type} message={tgStatus.message} />}
-          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{tgSaving && ButtonSpinner}{tgSaving ? "Saving..." : "Save"}</button>
+          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{tgSaving && ButtonSpinner}{tgSaving ? "Connecting..." : "Connect"}</button>
         </CollapsibleSection>
       </div>
 

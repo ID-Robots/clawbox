@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+vi.mock("@/lib/local-ai-runtime", () => ({
+  ensureLocalAiReady: vi.fn(),
+  getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
+}));
+
 describe("POST /setup-api/ollama/pull", () => {
   let ollamaPullPost: (req: Request) => Promise<Response>;
 

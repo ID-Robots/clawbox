@@ -981,7 +981,7 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#cred-confirm").fill("clawbox-pass");
   await page.locator("#hotspot-password").fill("hotspot-pass");
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: /^Connect$/ }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByText("OpenAI GPT").click();

@@ -16,21 +16,17 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
 }));
 
-vi.mock("@/lib/llamacpp-server", () => ({
-  clearLlamaCppPid: vi.fn(),
-  getLlamaCppLaunchSpec: vi.fn().mockReturnValue({ pidPath: "/tmp/llamacpp.pid" }),
-  readLlamaCppPid: vi.fn(),
+vi.mock("@/lib/local-ai-runtime", () => ({
+  stopLocalAiProvider: vi.fn(),
 }));
 
 import { setMany } from "@/lib/config-store";
-import { clearLlamaCppPid, getLlamaCppLaunchSpec, readLlamaCppPid } from "@/lib/llamacpp-server";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { inferConfiguredLocalModel, readConfig, restartGateway } from "@/lib/openclaw-config";
 
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockSetMany = vi.mocked(setMany);
-const mockClearLlamaCppPid = vi.mocked(clearLlamaCppPid);
-const mockGetLlamaCppLaunchSpec = vi.mocked(getLlamaCppLaunchSpec);
-const mockReadLlamaCppPid = vi.mocked(readLlamaCppPid);
+const mockStopLocalAiProvider = vi.mocked(stopLocalAiProvider);
 const mockInferConfiguredLocalModel = vi.mocked(inferConfiguredLocalModel);
 const mockReadConfig = vi.mocked(readConfig);
 const mockRestartGateway = vi.mocked(restartGateway);
@@ -74,9 +70,7 @@ describe("POST /setup-api/local-ai", () => {
     mockReadConfig.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
     mockRestartGateway.mockResolvedValue();
-    mockGetLlamaCppLaunchSpec.mockReturnValue({ pidPath: "/tmp/llamacpp.pid" } as never);
-    mockReadLlamaCppPid.mockResolvedValue(12345);
-    mockClearLlamaCppPid.mockResolvedValue();
+    mockStopLocalAiProvider.mockResolvedValue();
     setupExecFileMock();
 
     const mod = await import("@/app/setup-api/local-ai/route");
@@ -84,16 +78,12 @@ describe("POST /setup-api/local-ai", () => {
   });
 
   it("disables llama.cpp local AI and clears stored setup flags", async () => {
-    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
     const res = await localAiPost(jsonRequest({ action: "disable" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(mockReadLlamaCppPid).toHaveBeenCalled();
-    expect(killSpy).toHaveBeenCalledWith(12345, "SIGTERM");
-    expect(mockClearLlamaCppPid).toHaveBeenCalledWith("/tmp/llamacpp.pid");
+    expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
     expect(mockRestartGateway).toHaveBeenCalled();
     expect(mockSetMany).toHaveBeenCalledWith({
       local_ai_configured: false,
@@ -101,7 +91,5 @@ describe("POST /setup-api/local-ai", () => {
       local_ai_model: undefined,
       local_ai_configured_at: undefined,
     });
-
-    killSpy.mockRestore();
   });
 });

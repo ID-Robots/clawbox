@@ -25,6 +25,12 @@ describe("llamacpp config helpers", () => {
     expect(mod.getLlamaCppBaseUrl()).toBe("http://127.0.0.1:8080/v1");
   });
 
+  it("exposes the ClawBox proxy URL for on-demand llama.cpp startup", async () => {
+    const mod = await import("@/lib/llamacpp");
+
+    expect(mod.getLlamaCppProxyBaseUrl()).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+  });
+
   it("respects an explicit LLAMACPP_MODEL override", async () => {
     process.env.LLAMACPP_MODEL = "custom-gemma-q4";
     const mod = await import("@/lib/llamacpp");

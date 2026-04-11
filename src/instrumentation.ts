@@ -12,7 +12,16 @@ export async function register() {
 
   // Dynamic require avoids Next.js Edge Runtime static analysis of Node.js APIs
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { startTerminalServer, startLlamaCppServer } = require('./instrumentation-node')
+  const { startTerminalServer } = require('./instrumentation-node')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ensureLocalAiProxyUrls, restartGateway } = require('./lib/openclaw-config')
   startTerminalServer()
-  void startLlamaCppServer()
+  void ensureLocalAiProxyUrls()
+    .then((changed: boolean) => {
+      if (!changed) return
+      return restartGateway()
+    })
+    .catch((err: unknown) => {
+      console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
+    })
 }

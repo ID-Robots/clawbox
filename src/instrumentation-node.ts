@@ -221,3 +221,35 @@ async function bootLlamaCppServer() {
     })()
   })
 }
+
+export async function stopLlamaCppServer() {
+  llamaCppStopping = true
+
+  const llamaCpp = await import('./lib/llamacpp-server')
+  const spec = llamaCpp.getLlamaCppLaunchSpec()
+  const knownPid = llamaCppChild?.pid
+  const pid = knownPid ?? await llamaCpp.readLlamaCppPid(spec.pidPath)
+
+  if (!pid) {
+    llamaCppChild = null
+    await llamaCpp.clearLlamaCppPid(spec.pidPath)
+    return
+  }
+
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch {}
+
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+
+  try {
+    process.kill(pid, 0)
+    process.kill(pid, 'SIGKILL')
+  } catch {}
+
+  if (llamaCppChild?.pid === pid) {
+    llamaCppChild = null
+  }
+
+  await llamaCpp.clearLlamaCppPid(spec.pidPath)
+}

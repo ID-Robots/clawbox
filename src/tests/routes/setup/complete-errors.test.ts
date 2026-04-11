@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({
-  set: vi.fn(),
+  setMany: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -9,10 +9,10 @@ vi.mock("@/lib/auth", () => ({
   createSessionCookie: vi.fn(),
 }));
 
-import { set } from "@/lib/config-store";
+import { setMany } from "@/lib/config-store";
 import { createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 
-const mockSet = vi.mocked(set);
+const mockSetMany = vi.mocked(setMany);
 const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
 const mockCreateSessionCookie = vi.mocked(createSessionCookie);
 
@@ -23,7 +23,7 @@ describe("POST /setup-api/setup/complete error paths", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    mockSet.mockResolvedValue();
+    mockSetMany.mockResolvedValue();
     mockGetSessionSigningSecret.mockResolvedValue("test-secret");
     mockCreateSessionCookie.mockReturnValue("signed-cookie");
 
@@ -42,7 +42,7 @@ describe("POST /setup-api/setup/complete error paths", () => {
   });
 
   it("rolls back and returns 500 when setup completion persistence fails", async () => {
-    mockSet
+    mockSetMany
       .mockRejectedValueOnce(new Error("write failed"))
       .mockRejectedValue(new Error("rollback failed"));
 
@@ -50,8 +50,14 @@ describe("POST /setup-api/setup/complete error paths", () => {
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({ error: "write failed" });
-    expect(mockSet).toHaveBeenNthCalledWith(1, "setup_complete", true);
-    expect(mockSet).toHaveBeenNthCalledWith(2, "setup_complete", undefined);
-    expect(mockSet).toHaveBeenNthCalledWith(3, "setup_completed_at", undefined);
+    expect(mockSetMany).toHaveBeenNthCalledWith(1, {
+      setup_complete: true,
+      setup_completed_at: expect.any(String),
+      setup_progress_step: undefined,
+    });
+    expect(mockSetMany).toHaveBeenNthCalledWith(2, {
+      setup_complete: undefined,
+      setup_completed_at: undefined,
+    });
   });
 });

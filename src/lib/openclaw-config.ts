@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 
 const exec = promisify(execFile);
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
@@ -40,6 +41,13 @@ export interface OpenClawConfig {
       compaction?: { reserveTokensFloor?: number };
     };
   };
+}
+
+const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
+
+function getOllamaProxyBaseUrl(): string {
+  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LOCAL_AI_PROXY_ROOT_URL).trim().replace(/\/+$/, "");
+  return `${root}/setup-api/local-ai/ollama`;
 }
 
 function normalizeLocalProvider(provider: string | null | undefined): "llamacpp" | "ollama" | null {
@@ -100,6 +108,34 @@ async function writeConfig(config: OpenClawConfig): Promise<void> {
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
+}
+
+export async function ensureLocalAiProxyUrls(): Promise<boolean> {
+  const config = await readConfig();
+  const providers = config.models?.providers;
+  if (!providers) {
+    return false;
+  }
+
+  let changed = false;
+
+  const llamaProvider = providers.llamacpp;
+  if (llamaProvider && llamaProvider.baseUrl !== getLlamaCppProxyBaseUrl()) {
+    llamaProvider.baseUrl = getLlamaCppProxyBaseUrl();
+    changed = true;
+  }
+
+  const ollamaProvider = providers.ollama;
+  if (ollamaProvider && ollamaProvider.baseUrl !== getOllamaProxyBaseUrl()) {
+    ollamaProvider.baseUrl = getOllamaProxyBaseUrl();
+    changed = true;
+  }
+
+  if (changed) {
+    await writeConfig(config);
+  }
+
+  return changed;
 }
 
 export async function ensureCompactionReserveFloor(

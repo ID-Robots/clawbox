@@ -70,6 +70,53 @@ ensure_env_setting() {
   fi
 }
 
+get_env_setting_or_default() {
+  local env_file="$1"
+  local key="$2"
+  local default_value="$3"
+  local current_value=""
+  if [ -f "$env_file" ]; then
+    current_value=$(grep "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  if [ -n "$current_value" ]; then
+    printf '%s' "$current_value"
+  else
+    printf '%s' "$default_value"
+  fi
+}
+
+ensure_llamacpp_model_cached() {
+  local ENV_FILE="$PROJECT_DIR/.env"
+  local MODEL_DIR="$PROJECT_DIR/data/llamacpp/models"
+  local HF_REPO HF_FILE MODEL_PATH
+
+  HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf")
+  HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf")
+  MODEL_PATH="$MODEL_DIR/$HF_FILE"
+
+  mkdir -p "$MODEL_DIR"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
+
+  if [ -f "$MODEL_PATH" ]; then
+    echo "  Gemma 4 model already cached for offline use"
+    return 0
+  fi
+
+  echo "  Downloading Gemma 4 GGUF for offline use..."
+  if ! as_user_login "mkdir -p \"$MODEL_DIR\" && hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
+    echo "Error: failed to download Gemma 4 for offline startup" >&2
+    return 1
+  fi
+
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Error: Gemma 4 download completed but ${MODEL_PATH} was not found" >&2
+    return 1
+  fi
+
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
+  echo "  Gemma 4 model cached for offline startup"
+}
+
 has_playwright_chromium() {
   find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
 }
@@ -469,6 +516,7 @@ step_llamacpp_install() {
     echo "  llama-server already installed"
   fi
 
+  ensure_llamacpp_model_cached
   echo "  llama.cpp runtime ready"
 }
 

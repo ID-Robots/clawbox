@@ -39,6 +39,15 @@ describe("POST /setup-api/setup/complete", () => {
     expect(config.setup_complete).toBe(true);
   });
 
+  it("clears stored setup progress once setup is complete", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({ setup_progress_step: 6 }), "utf-8");
+
+    await completePost();
+
+    const config = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+    expect(config.setup_progress_step).toBeUndefined();
+  });
+
   it("sets setup_completed_at timestamp", async () => {
     const before = new Date().toISOString();
     await completePost();

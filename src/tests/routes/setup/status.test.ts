@@ -44,6 +44,7 @@ describe("GET /setup-api/setup/status", () => {
     expect(body.password_configured).toBe(false);
     expect(body.update_completed).toBe(false);
     expect(body.wifi_configured).toBe(false);
+    expect(body.setup_progress_step).toBeNull();
     expect(body.local_ai_configured).toBe(false);
     expect(body.local_ai_provider).toBeNull();
     expect(body.local_ai_model).toBeNull();
@@ -86,6 +87,15 @@ describe("GET /setup-api/setup/status", () => {
     const body = await res.json();
 
     expect(body.wifi_configured).toBe(true);
+  });
+
+  it("returns setup_progress_step when present", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({ setup_progress_step: 5 }), "utf-8");
+
+    const res = await statusGet();
+    const body = await res.json();
+
+    expect(body.setup_progress_step).toBe(5);
   });
 
   it("returns ai_model_configured with provider when set", async () => {
@@ -209,6 +219,7 @@ describe("GET /setup-api/setup/status", () => {
     expect(body.password_configured).toBe(true);
     expect(body.update_completed).toBe(true);
     expect(body.wifi_configured).toBe(true);
+    expect(body.setup_progress_step).toBeNull();
     expect(body.local_ai_configured).toBe(true);
     expect(body.local_ai_provider).toBe("llamacpp");
     expect(body.local_ai_model).toBe("llamacpp/gemma4-e2b-it-q4_0");

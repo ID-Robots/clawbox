@@ -1,4 +1,5 @@
 const DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1";
+const DEFAULT_LLAMACPP_PROXY_ROOT_URL = "http://127.0.0.1";
 const DEFAULT_LLAMACPP_MODEL = "gemma4-e2b-it-q4_0";
 export const DEFAULT_LLAMACPP_HF_REPO = "gguf-org/gemma-4-e2b-it-gguf";
 export const DEFAULT_LLAMACPP_HF_FILE = "gemma-4-e2b-it-edited-q4_0.gguf";
@@ -39,6 +40,11 @@ function normalizeBaseUrl(value: string): string {
 
 export function getLlamaCppBaseUrl(): string {
   return normalizeBaseUrl(process.env.LLAMACPP_BASE_URL || DEFAULT_LLAMACPP_BASE_URL);
+}
+
+export function getLlamaCppProxyBaseUrl(): string {
+  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LLAMACPP_PROXY_ROOT_URL).trim().replace(/\/+$/, "");
+  return `${root}/setup-api/local-ai/llamacpp/v1`;
 }
 
 export function getDefaultLlamaCppModel(): string {

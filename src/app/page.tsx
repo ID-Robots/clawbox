@@ -151,20 +151,25 @@ function ChromeDesktopInner() {
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
+
+  const syncSetupStatus = useCallback(async () => {
+    const data = await fetch("/setup-api/setup/status").then((r) => r.json());
+    setSetupRequired(!data.setup_complete);
+    setShowClawAiOfferNotification(!!data.setup_complete && !data.ai_model_configured);
+    return data;
+  }, []);
 
   // Check if setup is complete. The desktop boots either way; incomplete
   // setups get the wizard opened as a window after the UI loads.
   useEffect(() => {
     Promise.all([
-      fetch("/setup-api/setup/status").then(r => r.json()),
+      syncSetupStatus(),
       kv.init(),
     ])
-      .then(([data]) => {
-        setSetupRequired(!data.setup_complete);
-        setSetupChecked(true);
-      })
+      .then(() => setSetupChecked(true))
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
-  }, []);
+  }, [syncSetupStatus]);
 
   // ─── Haptic feedback helper ───
   const vibrate = useCallback((ms: number = 10) => {
@@ -882,7 +887,14 @@ function ChromeDesktopInner() {
 
   const handleSetupComplete = useCallback(() => {
     setSetupRequired(false);
+    void syncSetupStatus().catch(() => {});
     setOpenWindows((prev) => prev.filter((w) => w.appId !== "setup"));
+  }, [syncSetupStatus]);
+
+  useEffect(() => {
+    const handlePrimaryAiConfigured = () => setShowClawAiOfferNotification(false);
+    window.addEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
+    return () => window.removeEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
   }, []);
 
   // ─── Android back button / browser back handling ───
@@ -1041,6 +1053,19 @@ function ChromeDesktopInner() {
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
     openApp("settings");
   }, [openApp]);
+
+  const openClawAiOffer = useCallback(() => {
+    const w = window as Window & {
+      __clawboxPendingSettingsSection?: string;
+      __clawboxPendingClawAiOffer?: boolean;
+    };
+    w.__clawboxPendingSettingsSection = "ai";
+    w.__clawboxPendingClawAiOffer = true;
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "ai" } }));
+    window.dispatchEvent(new Event("clawbox:open-clawai-offer"));
+    openAppRef.current("settings");
+    setShowClawAiOfferNotification(false);
+  }, []);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -1377,63 +1402,113 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {/* New version available notification */}
-      {updateAvailable && (() => {
-        const cb = updateAvailable.clawbox;
-        const oc = updateAvailable.openclaw;
-        const cbNeeds = !!cb?.target && cb.target !== cb.current;
-        const ocNeeds = !!oc?.target && oc.target !== oc.current;
-        return (
-          <div
-            className="fixed top-4 right-4 z-[99998] w-[320px] rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
-            role="status"
-            aria-live="polite"
-          >
-            <div className="flex items-start gap-3 px-4 py-3">
-              <div className="w-9 h-9 rounded-full bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
-                <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 20 }}>system_update</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-white">{t("updateNotification.title")}</div>
-                <div className="text-xs text-white/60 mt-0.5">{t("updateNotification.description")}</div>
-                <div className="mt-2 space-y-0.5">
-                  {cbNeeds && (
-                    <div className="text-[11px] text-white/70 font-mono truncate">
-                      ClawBox {cleanVersion(cb.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(cb.target) ?? "?"}</span>
+      {(updateAvailable || showClawAiOfferNotification) && (
+        <div className="fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
+          {/* New version available notification */}
+          {updateAvailable && (() => {
+            const cb = updateAvailable.clawbox;
+            const oc = updateAvailable.openclaw;
+            const cbNeeds = !!cb?.target && cb.target !== cb.current;
+            const ocNeeds = !!oc?.target && oc.target !== oc.current;
+            return (
+              <div
+                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-full bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 20 }}>system_update</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white">{t("updateNotification.title")}</div>
+                    <div className="text-xs text-white/60 mt-0.5">{t("updateNotification.description")}</div>
+                    <div className="mt-2 space-y-0.5">
+                      {cbNeeds && (
+                        <div className="text-[11px] text-white/70 font-mono truncate">
+                          ClawBox {cleanVersion(cb.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(cb.target) ?? "?"}</span>
+                        </div>
+                      )}
+                      {ocNeeds && (
+                        <div className="text-[11px] text-white/70 font-mono truncate">
+                          OpenClaw {cleanVersion(oc.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(oc.target) ?? "?"}</span>
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {ocNeeds && (
-                    <div className="text-[11px] text-white/70 font-mono truncate">
-                      OpenClaw {cleanVersion(oc.current) ?? "?"} → <span className="text-orange-300">{cleanVersion(oc.target) ?? "?"}</span>
-                    </div>
-                  )}
+                  </div>
+                  <button
+                    onClick={dismissUpdateNotification}
+                    className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    aria-label={t("updateNotification.dismiss")}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 px-4 pb-3">
+                  <button
+                    onClick={openUpdateSettings}
+                    className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
+                  >
+                    {t("updateNotification.viewUpdate")}
+                  </button>
+                  <button
+                    onClick={dismissUpdateNotification}
+                    className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
+                  >
+                    {t("updateNotification.later")}
+                  </button>
                 </div>
               </div>
-              <button
-                onClick={dismissUpdateNotification}
-                className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
-                aria-label={t("updateNotification.dismiss")}
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
-              </button>
+            );
+          })()}
+
+          {showClawAiOfferNotification && (
+            <div
+              className="rounded-xl bg-[#1e2030] border border-orange-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="flex items-start gap-3 px-4 py-3">
+                <div className="w-9 h-9 rounded-full bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
+                  <span className="material-symbols-rounded text-orange-300" style={{ fontSize: 20 }}>smart_toy</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-white">Start free with ClawBox AI</div>
+                  <div className="text-xs leading-relaxed text-white/60 mt-0.5">
+                    You finished setup without a cloud AI provider. Connect ClawBox AI anytime for the recommended out-of-box experience.
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowClawAiOfferNotification(false)}
+                  className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                  aria-label="Dismiss ClawBox AI offer"
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                </button>
+              </div>
+              <div className="px-4 pb-2">
+                <div className="rounded-lg border border-orange-400/15 bg-orange-500/10 px-3 py-2 text-[11px] leading-relaxed text-orange-50/90">
+                  Open the portal, create your token, and finish connecting ClawBox AI in seconds.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 px-4 pb-3">
+                <button
+                  onClick={openClawAiOffer}
+                  className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
+                >
+                  Start free
+                </button>
+                <button
+                  onClick={() => setShowClawAiOfferNotification(false)}
+                  className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
+                >
+                  Later
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2 px-4 pb-3">
-              <button
-                onClick={openUpdateSettings}
-                className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
-              >
-                {t("updateNotification.viewUpdate")}
-              </button>
-              <button
-                onClick={dismissUpdateNotification}
-                className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
-              >
-                {t("updateNotification.later")}
-              </button>
-            </div>
-          </div>
-        );
-      })()}
+          )}
+        </div>
+      )}
       {/* Mobile fullscreen splash */}
       {showSplash && (
         <div

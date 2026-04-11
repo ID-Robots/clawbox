@@ -108,6 +108,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
   const [section, setSection] = useState<Section>("appearance");
+  const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
 
@@ -124,15 +125,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setMobileSection(s);
       }
     };
-    const w = window as Window & { __clawboxPendingSettingsSection?: unknown };
+    const requestClawAiOffer = () => {
+      setSection("ai");
+      setMobileSection("ai");
+      setOpenClawAIOfferRequest((current) => current + 1);
+    };
+    const w = window as Window & {
+      __clawboxPendingSettingsSection?: unknown;
+      __clawboxPendingClawAiOffer?: unknown;
+    };
     if (w.__clawboxPendingSettingsSection !== undefined) {
       apply(w.__clawboxPendingSettingsSection);
       delete w.__clawboxPendingSettingsSection;
     }
+    if (w.__clawboxPendingClawAiOffer) {
+      requestClawAiOffer();
+      delete w.__clawboxPendingClawAiOffer;
+    }
     const handler = (event: Event) =>
       apply((event as CustomEvent<{ section?: string }>).detail?.section);
+    const offerHandler = () => requestClawAiOffer();
     window.addEventListener("clawbox:open-settings-section", handler);
-    return () => window.removeEventListener("clawbox:open-settings-section", handler);
+    window.addEventListener("clawbox:open-clawai-offer", offerHandler);
+    return () => {
+      window.removeEventListener("clawbox:open-settings-section", handler);
+      window.removeEventListener("clawbox:open-clawai-offer", offerHandler);
+    };
   }, []);
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
@@ -415,7 +433,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (section !== "ai") return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section]);
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null } | null>(null);
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
   const [localAiError, setLocalAiError] = useState<string | null>(null);
   const refreshLocalAiStatus = useCallback(async () => {
@@ -427,18 +445,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       const model = typeof data.local_ai_model === "string" ? data.local_ai_model : null;
 
       let running: boolean | null = null;
+      let standbyEnabled = false;
       if (configured && provider === "llamacpp") {
         const llamaRes = await fetch("/setup-api/llamacpp/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
         running = !!llamaRes?.running;
+        standbyEnabled = !!llamaRes?.standbyEnabled;
       } else if (configured && provider === "ollama") {
         const ollamaRes = await fetch("/setup-api/ollama/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
         running = !!ollamaRes?.running;
+        standbyEnabled = !!ollamaRes?.standbyEnabled;
       }
 
-      setLocalAiStatus({ configured, provider, model, running });
+      setLocalAiStatus({ configured, provider, model, running, standbyEnabled });
       setLocalAiError(null);
     } catch {
-      setLocalAiStatus({ configured: false, provider: null, model: null, running: null });
+      setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
     }
   }, []);
   const disableLocalAi = useCallback(async () => {
@@ -1133,11 +1154,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               defaultProviderId="clawai"
               currentProviderId={aiProvider?.provider ?? null}
               currentModel={aiProvider?.model ?? null}
+              openClawAIOfferRequest={openClawAIOfferRequest}
               title="Connect AI Provider"
               description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
               onConfigured={() => {
                 fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
                 notifyChatModelStateChanged();
+                window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
               }}
             /></I18nProvider>
           </div>
@@ -1160,25 +1183,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               ) : localAiStatus.configured ? (
                 <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
-                  localAiStatus.running === false
+                  localAiStatus.running === false && !localAiStatus.standbyEnabled
                     ? "bg-amber-500/[0.06] border-amber-500/15"
                     : "bg-cyan-500/[0.06] border-cyan-500/15"
                 }`}>
                   <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
-                    localAiStatus.running === false
+                    localAiStatus.running === false && !localAiStatus.standbyEnabled
                       ? "bg-amber-500/10 border-amber-400/10"
                       : "bg-cyan-500/10 border-cyan-400/10"
                   }`}>
                     <AIProviderIcon provider={localAiStatus.provider} size={24} />
                     <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
-                      localAiStatus.running === false
+                      localAiStatus.running === false && !localAiStatus.standbyEnabled
                         ? "bg-[#2a1d10] border-amber-500/25"
                         : "bg-[#10212a] border-cyan-500/25"
                     }`}>
                       <span className={`material-symbols-rounded ${
-                        localAiStatus.running === false ? "text-amber-300" : "text-cyan-300"
+                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "text-amber-300" : "text-cyan-300"
                       }`} style={{ fontSize: 14 }}>
-                        {localAiStatus.running === false ? "warning" : "check"}
+                        {localAiStatus.running === false && !localAiStatus.standbyEnabled ? "warning" : "check"}
                       </span>
                     </span>
                   </div>
@@ -1188,14 +1211,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                        localAiStatus.running === false ? "bg-amber-300" : "bg-cyan-300"
+                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "bg-amber-300" : "bg-cyan-300"
                       }`} />
                       <span className={`text-xs ${
-                        localAiStatus.running === false ? "text-amber-300/80" : "text-cyan-300/80"
+                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "text-amber-300/80" : "text-cyan-300/80"
                       }`}>
-                        {localAiStatus.running === false
+                        {localAiStatus.running === false && !localAiStatus.standbyEnabled
                           ? `${localAiStatus.model ? localAiStatus.model.split("/").pop() : "Configured"} · endpoint not responding`
-                          : (localAiStatus.model ? localAiStatus.model.split("/").pop() : "Ready as fallback")}
+                          : localAiStatus.running === false
+                            ? `${localAiStatus.model ? localAiStatus.model.split("/").pop() : "Configured"} · sleeping until needed`
+                            : (localAiStatus.model ? localAiStatus.model.split("/").pop() : "Ready as fallback")}
                       </span>
                     </div>
                   </div>
@@ -1227,8 +1252,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
                     </div>
                     <p className="text-sm text-[var(--text-secondary)] mt-1">
-                      {localAiStatus.running === false
+                      {localAiStatus.running === false && !localAiStatus.standbyEnabled
                         ? "Configured, but currently offline."
+                        : localAiStatus.running === false
+                          ? "Enabled with on-demand standby to free RAM until OpenClaw needs it."
                         : "Enabled and ready as your local backup model."}
                     </p>
                   </div>
@@ -1390,12 +1417,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     {tgSaving ? (
                       <>
                         <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
-                        {t("settings.saving")}
+                        {t("connecting")}
                       </>
                     ) : (
                       <>
-                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>save</span>
-                        {t("settings.save")}
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
                       </>
                     )}
                   </button>

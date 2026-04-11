@@ -18,6 +18,7 @@ type ConfigureScope = "primary" | "local";
 export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: ConfigureScope = "primary") {
   const { onSaveSuccess, onSaveError, onClearStatus } = callbacks;
   const [llamaCppRunning, setLlamaCppRunning] = useState(false);
+  const [llamaCppInstalled, setLlamaCppInstalled] = useState(false);
   const [llamaCppModels, setLlamaCppModels] = useState<LlamaCppModel[]>([]);
   const [llamaCppEndpoint, setLlamaCppEndpoint] = useState("");
   const [llamaCppSaving, setLlamaCppSaving] = useState<string | false>(false);
@@ -28,16 +29,19 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
       const res = await fetch("/setup-api/llamacpp/status");
       if (!res.ok) {
         setLlamaCppRunning(false);
+        setLlamaCppInstalled(false);
         setLlamaCppModels([]);
         return;
       }
 
       const data = await res.json();
       setLlamaCppRunning(!!data.running);
+      setLlamaCppInstalled(!!data.installed);
       setLlamaCppModels(Array.isArray(data.models) ? data.models : []);
       setLlamaCppEndpoint(typeof data.baseUrl === "string" ? data.baseUrl : "");
     } catch {
       setLlamaCppRunning(false);
+      setLlamaCppInstalled(false);
       setLlamaCppModels([]);
     }
   }, []);
@@ -50,7 +54,7 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
     }
 
     setLlamaCppSaving(trimmedModel);
-    setLlamaCppProgress("Preparing llama.cpp...");
+    setLlamaCppProgress(llamaCppInstalled ? "Checking local Gemma 4 runtime..." : "Preparing llama.cpp...");
     onClearStatus?.();
 
     try {
@@ -126,10 +130,11 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
       setLlamaCppSaving(false);
       setLlamaCppProgress(null);
     }
-  }, [checkLlamaCppStatus, configureScope, onClearStatus, onSaveError, onSaveSuccess]);
+  }, [checkLlamaCppStatus, configureScope, llamaCppInstalled, onClearStatus, onSaveError, onSaveSuccess]);
 
   return {
     llamaCppRunning,
+    llamaCppInstalled,
     llamaCppModels,
     llamaCppEndpoint,
     llamaCppSaving,

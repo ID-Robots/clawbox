@@ -1,10 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
+
+vi.mock("@/lib/llamacpp-server", () => ({
+  getLlamaCppProvisioningStatus: vi.fn(),
+}));
+
+vi.mock("@/lib/local-ai-runtime", () => ({
+  getLocalAiRuntimeSnapshot: vi.fn(() => ({
+    idleTimeoutMs: 600000,
+    lastUsedAt: null,
+    proxyBaseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    upstreamBaseUrl: "http://127.0.0.1:8080/v1",
+    activeRequests: 0,
+  })),
+}));
+
+const mockGetLlamaCppProvisioningStatus = vi.mocked(getLlamaCppProvisioningStatus);
 
 describe("GET /setup-api/llamacpp/status", () => {
   let llamaCppStatusGet: () => Promise<Response>;
 
   beforeEach(async () => {
     vi.resetModules();
+    mockGetLlamaCppProvisioningStatus.mockResolvedValue({
+      alias: "gemma4-e2b-it-q4_0",
+      binPath: "/usr/local/bin/llama-server",
+      modelPath: "/home/clawbox/clawbox/data/llamacpp/models/gemma-4-e2b-it-edited-q4_0.gguf",
+      binaryAvailable: true,
+      modelAvailable: true,
+      installed: true,
+    });
     const mod = await import("@/app/setup-api/llamacpp/status/route");
     llamaCppStatusGet = mod.GET;
   });
@@ -30,6 +55,7 @@ describe("GET /setup-api/llamacpp/status", () => {
 
     expect(res.status).toBe(200);
     expect(body.running).toBe(true);
+    expect(body.installed).toBe(true);
     expect(body.models).toHaveLength(2);
     expect(body.models[0].id).toBe("gemma-q4");
   });

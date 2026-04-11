@@ -100,8 +100,108 @@ describe("VNCApp", () => {
     fireEvent.keyDown(document.body, { key: "a", code: "KeyA" });
     fireEvent.keyUp(document.body, { key: "a", code: "KeyA" });
 
-    expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA", true);
-    expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA", false);
+    await waitFor(() => {
+      expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA");
+    });
+  });
+
+  it("forwards canvas key events that bubble out unhandled by noVNC", async () => {
+    const { queryByText } = render(
+      <div data-chrome-window-content="true">
+        <VNCApp />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(mockRfbInstances).toHaveLength(1);
+    });
+
+    const rfb = mockRfbInstances[0];
+    rfb.emit("connect");
+
+    await waitFor(() => {
+      expect(rfb.focus).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(queryByText("vnc.connectingDesktop")).not.toBeInTheDocument();
+    });
+
+    fireEvent.pointerDown(rfb.target);
+    fireEvent.keyDown(rfb.canvas, { key: "a", code: "KeyA" });
+    fireEvent.keyUp(rfb.canvas, { key: "a", code: "KeyA" });
+
+    await waitFor(() => {
+      expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA");
+    });
+  });
+
+  it("does not leave printable keys stuck when keyup never reaches the fallback handler", async () => {
+    const { queryByText } = render(
+      <div data-chrome-window-content="true">
+        <VNCApp />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(mockRfbInstances).toHaveLength(1);
+    });
+
+    const rfb = mockRfbInstances[0];
+    rfb.emit("connect");
+
+    await waitFor(() => {
+      expect(rfb.focus).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(queryByText("vnc.connectingDesktop")).not.toBeInTheDocument();
+    });
+
+    fireEvent.pointerDown(rfb.target);
+    fireEvent.keyDown(document.body, { key: "a", code: "KeyA" });
+    fireEvent.keyDown(document.body, { key: "b", code: "KeyB" });
+
+    await waitFor(() => {
+      expect(rfb.sendKey).toHaveBeenCalledWith(97, "KeyA");
+      expect(rfb.sendKey).toHaveBeenCalledWith(98, "KeyB");
+    });
+  });
+
+  it("does not duplicate key events that noVNC already consumed on the canvas", async () => {
+    render(
+      <div data-chrome-window-content="true">
+        <VNCApp />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(mockRfbInstances).toHaveLength(1);
+    });
+
+    const rfb = mockRfbInstances[0];
+    rfb.emit("connect");
+
+    await waitFor(() => {
+      expect(rfb.focus).toHaveBeenCalled();
+    });
+
+    fireEvent.pointerDown(rfb.target);
+
+    const consumed = new KeyboardEvent("keydown", {
+      key: "a",
+      code: "KeyA",
+      bubbles: true,
+      cancelable: true,
+    });
+    rfb.canvas.addEventListener("keydown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }, { once: true });
+
+    rfb.canvas.dispatchEvent(consumed);
+
+    await waitFor(() => {
+      expect(rfb.sendKey).not.toHaveBeenCalledWith(97, "KeyA", true);
+    });
   });
 
   it("maps non-Latin printable keys to X11 keysyms for VNC text entry", () => {
@@ -205,6 +305,9 @@ describe("VNCApp", () => {
     const rfb = mockRfbInstances[0];
     rfb.emit("connect");
 
+    await waitFor(() => {
+      expect(rfb.focus).toHaveBeenCalled();
+    });
     await waitFor(() => {
       expect(queryByText("vnc.connectingDesktop")).not.toBeInTheDocument();
     });

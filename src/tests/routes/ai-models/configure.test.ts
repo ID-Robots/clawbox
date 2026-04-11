@@ -5,6 +5,7 @@ import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 
 vi.mock("child_process", () => ({
+  execFile: vi.fn(),
   spawn: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("@/lib/config-store", () => ({
+  DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
 }));
@@ -253,7 +255,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set gateway.auth.token clawbox");
   });
 
-  it("stores local AI state separately when configuring llama.cpp as Local AI", async () => {
+  it("promotes local AI to the active default when no primary AI provider was configured", async () => {
     const res = await configurePost(jsonRequest({
       provider: "llamacpp",
       scope: "local",
@@ -269,6 +271,27 @@ describe("POST /setup-api/ai-models/configure", () => {
         local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
       }),
     );
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
+    expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+    expect(commands).toContain("config set models.mode merge");
+  });
+
+  it("keeps local AI as fallback-only when a primary AI provider is already configured", async () => {
+    mockGetAll.mockResolvedValue({
+      ai_model_configured: true,
+      ai_model_provider: "openai",
+    });
+
+    const res = await configurePost(jsonRequest({
+      provider: "llamacpp",
+      scope: "local",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
 
     const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
     expect(commands).not.toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
@@ -494,7 +517,20 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
     const modelDef = providerDef?.models?.[0] ?? {};
 
+    expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
     expect(modelDef.contextWindow).toBe(131072);
     expect(modelDef.maxTokens).toBe(131072);
+  });
+
+  it("configures Ollama through the local AI proxy", async () => {
+    await configurePost(jsonRequest({
+      provider: "ollama",
+      apiKey: "llama3.2:3b",
+    }));
+
+    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.ollama");
+    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+
+    expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/ollama");
   });
 });

@@ -33,6 +33,13 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const GLOB_RESULT_LIMIT = 200;
 const GREP_RESULT_LIMIT = 250;
 const WEB_CACHE_TTL = 15 * 60_000; // 15 minutes
+const CLAWBOX_MCP_INSTRUCTIONS = `Use the dedicated browser_* tools for web browsing and browser automation.
+
+Important browser routing:
+- When asked to "open the browser", open a website, search the web, or interact with a page, use browser_open or browser_launch.
+- browser_* tools control the real Chromium window on the ClawBox desktop through CDP.
+- Do not use ui_open_app("browser") for normal browsing. The desktop "browser" app is only the Browser Setup / integration panel.
+- Only open the Browser Setup app when the user asks to configure browser integration or the browser tools report that setup is required.`;
 
 // ══════════════════════════════════════════════════════════════════════
 // HTTP HELPERS
@@ -384,7 +391,10 @@ function htmlToText(html: string): string {
 // MCP SERVER
 // ══════════════════════════════════════════════════════════════════════
 
-const server = new McpServer({ name: "clawbox", version: "3.0.0" });
+const server = new McpServer(
+  { name: "clawbox", version: "3.0.0" },
+  { instructions: CLAWBOX_MCP_INSTRUCTIONS },
+);
 
 // ══════════════════════════════════════════════════════════════════════
 // TOOL: bash
@@ -1446,13 +1456,40 @@ async function ensureBrowser(url?: string): Promise<string> {
   return currentSessionId;
 }
 
+async function launchBrowserSession(url?: string): Promise<Record<string, unknown>> {
+  if (currentSessionId) {
+    try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
+    currentSessionId = null;
+  }
+  const sessionId = await ensureBrowser(url);
+  return apiPost("/setup-api/browser", { action: "screenshot", sessionId }) as Promise<Record<string, unknown>>;
+}
+
 async function browserAction(action: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   const sessionId = await ensureBrowser();
   return apiPost("/setup-api/browser", { action, sessionId, ...params }) as Promise<Record<string, unknown>>;
 }
 
+server.tool("browser_open",
+  `Preferred tool when the user asks to open the browser, open a website, or start browsing.
+Attaches to the live Chromium window running on the ClawBox desktop via CDP and optionally navigates to a URL. Returns a screenshot.
+This controls the real browser visible in VNC, not the Browser Setup desktop app.
+
+Use browser_screenshot to see the current page,
+browser_click to interact with elements at x,y coordinates visible in the screenshot,
+browser_type to enter text, and browser_keypress for special keys.
+
+Workflow: browser_open → browser_screenshot → browser_click/type → browser_screenshot → ...`,
+  { url: z.string().optional().describe("Optional URL to navigate to after attaching") },
+  async ({ url }) => {
+    const result = await launchBrowserSession(url);
+    return browserResult(`Real Chromium browser opened.${url ? ` Navigated to: ${url}` : ""}`, result);
+  }
+);
+
 server.tool("browser_launch",
-  `Attach to the live Chromium window running on the ClawBox desktop via CDP and optionally navigate to a URL. Returns a screenshot.
+  `Alias of browser_open for compatibility.
+Attach to the live Chromium window running on the ClawBox desktop via CDP and optionally navigate to a URL. Returns a screenshot.
 This controls the real browser visible in VNC, not a separate hidden browser.
 Use browser_screenshot to see the current page,
 browser_click to interact with elements at x,y coordinates visible in the screenshot,
@@ -1461,14 +1498,8 @@ browser_type to enter text, and browser_keypress for special keys.
 Workflow: browser_launch → browser_screenshot → browser_click/type → browser_screenshot → ...`,
   { url: z.string().optional().describe("Optional URL to navigate to after attaching") },
   async ({ url }) => {
-    // Force new session
-    if (currentSessionId) {
-      try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
-      currentSessionId = null;
-    }
-    const sessionId = await ensureBrowser(url);
-    const result = await apiPost("/setup-api/browser", { action: "screenshot", sessionId }) as Record<string, unknown>;
-    return browserResult(`Browser launched.${url ? ` Navigated to: ${url}` : ""}`, result);
+    const result = await launchBrowserSession(url);
+    return browserResult(`Real Chromium browser opened.${url ? ` Navigated to: ${url}` : ""}`, result);
   }
 );
 
@@ -1600,14 +1631,22 @@ const AVAILABLE_APPS = [
   { id: "terminal", name: "Terminal", description: "Shell" },
   { id: "files", name: "Files", description: "File manager" },
   { id: "store", name: "Store", description: "App store" },
-  { id: "browser", name: "Browser", description: "Web browser" },
+  { id: "browser", name: "Browser Setup", description: "Browser integration settings panel, not the real browsing window" },
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
 ];
 
-server.tool("ui_open_app", "Open an app on the ClawBox desktop",
+server.tool("ui_open_app", "Open an app on the ClawBox desktop. For real web browsing, use browser_open or browser_launch instead of opening the 'browser' app.",
   { appId: z.string().describe("App ID") },
   async ({ appId }) => {
     await apiPost("/setup-api/kv", { key: "ui:pending-action", value: JSON.stringify({ type: "open_app", appId, ts: Date.now() }) });
+    if (appId === "browser") {
+      return {
+        content: [{
+          type: "text",
+          text: "Opening Browser Setup. This app configures browser integration. For the real Chromium browser, use browser_open or browser_launch.",
+        }],
+      };
+    }
     return { content: [{ type: "text", text: `Opening ${AVAILABLE_APPS.find(a => a.id === appId)?.name ?? appId}.` }] };
   }
 );

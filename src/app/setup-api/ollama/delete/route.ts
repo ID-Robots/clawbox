@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
 
-const OLLAMA_URL = "http://127.0.0.1:11434";
+const OLLAMA_URL = getOllamaBaseUrl();
 const MODEL_RE = /^[a-zA-Z0-9._:/-]+$/;
 
 export async function POST(request: Request) {
@@ -11,6 +12,8 @@ export async function POST(request: Request) {
     if (!model || typeof model !== "string" || !MODEL_RE.test(model)) {
       return NextResponse.json({ error: "Invalid model name" }, { status: 400 });
     }
+
+    await ensureLocalAiReady("ollama");
 
     const res = await fetch(`${OLLAMA_URL}/api/delete`, {
       method: "DELETE",

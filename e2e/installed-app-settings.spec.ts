@@ -1,5 +1,5 @@
 import { expect, test } from "./helpers/coverage";
-import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
+import { installClawboxMocks } from "./helpers/clawbox";
 
 test("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
@@ -37,9 +37,7 @@ test("installed app settings can save configuration and toggle enablement", asyn
   await page.getByRole("button", { name: "Install Anyway" }).click();
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
 
-  await openLauncher(page);
-  await page.getByTestId("app-launcher").getByPlaceholder("Search apps").fill("Home Assistant");
-  await page.getByTestId("app-launcher").getByRole("button", { name: "Home Assistant" }).click({ force: true });
+  await page.locator('[data-desktop-icon-id="home-assistant"] button').click();
 
   const settingsWindow = page.getByTestId("chrome-window-installed-home-assistant");
   await expect(settingsWindow).toBeVisible();
@@ -47,6 +45,6 @@ test("installed app settings can save configuration and toggle enablement", asyn
   await settingsWindow.getByPlaceholder("http://homeassistant.local:8123").fill("http://ha.local:8123");
   await settingsWindow.getByPlaceholder("Enter HA access token").fill("ha-secret-token");
   await settingsWindow.getByRole("switch", { name: "Enable Webhooks" }).click({ force: true });
-  await settingsWindow.getByRole("button", { name: "Save Settings" }).click();
+  await settingsWindow.getByRole("button", { name: /^Connect$/ }).click({ force: true });
   await expect(settingsWindow.getByText("Home Assistant URL")).toBeVisible();
 });

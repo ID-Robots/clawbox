@@ -17,7 +17,7 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
   await page.locator("#cred-confirm").fill("clawbox-pass");
   await page.locator("#hotspot-password").fill("hotspot-pass");
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: /^Connect$/ }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await page.getByText("OpenAI GPT").click();
@@ -29,7 +29,7 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
 
   await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
   await page.locator("#telegram-bot-token").fill("123456789:ABCdefGHI");
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByTestId("setup-step-telegram").getByRole("button", { name: /^Connect$/ }).click();
 
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByTestId("desktop-root")).toBeVisible();

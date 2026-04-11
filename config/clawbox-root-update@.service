@@ -5,4 +5,4 @@ Description=ClawBox Root Update Step (%i)
 Type=oneshot
 EnvironmentFile=-/etc/clawbox/network.env
 ExecStart=/bin/bash /home/clawbox/clawbox/install.sh --step %i
-TimeoutStartSec=600
+TimeoutStartSec=1800

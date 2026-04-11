@@ -36,6 +36,15 @@ export interface LlamaCppLaunchSpec {
   startupTimeoutMs: number;
 }
 
+export interface LlamaCppProvisioningStatus {
+  alias: string;
+  binPath: string;
+  modelPath: string;
+  binaryAvailable: boolean;
+  modelAvailable: boolean;
+  installed: boolean;
+}
+
 export function getConfiguredLlamaCppModelAlias(config: OpenClawConfig): string | null {
   const primaryModel = config.agents?.defaults?.model?.primary?.trim();
   if (primaryModel && primaryModel.startsWith("llamacpp/")) {
@@ -78,6 +87,32 @@ export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaC
 
 export async function ensureLlamaCppRuntimeDir() {
   await fs.mkdir(LLAMACPP_RUNTIME_DIR, { recursive: true });
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.stat(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getLlamaCppProvisioningStatus(alias = getDefaultLlamaCppModel()): Promise<LlamaCppProvisioningStatus> {
+  const spec = getLlamaCppLaunchSpec(alias);
+  const [binaryAvailable, modelAvailable] = await Promise.all([
+    pathExists(spec.binPath),
+    pathExists(spec.modelPath),
+  ]);
+
+  return {
+    alias,
+    binPath: spec.binPath,
+    modelPath: spec.modelPath,
+    binaryAvailable,
+    modelAvailable,
+    installed: binaryAvailable && modelAvailable,
+  };
 }
 
 export async function readLlamaCppPid(pidPath = LLAMACPP_PID_PATH): Promise<number | null> {

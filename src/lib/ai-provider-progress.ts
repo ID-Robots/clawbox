@@ -77,11 +77,18 @@ export function getLlamaCppOverlayProgress(
     phase = 3;
   } else if (
     normalized.includes("starting llama-server")
+    || normalized.includes("starting preinstalled gemma")
+    || normalized.includes("starting llama.cpp")
     || normalized.includes("already starting")
     || normalized.includes("waiting for it to become ready")
   ) {
     phase = 2;
-  } else if (normalized.includes("downloading")) {
+  } else if (
+    normalized.includes("downloading")
+    || normalized.includes("installing gemma 4")
+    || normalized.includes("installing llama.cpp and gemma 4")
+    || normalized.includes("repairing the llama.cpp runtime")
+  ) {
     phase = 1;
   }
 

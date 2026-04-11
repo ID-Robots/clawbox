@@ -17,7 +17,7 @@ test("setup configures the primary AI provider before Local AI", async ({ page }
   await page.locator("#cred-confirm").fill("clawbox-pass");
   await page.locator("#hotspot-password").fill("hotspot-pass");
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: /^Connect$/ }).click();
 
   const providerStep = page.getByTestId("setup-step-ai-models");
   const providerGroup = providerStep.getByRole("radiogroup", { name: "AI Provider" });

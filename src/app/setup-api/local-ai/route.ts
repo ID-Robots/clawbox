@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { promisify } from "util";
 import { execFile as execFileCb } from "child_process";
 import { setMany } from "@/lib/config-store";
-import { clearLlamaCppPid, getLlamaCppLaunchSpec, readLlamaCppPid } from "@/lib/llamacpp-server";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway } from "@/lib/openclaw-config";
 
 const execFile = promisify(execFileCb);
@@ -16,39 +16,6 @@ async function runCommand(cmd: string, args: string[]) {
     env: { ...process.env, HOME: "/home/clawbox" },
     timeout: 30_000,
   });
-}
-
-async function disableLlamaCpp(alias?: string) {
-  const spec = getLlamaCppLaunchSpec(alias);
-  const pid = await readLlamaCppPid(spec.pidPath);
-  if (pid) {
-    try {
-      process.kill(pid, "SIGTERM");
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      try {
-        process.kill(pid, 0);
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Process is already gone.
-      }
-    } catch {}
-    await clearLlamaCppPid(spec.pidPath);
-  }
-}
-
-async function disableOllama() {
-  try {
-    await execFile("systemctl", ["stop", "ollama"], { timeout: 30_000 });
-  } catch {
-    // Non-fatal: if systemd stop fails, fall back to process termination attempt.
-    const pgrep = await execFile("pgrep", ["-f", "ollama serve"], { timeout: 5_000 }).catch(() => null);
-    const pids = pgrep?.stdout?.trim().split("\n").filter(Boolean) ?? [];
-    for (const pid of pids) {
-      try {
-        process.kill(Number(pid), "SIGTERM");
-      } catch {}
-    }
-  }
 }
 
 export async function POST(request: Request) {
@@ -67,10 +34,8 @@ export async function POST(request: Request) {
     const config = await readOpenClawConfig();
     const inferredLocal = inferConfiguredLocalModel(config);
 
-    if (inferredLocal?.provider === "llamacpp") {
-      await disableLlamaCpp(inferredLocal.model.replace(/^llamacpp\//, ""));
-    } else if (inferredLocal?.provider === "ollama") {
-      await disableOllama();
+    if (inferredLocal?.provider === "llamacpp" || inferredLocal?.provider === "ollama") {
+      await stopLocalAiProvider(inferredLocal.provider);
     }
 
     await setMany({

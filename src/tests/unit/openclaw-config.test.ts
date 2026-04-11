@@ -639,4 +639,47 @@ describe("openclaw-config", () => {
       });
     });
   });
+
+  describe("ensureLocalAiProxyUrls", () => {
+    it("rewrites legacy local runtime URLs to the ClawBox proxy", async () => {
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1:8080/v1" },
+            ollama: { baseUrl: "http://127.0.0.1:11434" },
+          },
+        },
+      }) as never);
+
+      const changed = await openclawConfig.ensureLocalAiProxyUrls();
+
+      expect(changed).toBe(true);
+      expect(mockFs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining("openclaw.json.tmp"),
+        expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"'),
+        "utf-8",
+      );
+      expect(mockFs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining("openclaw.json.tmp"),
+        expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/ollama"'),
+        "utf-8",
+      );
+    });
+
+    it("skips writes when local AI providers already point at the proxy", async () => {
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" },
+            ollama: { baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama" },
+          },
+        },
+      }) as never);
+
+      const changed = await openclawConfig.ensureLocalAiProxyUrls();
+
+      expect(changed).toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+  });
 });

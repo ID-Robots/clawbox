@@ -1,14 +1,17 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { set } from "@/lib/config-store";
+import { setMany } from "@/lib/config-store";
 import { getSessionSigningSecret, createSessionCookie } from "@/lib/auth";
 
 export async function POST() {
   try {
     const timestamp = new Date().toISOString();
-    await set("setup_complete", true);
-    await set("setup_completed_at", timestamp);
+    await setMany({
+      setup_complete: true,
+      setup_completed_at: timestamp,
+      setup_progress_step: undefined,
+    });
 
     // Auto-login after first setup so user isn't shown the login screen
     const res = NextResponse.json({ success: true });
@@ -28,8 +31,10 @@ export async function POST() {
     return res;
   } catch (err) {
     // Rollback on partial failure
-    await set("setup_complete", undefined).catch(() => {});
-    await set("setup_completed_at", undefined).catch(() => {});
+    await setMany({
+      setup_complete: undefined,
+      setup_completed_at: undefined,
+    }).catch(() => {});
     return NextResponse.json(
       {
         error:

@@ -333,7 +333,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             disabled={saving}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
-            {saving ? t("saving") : t("telegram.saveAndContinue")}
+            {saving ? t("connecting") : t("settings.connect")}
           </button>
           <button
             type="button"
