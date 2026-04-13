@@ -79,7 +79,7 @@ const nextConfig: NextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "font-src 'self'",
-              "connect-src 'self' ws: wss:",
+              "connect-src 'self' ws: wss: http://*.local http://*.local:* https://*.local https://*.local:*",
               // Allow code-server iframe and webapp iframes (same origin)
               `frame-src 'self' blob:`,
               "frame-ancestors 'self'",

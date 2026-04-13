@@ -2,8 +2,25 @@
 set -euo pipefail
 
 IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
-AP_IP="10.42.0.1"
+DEFAULT_AP_IP="10.42.0.1"
+ALT_AP_IP="10.43.0.1"
+AP_IP="$DEFAULT_AP_IP"
 IFACE_TIMEOUT="${IFACE_TIMEOUT:-10}"
+
+# Detect collision with the upstream subnet. If any non-AP interface is on
+# 10.42.0.0/24, switch the AP to 10.43.0.0/24 so the captive portal,
+# masquerade, and DHCP don't fight the home network.
+detect_subnet_collision() {
+  local upstream
+  while IFS= read -r upstream; do
+    case "$upstream" in
+      10.42.0.*) AP_IP="$ALT_AP_IP"; return ;;
+    esac
+  done < <(ip -4 -o addr show 2>/dev/null | awk -v ap="$IFACE" '$2!=ap && $2!="lo" {split($4,a,"/"); print a[1]}')
+}
+detect_subnet_collision
+AP_SUBNET="${AP_IP%.*}.0/24"
+echo "[AP] Selected AP IP $AP_IP (subnet $AP_SUBNET)"
 CONFIG_FILE="/home/clawbox/clawbox/data/config.json"
 DNSMASQ_SHARED="/etc/NetworkManager/dnsmasq-shared.d"
 CAPTIVE_CONF="$DNSMASQ_SHARED/captive-portal.conf"
@@ -194,3 +211,13 @@ fi
 echo "[AP] Internet sharing active — access setup at http://${AP_IP}/setup"
 
 echo "[AP] WiFi access point '$SSID' is running on $IFACE ($AP_IP)"
+
+# Publish the live AP address so the Next.js middleware and other services
+# can redirect captive-portal probes to whichever subnet was selected.
+RUNTIME_FILE="/home/clawbox/clawbox/data/ap-runtime.env"
+mkdir -p "$(dirname "$RUNTIME_FILE")"
+cat > "$RUNTIME_FILE" <<RUNTIME_EOF
+AP_IP="$AP_IP"
+AP_SUBNET="$AP_SUBNET"
+RUNTIME_EOF
+chmod 644 "$RUNTIME_FILE"

@@ -13,6 +13,21 @@ const AP_START_SCRIPT =
 const AP_STOP_SCRIPT =
   process.env.AP_STOP_SCRIPT || "/home/clawbox/clawbox/scripts/stop-ap.sh";
 
+/** Parse one line of nmcli -t output, splitting on unescaped colons and
+ *  unescaping `\:` and `\\` per nmcli's terse-output escaping rules. */
+export function parseNmcliTerseLine(line: string): string[] {
+  const fields: string[] = [];
+  let buf = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\\" && i + 1 < line.length) { buf += line[++i]; continue; }
+    if (c === ":") { fields.push(buf); buf = ""; continue; }
+    buf += c;
+  }
+  fields.push(buf);
+  return fields;
+}
+
 // Mutex to serialize concurrent scanWifi calls
 let scanLock: Promise<void> = Promise.resolve();
 

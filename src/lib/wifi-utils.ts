@@ -12,3 +12,11 @@ export function signalToLevel(signal: number): number {
   if (signal >= 25) return 2;
   return 1;
 }
+
+export function dbmToLevel(dbm: number): number {
+  if (dbm >= -55) return 4;
+  if (dbm >= -65) return 3;
+  if (dbm >= -75) return 2;
+  if (dbm >= -85) return 1;
+  return 0;
+}

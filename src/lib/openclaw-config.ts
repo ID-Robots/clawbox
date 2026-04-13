@@ -172,6 +172,7 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://localhost",
     "http://127.0.0.1",
     "http://10.42.0.1",
+    "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
   controlUi.allowedOrigins = Array.from(origins);
   gateway.controlUi = controlUi;

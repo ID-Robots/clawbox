@@ -7,7 +7,7 @@ import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
-import { signalToLevel } from "@/lib/wifi-utils";
+import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
@@ -55,6 +55,11 @@ interface SystemStats {
 
 
 const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "system", "about"] as const;
+
+const REBOOT_PROBE_GRACE_MS = 8_000;
+const REBOOT_PROBE_INTERVAL_MS = 3_000;
+const REBOOT_PROBE_TIMEOUT_MS = 2_500;
+const REBOOT_HARD_REDIRECT_MS = 45_000;
 type Section = typeof SECTIONS[number];
 
 /* ── Sidebar nav items ── */
@@ -340,6 +345,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [wifiConnecting, setWifiConnecting] = useState(false);
   const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
+  const [wifiQuality, setWifiQuality] = useState<{ signalDbm: number | null; bitrateMbps: number | null; pingMs: number | null }>({ signalDbm: null, bitrateMbps: null, pingMs: null });
+  const [ethernet, setEthernet] = useState<{ connected: boolean; iface: string | null }>({ connected: false, iface: null });
 
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[] | null>(null);
   const [wifiScanning, setWifiScanning] = useState(false);
@@ -378,6 +385,73 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
   const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
   const [hotspotToggling, setHotspotToggling] = useState(false);
+  const [hotspotSSIDInput, setHotspotSSIDInput] = useState("ClawBox-Setup");
+  const [hotspotSSIDSaving, setHotspotSSIDSaving] = useState(false);
+  const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hotspotHasPassword, setHotspotHasPassword] = useState(false);
+  const [hotspotActive, setHotspotActive] = useState<boolean | null>(null);
+  const [hotspotBlockedBy, setHotspotBlockedBy] = useState<string | null>(null);
+  const [hotspotPassword, setHotspotPassword] = useState("");
+  const [hotspotPasswordShow, setHotspotPasswordShow] = useState(false);
+  const [hotspotPasswordSaving, setHotspotPasswordSaving] = useState(false);
+  const [hotspotPasswordStatus, setHotspotPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hotspotConfirmEnable, setHotspotConfirmEnable] = useState(false);
+  const [savedNetworks, setSavedNetworks] = useState<{ name: string; priority: number; device: string | null }[]>([]);
+  const [savedEditing, setSavedEditing] = useState<string | null>(null);
+  const [savedNewPassword, setSavedNewPassword] = useState("");
+  const [savedShowPassword, setSavedShowPassword] = useState(false);
+  const [savedBusy, setSavedBusy] = useState<string | null>(null);
+  const [savedStatus, setSavedStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const refreshSavedNetworks = async () => {
+    try {
+      const r = await fetch("/setup-api/wifi/saved");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      if (Array.isArray(d.profiles)) setSavedNetworks(d.profiles);
+    } catch (err) {
+      console.warn("[SettingsApp] refreshSavedNetworks failed:", err);
+    }
+  };
+  useEffect(() => { void refreshSavedNetworks(); }, []);
+  const updateSavedPassword = async (name: string) => {
+    if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
+      setSavedStatus({ type: "error", message: "Password must be 8–63 characters" });
+      return;
+    }
+    setSavedBusy(name); setSavedStatus(null);
+    try {
+      const r = await fetch("/setup-api/wifi/update", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: name, password: savedNewPassword, action: "update" }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Failed");
+      setSavedStatus({ type: "success", message: `Password updated for ${name}` });
+      setSavedEditing(null); setSavedNewPassword("");
+    } catch (err) {
+      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setSavedBusy(null);
+    }
+  };
+  const forgetSavedNetwork = async (name: string) => {
+    if (!window.confirm(`Forget WiFi network "${name}"? You'll need its password to reconnect.`)) return;
+    setSavedBusy(name); setSavedStatus(null);
+    try {
+      const r = await fetch("/setup-api/wifi/update", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: name, action: "forget" }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Failed");
+      setSavedStatus({ type: "success", message: `Forgot ${name}` });
+      void refreshSavedNetworks();
+    } catch (err) {
+      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setSavedBusy(null);
+    }
+  };
 
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
@@ -385,14 +459,57 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hostnameStatus, setHostnameStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [hostnameSaving, setHostnameSaving] = useState(false);
   const [hostnameConfirm, setHostnameConfirm] = useState(false);
+  const [hostnameRebootTo, setHostnameRebootTo] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hostnameRebootTo) return;
+    let cancelled = false;
+    const redirect = () => { if (!cancelled) window.location.replace(hostnameRebootTo); };
+    const probe = async () => {
+      if (cancelled) return;
+      try {
+        // no-cors: response is opaque so we can't inspect status. Any
+        // fulfilled fetch means TCP+HTTP completed, which is enough signal
+        // that the device is back — redirect deliberately on any success.
+        await fetch(`${hostnameRebootTo}setup-api/setup/status`, {
+          method: "GET",
+          mode: "no-cors",
+          cache: "no-store",
+          signal: AbortSignal.timeout(REBOOT_PROBE_TIMEOUT_MS),
+        });
+        redirect();
+        return;
+      } catch { /* not back yet */ }
+      if (!cancelled) setTimeout(probe, REBOOT_PROBE_INTERVAL_MS);
+    };
+    const probeStart = setTimeout(probe, REBOOT_PROBE_GRACE_MS);
+    const hardRedirect = setTimeout(redirect, REBOOT_HARD_REDIRECT_MS);
+    return () => { cancelled = true; clearTimeout(probeStart); clearTimeout(hardRedirect); };
+  }, [hostnameRebootTo]);
+  const [currentHost, setCurrentHost] = useState<string>("");
+  useEffect(() => { if (typeof window !== "undefined") setCurrentHost(window.location.hostname); }, []);
+  const accessedByIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(currentHost) || currentHost === "localhost";
+  const localUrl = hostname ? `${hostname}.local` : "";
+  const fullLocalUrl = localUrl ? `${typeof window !== "undefined" ? window.location.protocol : "http:"}//${localUrl}${typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : ""}` : "";
+  const [copiedLocalUrl, setCopiedLocalUrl] = useState(false);
+  const copyLocalUrl = async () => {
+    if (!fullLocalUrl) return;
+    try { await navigator.clipboard.writeText(fullLocalUrl); setCopiedLocalUrl(true); setTimeout(() => setCopiedLocalUrl(false), 1500); } catch { /* clipboard blocked */ }
+  };
 
   useEffect(() => {
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
+      setWifiQuality({ signalDbm: d.signalDbm ?? null, bitrateMbps: d.bitrateMbps ?? null, pingMs: d.pingMs ?? null });
+    }).catch(() => {});
+    fetch("/setup-api/wifi/ethernet").then(r => r.json()).then(d => {
+      setEthernet({ connected: !!d.connected, iface: d.iface ?? null });
     }).catch(() => {});
     fetch("/setup-api/system/hotspot").then(r => r.json()).then(d => {
       setHotspotEnabled(d.enabled ?? true);
-      if (d.ssid) setHotspotSSID(d.ssid);
+      if (d.ssid) { setHotspotSSID(d.ssid); setHotspotSSIDInput(d.ssid); }
+      setHotspotHasPassword(!!d.hasPassword);
+      setHotspotActive(!!d.active);
+      setHotspotBlockedBy(d.blockedBy ?? null);
     }).catch(() => {});
     fetch("/setup-api/system/hostname").then(r => r.json()).then(d => {
       if (d.hostname) {
@@ -429,7 +546,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       setHostnameStatus({ type: "success", message: t("settings.hostnameRestarting", { fqdn: `${name}.local` }) });
       setHostnameConfirm(false);
-      // Trigger reboot so the new hostname takes effect cleanly.
+      const proto = typeof window !== "undefined" ? window.location.protocol : "http:";
+      const port = typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : "";
+      const newUrl = `${proto}//${name}.local${port}/`;
+      setHostnameRebootTo(newUrl);
       try {
         await fetch("/setup-api/system/power", {
           method: "POST",
@@ -444,8 +564,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
-  const toggleHotspot = async () => {
-    const newEnabled = !hotspotEnabled;
+  const performHotspotToggle = async (newEnabled: boolean) => {
     setHotspotToggling(true);
     try {
       const res = await fetch("/setup-api/system/hotspot", {
@@ -457,6 +576,80 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setHotspotEnabled(newEnabled);
     } catch { /* leave state unchanged */ } finally {
       setHotspotToggling(false);
+    }
+  };
+
+  const toggleHotspot = () => {
+    const newEnabled = !hotspotEnabled;
+    // Enabling the AP while WiFi is the uplink will drop the WiFi connection
+    // (single radio). Confirm so the user isn't surprised.
+    if (newEnabled && connectedSSID && !ethernet.connected) {
+      setHotspotConfirmEnable(true);
+      return;
+    }
+    void performHotspotToggle(newEnabled);
+  };
+
+  const saveHotspotSSID = async () => {
+    const next = hotspotSSIDInput.trim();
+    if (!next) {
+      setHotspotSSIDStatus({ type: "error", message: "Hotspot name is required" });
+      return;
+    }
+    if (next.length > 32) {
+      setHotspotSSIDStatus({ type: "error", message: "Hotspot name must be 32 characters or less" });
+      return;
+    }
+    if (next === hotspotSSID) return;
+    setHotspotSSIDSaving(true);
+    setHotspotSSIDStatus(null);
+    try {
+      const res = await fetch("/setup-api/system/hotspot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: next, enabled: hotspotEnabled ?? true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed");
+      }
+      setHotspotSSID(next);
+      setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
+    } catch (err) {
+      setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setHotspotSSIDSaving(false);
+    }
+  };
+
+  const saveHotspotPassword = async () => {
+    if (hotspotPassword.length < 8) {
+      setHotspotPasswordStatus({ type: "error", message: t("credentials.hotspotPasswordMinLength") });
+      return;
+    }
+    if (hotspotPassword.length > 63) {
+      setHotspotPasswordStatus({ type: "error", message: "Password must be 63 characters or less" });
+      return;
+    }
+    setHotspotPasswordSaving(true);
+    setHotspotPasswordStatus(null);
+    try {
+      const res = await fetch("/setup-api/system/hotspot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssid: hotspotSSID, password: hotspotPassword, enabled: hotspotEnabled ?? true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed");
+      }
+      setHotspotHasPassword(true);
+      setHotspotPassword("");
+      setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
+    } catch (err) {
+      setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setHotspotPasswordSaving(false);
     }
   };
 
@@ -981,9 +1174,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-[var(--text-primary)] font-medium truncate">{connectedSSID}</div>
+                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                      <span className="text-xs text-green-400/80">WiFi · {t("settings.connected")}</span>
+                      {wifiQuality.signalDbm !== null && (
+                        <span className="text-[10px] text-white/45">· {dbmToLevel(wifiQuality.signalDbm)} bars · {wifiQuality.signalDbm} dBm</span>
+                      )}
+                      {wifiQuality.bitrateMbps !== null && (
+                        <span className="text-[10px] text-white/45">· {Math.round(wifiQuality.bitrateMbps)} Mbps</span>
+                      )}
+                      {wifiQuality.pingMs !== null && (
+                        <span className="text-[10px] text-white/45">· {wifiQuality.pingMs}ms gw</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : ethernet.connected ? (
+                <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>settings_ethernet</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-[var(--text-primary)] font-medium truncate">Ethernet{ethernet.iface ? ` (${ethernet.iface})` : ""}</div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400/80">{t("settings.connected")}</span>
+                      <span className="text-xs text-green-400/80">Wired · {t("settings.connected")}</span>
                     </div>
                   </div>
                 </div>
@@ -998,18 +1213,49 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
               )}
+
+              {localUrl && (
+                <div className={`mt-4 rounded-xl border px-4 py-3 ${accessedByIp ? "border-amber-400/30 bg-amber-400/[0.08]" : "border-white/[0.06] bg-white/[0.03]"}`}>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className={`material-symbols-rounded ${accessedByIp ? "text-amber-300" : "text-[var(--coral-bright)]"}`} style={{ fontSize: 16 }}>{accessedByIp ? "warning" : "link"}</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">Access this device at</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <a href={fullLocalUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{localUrl}</a>
+                    <button
+                      onClick={copyLocalUrl}
+                      className="px-2.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
+                      title="Copy URL"
+                      aria-label={copiedLocalUrl ? "URL copied" : "Copy URL"}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{copiedLocalUrl ? "check" : "content_copy"}</span>
+                      {copiedLocalUrl ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <span className="sr-only" aria-live="polite">{copiedLocalUrl ? "URL copied to clipboard" : ""}</span>
+                  {accessedByIp && (
+                    <p className="text-[11px] text-amber-100/85 mt-2 leading-relaxed">
+                      You&apos;re currently visiting this device by IP address ({currentHost}). The IP changes when WiFi and Ethernet swap, which can drop your session. Use <span className="font-mono">{localUrl}</span> instead so the URL stays the same on either connection.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Hotspot toggle card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${hotspotEnabled ? "bg-orange-500/15" : "bg-white/5"}`}>
-                    <span className={`material-symbols-rounded ${hotspotEnabled ? "text-[var(--coral-bright)]" : "text-[var(--text-muted)] opacity-50"}`} style={{ fontSize: 22 }}>wifi_tethering</span>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${hotspotEnabled && hotspotActive === false ? "bg-amber-400/15" : hotspotEnabled ? "bg-orange-500/15" : "bg-white/5"}`}>
+                    <span className={`material-symbols-rounded ${hotspotEnabled && hotspotActive === false ? "text-amber-300" : hotspotEnabled ? "text-[var(--coral-bright)]" : "text-[var(--text-muted)] opacity-50"}`} style={{ fontSize: 22 }}>wifi_tethering</span>
                   </div>
                   <div>
                     <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.hotspot")}</div>
-                    <div className="text-xs text-white/35 mt-0.5">{hotspotSSID}</div>
+                    <div className="text-xs text-white/35 mt-0.5">
+                      {hotspotSSID}
+                      {hotspotEnabled && hotspotActive === false && <span className="ml-2 text-amber-300/90">• not broadcasting</span>}
+                      {hotspotEnabled && hotspotActive === true && <span className="ml-2 text-emerald-300/80">• broadcasting</span>}
+                    </div>
                   </div>
                 </div>
                 <button
@@ -1020,10 +1266,76 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${hotspotEnabled ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
               </div>
-              {hotspotEnabled && (
+              {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
                   {t("settings.hotspotDesc", { ssid: hotspotSSID })}
                 </p>
+              )}
+              {hotspotEnabled && hotspotActive === false && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5">
+                  <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
+                  <div className="text-[11px] text-amber-100/90 leading-relaxed">
+                    Hotspot is not broadcasting{hotspotBlockedBy ? ` because this device is connected to "${hotspotBlockedBy}" over WiFi` : ""}.
+                    The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet.
+                    Saved settings will apply automatically the next time the AP starts.
+                  </div>
+                </div>
+              )}
+              {hotspotEnabled && (
+                <div className="mt-4 pt-4 border-t border-white/[0.06]">
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest block mb-2">
+                    {t("settings.hotspot")} name
+                  </label>
+                  <div className="flex items-stretch gap-2 mb-4">
+                    <input
+                      type="text"
+                      value={hotspotSSIDInput}
+                      onChange={e => { setHotspotSSIDInput(e.target.value); setHotspotSSIDStatus(null); }}
+                      maxLength={32}
+                      placeholder="ClawBox-Setup"
+                      className="flex-1 min-w-0 px-3.5 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none placeholder-white/15 focus:border-orange-400/60 focus:bg-white/[0.06] transition-all"
+                    />
+                    <button
+                      onClick={saveHotspotSSID}
+                      disabled={hotspotSSIDSaving || !hotspotSSIDInput.trim() || hotspotSSIDInput.trim() === hotspotSSID}
+                      className="px-4 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all"
+                    >
+                      {t("settings.save")}
+                    </button>
+                  </div>
+                  {hotspotSSIDStatus && <div className="mb-4"><StatusMessage type={hotspotSSIDStatus.type} message={hotspotSSIDStatus.message} /></div>}
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest block mb-2">
+                    {t("credentials.hotspotPassword")}
+                  </label>
+                  <div className="flex items-stretch gap-2">
+                    <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-xl overflow-hidden focus-within:border-orange-400/60 focus-within:bg-white/[0.06] transition-all">
+                      <input
+                        type={hotspotPasswordShow ? "text" : "password"}
+                        value={hotspotPassword}
+                        onChange={e => { setHotspotPassword(e.target.value); setHotspotPasswordStatus(null); }}
+                        placeholder={hotspotHasPassword ? "••••••••" : "At least 8 characters"}
+                        maxLength={63}
+                        className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/15"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setHotspotPasswordShow(v => !v)}
+                        className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
+                        aria-label={hotspotPasswordShow ? "Hide password" : "Show password"}
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{hotspotPasswordShow ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                    <button
+                      onClick={saveHotspotPassword}
+                      disabled={hotspotPasswordSaving || hotspotPassword.length < 8}
+                      className="px-4 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all"
+                    >
+                      {t("settings.save")}
+                    </button>
+                  </div>
+                  {hotspotPasswordStatus && <div className="mt-3"><StatusMessage type={hotspotPasswordStatus.type} message={hotspotPasswordStatus.message} /></div>}
+                </div>
               )}
             </div>
 
@@ -1056,6 +1368,53 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
               {hostnameStatus && <div className="mt-3"><StatusMessage type={hostnameStatus.type} message={hostnameStatus.message} /></div>}
             </div>
+
+            {/* Saved networks card */}
+            {savedNetworks.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>bookmark</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Saved Networks</label>
+                </div>
+                <div className="space-y-2">
+                  {savedNetworks.map(net => {
+                    const isActive = !!net.device;
+                    const isEditing = savedEditing === net.name;
+                    return (
+                      <div key={net.name} className="rounded-xl border border-white/[0.06] bg-white/[0.02]">
+                        <div className="flex items-center gap-3 px-4 py-3">
+                          <span className={`material-symbols-rounded ${isActive ? "text-green-400" : "text-[var(--text-muted)] opacity-60"}`} style={{ fontSize: 20 }}>{isActive ? "wifi" : "wifi_password"}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-[var(--text-primary)] font-medium truncate">{net.name}</div>
+                            {isActive && <div className="text-[10px] text-green-400/80 mt-0.5">Connected</div>}
+                          </div>
+                          <button onClick={() => { setSavedEditing(isEditing ? null : net.name); setSavedNewPassword(""); setSavedStatus(null); }} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Edit password" aria-label={`Edit password for ${net.name}`}>
+                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{isEditing ? "close" : "edit"}</span>
+                          </button>
+                          <button onClick={() => forgetSavedNetwork(net.name)} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-red-500/30 text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Forget" aria-label={`Forget ${net.name}`}>
+                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
+                          </button>
+                        </div>
+                        {isEditing && (
+                          <div className="px-4 pb-3 pt-1 border-t border-white/[0.04]">
+                            <div className="flex items-stretch gap-2 mt-2">
+                              <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                                <input type={savedShowPassword ? "text" : "password"} value={savedNewPassword} onChange={e => { setSavedNewPassword(e.target.value); setSavedStatus(null); }} placeholder="New password" maxLength={63} className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20" />
+                                <button type="button" onClick={() => setSavedShowPassword(v => !v)} className="px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer">
+                                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{savedShowPassword ? "visibility_off" : "visibility"}</span>
+                                </button>
+                              </div>
+                              <button onClick={() => updateSavedPassword(net.name)} disabled={savedBusy === net.name || savedNewPassword.length < 8} className="px-3 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-xs font-semibold cursor-pointer border-none">Save</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {savedStatus && <div className="mt-3"><StatusMessage type={savedStatus.type} message={savedStatus.message} /></div>}
+              </div>
+            )}
 
             {/* Connect to network card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -1995,14 +2354,39 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
+      {/* Hotspot enable confirmation — single-radio collision warning */}
+      {hotspotConfirmEnable && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+            <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
               {t("settings.hostnameConfirmDesc", { fqdn: `${hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local` })}
             </p>
+            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5 text-[12px] leading-relaxed text-amber-100/90">
+              <div className="flex items-start gap-2">
+                <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
+                <div>
+                  After reboot you&apos;ll need to reconnect at:
+                  <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
+                </div>
+              </div>
+            </div>
             <div className="flex gap-3">
               <button disabled={hostnameSaving} onClick={() => setHostnameConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">
                 {t("cancel")}
@@ -2154,9 +2538,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+            <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
               {t("settings.hostnameConfirmDesc", { fqdn: `${hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local` })}
             </p>
+            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5 text-[12px] leading-relaxed text-amber-100/90">
+              <div className="flex items-start gap-2">
+                <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
+                <div>
+                  After reboot you&apos;ll need to reconnect at:
+                  <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
+                </div>
+              </div>
+            </div>
             <div className="flex gap-3">
               <button disabled={hostnameSaving} onClick={() => setHostnameConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">
                 {t("cancel")}
@@ -2169,7 +2562,47 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
+      {/* Hotspot enable confirmation — single-radio collision warning (desktop layout) */}
+      {hotspotConfirmEnable && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
+      {hostnameRebootTo && typeof document !== "undefined" && createPortal(
+        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+          <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
+            <div className="relative w-20 h-20" aria-hidden="true">
+              <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />
+              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] animate-spin" />
+            </div>
+            <div className="space-y-2">
+              <h2 id="hostname-reboot-title" className="text-xl font-semibold text-white">Restarting device…</h2>
+              <p className="text-sm text-white/60 leading-relaxed">
+                The Jetson is rebooting with its new name.<br/>You&apos;ll be redirected automatically when it&apos;s back online.
+              </p>
+            </div>
+            <a href={hostnameRebootTo} className="text-xs text-[#fe6e00] hover:text-[#ff8b1a] font-mono underline-offset-2 hover:underline break-all">
+              {hostnameRebootTo}
+            </a>
+            <p className="text-[11px] text-white/30">
+              This usually takes 30–60 seconds. If your browser doesn&apos;t redirect, click the link above.
+            </p>
+          </div>
+        </div>,
+        document.body,
+      )}
+
       {updateStarted && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
           <style>{`

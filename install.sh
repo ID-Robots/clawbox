@@ -641,6 +641,8 @@ step_directories_permissions() {
 step_system_config() {
   step_systemd_services
   step_polkit_rules
+  step_nm_dispatcher
+  step_sysctl_linkdown
 }
 
 step_systemd_services() {
@@ -676,6 +678,37 @@ step_systemd_services() {
     echo "  Sudoers rules installed"
   fi
   echo "  Services installed and enabled"
+}
+
+step_sysctl_linkdown() {
+  local SYSCTL_DIR="/etc/sysctl.d"
+  local DEST="$SYSCTL_DIR/90-clawbox-linkdown.conf"
+  mkdir -p "$SYSCTL_DIR"
+  cat > "$DEST" <<'SYSCTL_EOF'
+# ClawBox: instantly skip default routes whose interface has lost link.
+# Fixes the 5-10s blackhole when Ethernet is unplugged while WiFi is also up.
+net.ipv4.conf.all.ignore_routes_with_linkdown=1
+net.ipv4.conf.default.ignore_routes_with_linkdown=1
+SYSCTL_EOF
+  chown root:root "$DEST"
+  chmod 0644 "$DEST"
+  sysctl -q -p "$DEST" 2>/dev/null || true
+  echo "  Linkdown routing sysctl installed"
+}
+
+step_nm_dispatcher() {
+  local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
+  local SRC="$PROJECT_DIR/scripts/nm-dispatcher-failover.sh"
+  local DEST="$DISPATCHER_DIR/90-clawbox-failover"
+  if [ ! -f "$SRC" ]; then
+    echo "  Skipping NM dispatcher: $SRC missing"
+    return
+  fi
+  mkdir -p "$DISPATCHER_DIR"
+  cp "$SRC" "$DEST"
+  chown root:root "$DEST"
+  chmod 0755 "$DEST"
+  echo "  NetworkManager failover dispatcher installed"
 }
 
 step_polkit_rules() {

@@ -29,6 +29,22 @@ export default function SystemTray({
   const { t } = useT();
   const [closing, setClosing] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
+  const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch("/setup-api/network/internet", { signal: AbortSignal.timeout(4000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (alive) setInternet({ online: !!d.online, latencyMs: d.latencyMs ?? null });
+      } catch { if (alive) setInternet({ online: false, latencyMs: null }); }
+    };
+    void tick();
+    const id = setInterval(tick, 15_000);
+    return () => { alive = false; clearInterval(id); };
+  }, [isOpen]);
   const [rebootState, setRebootState] = useState<RebootState>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -241,6 +257,16 @@ export default function SystemTray({
             <div className="text-2xl font-medium text-white">{time}</div>
             <div className="text-sm text-white/60">{date}</div>
           </div>
+
+          {/* Internet status */}
+          {internet && (
+            <div className="px-4 py-2.5 border-b border-white/10 flex items-center gap-2">
+              <span aria-hidden="true" className={`w-2 h-2 rounded-full ${internet.online ? "bg-green-400" : "bg-red-400"}`} />
+              <span className="text-xs text-white/70">
+                {internet.online ? `Internet · ${internet.latencyMs ?? "?"} ms` : "No internet"}
+              </span>
+            </div>
+          )}
 
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">

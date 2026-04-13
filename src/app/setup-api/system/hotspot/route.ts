@@ -4,6 +4,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, setMany, getAll } from "@/lib/config-store";
+import { parseNmcliTerseLine } from "@/lib/network";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,12 +16,39 @@ const HOTSPOT_ENV_PATH = path.join(
   "hotspot.env"
 );
 
+let getCache: { body: unknown; at: number } | null = null;
+const GET_TTL_MS = 3_000;
+
 export async function GET() {
+  if (getCache && Date.now() - getCache.at < GET_TTL_MS) {
+    return NextResponse.json(getCache.body);
+  }
   const config = await getAll();
   const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
   const hasPassword = !!config.hotspot_password;
   const enabled = config.hotspot_enabled !== false;
-  return NextResponse.json({ ssid, hasPassword, enabled });
+
+  const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
+  let active = false;
+  let blockedBy: string | null = null;
+  try {
+    const { stdout } = await execFileAsync("nmcli", [
+      "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
+    ], { timeout: 3_000 });
+    const rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
+    const apRow = rows.find(r => r[0] === "ClawBox-Setup" && r[2] === iface);
+    active = !!apRow;
+    if (enabled && !active) {
+      const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
+      if (wifiRow) blockedBy = wifiRow[0];
+    }
+  } catch (err) {
+    console.warn("[hotspot] nmcli unavailable:", err);
+  }
+
+  const body = { ssid, hasPassword, enabled, active, blockedBy };
+  getCache = { body, at: Date.now() };
+  return NextResponse.json(body);
 }
 
 export async function POST(request: Request) {

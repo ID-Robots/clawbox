@@ -7,7 +7,7 @@ const OPENCLAW_CONFIG_PATH = "/home/clawbox/.openclaw/openclaw.json";
 const ALLOWED_PROTOS = new Set(["http", "https"]);
 const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
 const ALLOWED_HOSTS = new Set(
-  (process.env.ALLOWED_HOSTS || "clawbox.local,10.42.0.1,localhost")
+  (process.env.ALLOWED_HOSTS || "clawbox.local,10.42.0.1,10.43.0.1,localhost")
     .split(",")
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean)
