@@ -154,6 +154,31 @@ export async function ensureCompactionReserveFloor(
   }
 }
 
+/**
+ * Set the OpenClaw gateway control-UI allowed origins to include the given
+ * mDNS hostname. Always preserves the standard local origins so the device
+ * remains reachable via IP and the AP captive portal even after a rename.
+ */
+export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
+  const config = await readConfig();
+  const gateway = (config.gateway ?? {}) as Record<string, unknown>;
+  const controlUi = (gateway.controlUi ?? {}) as Record<string, unknown>;
+  const existing = Array.isArray(controlUi.allowedOrigins)
+    ? (controlUi.allowedOrigins as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
+  const origins = new Set<string>([
+    ...existing,
+    `http://${hostname}.local`,
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://10.42.0.1",
+  ]);
+  controlUi.allowedOrigins = Array.from(origins);
+  gateway.controlUi = controlUi;
+  config.gateway = gateway;
+  await writeConfig(config);
+}
+
 export async function setTelegramToken(botToken: string): Promise<void> {
   const config = await readConfig();
   if (!config.channels) {

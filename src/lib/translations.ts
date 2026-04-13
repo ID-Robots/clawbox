@@ -55,8 +55,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Note:",
     "wifi.connect": "Connect",
     "wifi.findingNetworks": "Finding networks...",
-    "wifi.connectedMessage": "Connected! Reconnect to your home WiFi and visit http://clawbox.local to continue.",
-    "wifi.lostConnection": "Lost connection to ClawBox. If WiFi switched successfully, reconnect to your home WiFi and visit http://clawbox.local to continue.",
+    "wifi.connectedMessage": "Connected! Reconnect to your home WiFi and visit {url} to continue.",
+    "wifi.lostConnection": "Lost connection to ClawBox. If WiFi switched successfully, reconnect to your home WiFi and visit {url} to continue.",
     "wifi.connectionFailed": "Connection failed: {error}",
 
     // === UpdateStep ===
@@ -395,8 +395,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Забележка:",
     "wifi.connect": "Свържи се",
     "wifi.findingNetworks": "Търсене на мрежи...",
-    "wifi.connectedMessage": "Свързано! Свържете се с домашната си WiFi мрежа и отворете http://clawbox.local, за да продължите.",
-    "wifi.lostConnection": "Загубена връзка с ClawBox. Ако WiFi мрежата е сменена успешно, свържете се с домашната си WiFi и отворете http://clawbox.local, за да продължите.",
+    "wifi.connectedMessage": "Свързано! Свържете се с домашната си WiFi мрежа и отворете {url}, за да продължите.",
+    "wifi.lostConnection": "Загубена връзка с ClawBox. Ако WiFi мрежата е сменена успешно, свържете се с домашната си WiFi и отворете {url}, за да продължите.",
     "wifi.connectionFailed": "Неуспешно свързване: {error}",
 
     // === UpdateStep ===
@@ -735,8 +735,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Hinweis:",
     "wifi.connect": "Verbinden",
     "wifi.findingNetworks": "Netzwerke werden gesucht...",
-    "wifi.connectedMessage": "Verbunden! Verbinde dich mit deinem Heim-WLAN und öffne http://clawbox.local, um fortzufahren.",
-    "wifi.lostConnection": "Verbindung zu ClawBox verloren. Wenn der WLAN-Wechsel erfolgreich war, verbinde dich mit deinem Heim-WLAN und öffne http://clawbox.local.",
+    "wifi.connectedMessage": "Verbunden! Verbinde dich mit deinem Heim-WLAN und öffne {url}, um fortzufahren.",
+    "wifi.lostConnection": "Verbindung zu ClawBox verloren. Wenn der WLAN-Wechsel erfolgreich war, verbinde dich mit deinem Heim-WLAN und öffne {url}.",
     "wifi.connectionFailed": "Verbindung fehlgeschlagen: {error}",
 
     // === UpdateStep ===
@@ -1075,8 +1075,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Nota:",
     "wifi.connect": "Conectar",
     "wifi.findingNetworks": "Buscando redes...",
-    "wifi.connectedMessage": "¡Conectado! Conéctate a tu WiFi doméstica y visita http://clawbox.local para continuar.",
-    "wifi.lostConnection": "Se perdió la conexión con ClawBox. Si el cambio de WiFi fue exitoso, conéctate a tu WiFi doméstica y visita http://clawbox.local para continuar.",
+    "wifi.connectedMessage": "¡Conectado! Conéctate a tu WiFi doméstica y visita {url} para continuar.",
+    "wifi.lostConnection": "Se perdió la conexión con ClawBox. Si el cambio de WiFi fue exitoso, conéctate a tu WiFi doméstica y visita {url} para continuar.",
     "wifi.connectionFailed": "Error de conexión: {error}",
 
     // === UpdateStep ===
@@ -1415,8 +1415,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Remarque :",
     "wifi.connect": "Se connecter",
     "wifi.findingNetworks": "Recherche de réseaux...",
-    "wifi.connectedMessage": "Connecté ! Rejoignez votre WiFi domestique et rendez-vous sur http://clawbox.local pour continuer.",
-    "wifi.lostConnection": "Connexion à ClawBox perdue. Si le WiFi a bien été changé, rejoignez votre WiFi domestique et rendez-vous sur http://clawbox.local pour continuer.",
+    "wifi.connectedMessage": "Connecté ! Rejoignez votre WiFi domestique et rendez-vous sur {url} pour continuer.",
+    "wifi.lostConnection": "Connexion à ClawBox perdue. Si le WiFi a bien été changé, rejoignez votre WiFi domestique et rendez-vous sur {url} pour continuer.",
     "wifi.connectionFailed": "Échec de la connexion : {error}",
 
     // === UpdateStep ===
@@ -1755,8 +1755,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Nota:",
     "wifi.connect": "Connetti",
     "wifi.findingNetworks": "Ricerca reti...",
-    "wifi.connectedMessage": "Connesso! Collegati al WiFi di casa e visita http://clawbox.local per continuare.",
-    "wifi.lostConnection": "Connessione a ClawBox persa. Se il cambio WiFi è andato a buon fine, collegati al WiFi di casa e visita http://clawbox.local per continuare.",
+    "wifi.connectedMessage": "Connesso! Collegati al WiFi di casa e visita {url} per continuare.",
+    "wifi.lostConnection": "Connessione a ClawBox persa. Se il cambio WiFi è andato a buon fine, collegati al WiFi di casa e visita {url} per continuare.",
     "wifi.connectionFailed": "Connessione fallita: {error}",
 
     // === UpdateStep ===
@@ -2095,8 +2095,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "注意：",
     "wifi.connect": "接続",
     "wifi.findingNetworks": "ネットワークを検索中...",
-    "wifi.connectedMessage": "接続しました！自宅のWiFiに接続し直し、http://clawbox.local にアクセスして続けてください。",
-    "wifi.lostConnection": "ClawBoxとの接続が切れました。WiFiの切り替えに成功した場合は、自宅のWiFiに接続し直し、http://clawbox.local にアクセスしてください。",
+    "wifi.connectedMessage": "接続しました！自宅のWiFiに接続し直し、{url} にアクセスして続けてください。",
+    "wifi.lostConnection": "ClawBoxとの接続が切れました。WiFiの切り替えに成功した場合は、自宅のWiFiに接続し直し、{url} にアクセスしてください。",
     "wifi.connectionFailed": "接続に失敗しました: {error}",
 
     // === UpdateStep ===
@@ -2435,8 +2435,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Let op:",
     "wifi.connect": "Verbinden",
     "wifi.findingNetworks": "Netwerken zoeken...",
-    "wifi.connectedMessage": "Verbonden! Maak verbinding met je thuis-WiFi en ga naar http://clawbox.local om verder te gaan.",
-    "wifi.lostConnection": "Verbinding met ClawBox verloren. Als het WiFi-netwerk succesvol is gewisseld, maak dan verbinding met je thuis-WiFi en ga naar http://clawbox.local.",
+    "wifi.connectedMessage": "Verbonden! Maak verbinding met je thuis-WiFi en ga naar {url} om verder te gaan.",
+    "wifi.lostConnection": "Verbinding met ClawBox verloren. Als het WiFi-netwerk succesvol is gewisseld, maak dan verbinding met je thuis-WiFi en ga naar {url}.",
     "wifi.connectionFailed": "Verbinding mislukt: {error}",
 
     // === UpdateStep ===
@@ -2775,8 +2775,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "Observera:",
     "wifi.connect": "Anslut",
     "wifi.findingNetworks": "Söker nätverk...",
-    "wifi.connectedMessage": "Ansluten! Anslut till ditt hem-WiFi och gå till http://clawbox.local för att fortsätta.",
-    "wifi.lostConnection": "Anslutningen till ClawBox bröts. Om WiFi-bytet lyckades, anslut till ditt hem-WiFi och gå till http://clawbox.local för att fortsätta.",
+    "wifi.connectedMessage": "Ansluten! Anslut till ditt hem-WiFi och gå till {url} för att fortsätta.",
+    "wifi.lostConnection": "Anslutningen till ClawBox bröts. Om WiFi-bytet lyckades, anslut till ditt hem-WiFi och gå till {url} för att fortsätta.",
     "wifi.connectionFailed": "Anslutningen misslyckades: {error}",
 
     // === UpdateStep ===
@@ -3115,8 +3115,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.wifiNotePrefix": "注意：",
     "wifi.connect": "连接",
     "wifi.findingNetworks": "正在查找网络...",
-    "wifi.connectedMessage": "已连接！请连接家中 WiFi 并访问 http://clawbox.local 继续。",
-    "wifi.lostConnection": "与 ClawBox 的连接已断开。如果 WiFi 切换成功，请连接家中 WiFi 并访问 http://clawbox.local 继续。",
+    "wifi.connectedMessage": "已连接！请连接家中 WiFi 并访问 {url} 继续。",
+    "wifi.lostConnection": "与 ClawBox 的连接已断开。如果 WiFi 切换成功，请连接家中 WiFi 并访问 {url} 继续。",
     "wifi.connectionFailed": "连接失败：{error}",
 
     // === UpdateStep ===

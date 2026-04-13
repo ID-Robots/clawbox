@@ -8,6 +8,7 @@ import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import { useT, LANGUAGES } from "@/lib/i18n";
 import type { Locale } from "@/lib/i18n";
+import { useLocalUrl } from "@/hooks/useLocalUrl";
 
 interface WifiStepProps {
   onNext: () => void;
@@ -15,6 +16,7 @@ interface WifiStepProps {
 
 export default function WifiStep({ onNext }: WifiStepProps) {
   const { locale, setLocale, t } = useT();
+  const localUrl = useLocalUrl();
   const [showWifiList, setShowWifiList] = useState(false);
   const [networks, setNetworks] = useState<WifiNetwork[] | null>(null);
   const [loadingNetworks, setLoadingNetworks] = useState(false);
@@ -135,7 +137,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       setConnecting(false);
       setStatus({
         type: "success",
-        message: t("wifi.connectedMessage"),
+        message: t("wifi.connectedMessage", { url: localUrl }),
       });
 
       setTimeout(() => onNext(), 3000);
@@ -145,7 +147,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         setConnecting(false);
         setStatus({
           type: "error",
-          message: t("wifi.lostConnection"),
+          message: t("wifi.lostConnection", { url: localUrl }),
         });
         return;
       }
@@ -397,7 +399,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
             <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
               <span className="font-semibold">{t("wifi.wifiNotePrefix")}</span> {t("wifi.wifiNote")}{" "}
-              <span className="font-semibold">http://clawbox.local</span>.
+              <span className="font-semibold">{localUrl}</span>.
             </p>
 
             <div className="flex items-center gap-3 mt-3">

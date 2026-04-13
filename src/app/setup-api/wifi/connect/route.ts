@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { switchToClient } from "@/lib/network";
-import { set, setMany } from "@/lib/config-store";
+import { set, setMany, get } from "@/lib/config-store";
 
 export const dynamic = "force-dynamic";
 
@@ -34,9 +34,10 @@ export async function POST(request: Request) {
 
     await setMany({ wifi_configured: true, hotspot_enabled: false });
 
+    const hostname = ((await get("hostname")) as string | undefined) || "clawbox";
     return NextResponse.json({
       success: true,
-      message: "Connected! Reconnect to your home WiFi and visit http://clawbox.local to continue.",
+      message: `Connected! Reconnect to your home WiFi and visit http://${hostname}.local to continue.`,
     });
   } catch (err) {
     // switchToClient already restores the AP on failure

@@ -5,6 +5,7 @@ import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
+import { setControlUiAllowedOrigins, restartGateway } from "@/lib/openclaw-config";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +61,17 @@ export async function POST(request: Request) {
   await set("hostname", name);
   await fs.mkdir(path.dirname(HOSTNAME_ENV_PATH), { recursive: true });
   await fs.writeFile(HOSTNAME_ENV_PATH, `HOSTNAME=${name}\n`, { mode: 0o600 });
+
+  // Update OpenClaw gateway control-UI allowed origins so the chat / control
+  // UI keeps working at http://<name>.local. Restart the gateway so it picks
+  // up the new origin list. Both are best-effort: if either fails the
+  // hostname change still proceeds (a reboot will reconcile).
+  try {
+    await setControlUiAllowedOrigins(name);
+    await restartGateway();
+  } catch (err) {
+    console.warn("[hostname] Failed to update OpenClaw allowed origins:", err);
+  }
 
   try {
     await execFileAsync("/usr/bin/sudo", [

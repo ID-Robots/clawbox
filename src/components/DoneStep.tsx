@@ -11,6 +11,7 @@ import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
+import { useLocalUrl } from "@/hooks/useLocalUrl";
 
 /* ── Types ── */
 
@@ -181,6 +182,7 @@ function CollapsibleSection({
 /* ── Main component ── */
 
 export default function DoneStep({ setupComplete = false, onComplete }: DoneStepProps) {
+  const localUrl = useLocalUrl();
 
   /* ── Finish ── */
   const [finishing, setFinishing] = useState(false);
@@ -836,7 +838,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof TypeError && err.message.includes("fetch")) {
-        setWifiStatus({ type: "error", message: "Lost connection. Reconnect to your WiFi and visit http://clawbox.local" });
+        setWifiStatus({ type: "error", message: `Lost connection. Reconnect to your WiFi and visit ${localUrl}` });
         return;
       }
       setWifiStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
@@ -1019,7 +1021,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
           </div>
           <p className="text-[11px] text-amber-400/80 leading-relaxed">
             <span className="font-semibold">Note:</span> Connecting to WiFi will stop the hotspot.
-            {"You'll"} need to reach the device via your WiFi network at <span className="font-semibold">http://clawbox.local</span>.
+            {"You'll"} need to reach the device via your WiFi network at <span className="font-semibold">{localUrl}</span>.
           </p>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
           <button
@@ -1307,7 +1309,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               </p>
             ) : (
               <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
-                Enabling the hotspot will disconnect WiFi. The device will be reachable via the hotspot or Ethernet at <span className="font-semibold">http://clawbox.local</span>.
+                Enabling the hotspot will disconnect WiFi. The device will be reachable via the hotspot or Ethernet at <span className="font-semibold">{localUrl}</span>.
               </p>
             )}
             <label htmlFor="hs-name" className={LABEL_CLASS}>Hotspot Name</label>

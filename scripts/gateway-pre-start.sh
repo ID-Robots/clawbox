@@ -4,9 +4,22 @@ set -euo pipefail
 
 OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
 OPENCLAW_CONFIG="/home/clawbox/.openclaw/openclaw.json"
+HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
   exit 0
+fi
+
+# Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
+CONFIGURED_HOSTNAME="clawbox"
+if [ -f "$HOSTNAME_ENV" ]; then
+  # Parse HOSTNAME=... without executing the file (avoid arbitrary code execution).
+  _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1)
+  _h="${_h%\"}"; _h="${_h#\"}"
+  _h="${_h%\'}"; _h="${_h#\'}"
+  if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    CONFIGURED_HOSTNAME="$_h"
+  fi
 fi
 
 # Fix invalid config keys that prevent gateway from starting
@@ -34,7 +47,7 @@ fi
 
 "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins '["http://clawbox.local","http://localhost","http://127.0.0.1","http://10.42.0.1"]' --json 2>/dev/null || true
+"$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins "[\"http://${CONFIGURED_HOSTNAME}.local\",\"http://localhost\",\"http://127.0.0.1\",\"http://10.42.0.1\"]" --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.bind lan 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.mode local 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
