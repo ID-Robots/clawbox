@@ -43,6 +43,14 @@ export function getSystemUsername(): string {
     || "clawbox";
 }
 
+// Reject CR/LF/NUL/C0/DEL to prevent shell/PAM injection and terminal control
+// sequences from sneaking into stored credentials.
+export const PASSWORD_CONTROL_CHAR_RE = /[\r\n\x00-\x1f\x7f]/;
+
+export function isSafePasswordChars(s: string): boolean {
+  return !PASSWORD_CONTROL_CHAR_RE.test(s);
+}
+
 /** Verify the configured Linux user's password using unix_chkpwd (PAM helper). */
 export async function verifyPassword(password: string): Promise<boolean> {
   return new Promise((resolve) => {

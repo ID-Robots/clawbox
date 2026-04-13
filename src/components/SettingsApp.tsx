@@ -460,6 +460,97 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hostnameSaving, setHostnameSaving] = useState(false);
   const [hostnameConfirm, setHostnameConfirm] = useState(false);
   const [hostnameRebootTo, setHostnameRebootTo] = useState<string | null>(null);
+  const [sysCurrentPassword, setSysCurrentPassword] = useState("");
+  const [sysCurrentVerified, setSysCurrentVerified] = useState(false);
+  const [sysVerifying, setSysVerifying] = useState(false);
+  const [sysPassword, setSysPassword] = useState("");
+  const [sysPasswordConfirm, setSysPasswordConfirm] = useState("");
+  const [sysPasswordShow, setSysPasswordShow] = useState(false);
+  const [sysNewShow, setSysNewShow] = useState(false);
+  const [sysConfirmShow, setSysConfirmShow] = useState(false);
+  const [sysPasswordSaving, setSysPasswordSaving] = useState(false);
+  const [sysPasswordStatus, setSysPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [sysPasswordConfirmOpen, setSysPasswordConfirmOpen] = useState(false);
+  const [sysPasswordConfirmReveal, setSysPasswordConfirmReveal] = useState(false);
+  const sysPasswordConfirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!sysPasswordConfirmOpen) return;
+    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+    sysPasswordConfirmCancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !sysPasswordSaving) setSysPasswordConfirmOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, [sysPasswordConfirmOpen, sysPasswordSaving]);
+  const verifyCurrentPassword = async () => {
+    if (!sysCurrentPassword) return;
+    setSysVerifying(true);
+    setSysPasswordStatus(null);
+    try {
+      const r = await fetch("/setup-api/system/credentials/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: sysCurrentPassword }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Verification failed");
+      setSysCurrentVerified(true);
+    } catch (err) {
+      setSysCurrentVerified(false);
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Verification failed" });
+    } finally {
+      setSysVerifying(false);
+    }
+  };
+  const resetSysPasswordForm = () => {
+    setSysCurrentPassword(""); setSysCurrentVerified(false);
+    setSysPassword(""); setSysPasswordConfirm("");
+    setSysPasswordStatus(null);
+    setSysPasswordConfirmOpen(false); setSysPasswordConfirmReveal(false);
+  };
+  const validateNewPassword = (): string | null => {
+    if (sysPassword.length < 8) return "New password must be at least 8 characters";
+    if (sysPassword !== sysPasswordConfirm) return "New passwords don't match";
+    if (sysPassword === sysCurrentPassword) return "New password must differ from current";
+    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return "Password contains invalid characters";
+    return null;
+  };
+
+  const requestSystemPasswordChange = () => {
+    if (!sysCurrentVerified) return;
+    const err = validateNewPassword();
+    if (err) { setSysPasswordStatus({ type: "error", message: err }); return; }
+    setSysPasswordStatus(null);
+    setSysPasswordConfirmReveal(false);
+    setSysPasswordConfirmOpen(true);
+  };
+
+  const saveSystemPassword = async () => {
+    if (!sysCurrentVerified) return;
+    const err = validateNewPassword();
+    if (err) { setSysPasswordStatus({ type: "error", message: err }); return; }
+    setSysPasswordSaving(true);
+    setSysPasswordStatus(null);
+    try {
+      const r = await fetch("/setup-api/system/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: sysCurrentPassword, password: sysPassword }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Failed");
+      resetSysPasswordForm();
+      setSysPasswordStatus({ type: "success", message: "Password updated. Use the new password next time you sign in or SSH." });
+    } catch (err) {
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setSysPasswordSaving(false);
+    }
+  };
   useEffect(() => {
     if (!hostnameRebootTo) return;
     let cancelled = false;
@@ -2039,6 +2130,111 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
+            {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed) */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Password</label>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
+                Used for web sign-in, SSH, and <span className="font-mono">sudo</span>. Updating it here changes all three.
+              </p>
+              <div className="space-y-2">
+                <div className="flex items-stretch gap-2">
+                  <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                    <label htmlFor="sys-current-password" className="sr-only">Current password</label>
+                    <input
+                      id="sys-current-password"
+                      type={sysPasswordShow ? "text" : "password"}
+                      value={sysCurrentPassword}
+                      onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
+                      onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
+                      placeholder="Current password"
+                      maxLength={128}
+                      autoComplete="current-password"
+                      disabled={sysCurrentVerified}
+                      className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
+                    />
+                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? "Hide current password" : "Show current password"}>
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                  {sysCurrentVerified ? (
+                    <button
+                      type="button"
+                      onClick={resetSysPasswordForm}
+                      className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
+                      title="Clear and re-enter current password"
+                      aria-label="Clear and re-enter current password"
+                    >
+                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
+                      Re-enter
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={verifyCurrentPassword}
+                      disabled={sysVerifying || !sysCurrentPassword}
+                      className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
+                    >
+                      {sysVerifying ? "Checking…" : "Verify"}
+                    </button>
+                  )}
+                </div>
+
+                {sysCurrentVerified && (
+                  <>
+                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                      <label htmlFor="sys-new-password" className="sr-only">New password</label>
+                      <input
+                        id="sys-new-password"
+                        type={sysNewShow ? "text" : "password"}
+                        value={sysPassword}
+                        onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
+                        placeholder="New password (8+ characters)"
+                        maxLength={128}
+                        autoComplete="new-password"
+                        autoFocus
+                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
+                      />
+                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? "Hide new password" : "Show new password"}>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                      <label htmlFor="sys-confirm-password" className="sr-only">Confirm new password</label>
+                      <input
+                        id="sys-confirm-password"
+                        type={sysConfirmShow ? "text" : "password"}
+                        value={sysPasswordConfirm}
+                        onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
+                        placeholder="Confirm new password"
+                        maxLength={128}
+                        autoComplete="new-password"
+                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
+                      />
+                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? "Hide confirm password" : "Show confirm password"}>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                    {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
+                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">Passwords don&apos;t match yet</div>
+                    )}
+                    <div className="flex justify-end">
+                      <button
+                        onClick={requestSystemPasswordChange}
+                        disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
+                        className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
+                      >
+                        {sysPasswordSaving ? "Saving…" : "Update password"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
+            </div>
+
           </div>
         )}
 
@@ -2573,6 +2769,39 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="flex gap-3">
               <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
               <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* System password change confirmation */}
+      {sysPasswordConfirmOpen && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
+              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">Write this password down</h3>
+            </div>
+            <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
+              This will change your password for <span className="text-[var(--text-primary)] font-medium">web sign-in, SSH, and sudo</span>. If you forget it, you may be locked out of the device entirely and need a factory reset to recover.
+            </p>
+            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">New password</span>
+                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? "Hide password" : "Reveal password"}>
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
+                  {sysPasswordConfirmReveal ? "Hide" : "Reveal"}
+                </button>
+              </div>
+              <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
+                {sysPasswordConfirmReveal ? sysPassword : "••••••••"}
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
+              <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
+                {sysPasswordSaving ? "Saving…" : "I’ve written it down — change"}
+              </button>
             </div>
           </div>
         </div>

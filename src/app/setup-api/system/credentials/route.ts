@@ -3,8 +3,9 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { set } from "@/lib/config-store";
-import { getSystemUsername } from "@/lib/auth";
+import { get, set } from "@/lib/config-store";
+import { getSystemUsername, verifyPassword, isSafePasswordChars } from "@/lib/auth";
+import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -16,36 +17,12 @@ const CHPASSWD_INPUT_PATH = path.join(
   ".chpasswd-input"
 );
 
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const RATE_LIMIT_MAX_ATTEMPTS = 5;
-
-const attempts = new Map<string, { count: number; firstAttempt: number }>();
-
-function getClientIP(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return "unknown";
-}
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const record = attempts.get(ip);
-  if (!record || now - record.firstAttempt > RATE_LIMIT_WINDOW_MS) {
-    attempts.set(ip, { count: 1, firstAttempt: now });
-    return true;
-  }
-  record.count++;
-  return record.count <= RATE_LIMIT_MAX_ATTEMPTS;
-}
-
-function resetRateLimit(ip: string): void {
-  attempts.delete(ip);
-}
+const PASSWORD_RATE_LIMIT = { windowMs: 15 * 60 * 1000, max: 5 };
 
 export async function POST(request: Request) {
-  const clientIP = getClientIP(request);
+  const ip = clientIp(request);
 
-  if (!checkRateLimit(clientIP)) {
+  if (!checkRateLimit("password", ip, PASSWORD_RATE_LIMIT)) {
     return NextResponse.json(
       { error: "Too many attempts. Please try again later." },
       { status: 429 }
@@ -53,36 +30,36 @@ export async function POST(request: Request) {
   }
 
   try {
-    let body: { password?: string };
+    let body: { password?: string; currentPassword?: string };
     try {
       body = await request.json();
     } catch {
-      return NextResponse.json(
-        { error: "Invalid JSON" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { password } = body;
+    const { password, currentPassword } = body;
     if (!password) {
-      return NextResponse.json(
-        { error: "Password is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Password is required" }, { status: 400 });
     }
     if (password.length < 8) {
-      return NextResponse.json(
-        { error: "Password must be at least 8 characters" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
+    }
+    if (!isSafePasswordChars(password)) {
+      return NextResponse.json({ error: "Password must not contain control characters or newlines" }, { status: 400 });
     }
 
-    // Reject passwords with newlines or control characters to prevent injection
-    if (/[\r\n\x00-\x1f\x7f]/.test(password)) {
-      return NextResponse.json(
-        { error: "Password must not contain control characters or newlines" },
-        { status: 400 }
-      );
+    // After the initial setup, require the current password to make a change.
+    // During first-boot setup (no password configured yet), CredentialsStep
+    // calls this without `currentPassword` to set the initial value.
+    const passwordAlreadyConfigured = !!(await get("password_configured"));
+    if (passwordAlreadyConfigured) {
+      if (!currentPassword) {
+        return NextResponse.json({ error: "Current password is required" }, { status: 400 });
+      }
+      const ok = await verifyPassword(currentPassword);
+      if (!ok) {
+        return NextResponse.json({ error: "Current password is incorrect" }, { status: 401 });
+      }
     }
 
     // Write password to a secure temp file, then delegate to the root
@@ -106,7 +83,7 @@ export async function POST(request: Request) {
       throw err;
     }
 
-    resetRateLimit(clientIP);
+    resetRateLimit("password", ip);
 
     await set("password_configured", true);
     await set("password_configured_at", new Date().toISOString());
