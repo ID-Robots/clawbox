@@ -301,21 +301,68 @@ step_network_setup() {
   echo "  WiFi interface saved to $IFACE_ENV and /etc/clawbox/network.env"
 
   # --- Hostname and mDNS ---
-  hostnamectl set-hostname clawbox
+  apply_hostname "$(read_configured_hostname)"
+}
+
+# Validate an RFC 1123 hostname label: 1-63 chars, [a-z0-9-], no leading/trailing hyphen.
+# Prints the lowercased hostname on success, or empty string on failure.
+validate_hostname() {
+  local name="${1:-}"
+  name="${name,,}"
+  if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    echo ""
+    return 1
+  fi
+  echo "$name"
+}
+
+# Read desired hostname from data/hostname.env (HOSTNAME=value) or config.json.
+# Falls back to "clawbox".
+read_configured_hostname() {
+  local hostname_env="$PROJECT_DIR/data/hostname.env"
+  local name=""
+  if [ -f "$hostname_env" ]; then
+    # shellcheck source=/dev/null
+    name=$(. "$hostname_env" 2>/dev/null; printf '%s' "${HOSTNAME:-}")
+  fi
+  if [ -z "$name" ]; then
+    name="clawbox"
+  fi
+  local valid
+  valid=$(validate_hostname "$name") || valid=""
+  if [ -z "$valid" ]; then
+    valid="clawbox"
+  fi
+  printf '%s' "$valid"
+}
+
+# Set system hostname and update avahi so mDNS advertises <name>.local.
+apply_hostname() {
+  local name
+  name=$(validate_hostname "${1:-}") || name=""
+  if [ -z "$name" ]; then
+    echo "  Invalid hostname '${1:-}', skipping"
+    return 1
+  fi
+  hostnamectl set-hostname "$name"
   if [ ! -f "$AVAHI_CONF" ]; then
     echo "  Warning: $AVAHI_CONF not found, skipping avahi configuration"
     return
   fi
   cp -n "$AVAHI_CONF" "${AVAHI_CONF}.bak" 2>/dev/null || true
   if grep -q '^#\?host-name=' "$AVAHI_CONF"; then
-    sed -i 's/^#\?host-name=.*/host-name=clawbox/' "$AVAHI_CONF"
+    sed -i "s/^#\\?host-name=.*/host-name=$name/" "$AVAHI_CONF"
   elif grep -q '^\[server\]' "$AVAHI_CONF"; then
-    sed -i '/^\[server\]/a host-name=clawbox' "$AVAHI_CONF"
+    sed -i "/^\\[server\\]/a host-name=$name" "$AVAHI_CONF"
   else
-    printf '\n[server]\nhost-name=clawbox\n' >> "$AVAHI_CONF"
+    printf '\n[server]\nhost-name=%s\n' "$name" >> "$AVAHI_CONF"
   fi
   systemctl restart avahi-daemon
-  echo "  Hostname set to 'clawbox', avahi restarted"
+  echo "  Hostname set to '$name', avahi restarted"
+}
+
+step_set_hostname() {
+  apply_hostname "$(read_configured_hostname)"
 }
 
 step_git_pull() {
@@ -992,7 +1039,7 @@ DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
   chromium_install ai_tools_install vnc_install
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
-  network_setup setup_config system_config
+  network_setup set_hostname setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme

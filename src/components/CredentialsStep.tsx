@@ -14,6 +14,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [hostname, setHostname] = useState("clawbox");
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [showHotspotPassword, setShowHotspotPassword] = useState(false);
@@ -40,6 +41,12 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         }
       })
       .catch(() => {});
+    fetch("/setup-api/system/hostname", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.hostname && !controller.signal.aborted) setHostname(data.hostname);
+      })
+      .catch(() => {});
     return () => controller.abort();
   }, []);
 
@@ -52,6 +59,12 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
   const save = async () => {
     setTouched(true);
+    // Validate hostname
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostname)) {
+      setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
+      return;
+    }
     // Validate system password (required)
     if (!password) {
       setStatus({ type: "error", message: t("credentials.passwordRequired") });
@@ -99,6 +112,20 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     setSaving(true);
     setStatus(null);
     try {
+      // Save hostname (applies live; mDNS update is non-fatal on failure)
+      try {
+        await fetch("/setup-api/system/hostname", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hostname: normalizedHostname }),
+          signal: controller.signal,
+        });
+      } catch (hostnameErr) {
+        if (hostnameErr instanceof DOMException && hostnameErr.name === "AbortError") return;
+        // Non-fatal during setup: reboot at the end will still apply from config.
+      }
+      if (controller.signal.aborted) return;
+
       // Save system password if provided
       if (password) {
         const res = await fetch("/setup-api/system/credentials", {
@@ -176,6 +203,29 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
           {t("credentials.description")}
         </p>
+
+        {/* Local URL (mDNS hostname) */}
+        <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("credentials.localUrl")}</h2>
+        <div className="mb-5">
+          <label htmlFor="cred-hostname" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+            {t("credentials.localUrlLabel")}
+          </label>
+          <div className={`flex items-center bg-[var(--bg-deep)] border rounded-lg overflow-hidden transition-colors ${inputBorder(touched && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname.trim().toLowerCase().replace(/\.local$/, "")))}`}>
+            <input
+              id="cred-hostname"
+              type="text"
+              value={hostname}
+              onChange={(e) => setHostname(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+              maxLength={63}
+              placeholder="clawbox"
+              autoComplete="off"
+              className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-gray-200 outline-none placeholder-gray-500"
+            />
+            <span className="px-3 text-sm text-gray-500 select-none">.local</span>
+          </div>
+          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1.5">{t("credentials.localUrlHelp")}</p>
+        </div>
 
         {/* System Password */}
         <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("credentials.systemPassword")}</h2>

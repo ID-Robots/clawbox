@@ -43,27 +43,35 @@ async function deleteOllamaModels(): Promise<void> {
 }
 
 /**
- * Delete all saved WiFi connections from NetworkManager.
- * Without this, the device auto-reconnects to a saved network after reboot
- * instead of returning to AP (captive portal) mode.
+ * Delete all saved WiFi connections from NetworkManager, including the
+ * hotspot profile. Without this, the device auto-reconnects to a saved
+ * network after reboot (bypassing AP/captive-portal mode), and the previous
+ * hotspot password stays saved in the ClawBox-Setup profile.
+ *
+ * nmcli TYPE column varies by version ("wifi" modern, "802-11-wireless"
+ * older) — match both.
  */
 async function deleteWifiConnections(): Promise<void> {
   const { stdout } = await execFile("nmcli", ["-t", "-f", "NAME,TYPE", "connection", "show"], {
     timeout: 10_000,
   });
-  const wifiNames = stdout
-    .trim()
-    .split("\n")
-    .filter((line) => line.endsWith(":802-11-wireless"))
-    .map((line) => line.slice(0, -":802-11-wireless".length));
+  const wifiNames = new Set<string>();
+  for (const line of stdout.trim().split("\n")) {
+    const match = line.match(/^(.*):(?:wifi|802-11-wireless)$/);
+    if (match) wifiNames.add(match[1]);
+  }
+  // Always attempt to delete the hotspot profile even if it didn't appear in
+  // the listing, so a stored password from a renamed/stale connection can't
+  // survive a factory reset.
+  wifiNames.add("ClawBox-Setup");
 
   for (const name of wifiNames) {
     await execFile("nmcli", ["connection", "delete", name], { timeout: 10_000 }).catch((err) => {
       console.warn(`[Reset] Failed to delete WiFi connection '${name}':`, err instanceof Error ? err.message : err);
     });
   }
-  if (wifiNames.length > 0) {
-    console.log(`[Reset] Deleted ${wifiNames.length} saved WiFi connection(s)`);
+  if (wifiNames.size > 0) {
+    console.log(`[Reset] Deleted ${wifiNames.size} WiFi connection(s) (including hotspot)`);
   }
 }
 
@@ -160,6 +168,19 @@ export async function POST() {
     await deleteWifiConnections().catch((err) => {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
+
+    // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
+    // already wiped, so clawbox-root-update@set_hostname.service will read the
+    // default and apply it before the reboot.
+    try {
+      await execFile("/usr/bin/sudo", [
+        "/usr/bin/systemctl",
+        "start",
+        "clawbox-root-update@set_hostname.service",
+      ], { timeout: 10_000 });
+    } catch (err) {
+      console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
+    }
 
     // 7. Return error if file cleanup had failures
     if (allFailures.length > 0) {

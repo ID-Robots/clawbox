@@ -379,6 +379,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
   const [hotspotToggling, setHotspotToggling] = useState(false);
 
+  /* ── Local URL (mDNS hostname) ── */
+  const [hostname, setHostname] = useState<string>("");
+  const [hostnameInput, setHostnameInput] = useState<string>("");
+  const [hostnameStatus, setHostnameStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hostnameSaving, setHostnameSaving] = useState(false);
+  const [hostnameConfirm, setHostnameConfirm] = useState(false);
+
   useEffect(() => {
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
@@ -387,7 +394,55 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setHotspotEnabled(d.enabled ?? true);
       if (d.ssid) setHotspotSSID(d.ssid);
     }).catch(() => {});
+    fetch("/setup-api/system/hostname").then(r => r.json()).then(d => {
+      if (d.hostname) {
+        setHostname(d.hostname);
+        setHostnameInput(d.hostname);
+      }
+    }).catch(() => {});
   }, []);
+
+  const saveHostname = async () => {
+    const name = hostnameInput.trim().toLowerCase().replace(/\.local$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
+      setHostnameStatus({ type: "error", message: t("settings.hostnameInvalid") });
+      return;
+    }
+    if (name === hostname) {
+      setHostnameConfirm(false);
+      return;
+    }
+    setHostnameSaving(true);
+    setHostnameStatus(null);
+    try {
+      const res = await fetch("/setup-api/system/hostname", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname: name }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setHostnameStatus({ type: "error", message: data.error || t("settings.hostnameSaveFailed") });
+        setHostnameSaving(false);
+        setHostnameConfirm(false);
+        return;
+      }
+      setHostnameStatus({ type: "success", message: t("settings.hostnameRestarting", { fqdn: `${name}.local` }) });
+      setHostnameConfirm(false);
+      // Trigger reboot so the new hostname takes effect cleanly.
+      try {
+        await fetch("/setup-api/system/power", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "restart" }),
+        });
+      } catch { /* device reboots, connection drops */ }
+    } catch (err) {
+      setHostnameStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.hostnameSaveFailed") });
+      setHostnameSaving(false);
+      setHostnameConfirm(false);
+    }
+  };
 
   const toggleHotspot = async () => {
     const newEnabled = !hotspotEnabled;
@@ -970,6 +1025,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   {t("settings.hotspotDesc", { ssid: hotspotSSID })}
                 </p>
               )}
+            </div>
+
+            {/* Local URL (mDNS hostname) card */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>link</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.localUrl")}</label>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">{t("settings.localUrlDesc")}</p>
+              <div className="flex items-stretch gap-2">
+                <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-xl overflow-hidden focus-within:border-orange-400/60 focus-within:bg-white/[0.06] transition-all">
+                  <input
+                    type="text"
+                    value={hostnameInput}
+                    onChange={e => { setHostnameInput(e.target.value); setHostnameStatus(null); }}
+                    maxLength={63}
+                    placeholder="clawbox"
+                    className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/15"
+                  />
+                  <span className="px-3 text-sm text-[var(--text-muted)] opacity-60 select-none">.local</span>
+                </div>
+                <button
+                  onClick={() => setHostnameConfirm(true)}
+                  disabled={hostnameSaving || !hostnameInput.trim() || hostnameInput.trim().toLowerCase().replace(/\.local$/, "") === hostname}
+                  className="px-4 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all"
+                >
+                  {t("settings.save")}
+                </button>
+              </div>
+              {hostnameStatus && <div className="mt-3"><StatusMessage type={hostnameStatus.type} message={hostnameStatus.message} /></div>}
             </div>
 
             {/* Connect to network card */}
@@ -1910,6 +1995,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
+      {/* Hostname confirmation modal */}
+      {hostnameConfirm && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+              {t("settings.hostnameConfirmDesc", { fqdn: `${hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local` })}
+            </p>
+            <div className="flex gap-3">
+              <button disabled={hostnameSaving} onClick={() => setHostnameConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">
+                {t("cancel")}
+              </button>
+              <button disabled={hostnameSaving} onClick={saveHostname} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
+                {hostnameSaving ? t("settings.restartingDevice") : t("settings.saveAndRestart")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
         {resetOverlay}
       </div>
     );
@@ -2038,6 +2143,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </button>
               <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
                 {t("settings.reset")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hostname confirmation modal */}
+      {hostnameConfirm && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
+            <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
+              {t("settings.hostnameConfirmDesc", { fqdn: `${hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local` })}
+            </p>
+            <div className="flex gap-3">
+              <button disabled={hostnameSaving} onClick={() => setHostnameConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">
+                {t("cancel")}
+              </button>
+              <button disabled={hostnameSaving} onClick={saveHostname} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
+                {hostnameSaving ? t("settings.restartingDevice") : t("settings.saveAndRestart")}
               </button>
             </div>
           </div>
