@@ -711,6 +711,15 @@ step_nm_dispatcher() {
   echo "  NetworkManager failover dispatcher installed"
 }
 
+step_post_update() {
+  # Re-apply system-level fixups that aren't covered by `git pull && build`.
+  # Triggered by the in-app updater so existing devices pick up new dispatcher
+  # scripts, sysctls, etc. without a full reinstall. Keep this list small and
+  # idempotent.
+  step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
+  step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+}
+
 step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
@@ -1077,6 +1086,7 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch
+  nm_dispatcher sysctl_linkdown post_update
 )
 
 if [ "${1:-}" = "--step" ]; then

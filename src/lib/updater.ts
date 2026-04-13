@@ -201,6 +201,14 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 90_000,
     customRun: updateClawBoxAndReboot,
   },
+  {
+    // Runs after reboot via checkContinuation — picks up dispatcher scripts,
+    // sysctls, and other root fixups that landed in the new install.sh.
+    id: "post_update",
+    label: "Applying system fixups",
+    timeoutMs: 60_000,
+    requiresRoot: true,
+  },
 ];
 
 /**
