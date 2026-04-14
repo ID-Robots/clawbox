@@ -269,8 +269,7 @@ function ChromeDesktopInner() {
         }
         // Auto-open chat once after fresh install (no saved preferences yet)
         if (!data.desktop_apps && !data.wp_id && !kv.get('clawbox-chat-greeted')) {
-          kv.set('clawbox-chat-greeted', '1');
-          setChatOpen(true);
+          setShouldAutoOpenChat(true);
         }
       })
       .catch(() => { prefsLoaded.current = true; });
@@ -314,7 +313,15 @@ function ChromeDesktopInner() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
+  const [shouldAutoOpenChat, setShouldAutoOpenChat] = useState(false);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
+
+  useEffect(() => {
+    if (!setupChecked || setupRequired || !shouldAutoOpenChat) return;
+    kv.set('clawbox-chat-greeted', '1');
+    setChatOpen(true);
+    setShouldAutoOpenChat(false);
+  }, [setupChecked, setupRequired, shouldAutoOpenChat]);
 
   // Open chat when a skill is installed/uninstalled/toggled
   useEffect(() => {
@@ -870,6 +877,10 @@ function ChromeDesktopInner() {
     ]);
     setNextZIndex((z) => z + 1);
   }, [openWindows, nextZIndex, getAllApps]);
+
+  const openSetupWindow = useCallback(() => {
+    openApp("setup");
+  }, [openApp]);
 
   const closeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
@@ -1733,7 +1744,17 @@ function ChromeDesktopInner() {
       {chatPanelWidth === 0 && (
         <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
       )}
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      <ChatPopup
+        isOpen={setupChecked ? chatOpen : false}
+        onClose={() => setChatOpen(false)}
+        onOpenSettingsSection={openSettingsSection}
+        onOpenSetup={openSetupWindow}
+        onPanelModeChange={handleChatPanelModeChange}
+        initialPanelWidth={chatPanelWidth}
+        mascotX={mascotHidden ? 85 : mascotX}
+        trayMode={mascotHidden}
+        setupRequired={setupRequired}
+      />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (

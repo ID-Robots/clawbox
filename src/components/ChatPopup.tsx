@@ -40,12 +40,14 @@ interface ChatPopupProps {
   onClose: () => void
   onOpenFull?: () => void
   onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
+  onOpenSetup?: () => void
   onThinkingChange?: (thinking: boolean) => void
   onPanelModeChange?: (panelWidth: number) => void
   initialPanelWidth?: number
   mascotX?: number
   mobile?: boolean
   trayMode?: boolean
+  setupRequired?: boolean
 }
 
 interface ChatMessage {
@@ -122,7 +124,7 @@ function uuid(): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onOpenSetup, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false, setupRequired = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   const panelMode = panelWidth !== null
@@ -297,6 +299,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const refreshChatModelState = useCallback(async () => {
+    if (setupRequired) return
     try {
       const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
       if (!res.ok) return
@@ -305,7 +308,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch {
       // Ignore toggle-state refresh failures and keep the current option list.
     }
-  }, [])
+  }, [setupRequired])
 
   const connect = useCallback(async () => {
     if (wsRef.current) {
@@ -702,13 +705,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (isOpen) {
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      if (setupRequired) {
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+        wsRef.current?.close()
+        wsRef.current = null
+        pendingRef.current.clear()
+      } else if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         connect()
       }
     } else {
       setVisible(false)
     }
-  }, [isOpen, connect])
+  }, [isOpen, connect, setupRequired])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -836,7 +844,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           touchAction: 'none',
         }}>
         <div style={{ display: 'flex', minWidth: 0 }}>
-          {chatModelState && (
+          {!setupRequired && chatModelState && (
             <div
               onPointerDown={stopHeaderDrag}
               style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', maxWidth: 240 }}
@@ -886,7 +894,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           )}
         </div>
         <div style={{ flex: 1 }} />
-        {(status === 'connecting' || switchingModel) && (
+        {!setupRequired && (status === 'connecting' || switchingModel) && (
           <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <div style={{
               width: 12, height: 12,
@@ -897,7 +905,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }} />
           </div>
         )}
-        {status === 'connected' && !switchingModel && (
+        {!setupRequired && status === 'connected' && !switchingModel && (
           <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
           </div>
@@ -966,7 +974,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
-        {(status === 'connecting' || reloadingSkill) && (
+        {setupRequired ? (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.75)', fontSize: 13, textAlign: 'center', padding: 20 }}>
+            <span className="material-symbols-rounded" style={{ fontSize: 34, color: '#f97316' }}>construction</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 320 }}>
+              <span style={{ fontSize: 16, fontWeight: 600, color: '#fff' }}>{t("chat.setupRequiredTitle")}</span>
+              <span style={{ lineHeight: 1.5, color: 'rgba(255,255,255,0.6)' }}>{t("chat.setupRequiredBody")}</span>
+            </div>
+            {onOpenSetup && (
+              <button
+                onClick={onOpenSetup}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 10, padding: '8px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 600,
+                }}
+              >{t("chat.openSetup")}</button>
+            )}
+          </div>
+        ) : (status === 'connecting' || reloadingSkill) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
             <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } }`}</style>
             {reloadingSkill ? (
@@ -993,7 +1019,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'error' && (
+        {!setupRequired && status === 'error' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
@@ -1008,14 +1034,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && (
+        {!setupRequired && status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
           </div>
         )}
 
-        {!reloadingSkill && messages.map((msg, i) => (
+        {!setupRequired && !reloadingSkill && messages.map((msg, i) => (
           <div key={i} style={{
             display: 'flex',
             justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
@@ -1040,7 +1066,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         ))}
 
         {/* Streaming message */}
-        {!reloadingSkill && streaming && (
+        {!setupRequired && !reloadingSkill && streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
               maxWidth: '85%', padding: '8px 14px',
@@ -1057,7 +1083,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
 
         {/* Typing indicator when sending but no stream yet */}
-        {sending && !streaming && (
+        {!setupRequired && sending && !streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
               padding: '10px 16px',
@@ -1080,7 +1106,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       </div>
 
       {/* Attachment preview */}
-      {attachments.length > 0 && (
+      {!setupRequired && attachments.length > 0 && (
         <div style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           {attachments.map((a, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 8, background: 'rgba(249,115,22,0.15)', fontSize: 11, color: '#f97316' }}>
@@ -1095,15 +1121,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       )}
 
       {/* Hidden file input */}
-      <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
+      {!setupRequired && (
+        <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
+      )}
 
       {/* Input area */}
-      <div style={{
-        padding: '10px 14px 12px',
-        borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
-        background: 'rgba(0,0,0,0.2)',
-        display: 'flex', gap: 8, alignItems: 'flex-end',
-      }}>
+      {!setupRequired && (
+        <div style={{
+          padding: '10px 14px 12px',
+          borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
+          background: 'rgba(0,0,0,0.2)',
+          display: 'flex', gap: 8, alignItems: 'flex-end',
+        }}>
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={status !== 'connected'}
@@ -1176,7 +1205,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
-      </div>
+        </div>
+      )}
 
       {/* Left-edge resize for panel mode */}
       {!mobile && panelMode && (

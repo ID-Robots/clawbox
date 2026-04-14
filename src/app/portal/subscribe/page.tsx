@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Image from "next/image";
 import {
   FREE_PLAN_FEATURES,
@@ -7,6 +8,44 @@ import {
   PRO_PLAN_FEATURES,
   PURCHASE_EMAIL_NOTE,
 } from "@/lib/max-subscription";
+import { getSiteUrl } from "@/lib/site-url";
+
+const siteUrl = getSiteUrl();
+
+export const metadata: Metadata = {
+  title: "ClawBox AI Plans",
+  description:
+    "Compare ClawBox AI Free, Pro, and Max plans and claim the ClawBox owner Max bonus with the email tied to your device purchase.",
+  alternates: {
+    canonical: "/portal/subscribe",
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
+  openGraph: {
+    title: "ClawBox AI Plans",
+    description:
+      "Compare ClawBox AI Free, Pro, and Max plans and claim the ClawBox owner Max bonus.",
+    url: `${siteUrl}/portal/subscribe`,
+    type: "website",
+    images: [
+      {
+        url: "/clawbox-box.png",
+        width: 1200,
+        height: 630,
+        alt: "ClawBox AI subscription plans",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ClawBox AI Plans",
+    description:
+      "Compare ClawBox AI Free, Pro, and Max plans and claim the ClawBox owner Max bonus.",
+    images: ["/clawbox-box.png"],
+  },
+};
 
 const plans = [
   {

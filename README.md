@@ -34,14 +34,14 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 | Feature | Description |
 |---------|-------------|
-| 🧙 **5-minute setup** | Guided wizard: WiFi → updates → AI provider → messaging → done |
+| 🧙 **5-minute setup** | Guided wizard: WiFi → updates → security → cloud AI → local AI → Telegram |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, and system tray |
 | 🤖 **AI-controlled OS** | 40+ MCP tools let the AI agent operate the entire device |
 | 🔒 **Privacy-first** | Everything runs locally. No telemetry. No data collection. |
 | 🧠 **Hybrid AI** | Local models (Llama, Gemma, Mistral) + cloud (Claude, GPT, Gemini) |
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
 | 💬 **Multi-platform** | Telegram, web panel, desktop chat |
-| 💻 **Built-in apps** | Terminal, file manager, VS Code, VNC, app store, AI chat |
+| 💻 **Built-in apps** | OpenClaw chat, terminal, file manager, browser tools, VNC, app store |
 | 🛠️ **Code assistant** | AI builds and deploys desktop webapps through iterative coding |
 | ⚡ **Always-on** | 7-15W power. Runs 24/7 for ~€39/year in electricity |
 
@@ -141,24 +141,28 @@ The installer (`install.sh`) provisions the Jetson from scratch:
 - Configures systemd services and captive-portal DNS
 - Creates the WiFi access point for first-boot setup
 
-Two systemd services run the OS:
+Key systemd services run the OS:
 
 | Service | Role |
 |---|---|
 | `clawbox-ap` | WiFi access point (SSID: ClawBox-Setup, IP: 10.42.0.1) |
-| `clawbox-setup` | Web server on port 80 (Next.js + WebSocket proxy) |
+| `clawbox-setup` | Web server on port 80 (Next.js + gateway proxy) |
+| `clawbox-gateway` | OpenClaw gateway on port 18789 |
+| `clawbox-performance` | Device tuning and runtime performance helpers |
+| `clawbox-browser` | Optional Chromium automation service for browser control |
 
 ### Layer 2 — Setup Wizard
 
-On first boot (or after factory reset), the OS presents a 7-step wizard:
+On first boot (or after factory reset), the OS presents a 6-step wizard:
 
-1. 🌐 **Welcome** — Language selection (10 languages supported)
-2. 🔒 **Security** — Device password + WiFi hotspot credentials
-3. 📶 **WiFi** — Connect to your home/office network (or use Ethernet)
-4. ⬆️ **Update** — Pull latest system updates
-5. 🧠 **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
+1. 📶 **WiFi** — Connect to your home/office network (or use Ethernet)
+2. ⬆️ **Update** — Pull latest system updates
+3. 🔒 **Security** — Device password + hotspot/device-name settings
+4. 🧠 **Connect AI Provider** — Configure Claude, GPT, Gemini, OpenRouter, or ClawBox AI
+5. 🖥️ **Set Up Local AI** — Configure llama.cpp or Ollama as the on-device fallback
 6. 💬 **Telegram** — Optional bot token for remote messaging
-7. ✅ **Done** — System status dashboard and factory reset option
+
+After Telegram, ClawBox runs a completion flow that finalizes setup, warms the gateway, and opens the desktop.
 
 ### Layer 3 — Desktop Environment
 
@@ -167,9 +171,8 @@ After setup, ClawBox serves a Chrome OS-style desktop accessible from any browse
 - 🤖 **AI Chat** — Full-window and floating popup chat via the OpenClaw gateway
 - 💻 **Terminal** — xterm.js shell with WebSocket PTY
 - 📁 **File Manager** — Browse, upload, rename, delete files on the device
-- 🌐 **Browser Automation** — Visual Chromium control via DevTools Protocol
+- 🌐 **Browser Tools** — Chromium install, integration, and visual control via DevTools Protocol
 - 🖥️ **Remote Desktop** — NoVNC viewer for VNC sessions
-- 📝 **VS Code** — Integrated code-server IDE
 - 🏪 **App Store** — Discover and install skills from openclawhardware.dev
 - ⚙️ **Settings** — WiFi, AI provider, appearance, Telegram, system management
 - 🦙 **Ollama Models** — Pull, search, and manage local AI models
@@ -186,16 +189,20 @@ The OpenClaw AI agent controls the device through an MCP (Model Context Protocol
 ```text
 system_stats / system_info / system_power   — monitor and manage the device
 bash                                        — execute shell commands
+task_status                                 — poll long-running shell jobs
 read_file / write_file / edit_file          — file operations
 list_directory / glob / grep                — search files and content
-wifi_scan / wifi_status                     — network management
-ui_open_app / ui_notify                     — control the desktop UI
+web_fetch / web_search                      — retrieve remote content
+notebook_edit                               — surgical Jupyter notebook edits
+agent / task_create / task_update / task_get / task_list / task_stop
+wifi_scan / wifi_status / vnc_status        — device status and connectivity
+ui_open_app / ui_list_apps / ui_notify      — control the desktop UI
 ```
 
 **Browser automation tools:**
 
 ```text
-browser_launch / browser_navigate / browser_click / browser_type
+browser_open / browser_launch / browser_navigate / browser_click / browser_type
 browser_scroll / browser_screenshot / browser_keypress / browser_close
 ```
 
@@ -207,35 +214,35 @@ webapp_create / webapp_update                — create desktop apps from HTML
 preferences_get / preferences_set            — user preferences
 ```
 
-**Code assistant tools** (for building new desktop webapps):
+**Code assistant flow** (for building new desktop webapps):
 
 ```text
-code_project_init    — scaffold a new multi-file webapp project
-code_project_list    — list all projects
-code_project_build   — bundle CSS/JS into HTML, deploy to desktop, open the app
-code_project_delete  — remove a project
-code_file_write      — create or overwrite a project file
-code_file_read       — read a project file
-code_file_edit       — surgical string-replacement edits
-code_file_delete     — remove a file
-code_file_list       — recursive project tree
-code_search          — grep across project files
+code_project_init / code_project_list / code_project_build / code_project_delete
+read_file / write_file / edit_file          — edit files inside data/code-projects/<id>/
+list_directory / glob / grep                — inspect and search project files
 ```
 
-The code assistant enables the AI to iteratively build, test, and deploy new desktop apps — write code across multiple files, make precise edits, search the codebase, then build a self-contained webapp that appears on the user's desktop.
+The code assistant enables the AI to iteratively build, test, and deploy new desktop apps — scaffold a project, edit multiple files, search the project tree, then build a self-contained webapp that appears on the user's desktop.
 
 **CLI wrapper** (`clawbox` command):
 
 ```bash
 clawbox webapp create <appId> <name> [color] < file.html
+clawbox webapp update <appId> < file.html
 clawbox app open <appId>
 clawbox app list
 clawbox notify <message>
 clawbox system stats
+clawbox system info
 clawbox code init <projectId> <name> [template] [color]
+clawbox code list
 clawbox code build <projectId>
 clawbox code files <projectId>
+clawbox code read <projectId> <filePath>
+clawbox code write <projectId> <filePath> --content '...'
+clawbox code edit <projectId> <filePath> --old 'old' --new 'new'
 clawbox code search <projectId> <pattern>
+clawbox code delete <projectId>
 ```
 
 ---
@@ -251,7 +258,7 @@ Browser (http://clawbox.local)
   │     ├── /               → Desktop environment (post-setup)
   │     ├── /setup-api/*    → 50+ API routes (system, files, code, browser, etc.)
   │     ├── /api/*          → Proxy to OpenClaw gateway
-  │     └── WebSocket       → Proxy to gateway + terminal PTY
+  │     └── WebSocket       → Proxy to OpenClaw gateway
   │
   ├── Port 3006: Terminal WebSocket PTY server
   │
@@ -264,7 +271,7 @@ Browser (http://clawbox.local)
   └── Port 18800: Chromium CDP (browser automation)
 ```
 
-Node.js is used for the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying.
+The production wrapper is launched with Bun, while OpenClaw and related runtime dependencies still require Node.js 22.19+ compatibility.
 
 ## 🛠️ Tech Stack
 
@@ -272,8 +279,8 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 |-------|-----------|
 | **Frontend** | Next.js 16, React 19, Tailwind CSS 4 |
 | **Language** | TypeScript 5 |
-| **Package Manager** | Bun |
-| **Runtime** | Node.js 22.19+ (production), Bun (dev/build) |
+| **Package Manager** | Bun + npm |
+| **Runtime** | Bun (UI dev/build + launcher), Node.js 22.19+ required for OpenClaw compatibility |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) via MCP |
 | **Local Models** | Ollama (Llama, Gemma, Mistral) |
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
@@ -292,7 +299,7 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 │   ├── hooks/              Window manager, Ollama model management
 │   ├── lib/                Config, network, auth, OAuth, i18n, updater, code-projects
 │   ├── tests/              Unit + API route tests
-│   └── middleware.ts       Captive portal detection + session auth
+│   └── proxy.ts            Captive portal detection + session auth
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
 ├── install.sh              Full Jetson/device installer (idempotent)
 └── install-x64.sh          x64 desktop installer
@@ -319,7 +326,7 @@ bun run test             # Unit tests (Vitest)
 | `GATEWAY_PORT` | `18789` | OpenClaw gateway port |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
 | `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
-| `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,localhost` | Trusted hostnames |
+| `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |

@@ -1,7 +1,7 @@
 {
-  "name": "ClawBox",
+  "name": "ClawBox - Private Local AI Assistant OS",
   "short_name": "ClawBox",
-  "description": "Personal AI Assistant Device",
+  "description": "Private AI assistant OS with browser-based setup, OpenClaw integration, browser automation, and local AI fallbacks.",
   "start_url": "/",
   "display": "standalone",
   "display_override": ["standalone", "fullscreen"],

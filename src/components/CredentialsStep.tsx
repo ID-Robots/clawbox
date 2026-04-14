@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
 
@@ -67,6 +67,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       saveControllerRef.current?.abort();
     };
   }, []);
+
+  const handleSkip = useCallback(() => {
+    if (saving) return;
+    saveControllerRef.current?.abort();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setStatus(null);
+    onNext();
+  }, [onNext, saving]);
 
   const save = async () => {
     setTouched(true);
@@ -439,7 +447,15 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           <StatusMessage type={status.type} message={status.message} />
         )}
 
-        <div className="mt-5">
+        <div className="mt-5 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSkip}
+            disabled={saving}
+            className="px-6 py-3 rounded-lg border border-white/10 bg-white/5 text-white/80 font-semibold text-sm transition hover:bg-white/10 cursor-pointer disabled:opacity-50"
+          >
+            {t("skip")}
+          </button>
           <button
             type="button"
             onClick={save}

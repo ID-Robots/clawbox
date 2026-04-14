@@ -82,6 +82,9 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.stop": "Stop",
     "chat.send": "Send",
     "chat.retry": "Retry",
+    "chat.setupRequiredTitle": "Finish setup to start chat",
+    "chat.setupRequiredBody": "The AI gateway starts after initial setup. Complete the setup window, then open chat again.",
+    "chat.openSetup": "Open setup",
 
     // === TerminalApp ===
     "terminal.connecting": "Connecting to terminal server…",

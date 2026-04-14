@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { getMetadataBase } from "@/lib/site-url";
 import "./globals.css";
 
 export const viewport: Viewport = {
@@ -12,10 +13,55 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "ClawBox",
-  description: "Personal AI Assistant Device",
+  metadataBase: getMetadataBase(),
+  applicationName: "ClawBox",
+  title: {
+    default: "ClawBox | Private Local AI Assistant OS",
+    template: "%s | ClawBox",
+  },
+  description:
+    "ClawBox is a private AI assistant OS for NVIDIA Jetson and x64 desktops, with local setup, OpenClaw integration, browser automation, and on-device AI fallbacks.",
   manifest: "/manifest.json",
-  themeColor: "#0a0f1a",
+  keywords: [
+    "ClawBox",
+    "OpenClaw",
+    "private AI assistant",
+    "local AI device",
+    "NVIDIA Jetson AI",
+    "AI desktop OS",
+    "browser automation",
+    "MCP tools",
+  ],
+  alternates: {
+    canonical: "/",
+  },
+  robots: {
+    index: false,
+    follow: false,
+  },
+  openGraph: {
+    title: "ClawBox | Private Local AI Assistant OS",
+    description:
+      "Private AI assistant OS with browser-based setup, OpenClaw integration, browser automation, and local AI fallbacks.",
+    url: "/",
+    siteName: "ClawBox",
+    type: "website",
+    images: [
+      {
+        url: "/clawbox-box.png",
+        width: 1200,
+        height: 630,
+        alt: "ClawBox private AI assistant device",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ClawBox | Private Local AI Assistant OS",
+    description:
+      "Private AI assistant OS with browser-based setup, OpenClaw integration, browser automation, and local AI fallbacks.",
+    images: ["/clawbox-box.png"],
+  },
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "48x48" },

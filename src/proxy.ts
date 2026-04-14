@@ -37,6 +37,7 @@ const APPLE_PATHS = new Set([
 
 const PUBLIC_PREFIXES = [
   "/login",
+  "/portal/",
   "/setup",
   "/setup-api/",
   "/login-api",
@@ -53,6 +54,7 @@ const PUBLIC_EXACT = new Set([
   "/clawbox-crab.png",
   "/clawbox-icon.png",
   "/clawbox-logo.png",
+  "/portal",
   "/portal/subscribe",
 ]);
 
@@ -107,9 +109,9 @@ async function verifySessionCookie(cookie: string): Promise<boolean> {
   }
 }
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// ─── Proxy ────────────────────────────────────────────────────────────────────
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
 
   // 1. Captive portal detection
