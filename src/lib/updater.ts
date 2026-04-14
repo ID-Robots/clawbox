@@ -134,9 +134,14 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
 
+  // Use reset --hard + clean so local modifications to tracked files
+  // (e.g. install.sh) don't block the update. This is a managed appliance;
+  // the repo is not expected to carry user edits.
   await execShell(
     `${gitCmd} fetch origin ${local}` +
-    ` && ${gitCmd} checkout -B ${local} FETCH_HEAD`,
+    ` && ${gitCmd} checkout -B ${local}` +
+    ` && ${gitCmd} reset --hard FETCH_HEAD` +
+    ` && ${gitCmd} clean -fd`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);
