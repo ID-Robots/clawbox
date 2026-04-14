@@ -1,14 +1,30 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import {
+  CLAWBOX_HOME,
+  CLAWBOX_NPM_PREFIX,
+  DATA_DIR,
+  OPENCLAW_CONFIG_PATH,
+  OPENCLAW_HOME,
+  getClawboxRuntimeEnv,
+} from "@/lib/runtime-paths";
 
 const exec = promisify(execFile);
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
-export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
+export const CONFIG_PATH = OPENCLAW_CONFIG_PATH;
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
+const GATEWAY_SERVICE = "clawbox-gateway.service";
+const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
+const GATEWAY_LOG_PATH = path.join(DATA_DIR, "openclaw-gateway.log");
+
+function getRuntimeHome(): string {
+  const envHome = process.env.HOME?.trim();
+  if (envHome && envHome !== "/root") return envHome;
+  return CLAWBOX_HOME;
+}
 
 export interface OpenClawConfig {
   [key: string]: unknown;
@@ -197,9 +213,14 @@ export async function setTelegramToken(botToken: string): Promise<void> {
 
 export async function restartGateway(): Promise<void> {
   try {
-    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
-      timeout: 60000,
-    });
+    if (shouldUseSystemdGateway()) {
+      await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", GATEWAY_SERVICE], {
+        timeout: 60000,
+      });
+      return;
+    }
+
+    await restartDetachedGateway();
   } catch (err) {
     console.error(
       "[openclaw-config] Failed to restart gateway:",
@@ -231,14 +252,15 @@ let _openclawBinCache: string | null = null;
 export function findOpenclawBin(): string {
   if (_openclawBinCache) return _openclawBinCache;
   const nodeDir = path.dirname(process.execPath);
-  const home = process.env.HOME || "/home/clawbox";
+  const runtimeHome = getRuntimeHome();
   const candidates = [
     path.join(nodeDir, "openclaw"),
-    path.join(home, ".npm-global", "bin", "openclaw"),
+    path.join(runtimeHome, ".npm-global", "bin", "openclaw"),
+    path.join(CLAWBOX_NPM_PREFIX, "bin", "openclaw"),
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw",
   ];
-  const nvmDir = path.join(home, ".nvm", "versions", "node");
+  const nvmDir = path.join(runtimeHome, ".nvm", "versions", "node");
   try {
     const versions = fsSync.readdirSync(nvmDir) as string[];
     for (const v of versions.sort().reverse()) {
@@ -256,14 +278,72 @@ export function findOpenclawBin(): string {
 
 /** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
 export function getSkillsDir(): string {
-  const home = process.env.HOME || "/home/clawbox";
-  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+  const runtimeHome = getRuntimeHome();
+  const runtimeOpenclawConfig = path.join(runtimeHome, ".openclaw", "openclaw.json");
   try {
-    const config = JSON.parse(fsSync.readFileSync(openclawConfig, "utf-8"));
+    const config = JSON.parse(fsSync.readFileSync(runtimeOpenclawConfig, "utf-8"));
     const workspace = config?.agents?.defaults?.workspace;
     if (typeof workspace === "string" && workspace) return workspace;
   } catch {}
-  const openclawWorkspace = path.join(home, ".openclaw", "workspace");
+  const openclawWorkspace = path.join(runtimeHome, ".openclaw", "workspace");
   if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
-  return path.join(home, "clawd");
+  return path.join(runtimeHome, "clawd");
+}
+
+function shouldUseSystemdGateway(): boolean {
+  if (process.env.CLAWBOX_USE_SYSTEMD === "0") return false;
+  if (process.env.CLAWBOX_USE_SYSTEMD === "1") return true;
+  return hasSystemdUnit(GATEWAY_SERVICE);
+}
+
+function hasSystemdUnit(unit: string): boolean {
+  return [
+    path.join("/etc/systemd/system", unit),
+    path.join("/lib/systemd/system", unit),
+  ].some((candidate) => fsSync.existsSync(candidate));
+}
+
+async function restartDetachedGateway(): Promise<void> {
+  const openclawBin = findOpenclawBin();
+  const gatewayPath = `${path.dirname(openclawBin)}:${process.env.PATH || ""}`;
+
+  await exec("pkill", ["-f", "openclaw.*gateway"], { timeout: 5000 }).catch(() => {});
+
+  fsSync.mkdirSync(path.dirname(GATEWAY_LOG_PATH), { recursive: true });
+  const logFd = fsSync.openSync(GATEWAY_LOG_PATH, "a");
+  const child = spawn(
+    openclawBin,
+    ["gateway", "--allow-unconfigured", "--bind", process.env.CLAWBOX_GATEWAY_BIND || "loopback"],
+    {
+      cwd: CLAWBOX_HOME,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: getClawboxRuntimeEnv({
+        PATH: gatewayPath,
+        NODE_ENV: process.env.NODE_ENV || "production",
+        BUN_ENV: process.env.BUN_ENV || "production",
+      }),
+    },
+  );
+  child.unref();
+  fsSync.closeSync(logFd);
+
+  await waitForGatewayReady();
+}
+
+async function waitForGatewayReady(): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  const url = `http://127.0.0.1:${GATEWAY_PORT}`;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
+      if (res.ok || res.status < 500) {
+        return;
+      }
+    } catch {
+      // Keep polling until the gateway comes up or times out.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Gateway did not become ready on port ${GATEWAY_PORT}`);
 }

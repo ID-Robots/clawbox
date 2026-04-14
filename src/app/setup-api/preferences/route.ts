@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import fs from "fs/promises";
+import { getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
@@ -63,7 +64,7 @@ export async function POST(req: Request) {
       };
       const lang = body.ui_language;
       const langName = LANG_NAMES[lang] ?? "English";
-      const wsDir = "/home/clawbox/.openclaw/workspace";
+      const wsDir = getSkillsDir();
       await fs.mkdir(wsDir, { recursive: true }).catch(() => {});
 
       // Update USER.md with language preference

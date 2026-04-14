@@ -1,8 +1,9 @@
-import path from "path";
 import fs from "fs";
+import path from "path";
+import { CLAWBOX_ROOT, DATA_DIR as RUNTIME_DATA_DIR } from "./runtime-paths";
 
-export const CONFIG_ROOT = process.env.CLAWBOX_ROOT || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
-export const DATA_DIR = path.join(CONFIG_ROOT, "data");
+export const CONFIG_ROOT = CLAWBOX_ROOT;
+export const DATA_DIR = RUNTIME_DATA_DIR;
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 
 // Simple JSON file-based key-value store — works with both Node.js and Bun

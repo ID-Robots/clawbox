@@ -6,6 +6,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
+import { CLAWBOX_HOME, getClawboxRuntimeEnv } from '@/lib/runtime-paths'
 
 let terminalChild: ChildProcess | null = null
 let terminalStopping = false
@@ -181,14 +182,12 @@ async function bootLlamaCppServer() {
       `${spec.contextWindow}`,
     ],
     {
-      cwd: '/home/clawbox',
+      cwd: CLAWBOX_HOME,
       detached: false,
       stdio: 'ignore',
-      env: {
-        ...process.env,
-        HOME: '/home/clawbox',
+      env: getClawboxRuntimeEnv({
         LLAMACPP_PID_PATH: spec.pidPath,
-      },
+      }),
     },
   )
 

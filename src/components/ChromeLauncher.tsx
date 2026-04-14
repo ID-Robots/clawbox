@@ -298,6 +298,7 @@ export default function ChromeLauncher({
       {/* Launcher context menu */}
       {ctxMenu && (
         <div
+          data-testid="launcher-context-menu"
           className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
@@ -311,6 +312,7 @@ export default function ChromeLauncher({
           <div className="border-t border-white/10 my-0.5" />
 
           <button
+            data-testid="launcher-context-open"
             onClick={() => handleAppClick(ctxMenu.app.id)}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
@@ -319,6 +321,7 @@ export default function ChromeLauncher({
 
           {ctxMenu.app.isPinned ? (
             <button
+              data-testid="launcher-context-unpin"
               onClick={() => { if (onUnpinApp) onUnpinApp(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
@@ -326,6 +329,7 @@ export default function ChromeLauncher({
             </button>
           ) : (
             <button
+              data-testid="launcher-context-pin"
               onClick={() => { if (onPinApp) onPinApp(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
@@ -335,6 +339,7 @@ export default function ChromeLauncher({
 
           {onAddToDesktop && (
             <button
+              data-testid="launcher-context-add-desktop"
               onClick={() => { onAddToDesktop(ctxMenu.app.id); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >

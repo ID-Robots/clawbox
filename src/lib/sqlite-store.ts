@@ -9,12 +9,9 @@
 
 import path from "path";
 import fs from "fs";
+import { DATA_DIR } from "./runtime-paths";
 
-const DB_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "clawbox.db",
-);
+const DB_PATH = path.join(DATA_DIR, "clawbox.db");
 
 // Minimal structural types — we don't depend on bun-types directly because
 // the file is also walked by Vitest under Node, where bun:sqlite types are

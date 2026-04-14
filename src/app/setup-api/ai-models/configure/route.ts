@@ -19,10 +19,10 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { CLAWBOX_HOME, CLAWBOX_ROOT, OPENCLAW_HOME, getClawboxRuntimeEnv } from "@/lib/runtime-paths";
 
 const OPENCLAW_BIN = findOpenclawBin();
-const AUTH_PROFILES_PATH =
-  "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
+const AUTH_PROFILES_PATH = path.join(OPENCLAW_HOME, "agents", "main", "agent", "auth-profiles.json");
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
@@ -99,10 +99,10 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
     let settled = false;
     const child = spawn(cmd, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: "/home/clawbox",
+      cwd: CLAWBOX_HOME,
       uid: CLAWBOX_UID,
       gid: CLAWBOX_GID,
-      env: { ...process.env, HOME: "/home/clawbox" },
+      env: getClawboxRuntimeEnv(),
     });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
@@ -474,7 +474,7 @@ export async function POST(request: Request) {
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
       ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]
-        .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
+        .map(name => fs.chown(path.join(OPENCLAW_HOME, name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
     );
 
     // 6. Persist to ClawBox config store
@@ -529,7 +529,7 @@ export async function POST(request: Request) {
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
-        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+        await runCommand("sudo", [path.join(CLAWBOX_ROOT, "scripts", "optimize-ollama.sh")]);
       } catch (err) {
         // Non-fatal: Ollama will still work, just use more memory
         console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);

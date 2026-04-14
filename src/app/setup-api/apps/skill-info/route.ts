@@ -7,7 +7,6 @@ import { findOpenclawBin } from "@/lib/openclaw-config";
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
-const HOME = process.env.HOME || "/home/clawbox";
 const OPENCLAW_BIN = findOpenclawBin();
 
 interface SkillInfo {

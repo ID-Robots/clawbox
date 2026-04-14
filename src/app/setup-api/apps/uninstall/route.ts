@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
 import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
+import { DATA_DIR } from "@/lib/runtime-paths";
 
 export const dynamic = "force-dynamic";
-
-const HOME = process.env.HOME || "/home/clawbox";
 
 export async function POST(req: Request) {
   try {
@@ -23,7 +22,7 @@ export async function POST(req: Request) {
     await fs.rm(skillDir, { recursive: true, force: true });
 
     // Remove cached icon
-    const iconPath = path.join(HOME, "clawbox", "data", "icons", `${appId}.png`);
+    const iconPath = path.join(DATA_DIR, "icons", `${appId}.png`);
     await fs.rm(iconPath, { force: true }).catch(() => {});
 
     // Reload gateway so agent drops the skill

@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
+import {
+  verifyPassword,
+  verifyLocalPassword,
+  createSessionCookie,
+  getSessionSigningSecret,
+  useLocalPasswordAuth,
+} from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -40,12 +46,14 @@ export async function POST(request: Request) {
   if (!rateLimit(ip)) {
     return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
   }
+  const usesLocalPassword = useLocalPasswordAuth();
+  const isX64Install = process.env.CLAWBOX_INSTALL_MODE === "x64";
 
   // If password not configured, check if this is an upgrade from a pre-auth version
   const configured = await get("password_configured");
   if (!configured) {
     const setupComplete = await get("setup_complete");
-    if (setupComplete) {
+    if (setupComplete && !usesLocalPassword && !isX64Install) {
       // Auto-migrate: user completed setup before auth was added
       await set("password_configured", true);
       await set("password_configured_at", new Date().toISOString());
@@ -69,7 +77,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid session duration" }, { status: 400 });
   }
 
-  const valid = await verifyPassword(password);
+  const valid = usesLocalPassword
+    ? await verifyLocalPassword(password)
+    : await verifyPassword(password);
   if (!valid) {
     return NextResponse.json({ error: "Incorrect password" }, { status: 401 });
   }

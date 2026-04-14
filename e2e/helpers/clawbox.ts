@@ -966,13 +966,13 @@ export async function completeSetupWizard(page: Page) {
   await page.getByRole("button", { name: "Connect" }).click();
 
   const updateStep = page.getByTestId("setup-step-update");
-  await expect(updateStep).toBeVisible({ timeout: 10_000 });
-  const continueButton = updateStep.getByRole("button", { name: "Continue" });
   const credentialsStep = page.getByTestId("setup-step-credentials");
-  const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
+  const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 10_000 })
     .then(() => true)
     .catch(() => false);
   if (!advancedAutomatically) {
+    await expect(updateStep).toBeVisible({ timeout: 10_000 });
+    const continueButton = updateStep.getByRole("button", { name: "Continue" });
     await continueButton.click();
   }
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });

@@ -581,10 +581,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       formData.append('path', 'uploads')
       try {
         const res = await fetch('/setup-api/files', { method: 'POST', body: formData })
-        if (res.ok) {
-          setAttachments(prev => [...prev, { name: file.name, path: `/home/clawbox/uploads/${file.name}`, type: file.type }])
+        const data = await res.json().catch(() => ({}))
+        if (res.ok && typeof data.absPath === 'string' && data.absPath) {
+          setAttachments(prev => [...prev, { name: file.name, path: data.absPath, type: file.type }])
+        } else {
+          const message = typeof data.error === 'string' && data.error
+            ? data.error
+            : `Failed to attach ${file.name}.`
+          setMessages(prev => [...prev, { role: 'system', text: message, timestamp: Date.now() }])
         }
-      } catch { /* upload failed */ }
+      } catch {
+        setMessages(prev => [...prev, { role: 'system', text: `Failed to attach ${file.name}.`, timestamp: Date.now() }])
+      }
     }
     e.target.value = ''
   }, [])

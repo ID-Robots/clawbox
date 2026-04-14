@@ -10,10 +10,13 @@ interface CredentialsStepProps {
 
 export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const { t } = useT();
+  const [currentPassword, setCurrentPassword] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [requiresCurrentPassword, setRequiresCurrentPassword] = useState(false);
   const [hostname, setHostname] = useState("clawbox");
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
@@ -47,6 +50,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         if (data?.hostname && !controller.signal.aborted) setHostname(data.hostname);
       })
       .catch(() => {});
+    fetch("/setup-api/setup/status", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && !controller.signal.aborted) {
+          setRequiresCurrentPassword(!!data.requires_current_password);
+        }
+      })
+      .catch(() => {});
     return () => controller.abort();
   }, []);
 
@@ -63,6 +74,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
     if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostname)) {
       setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
+      return;
+    }
+    if (requiresCurrentPassword && !currentPassword) {
+      setStatus({ type: "error", message: "Current password is required on desktop installs" });
       return;
     }
     // Validate system password (required)
@@ -131,7 +146,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ currentPassword: requiresCurrentPassword ? currentPassword : undefined, password }),
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
@@ -170,6 +185,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         type: "success",
         message: t("credentials.settingsSaved"),
       });
+      setCurrentPassword("");
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       timeoutRef.current = setTimeout(() => onNext(), 1500);
     } catch (err) {
@@ -229,6 +245,36 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
         {/* System Password */}
         <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("credentials.systemPassword")}</h2>
+
+        {requiresCurrentPassword && (
+          <div className="mb-4">
+            <label htmlFor="cred-current-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
+              Current Password
+            </label>
+            <div className="relative">
+              <input
+                id="cred-current-password"
+                type={showCurrentPassword ? "text" : "password"}
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") save();
+                }}
+                placeholder="Enter your current desktop password"
+                autoComplete="current-password"
+                className={`${inputBase} ${inputBorder(touched && !currentPassword)}`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowCurrentPassword((v) => !v)}
+                aria-label={showCurrentPassword ? "Hide password" : "Show password"}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+              >
+                {showCurrentPassword ? EyeClosed : EyeOpen}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mb-4">
           <label htmlFor="cred-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
@@ -397,7 +443,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
           <button
             type="button"
             onClick={save}
-            disabled={saving || !password || !confirmPassword || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
+            disabled={saving || !password || !confirmPassword || (requiresCurrentPassword && !currentPassword) || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? t("connecting") : t("settings.connect")}

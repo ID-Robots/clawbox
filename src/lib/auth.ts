@@ -3,9 +3,20 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { promisify } from "util";
 import { DATA_DIR } from "./config-store";
 
 const SECRET_PATH = path.join(DATA_DIR, ".session-secret");
+const LOCAL_PASSWORD_PATH = path.join(DATA_DIR, ".clawbox-password");
+const scryptAsync = promisify(crypto.scrypt);
+
+async function scryptPassword(password: string, saltHex: string): Promise<Buffer> {
+  return scryptAsync(password, Buffer.from(saltHex, "hex"), 64) as Promise<Buffer>;
+}
+
+export function useLocalPasswordAuth(): boolean {
+  return process.env.CLAWBOX_LOCAL_PASSWORD_AUTH === "1";
+}
 
 /** Get or create a persistent HMAC secret for session cookies. */
 export async function getOrCreateSecret(): Promise<string> {
@@ -25,6 +36,27 @@ export async function getSessionSigningSecret(): Promise<string> {
   const envSecret = process.env.SESSION_SECRET?.trim();
   if (envSecret) return envSecret;
   return getOrCreateSecret();
+}
+
+export async function setLocalPassword(password: string): Promise<void> {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = (await scryptPassword(password, salt)).toString("hex");
+  await fs.mkdir(path.dirname(LOCAL_PASSWORD_PATH), { recursive: true });
+  await fs.writeFile(LOCAL_PASSWORD_PATH, `${salt}:${hash}`, { mode: 0o600 });
+}
+
+export async function verifyLocalPassword(password: string): Promise<boolean> {
+  try {
+    const raw = (await fs.readFile(LOCAL_PASSWORD_PATH, "utf-8")).trim();
+    const [salt, storedHash] = raw.split(":");
+    if (!salt || !storedHash) return false;
+
+    const actual = await scryptPassword(password, salt);
+    const expected = Buffer.from(storedHash, "hex");
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve the install user across default, sudo-launched, and x64 setups. */

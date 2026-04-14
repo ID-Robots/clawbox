@@ -5,14 +5,16 @@ vi.mock("@/lib/network", () => ({
 }));
 
 vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(),
   set: vi.fn(),
   setMany: vi.fn(),
 }));
 
 import { switchToClient } from "@/lib/network";
-import { set, setMany } from "@/lib/config-store";
+import { get, set, setMany } from "@/lib/config-store";
 
 const mockSwitchToClient = vi.mocked(switchToClient);
+const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockSetMany = vi.mocked(setMany);
 
@@ -32,6 +34,7 @@ describe("POST /setup-api/wifi/connect", () => {
     vi.clearAllMocks();
 
     mockSwitchToClient.mockResolvedValue({ message: "connected" });
+    mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
 

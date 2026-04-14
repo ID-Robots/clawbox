@@ -140,6 +140,27 @@ describe("/setup-api/system/hotspot", () => {
       expect(body.hasPassword).toBe(true);
       expect(body.enabled).toBe(false);
     });
+
+    it("defaults hotspot to disabled on x64 installs", async () => {
+      const originalInstallMode = process.env.CLAWBOX_INSTALL_MODE;
+      process.env.CLAWBOX_INSTALL_MODE = "x64";
+      try {
+        vi.resetModules();
+        const mod = await import("@/app/setup-api/system/hotspot/route");
+        hotspotGet = mod.GET;
+
+        const res = await hotspotGet();
+        const body = await res.json();
+
+        expect(body.enabled).toBe(false);
+      } finally {
+        if (originalInstallMode === undefined) {
+          delete process.env.CLAWBOX_INSTALL_MODE;
+        } else {
+          process.env.CLAWBOX_INSTALL_MODE = originalInstallMode;
+        }
+      }
+    });
   });
 
   describe("POST /setup-api/system/hotspot", () => {

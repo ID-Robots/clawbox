@@ -2,16 +2,13 @@ import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
+import { AP_START_SCRIPT, AP_STOP_SCRIPT, DATA_DIR } from "./runtime-paths";
 
 const exec = promisify(execFile);
 const IFACE = process.env.NETWORK_INTERFACE || "wlP1p1s0";
 const NETWORK_TIMEOUT = Number(process.env.NETWORK_COMMAND_TIMEOUT) || 60000;
 const AP_RETRY_COUNT = 3;
 const AP_RETRY_DELAY = 2000;
-const AP_START_SCRIPT =
-  process.env.AP_START_SCRIPT || "/home/clawbox/clawbox/scripts/start-ap.sh";
-const AP_STOP_SCRIPT =
-  process.env.AP_STOP_SCRIPT || "/home/clawbox/clawbox/scripts/stop-ap.sh";
 
 /** Parse one line of nmcli -t output, splitting on unescaped colons and
  *  unescaping `\:` and `\\` per nmcli's terse-output escaping rules. */
@@ -53,11 +50,7 @@ function deduplicateNetworks(networks: WifiNetwork[]): WifiNetwork[] {
   return Array.from(deduped.values()).sort((a, b) => b.signal - a.signal);
 }
 
-const SCAN_CACHE_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "wifi-scan-cache.json"
-);
+const SCAN_CACHE_PATH = path.join(DATA_DIR, "wifi-scan-cache.json");
 
 let cachedFileScan: { networks: WifiNetwork[]; mtime: number } | null = null;
 

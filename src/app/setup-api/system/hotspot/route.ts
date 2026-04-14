@@ -5,16 +5,14 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, setMany, getAll } from "@/lib/config-store";
 import { parseNmcliTerseLine } from "@/lib/network";
+import { AP_STOP_SCRIPT, DATA_DIR } from "@/lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
-const HOTSPOT_ENV_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "hotspot.env"
-);
+const HOTSPOT_ENV_PATH = path.join(DATA_DIR, "hotspot.env");
+const IS_X64_INSTALL = process.env.CLAWBOX_INSTALL_MODE === "x64";
 
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
@@ -26,7 +24,7 @@ export async function GET() {
   const config = await getAll();
   const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
   const hasPassword = !!config.hotspot_password;
-  const enabled = config.hotspot_enabled !== false;
+  const enabled = IS_X64_INSTALL ? !!config.hotspot_enabled : config.hotspot_enabled !== false;
 
   const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
   let active = false;
@@ -115,25 +113,22 @@ export async function POST(request: Request) {
     });
 
     // Start or stop the AP service based on enabled state
-    try {
-      if (isEnabled) {
-        await execFileAsync("/usr/bin/sudo", [
-          "/usr/bin/systemctl",
-          "start",
-          "clawbox-root-update@restart_ap.service",
-        ]);
-      } else {
-        // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
-        const stopScript = path.join(
-          process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-          "scripts",
-          "stop-ap.sh"
-        );
-        await execFileAsync("bash", [stopScript], { timeout: 15_000 });
+    if (!IS_X64_INSTALL) {
+      try {
+        if (isEnabled) {
+          await execFileAsync("/usr/bin/sudo", [
+            "/usr/bin/systemctl",
+            "start",
+            "clawbox-root-update@restart_ap.service",
+          ]);
+        } else {
+          // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
+          await execFileAsync("bash", [AP_STOP_SCRIPT], { timeout: 15_000 });
+        }
+      } catch (apErr) {
+        console.warn("[hotspot] Failed to toggle AP:", apErr);
+        // Non-fatal: settings are saved for next AP start
       }
-    } catch (apErr) {
-      console.warn("[hotspot] Failed to toggle AP:", apErr);
-      // Non-fatal: settings are saved for next AP start
     }
 
     return NextResponse.json({ success: true });

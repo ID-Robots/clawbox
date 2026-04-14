@@ -6,16 +6,13 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
 import { setControlUiAllowedOrigins, restartGateway } from "@/lib/openclaw-config";
+import { DATA_DIR } from "@/lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
-const HOSTNAME_ENV_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "hostname.env"
-);
+const HOSTNAME_ENV_PATH = path.join(DATA_DIR, "hostname.env");
 
 const DEFAULT_HOSTNAME = "clawbox";
 const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;

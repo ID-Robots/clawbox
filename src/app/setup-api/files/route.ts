@@ -4,6 +4,7 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
+import { FILES_ROOT } from "@/lib/runtime-paths";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -23,7 +24,7 @@ function getAvailableDiskBytes(dir: string): number {
 
 export const dynamic = "force-dynamic";
 
-const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+const BASE_DIR = FILES_ROOT;
 
 function safePath(rel: string): string | null {
   const base = path.resolve(BASE_DIR);
@@ -101,9 +102,10 @@ export async function POST(req: NextRequest) {
     if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
 
     try {
-      const result = await new Promise<{ name: string }>((resolve, reject) => {
+      const result = await new Promise<{ name: string; absPath: string }>((resolve, reject) => {
         const busboy = Busboy({ headers: { "content-type": contentType } });
         let fileName = "";
+        let uploadedPath = "";
         const fileWrites: Promise<void>[] = [];
         let settled = false;
 
@@ -116,7 +118,7 @@ export async function POST(req: NextRequest) {
         const resolveOnce = () => {
           if (settled) return;
           settled = true;
-          resolve({ name: fileName });
+          resolve({ name: fileName, absPath: uploadedPath });
         };
 
         busboy.on("file", (_field, fileStream, info) => {
@@ -127,6 +129,7 @@ export async function POST(req: NextRequest) {
             rejectOnce(new Error("Invalid destination"));
             return;
           }
+          uploadedPath = destPath;
           const ws = fs.createWriteStream(destPath);
           const writePromise = pipeline(fileStream, ws).then(() => {});
           fileWrites.push(writePromise);
@@ -140,7 +143,7 @@ export async function POST(req: NextRequest) {
         const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
         nodeStream.pipe(busboy);
       });
-      return NextResponse.json({ ok: true, name: result.name });
+      return NextResponse.json({ ok: true, name: result.name, absPath: result.absPath });
     } catch (err) {
       return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
     }

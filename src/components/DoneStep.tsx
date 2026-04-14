@@ -221,10 +221,13 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
 
   /* ── Security (system password + hotspot) ── */
+  const [currentPassword, setCurrentPassword] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [requiresCurrentPassword, setRequiresCurrentPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [hotspotName, setHotspotName] = useState("ClawBox-Setup");
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [showHotspotPassword, setShowHotspotPassword] = useState(false);
@@ -303,6 +306,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
           setSecurityDone(!!data.password_configured);
           setTelegramDone(!!data.telegram_configured);
           setProviderDone(!!data.ai_model_configured);
+          setRequiresCurrentPassword(!!data.requires_current_password);
           if (data.wifi_configured) setWifiDone(true);
           if (data.ai_model_provider) setProviderName(data.ai_model_provider);
         }
@@ -366,6 +370,10 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
   };
 
   const saveSecurity = async () => {
+    if (requiresCurrentPassword && password && !currentPassword) {
+      setSecStatus({ type: "error", message: "Current password is required on desktop installs" });
+      return;
+    }
     if (password || confirmPassword) {
       if (password.length < 8) {
         setSecStatus({ type: "error", message: "Password must be at least 8 characters" });
@@ -392,7 +400,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ currentPassword: requiresCurrentPassword ? currentPassword : undefined, password }),
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -416,6 +424,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
       }
       setSecStatus({ type: "success", message: "Settings saved!" });
       if (password) setSecurityDone(true);
+      setCurrentPassword("");
       setPassword("");
       setConfirmPassword("");
     } catch (err) {
@@ -1265,6 +1274,20 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         {/* Security */}
         <CollapsibleSection id="security" title="Security" done={securityDone} open={openSection === "security"} onToggle={toggle}>
           <p className="text-xs text-[var(--text-muted)]">Set system password and configure hotspot for next setup.</p>
+          {requiresCurrentPassword && (
+            <div>
+              <label htmlFor="sec-current-pw" className={LABEL_CLASS}>Current Password</label>
+              <PasswordInput
+                id="sec-current-pw"
+                value={currentPassword}
+                onChange={setCurrentPassword}
+                visible={showCurrentPassword}
+                onToggle={() => setShowCurrentPassword((v) => !v)}
+                placeholder="Enter your current desktop password"
+                autoComplete="current-password"
+              />
+            </div>
+          )}
           <div>
             <label htmlFor="sec-pw" className={LABEL_CLASS}>New Password</label>
             <PasswordInput

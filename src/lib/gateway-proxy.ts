@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
+import { OPENCLAW_CONFIG_PATH } from "@/lib/runtime-paths";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
-const OPENCLAW_CONFIG_PATH = "/home/clawbox/.openclaw/openclaw.json";
 
 const ALLOWED_PROTOS = new Set(["http", "https"]);
 const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";

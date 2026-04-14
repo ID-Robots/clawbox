@@ -6,14 +6,15 @@ import { execFile as execFileCb } from "child_process";
 import { setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway } from "@/lib/openclaw-config";
+import { CLAWBOX_HOME, getClawboxRuntimeEnv } from "@/lib/runtime-paths";
 
 const execFile = promisify(execFileCb);
 const OPENCLAW_BIN = findOpenclawBin();
 
 async function runCommand(cmd: string, args: string[]) {
   return await execFile(cmd, args, {
-    cwd: "/home/clawbox",
-    env: { ...process.env, HOME: "/home/clawbox" },
+    cwd: CLAWBOX_HOME,
+    env: getClawboxRuntimeEnv(),
     timeout: 30_000,
   });
 }

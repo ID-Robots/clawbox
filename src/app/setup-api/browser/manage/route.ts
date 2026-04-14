@@ -1,21 +1,24 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { constants as fsConstants } from "fs";
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
-import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
+import { readConfig, findOpenclawBin, restartGateway } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { CLAWBOX_HOME, CLAWBOX_ROOT, getClawboxRuntimeEnv } from "@/lib/runtime-paths";
 
 const exec = promisify(execFile);
-const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
-const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
+const HOME = CLAWBOX_HOME;
 const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
 const PLAYWRIGHT_BROWSERS_DIR = path.join(HOME, ".cache", "ms-playwright");
 const CDP_PORT = 18800;
 const BROWSER_ENABLED_KEY = "browser:integration-enabled";
+const BROWSER_SERVICE = "clawbox-browser.service";
+const BROWSER_LOG_PATH = "/tmp/clawbox-browser.log";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -105,6 +108,53 @@ async function cleanBrowserLocks() {
       fs.unlink(path.join(PROFILE_DIR, f)).catch(() => {})
     )
   );
+}
+
+function shouldUseBrowserService(): boolean {
+  if (process.env.CLAWBOX_USE_SYSTEMD === "0") return false;
+  if (process.env.CLAWBOX_USE_SYSTEMD === "1") return true;
+  return ["/etc/systemd/system", "/lib/systemd/system"].some((root) =>
+    fsSync.existsSync(path.join(root, BROWSER_SERVICE))
+  );
+}
+
+async function startBrowserDirect(): Promise<void> {
+  const browserScript = path.join(CLAWBOX_ROOT, "scripts", "launch-browser.sh");
+  await fs.access(browserScript, fsConstants.X_OK);
+  let logHandle: number | null = null;
+  try {
+    try {
+      logHandle = fsSync.openSync(BROWSER_LOG_PATH, "a");
+    } catch {
+      try {
+        logHandle = fsSync.openSync("/dev/null", "a");
+      } catch {
+        logHandle = null;
+      }
+    }
+
+    const stdio: ["ignore", number, number] | ["ignore", "ignore", "ignore"] =
+      typeof logHandle === "number"
+        ? ["ignore", logHandle, logHandle]
+        : ["ignore", "ignore", "ignore"];
+
+    const child = spawn("bash", [browserScript], {
+      cwd: CLAWBOX_ROOT,
+      detached: true,
+      stdio,
+      env: getClawboxRuntimeEnv({
+        DISPLAY: process.env.DISPLAY || ":0",
+        CDP_PORT: String(CDP_PORT),
+        XDG_CONFIG_HOME: path.join(HOME, ".config"),
+        XDG_CACHE_HOME: path.join(HOME, ".cache"),
+      }),
+    });
+    child.unref();
+  } finally {
+    if (typeof logHandle === "number") {
+      fsSync.closeSync(logHandle);
+    }
+  }
 }
 
 /** Check if browser is running and CDP is accessible */
@@ -232,7 +282,7 @@ export async function POST(req: Request) {
 
         let enableRestartOk = true;
         try {
-          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await restartGateway();
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           enableRestartOk = false;
@@ -252,7 +302,7 @@ export async function POST(req: Request) {
 
         let disableRestartOk = true;
         try {
-          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await restartGateway();
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           disableRestartOk = false;
@@ -279,12 +329,15 @@ export async function POST(req: Request) {
 
         try {
           console.log(`[browser] Starting clawbox-browser.service (CDP port ${CDP_PORT})`);
-          // Start dedicated service — runs as root, drops to clawbox via runuser
-          await exec("/usr/bin/sudo", [
-            "/usr/bin/systemctl", "start", "clawbox-browser.service",
-          ], { timeout: 5000 }).catch((err) => {
-            console.error("[browser] systemctl start failed:", err);
-          });
+          if (shouldUseBrowserService()) {
+            await exec("/usr/bin/sudo", [
+              "/usr/bin/systemctl", "start", BROWSER_SERVICE,
+            ], { timeout: 5000 }).catch((err) => {
+              console.error("[browser] systemctl start failed:", err);
+            });
+          } else {
+            await startBrowserDirect();
+          }
 
           // Wait for CDP to become ready
           for (let i = 0; i < 10; i++) {
@@ -315,9 +368,11 @@ export async function POST(req: Request) {
       }
 
       case "close-browser": {
-        try {
-          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
-        } catch {}
+        if (shouldUseBrowserService()) {
+          try {
+            await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", BROWSER_SERVICE], { timeout: 10000 });
+          } catch {}
+        }
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
         } catch {}

@@ -4,11 +4,11 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { CLAWBOX_HOME } from "@/lib/runtime-paths";
 
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
-const HOME = process.env.HOME || "/home/clawbox";
 const OPENCLAW_BIN = findOpenclawBin();
 
 /**
@@ -16,7 +16,7 @@ const OPENCLAW_BIN = findOpenclawBin();
  */
 const CONFIG_WRITERS: Record<string, (settings: Record<string, string | boolean>) => Promise<void>> = {
   "home-assistant": async (settings) => {
-    const configDir = path.join(HOME, ".config", "home-assistant");
+    const configDir = path.join(CLAWBOX_HOME, ".config", "home-assistant");
     const configFile = path.join(configDir, "config.json");
     await fs.mkdir(configDir, { recursive: true });
     const config: Record<string, unknown> = {};

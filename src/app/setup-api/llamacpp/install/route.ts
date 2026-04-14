@@ -18,6 +18,7 @@ import {
   tailLlamaCppLog,
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
+import { CLAWBOX_HOME, CLAWBOX_INSTALL_SCRIPT, CLAWBOX_ROOT, getClawboxRuntimeEnv } from "@/lib/runtime-paths";
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
@@ -61,6 +62,22 @@ async function readLlamaCppInstallFailure(): Promise<string | null> {
 }
 
 async function repairLlamaCppRuntime(): Promise<{ ok: boolean; error?: string }> {
+  if (process.env.CLAWBOX_USE_SYSTEMD === "0") {
+    try {
+      await execFile("/bin/bash", [CLAWBOX_INSTALL_SCRIPT, "--step", "llamacpp_install"], {
+        cwd: CLAWBOX_ROOT,
+        env: getClawboxRuntimeEnv(),
+        timeout: LLAMACPP_INSTALL_TIMEOUT_MS,
+      });
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : "Failed to repair llama.cpp runtime",
+      };
+    }
+  }
+
   await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", LLAMACPP_INSTALL_SERVICE], {
     timeout: 10_000,
   }).catch(() => {});
@@ -96,10 +113,10 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
       `${spec.contextWindow}`,
     ],
     {
-      cwd: "/home/clawbox",
+      cwd: CLAWBOX_HOME,
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/clawbox" },
+      env: getClawboxRuntimeEnv(),
     }
   );
 }

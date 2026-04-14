@@ -7,18 +7,28 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("@/lib/auth", () => ({
   verifyPassword: vi.fn(),
+  verifyLocalPassword: vi.fn(),
   createSessionCookie: vi.fn().mockReturnValue("session.cookie"),
   getSessionSigningSecret: vi.fn().mockResolvedValue("secret"),
+  useLocalPasswordAuth: vi.fn(() => false),
 }));
 
 import * as config from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
+import {
+  verifyPassword,
+  verifyLocalPassword,
+  createSessionCookie,
+  getSessionSigningSecret,
+  useLocalPasswordAuth,
+} from "@/lib/auth";
 
 const mockGet = vi.mocked(config.get);
 const mockSet = vi.mocked(config.set);
 const mockVerifyPassword = vi.mocked(verifyPassword);
+const mockVerifyLocalPassword = vi.mocked(verifyLocalPassword);
 const mockCreateSessionCookie = vi.mocked(createSessionCookie);
 const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
+const mockUseLocalPasswordAuth = vi.mocked(useLocalPasswordAuth);
 
 describe("/login-api", () => {
   let POST: (req: Request) => Promise<Response>;
@@ -28,8 +38,10 @@ describe("/login-api", () => {
     vi.clearAllMocks();
     mockGet.mockResolvedValue(true as never);
     mockVerifyPassword.mockResolvedValue(false);
+    mockVerifyLocalPassword.mockResolvedValue(false);
     mockCreateSessionCookie.mockReturnValue("session.cookie");
     mockGetSessionSigningSecret.mockResolvedValue("secret");
+    mockUseLocalPasswordAuth.mockReturnValue(false);
     const mod = await import("@/app/login-api/route");
     POST = mod.POST;
   });
@@ -113,5 +125,22 @@ describe("/login-api", () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(mockSet).toHaveBeenCalledWith("password_configured", true);
+  });
+
+  it("uses the local ClawBox password verifier on x64 installs", async () => {
+    mockUseLocalPasswordAuth.mockReturnValue(true);
+    mockVerifyLocalPassword.mockResolvedValue(true);
+
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.11" },
+      body: JSON.stringify({ password: "correct", duration: 43200 }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.success).toBe(true);
+    expect(mockVerifyLocalPassword).toHaveBeenCalledWith("correct");
+    expect(mockVerifyPassword).not.toHaveBeenCalled();
   });
 });

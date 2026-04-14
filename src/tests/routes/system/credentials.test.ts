@@ -4,6 +4,7 @@ import fs from "fs/promises";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -15,19 +16,40 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(),
   set: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
   getSystemUsername: vi.fn(() => process.env.CLAWBOX_USER || "clawbox"),
+  isSafePasswordChars: vi.fn((value: string) => !/[\r\n\x00-\x1f\x7f]/.test(value)),
+  verifyPassword: vi.fn(async () => true),
+  verifyLocalPassword: vi.fn(async () => true),
+  setLocalPassword: vi.fn(async () => {}),
+  useLocalPasswordAuth: vi.fn(() => false),
 }));
 
-import { set } from "@/lib/config-store";
-import { getSystemUsername } from "@/lib/auth";
+import { get, set } from "@/lib/config-store";
+import {
+  getSystemUsername,
+  isSafePasswordChars,
+  verifyPassword,
+  verifyLocalPassword,
+  setLocalPassword,
+  useLocalPasswordAuth,
+} from "@/lib/auth";
+import { spawn } from "child_process";
 
+const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockGetSystemUsername = vi.mocked(getSystemUsername);
+const mockIsSafePasswordChars = vi.mocked(isSafePasswordChars);
+const mockVerifyPassword = vi.mocked(verifyPassword);
+const mockVerifyLocalPassword = vi.mocked(verifyLocalPassword);
+const mockSetLocalPassword = vi.mocked(setLocalPassword);
+const mockUseLocalPasswordAuth = vi.mocked(useLocalPasswordAuth);
 const mockExecFile = vi.mocked(childProcess.execFile);
+const mockSpawn = vi.mocked(spawn);
 const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -80,8 +102,27 @@ describe("POST /setup-api/system/credentials", () => {
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
     mockFs.unlink.mockResolvedValue();
+    mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
+    mockSpawn.mockImplementation((() => ({
+      stdin: {
+        write: vi.fn(),
+        end: vi.fn(),
+      },
+      stderr: {
+        on: vi.fn(),
+      },
+      on: vi.fn((event: string, cb: (code?: number) => void) => {
+        if (event === "close") cb(0);
+        return undefined;
+      }),
+    })) as never);
     mockGetSystemUsername.mockImplementation(() => process.env.CLAWBOX_USER || "clawbox");
+    mockIsSafePasswordChars.mockImplementation((value: string) => !/[\r\n\x00-\x1f\x7f]/.test(value));
+    mockVerifyPassword.mockResolvedValue(true);
+    mockVerifyLocalPassword.mockResolvedValue(true);
+    mockSetLocalPassword.mockResolvedValue();
+    mockUseLocalPasswordAuth.mockReturnValue(false);
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
     });
@@ -93,6 +134,7 @@ describe("POST /setup-api/system/credentials", () => {
   afterEach(() => {
     vi.clearAllMocks();
     delete process.env.CLAWBOX_USER;
+    delete process.env.CLAWBOX_INSTALL_MODE;
   });
 
   it("sets password successfully", async () => {
@@ -118,6 +160,28 @@ describe("POST /setup-api/system/credentials", () => {
       "desktopuser:securepassword123\n",
       expect.objectContaining({ mode: 0o600 })
     );
+  });
+
+  it("stores a local ClawBox password on x64 instead of invoking systemctl", async () => {
+    mockUseLocalPasswordAuth.mockReturnValue(true);
+
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(mockSetLocalPassword).toHaveBeenCalledWith("securepassword123");
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it("requires the current password on x64 installs", async () => {
+    process.env.CLAWBOX_INSTALL_MODE = "x64";
+
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe("Current password is required");
   });
 
   it("returns 400 for invalid JSON", async () => {

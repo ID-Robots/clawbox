@@ -9,6 +9,7 @@
 # Environment variables:
 #   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
+#   OPENCLAW_PRIMARY_MODEL — optional OpenClaw primary model override
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -536,10 +537,15 @@ step_openclaw_config() {
   local CLAWBOX_AI_ENV="$PROJECT_DIR/.env"
   local CLAWBOX_AI_KEY="${CLAWBOX_AI_API_KEY:-}"
   local AUTH_PROFILES="$CLAWBOX_HOME/.openclaw/agents/main/agent/auth-profiles.json"
+  local OPENCLAW_PRIMARY_MODEL_VALUE="${OPENCLAW_PRIMARY_MODEL:-$(get_env_setting_or_default "$PROJECT_DIR/.env" "OPENCLAW_PRIMARY_MODEL" "")}"
 
   # Sequential config set calls to avoid ConfigMutationConflictError
-  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
-  echo "  Default model set"
+  if [ -n "$OPENCLAW_PRIMARY_MODEL_VALUE" ]; then
+    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "$OPENCLAW_PRIMARY_MODEL_VALUE"
+    echo "  Primary model set from OPENCLAW_PRIMARY_MODEL"
+  else
+    echo "  Primary model left at OpenClaw default"
+  fi
   as_clawbox "$OPENCLAW_BIN" config set agents.defaults.compaction.reserveTokensFloor 24000
   echo "  Compaction reserve floor set"
 

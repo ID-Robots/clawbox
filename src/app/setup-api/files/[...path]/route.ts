@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { FILES_ROOT } from "@/lib/runtime-paths";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,7 @@ const MIME_TYPES: Record<string, string> = {
   mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
 };
 
-const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+const BASE_DIR = FILES_ROOT;
 
 function safePath(segments: string[]): string | null {
   const rel = segments.join("/");

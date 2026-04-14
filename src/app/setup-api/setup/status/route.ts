@@ -23,6 +23,8 @@ export async function GET() {
       ? config.setup_progress_step
       : Number(config.setup_progress_step ?? 0);
     return NextResponse.json({
+      install_mode: process.env.CLAWBOX_INSTALL_MODE || "device",
+      requires_current_password: process.env.CLAWBOX_INSTALL_MODE === "x64",
       setup_complete: !!config.setup_complete,
       password_configured: !!config.password_configured,
       update_completed: !!config.update_completed,

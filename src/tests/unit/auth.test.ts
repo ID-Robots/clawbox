@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-auth-tests-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "data");
 const SECRET_PATH = path.join(DATA_DIR, ".session-secret");
+const LOCAL_PASSWORD_PATH = path.join(DATA_DIR, ".clawbox-password");
 
 let auth: typeof import("@/lib/auth");
 
@@ -20,6 +21,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   // Clean secret file before each test
   await fs.rm(SECRET_PATH, { force: true });
+  await fs.rm(LOCAL_PASSWORD_PATH, { force: true });
 });
 
 afterAll(async () => {
@@ -117,6 +119,33 @@ describe("auth", () => {
       // On test machines unix_chkpwd may not exist, so this should resolve false
       const result = await auth.verifyPassword("wrong-password-test");
       expect(result).toBe(false);
+    });
+  });
+
+  describe("local password auth", () => {
+    it("stores and verifies a local ClawBox password", async () => {
+      await auth.setLocalPassword("desktop-secret");
+
+      await expect(auth.verifyLocalPassword("desktop-secret")).resolves.toBe(true);
+      await expect(auth.verifyLocalPassword("wrong-secret")).resolves.toBe(false);
+    });
+
+    it("returns false when no local ClawBox password is configured", async () => {
+      await expect(auth.verifyLocalPassword("desktop-secret")).resolves.toBe(false);
+    });
+
+    it("invalidates the old local password when it is updated", async () => {
+      await auth.setLocalPassword("first-password");
+      await auth.setLocalPassword("second-password");
+
+      await expect(auth.verifyLocalPassword("first-password")).resolves.toBe(false);
+      await expect(auth.verifyLocalPassword("second-password")).resolves.toBe(true);
+    });
+
+    it("returns false for malformed local password files", async () => {
+      await fs.writeFile(LOCAL_PASSWORD_PATH, "not-a-valid-password-file", "utf-8");
+
+      await expect(auth.verifyLocalPassword("desktop-secret")).resolves.toBe(false);
     });
   });
 

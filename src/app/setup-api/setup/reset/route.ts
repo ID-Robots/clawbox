@@ -5,11 +5,12 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
+import { OPENCLAW_HOME } from "@/lib/runtime-paths";
 
 const execFile = promisify(execFileCb);
 
 export const dynamic = "force-dynamic";
-const OPENCLAW_DIR = "/home/clawbox/.openclaw";
+const OPENCLAW_DIR = OPENCLAW_HOME;
 
 // Files to preserve during factory reset (hardware-specific, auto-generated)
 const PRESERVE_FILES = new Set(["network.env"]);

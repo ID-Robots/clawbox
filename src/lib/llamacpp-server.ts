@@ -10,12 +10,13 @@ import {
   getLlamaCppServerContextSize,
 } from "./llamacpp";
 import { inferConfiguredLocalModel, type OpenClawConfig } from "./openclaw-config";
+import { HF_BIN_PATH } from "./runtime-paths";
 
 const LLAMACPP_RUNTIME_DIR = path.join(DATA_DIR, "llamacpp");
 const LLAMACPP_PID_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.pid");
 const LLAMACPP_LOG_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.log");
 const DEFAULT_LLAMACPP_BIN = "/usr/local/bin/llama-server";
-const DEFAULT_HF_BIN = "/home/clawbox/.local/bin/hf";
+const DEFAULT_HF_BIN = HF_BIN_PATH;
 const DEFAULT_STARTUP_TIMEOUT_MS = 20 * 60 * 1000;
 
 export interface LlamaCppLaunchSpec {

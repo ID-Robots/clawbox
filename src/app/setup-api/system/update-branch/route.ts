@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { readFile, writeFile, unlink } from "fs/promises";
 import path from "path";
+import { CLAWBOX_ROOT } from "@/lib/runtime-paths";
 
 export const dynamic = "force-dynamic";
 
-const PROJECT_DIR = "/home/clawbox/clawbox";
+const PROJECT_DIR = CLAWBOX_ROOT;
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
 

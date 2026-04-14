@@ -1,12 +1,22 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile } from "fs/promises";
+import fs from "fs";
 import path from "path";
 import { get, set, setMany } from "./config-store";
 import { findOpenclawBin, restartGateway } from "./openclaw-config";
+import {
+  CLAWBOX_HOME,
+  CLAWBOX_INSTALL_MODE,
+  CLAWBOX_INSTALL_SCRIPT,
+  CLAWBOX_NPM_PREFIX,
+  CLAWBOX_ROOT,
+  getClawboxRuntimeEnv,
+} from "./runtime-paths";
 
-const PROJECT_DIR = "/home/clawbox/clawbox";
+const PROJECT_DIR = CLAWBOX_ROOT;
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
+const ROOT_UPDATE_TEMPLATE = "clawbox-root-update@";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -16,6 +26,15 @@ const PING_TARGETS = (process.env.PING_TARGETS || "8.8.8.8,1.1.1.1")
   .split(",")
   .map((t) => t.trim())
   .filter((t) => t && VALID_HOST.test(t));
+
+function shouldUseRootUpdateService(): boolean {
+  if (process.env.CLAWBOX_USE_SYSTEMD === "0") return false;
+  if (process.env.CLAWBOX_USE_SYSTEMD === "1") return true;
+  return [
+    path.join("/etc/systemd/system", `${ROOT_UPDATE_TEMPLATE}.service`),
+    path.join("/lib/systemd/system", `${ROOT_UPDATE_TEMPLATE}.service`),
+  ].some((candidate) => fs.existsSync(candidate));
+}
 
 interface UpdateStepDef {
   id: string;
@@ -64,7 +83,16 @@ function waitForTermination(): Promise<void> {
  * Used for steps that will kill the current process (rebuild, reboot).
  */
 async function startRootServiceFireAndForget(stepId: string): Promise<void> {
-  const service = `clawbox-root-update@${stepId}.service`;
+  if (!shouldUseRootUpdateService()) {
+    await execFile("/bin/bash", [CLAWBOX_INSTALL_SCRIPT, "--step", stepId], {
+      cwd: PROJECT_DIR,
+      env: getClawboxRuntimeEnv({ CLAWBOX_USE_SYSTEMD: "0" }),
+      timeout: 10_000,
+    });
+    return;
+  }
+
+  const service = `${ROOT_UPDATE_TEMPLATE}${stepId}.service`;
   execFile("/usr/bin/systemctl", ["reset-failed", service], {
     timeout: 10_000,
   }).catch(() => {});
@@ -146,7 +174,7 @@ async function updateClawBoxAndReboot(): Promise<void> {
   await waitForTermination();
 }
 
-const UPDATE_STEPS: UpdateStepDef[] = [
+const DEVICE_UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
     label: "Updating system packages",
@@ -211,6 +239,55 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
 ];
 
+const DESKTOP_UPDATE_STEPS: UpdateStepDef[] = [
+  {
+    id: "fix_git_perms",
+    label: "Repairing repository permissions",
+    timeoutMs: 30_000,
+    requiresRoot: true,
+  },
+  {
+    id: "git_pull",
+    label: "Updating ClawBox code",
+    timeoutMs: 120_000,
+    requiresRoot: true,
+  },
+  {
+    id: "build",
+    label: "Rebuilding ClawBox",
+    timeoutMs: 10 * 60_000,
+    requiresRoot: true,
+  },
+  {
+    id: "openclaw_install",
+    label: "Updating OpenClaw",
+    timeoutMs: 120_000,
+    requiresRoot: true,
+  },
+  {
+    id: "openclaw_patch",
+    label: "Patching OpenClaw gateway",
+    timeoutMs: 30_000,
+    requiresRoot: true,
+  },
+  {
+    id: "openclaw_config",
+    label: "Refreshing OpenClaw configuration",
+    timeoutMs: 30_000,
+    requiresRoot: true,
+  },
+  {
+    id: "gateway_restart",
+    label: "Restarting OpenClaw gateway",
+    timeoutMs: 30_000,
+    customRun: () => restartGateway(),
+  },
+];
+
+const UPDATE_STEPS: UpdateStepDef[] = CLAWBOX_INSTALL_MODE === "x64"
+  ? DESKTOP_UPDATE_STEPS
+  : DEVICE_UPDATE_STEPS;
+
 /**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
  * service. The main service runs as clawbox with NoNewPrivileges=true, so
@@ -218,7 +295,16 @@ const UPDATE_STEPS: UpdateStepDef[] = [
  * root, and polkit authorizes the clawbox user to start it.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
-  const serviceName = `clawbox-root-update@${stepId}.service`;
+  if (!shouldUseRootUpdateService()) {
+    await execFile("/bin/bash", [CLAWBOX_INSTALL_SCRIPT, "--step", stepId], {
+      cwd: PROJECT_DIR,
+      env: getClawboxRuntimeEnv({ CLAWBOX_USE_SYSTEMD: "0" }),
+      timeout: timeoutMs + 30_000,
+    });
+    return;
+  }
+
+  const serviceName = `${ROOT_UPDATE_TEMPLATE}${stepId}.service`;
   await execFile("/usr/bin/systemctl", ["reset-failed", serviceName], {
     timeout: 10_000,
   }).catch(() => {});
@@ -232,7 +318,7 @@ let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
 
 const OPENCLAW_BIN = findOpenclawBin();
-const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
+const OPENCLAW_PKG = path.join(CLAWBOX_NPM_PREFIX, "lib", "node_modules", "openclaw", "package.json");
 
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
@@ -269,7 +355,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   const [targetVersion, openclawCurrent, openclawTarget] = await Promise.all([
     getTargetVersion(),
-    execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
+    execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000, env: getClawboxRuntimeEnv() })
       .then(({ stdout }) => stdout.trim() || null)
       .catch(() =>
         // Fallback: read version from installed package.json
@@ -277,7 +363,10 @@ export async function getVersionInfo(): Promise<VersionInfo> {
           .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
           .catch(() => null)
       ),
-    execShell("bun pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
+    execShell("bun pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org", {
+      timeout: 10_000,
+      env: getClawboxRuntimeEnv(),
+    })
       .then(({ stdout }) => stdout.trim() || null)
       .catch(() => null),
   ]);
@@ -311,8 +400,8 @@ export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
     const { stdout } = await execShell(
-      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox ls-remote --tags --refs origin",
-      { timeout: 10_000 },
+      `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} ls-remote --tags --refs origin`,
+      { timeout: 10_000, env: getClawboxRuntimeEnv() },
     );
     const tags = stdout
       .trim()
@@ -398,6 +487,7 @@ export async function checkContinuation(): Promise<boolean> {
   await set("update_needs_continuation", undefined);
 
   const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
+  if (restartIndex < 0) return false;
   const startFrom = restartIndex + 1;
 
   running = true;

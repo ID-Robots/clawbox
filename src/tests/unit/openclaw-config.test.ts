@@ -5,6 +5,7 @@ import fsSync from "fs";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -20,6 +21,9 @@ vi.mock("fs", () => ({
   default: {
     readFileSync: vi.fn(),
     existsSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    openSync: vi.fn(),
+    closeSync: vi.fn(),
   },
 }));
 
@@ -85,11 +89,15 @@ describe("openclaw-config", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    process.env.CLAWBOX_USE_SYSTEMD = "1";
 
     mockFs.readFile.mockResolvedValue("{}");
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
+    mockFsSync.mkdirSync.mockImplementation(() => undefined);
+    mockFsSync.openSync.mockReturnValue(42 as never);
+    mockFsSync.closeSync.mockImplementation(() => undefined);
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
     });
@@ -99,6 +107,7 @@ describe("openclaw-config", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    delete process.env.CLAWBOX_USE_SYSTEMD;
   });
 
   describe("ensureCompactionReserveFloor", () => {

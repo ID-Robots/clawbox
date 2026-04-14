@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import fs from "fs/promises";
+import { OPENCLAW_CONFIG_PATH } from "@/lib/runtime-paths";
 
 export const dynamic = "force-dynamic";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
-const OPENCLAW_CONFIG = process.env.OPENCLAW_HOME
-  ? `${process.env.OPENCLAW_HOME}/openclaw.json`
-  : "/home/clawbox/.openclaw/openclaw.json";
 
 export async function GET(request: NextRequest) {
   const host = request.headers.get("host")?.replace(/:\d+$/, "") || "clawbox.local";
@@ -15,7 +13,7 @@ export async function GET(request: NextRequest) {
 
   let model = "";
   try {
-    const raw = await fs.readFile(OPENCLAW_CONFIG, "utf-8");
+    const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf-8");
     const config = JSON.parse(raw);
     model = config?.agents?.defaults?.model?.primary || "";
   } catch (err) {

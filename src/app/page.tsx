@@ -1322,7 +1322,7 @@ function ChromeDesktopInner() {
     setDesktopDragOver(false);
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    const dir = "/home/clawbox/Downloads";
+    const dir = "Downloads";
     const total = files.length;
     const totalSize = Array.from(files).reduce((sum, f) => sum + f.size, 0);
 

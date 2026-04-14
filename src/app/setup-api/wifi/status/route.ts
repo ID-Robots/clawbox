@@ -52,18 +52,35 @@ export async function GET() {
     if (status.error) {
       return NextResponse.json({ error: status.error }, { status: 500 });
     }
-    const state = status["GENERAL.STATE"] || "";
-    const ssid = status["GENERAL.CONNECTION"] || null;
-    const connected = /\(connected\)/.test(state) && !!ssid && ssid !== "--" && ssid !== "ClawBox-Setup";
-    const ip = (status["IP4.ADDRESS[1]"] || "").split("/")[0] || null;
-    const gateway = status["IP4.GATEWAY"] || null;
+    const statusRecord = status as Record<string, unknown>;
+    const state = typeof statusRecord["GENERAL.STATE"] === "string" ? statusRecord["GENERAL.STATE"] : "";
+    const nmcliSsid = typeof statusRecord["GENERAL.CONNECTION"] === "string" ? statusRecord["GENERAL.CONNECTION"] : null;
+    const connectedFromStatus = typeof statusRecord.connected === "boolean" ? statusRecord.connected : null;
+    const connected = connectedFromStatus ?? (/\(connected\)/.test(state) && !!nmcliSsid && nmcliSsid !== "--" && nmcliSsid !== "ClawBox-Setup");
+    const ssid = connected
+      ? (typeof statusRecord.ssid === "string" ? statusRecord.ssid : nmcliSsid)
+      : null;
+    const ip = typeof statusRecord.ip === "string"
+      ? statusRecord.ip
+      : ((typeof statusRecord["IP4.ADDRESS[1]"] === "string" ? statusRecord["IP4.ADDRESS[1]"] : "").split("/")[0] || null);
+    const gateway = typeof statusRecord.gateway === "string"
+      ? statusRecord.gateway
+      : (typeof statusRecord["IP4.GATEWAY"] === "string" ? statusRecord["IP4.GATEWAY"] : null);
+    const signalDbm = connected
+      ? (typeof statusRecord.signalDbm === "number" ? statusRecord.signalDbm : quality.signalDbm)
+      : null;
+    const bitrateMbps = connected
+      ? (typeof statusRecord.bitrateMbps === "number" ? statusRecord.bitrateMbps : quality.bitrateMbps)
+      : null;
+    const signal = connected && typeof statusRecord.signal === "number" ? statusRecord.signal : undefined;
     const pingMs = connected ? await pingGateway(gateway) : null;
     const body = {
       connected,
       ssid: connected ? ssid : null,
       ip, gateway,
-      signalDbm: connected ? quality.signalDbm : null,
-      bitrateMbps: connected ? quality.bitrateMbps : null,
+      signal,
+      signalDbm,
+      bitrateMbps,
       pingMs,
       raw: status,
     };

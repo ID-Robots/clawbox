@@ -60,6 +60,8 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ## 🚀 Quick Start
 
+### Jetson / ClawBox hardware
+
 ```bash
 sudo bash install.sh
 ```
@@ -68,12 +70,72 @@ Connect to the **ClawBox-Setup** WiFi network (open, no password) and navigate t
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
+### x64 desktop install
+
+For Ubuntu/Debian-style `x86_64` desktops and laptops, use the x64 installer instead:
+
+```bash
+bash install-x64.sh
+```
+
+This is the safest first run:
+- installs ClawBox under your current user's home directory
+- installs OpenClaw into `~/.npm-global`
+- writes OpenClaw/config/runtime files under your home directory
+- starts the UI and gateway as user-owned background processes
+- does **not** modify hostname, WiFi AP, DNS, or system services
+
+If you want an isolated test install, choose a separate target directory and port:
+
+```bash
+CLAWBOX_DIR="$HOME/clawbox-x64-test" \
+CLAWBOX_PORT=3015 \
+bash install-x64.sh
+```
+
+Then open:
+- `http://127.0.0.1:3015`
+- `http://clawbox.local:3015`
+
+Optional root mode is available if you want the installer to add missing system packages and write systemd/sudoers integration:
+
+```bash
+sudo bash install-x64.sh
+```
+
+Use root mode only when you want the more invasive system-level setup. User mode is the recommended desktop path.
+
+### x64 installer notes
+
+User mode expects a few base tools to already exist on the machine:
+- `git`
+- `curl`
+- `python3`
+- `node` and `npm` with Node.js 22.19+
+- `make` and `gcc`
+- `bun` (the installer will add it if missing)
+
+Optional tools improve desktop features but are not required for the basic UI/gateway flow:
+- `cmake` and `ninja` for local `llama.cpp` builds
+- `chromium` or `google-chrome` for desktop browser integration
+- `ollama` for local Ollama models
+
+Useful environment variables for `install-x64.sh`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLAWBOX_DIR` | `$HOME/clawbox` | Where to clone or update ClawBox |
+| `CLAWBOX_PORT` | `3005` | UI port for the desktop install |
+| `CLAWBOX_BRANCH` | `main` | Git branch to clone or update |
+| `CLAWBOX_REPO_URL` | upstream GitHub repo | Clone source for the installer |
+| `CLAWBOX_USER` | current login user | Install target user |
+
 ## How It Works
 
 ### Layer 1 — System Bootstrap
 
 The installer (`install.sh`) provisions the Jetson from scratch:
-- Installs system packages, Node.js 22, Bun runtime
+- Installs system packages, Node.js 22.19+, Bun runtime
 - Sets hostname to `clawbox`, enables mDNS discovery
 - Builds the web OS, installs the OpenClaw gateway
 - Configures systemd services and captive-portal DNS
@@ -211,7 +273,7 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 | **Frontend** | Next.js 16, React 19, Tailwind CSS 4 |
 | **Language** | TypeScript 5 |
 | **Package Manager** | Bun |
-| **Runtime** | Node.js 22 (production), Bun (dev/build) |
+| **Runtime** | Node.js 22.19+ (production), Bun (dev/build) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) via MCP |
 | **Local Models** | Ollama (Llama, Gemma, Mistral) |
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
@@ -232,7 +294,8 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 │   ├── tests/              Unit + API route tests
 │   └── middleware.ts       Captive portal detection + session auth
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
-└── install.sh              Full system installer (idempotent)
+├── install.sh              Full Jetson/device installer (idempotent)
+└── install-x64.sh          x64 desktop installer
 ```
 
 ---
