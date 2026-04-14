@@ -538,8 +538,16 @@ step_openclaw_config() {
   local AUTH_PROFILES="$CLAWBOX_HOME/.openclaw/agents/main/agent/auth-profiles.json"
 
   # Sequential config set calls to avoid ConfigMutationConflictError
-  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
-  echo "  Default model set"
+  # Only seed the primary model if unset — preserves the user's provider choice
+  # across updates (rebuild_reboot re-invokes this step).
+  local CURRENT_PRIMARY
+  CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
+  if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
+    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+    echo "  Default model set"
+  else
+    echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
+  fi
   as_clawbox "$OPENCLAW_BIN" config set agents.defaults.compaction.reserveTokensFloor 24000
   echo "  Compaction reserve floor set"
 
