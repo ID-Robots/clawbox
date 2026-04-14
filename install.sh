@@ -9,7 +9,7 @@
 # Environment variables:
 #   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
-set -euo pipefail
+set -uo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
 
@@ -572,68 +572,79 @@ fi
 
 TOTAL_STEPS=18
 step=0
+FAILED_STEPS=()
 log() {
   step=$((step + 1))
   echo ""
   echo "[$step/$TOTAL_STEPS] $1"
 }
+run_step() {
+  local name="$1"; shift
+  if "$@"; then
+    return 0
+  else
+    echo "  WARNING: Step failed: $name (continuing...)"
+    FAILED_STEPS+=("$name")
+    return 0
+  fi
+}
 
 echo "=== ClawBox Installer ==="
 
 log "Ensuring clawbox user exists..."
-step_ensure_user
+run_step "ensure_user" step_ensure_user
 
 log "Installing system packages..."
-step_apt_update
+run_step "apt_update" step_apt_update
 
 log "Installing NVIDIA JetPack..."
-step_nvidia_jetpack
+run_step "nvidia_jetpack" step_nvidia_jetpack
 
 log "Enabling max performance mode..."
-step_performance_mode
+run_step "performance_mode" step_performance_mode
 
 log "Detecting WiFi interface..."
-step_detect_wifi
+run_step "detect_wifi" step_detect_wifi
 
 log "Configuring hostname and mDNS..."
-step_hostname_mdns
+run_step "hostname_mdns" step_hostname_mdns
 
 log "Setting up ClawBox repository..."
-step_git_pull
+run_step "git_pull" step_git_pull
 
 log "Ensuring bun is installed..."
-step_install_bun
+run_step "install_bun" step_install_bun
 
 log "Building ClawBox..."
-step_build
+run_step "build" step_build
 
 log "Installing OpenClaw..."
-step_openclaw_install
+run_step "openclaw_install" step_openclaw_install
 
 log "Patching and configuring OpenClaw..."
-step_openclaw_patch
-step_openclaw_config
+run_step "openclaw_patch" step_openclaw_patch
+run_step "openclaw_config" step_openclaw_config
 
 log "Configuring captive portal DNS..."
-step_captive_portal_dns
+run_step "captive_portal_dns" step_captive_portal_dns
 
 log "Setting up directories and permissions..."
-step_directories_permissions
+run_step "directories_permissions" step_directories_permissions
 
 log "Installing systemd services..."
-step_systemd_services
+run_step "systemd_services" step_systemd_services
 
 log "Installing polkit rules..."
-step_polkit_rules
+run_step "polkit_rules" step_polkit_rules
 
 log "Installing jtop (jetson-stats)..."
-step_jtop_install
+run_step "jtop_install" step_jtop_install
 
 log "Installing Ollama..."
-step_ollama_install
+run_step "ollama_install" step_ollama_install
 
 log "Starting services..."
-step_start_services
+run_step "start_services" step_start_services
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
@@ -643,7 +654,14 @@ if [ -f "$IFACE_ENV" ]; then
 fi
 
 echo ""
-echo "=== ClawBox Setup Complete ==="
+if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
+  echo "=== ClawBox Setup Complete ==="
+else
+  echo "=== ClawBox Setup Complete (with ${#FAILED_STEPS[@]} warning(s)) ==="
+  echo ""
+  echo "  Failed steps: ${FAILED_STEPS[*]}"
+  echo "  Re-run with: sudo bash install.sh"
+fi
 echo ""
 echo "  WiFi interface: ${NETWORK_INTERFACE:-unknown}"
 echo "  WiFi AP:        ClawBox-Setup (open network)"
