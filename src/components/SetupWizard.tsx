@@ -234,9 +234,9 @@ function SetupCompletionOverlay({
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={60}
-                  height={60}
-                  className="h-[60px] w-[60px] object-contain"
+                  width={100}
+                  height={100}
+                  className="h-[100px] w-[100px] object-contain"
                   priority
                 />
               </div>
@@ -505,8 +505,9 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       </header>
 
       <main
-        className="flex-1 flex flex-col items-center justify-start sm:justify-center px-4 pt-2 pb-4 sm:p-6"
+        className="flex-1 flex flex-col items-center justify-start px-4 pt-2 pb-4 sm:p-6"
       >
+        <div className="w-full flex flex-col items-center my-auto">
         {completionStarted ? (
           <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
         ) : (
@@ -550,6 +551,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             )}
           </>
         )}
+        </div>
       </main>
 
       <footer className="px-4 py-3 flex items-center justify-center gap-3">
