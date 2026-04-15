@@ -311,11 +311,11 @@ export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
     await execShell(
-      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox fetch --quiet --tags origin",
+      `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} fetch --quiet --tags origin`,
       { timeout: 20_000 },
     ).catch(() => {});
     const { stdout } = await execShell(
-      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox ls-remote --tags --refs origin",
+      `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} ls-remote --tags --refs origin`,
       { timeout: 10_000 },
     );
     const tags = stdout
@@ -337,7 +337,7 @@ export async function getTargetVersion(): Promise<string | null> {
     for (let i = semverTags.length - 1; i >= 0; i--) {
       const tag = semverTags[i];
       const isForward = await execShell(
-        `git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox merge-base --is-ancestor HEAD refs/tags/${tag}`,
+        `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} merge-base --is-ancestor HEAD refs/tags/${tag}`,
         { timeout: 10_000 },
       ).then(() => true).catch(() => false);
       if (isForward) {

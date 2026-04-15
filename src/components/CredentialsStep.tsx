@@ -111,6 +111,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
     setSaving(true);
     setStatus(null);
+    const newHost = `${normalizedHostname}.local`;
+    const newSetupUrl = new URL("/setup", window.location.href);
+    newSetupUrl.hostname = newHost;
     try {
       // Save hostname (applies live; mDNS update is non-fatal on failure)
       try {
@@ -171,9 +174,33 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         message: t("credentials.settingsSaved"),
       });
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      timeoutRef.current = setTimeout(() => onNext(), 1500);
+      const currentHost = window.location.hostname.toLowerCase();
+      if (currentHost.endsWith(".local") && currentHost !== newHost) {
+        timeoutRef.current = setTimeout(() => window.location.replace(newSetupUrl.toString()), 1500);
+      } else {
+        timeoutRef.current = setTimeout(() => onNext(), 1500);
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof TypeError && err.message.includes("fetch")) {
+        // Connection dropped mid-save — most likely the hostname just changed
+        // and mDNS is pointing at the new name. Probe the new URL before
+        // redirecting so we don't strand the user on a dead hostname.
+        try {
+          await fetch(newSetupUrl.toString(), {
+            method: "HEAD",
+            signal: AbortSignal.timeout(5000),
+          });
+          window.location.replace(newSetupUrl.toString());
+          return;
+        } catch {
+          setStatus({
+            type: "error",
+            message: `Could not reach ${newSetupUrl.toString()} — settings were saved, but mDNS may not be ready. Try opening the URL manually.`,
+          });
+          return;
+        }
+      }
       setStatus({
         type: "error",
         message: `Failed: ${err instanceof Error ? err.message : err}`,
@@ -398,8 +425,11 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             type="button"
             onClick={save}
             disabled={saving || !password || !confirmPassword || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
-            className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+            className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
+            {saving && (
+              <span aria-hidden="true" className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            )}
             {saving ? t("connecting") : t("settings.connect")}
           </button>
         </div>

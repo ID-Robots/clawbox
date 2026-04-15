@@ -505,7 +505,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       </header>
 
       <main
-        className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-4 pt-2 pb-4 sm:p-6"
+        className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-4 pt-2 pb-24 sm:p-6"
       >
         <div className="w-full flex flex-col items-center my-auto">
         {completionStarted ? (
