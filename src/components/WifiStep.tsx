@@ -173,17 +173,17 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-wifi">
-      <div className="card-surface rounded-2xl p-8">
-        <div className="flex flex-col items-center gap-2 mb-6">
+      <div className="card-surface rounded-2xl p-5 sm:p-8">
+        <div className="flex flex-col items-center gap-2 mb-5 sm:mb-6">
           <Image
             src="/clawbox-crab.png"
             alt="ClawBox"
             width={120}
             height={120}
-            className="w-[120px] h-[120px] object-contain animate-welcome-powerup"
+            className="w-20 h-20 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup"
             priority
           />
-          <h1 className="text-2xl font-bold font-display text-center">
+          <h1 className="text-xl sm:text-2xl font-bold font-display text-center">
             {t("wifi.welcome")}
           </h1>
           <p className="text-xs text-[var(--text-muted)] text-center">
@@ -256,7 +256,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   <span className={`inline-block w-2 h-2 rounded-full ${ethDetected ? "bg-[#00e5cc]" : "bg-gray-400"}`} />
                   {t("wifi.ethernet")}
                 </span>
-                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
+                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
               <button
                 type="button"

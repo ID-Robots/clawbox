@@ -196,8 +196,8 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
-      <div className="card-surface rounded-2xl p-8">
-        <h1 className="text-2xl font-bold font-display mb-2">
+      <div className="card-surface rounded-2xl p-5 sm:p-8">
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
           {t("credentials.title")}
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
@@ -251,7 +251,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               type="button"
               onClick={() => setShowPassword((v) => !v)}
               aria-label={showPassword ? "Hide password" : "Show password"}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+              className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
             >
               {showPassword ? EyeClosed : EyeOpen}
             </button>
@@ -279,7 +279,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               type="button"
               onClick={() => setShowConfirm((v) => !v)}
               aria-label={showConfirm ? "Hide password" : "Show password"}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+              className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
             >
               {showConfirm ? EyeClosed : EyeOpen}
             </button>
@@ -352,7 +352,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     type="button"
                     onClick={() => setShowHotspotPassword((v) => !v)}
                     aria-label={showHotspotPassword ? "Hide password" : "Show password"}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
                   >
                     {showHotspotPassword ? EyeClosed : EyeOpen}
                   </button>
@@ -379,7 +379,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     type="button"
                     onClick={() => setShowConfirmHotspot((v) => !v)}
                     aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
                   >
                     {showConfirmHotspot ? EyeClosed : EyeOpen}
                   </button>
@@ -398,7 +398,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             type="button"
             onClick={save}
             disabled={saving || !password || !confirmPassword || (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword))}
-            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+            className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? t("connecting") : t("settings.connect")}
           </button>

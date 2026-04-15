@@ -192,7 +192,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (loading) {
     return (
       <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-8">
+        <div className="card-surface rounded-2xl p-5 sm:p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> {t("update.checkingUpdates")}
           </div>
@@ -204,8 +204,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (fetchError) {
     return (
       <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-8">
-          <h1 className="text-2xl font-bold font-display mb-2">
+        <div className="card-surface rounded-2xl p-5 sm:p-8">
+          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
             {t("update.title")}
           </h1>
           <p className="text-red-400 text-sm mb-5">
@@ -242,8 +242,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (isIdle && !starting) {
     return (
       <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-8">
-          <h1 className="text-2xl font-bold font-display mb-2">
+        <div className="card-surface rounded-2xl p-5 sm:p-8">
+          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
             {isUpToDate ? (
               <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
                 {t("update.upToDate")}
@@ -281,12 +281,12 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
               )}
             </div>
           )}
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             {isUpToDate ? (
               <button
                 type="button"
                 onClick={onNext}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
               >
                 {t("continue")}
               </button>
@@ -295,14 +295,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 <button
                   type="button"
                   onClick={triggerUpdate}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                  className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
                 >
                   {t("update.startUpdate")}
                 </button>
                 <button
                   type="button"
                   onClick={onNext}
-                  className="px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  className="w-full sm:w-auto px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
                 >
                   {isDowngrade ? t("skip") : t("update.skipUpdates")}
                 </button>
@@ -318,7 +318,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   if (!state || (isIdle && starting)) {
     return (
       <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-8">
+        <div className="card-surface rounded-2xl p-5 sm:p-8">
           <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
             <div className="spinner" /> {t("update.preparingUpdate")}
           </div>
@@ -329,8 +329,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-      <div className="card-surface rounded-2xl p-8">
-        <h1 className="text-2xl font-bold font-display mb-2">
+      <div className="card-surface rounded-2xl p-5 sm:p-8">
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
           {isDone ? (
             <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
               {t("update.updateComplete")}

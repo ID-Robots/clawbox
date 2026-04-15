@@ -178,6 +178,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Connect Telegram",
+    "telegram.openBotFather": "Open @BotFather in Telegram",
     "telegram.description": "Link a Telegram bot so you can chat with your ClawBox from your phone.",
     "telegram.step1": "Scan the QR code or search",
     "telegram.step1Suffix": "in Telegram",
@@ -518,6 +519,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Свързване на Telegram",
+    "telegram.openBotFather": "Отваряне на @BotFather в Telegram",
     "telegram.description": "Свържете Telegram бот, за да чатите с ClawBox от телефона си.",
     "telegram.step1": "Сканирайте QR кода или потърсете",
     "telegram.step1Suffix": "в Telegram",
@@ -858,6 +860,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Telegram verbinden",
+    "telegram.openBotFather": "@BotFather in Telegram öffnen",
     "telegram.description": "Verbinde einen Telegram-Bot, um von deinem Handy mit ClawBox zu chatten.",
     "telegram.step1": "Scanne den QR-Code oder suche nach",
     "telegram.step1Suffix": "in Telegram",
@@ -1198,6 +1201,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Conectar Telegram",
+    "telegram.openBotFather": "Abrir @BotFather en Telegram",
     "telegram.description": "Vincula un bot de Telegram para chatear con tu ClawBox desde el móvil.",
     "telegram.step1": "Escanea el código QR o busca",
     "telegram.step1Suffix": "en Telegram",
@@ -1538,6 +1542,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Connecter Telegram",
+    "telegram.openBotFather": "Ouvrir @BotFather dans Telegram",
     "telegram.description": "Reliez un bot Telegram pour discuter avec votre ClawBox depuis votre téléphone.",
     "telegram.step1": "Scannez le QR code ou recherchez",
     "telegram.step1Suffix": "dans Telegram",
@@ -1878,6 +1883,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Connetti Telegram",
+    "telegram.openBotFather": "Apri @BotFather su Telegram",
     "telegram.description": "Collega un bot Telegram per chattare con il tuo ClawBox dal telefono.",
     "telegram.step1": "Scansiona il codice QR o cerca",
     "telegram.step1Suffix": "su Telegram",
@@ -2218,6 +2224,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Telegramを接続",
+    "telegram.openBotFather": "Telegramで @BotFather を開く",
     "telegram.description": "Telegramボットを連携して、スマホからClawBoxとチャットしましょう。",
     "telegram.step1": "QRコードをスキャンするか、検索してください",
     "telegram.step1Suffix": "（Telegram内で）",
@@ -2558,6 +2565,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Telegram verbinden",
+    "telegram.openBotFather": "@BotFather openen in Telegram",
     "telegram.description": "Koppel een Telegram-bot om vanaf je telefoon met je ClawBox te chatten.",
     "telegram.step1": "Scan de QR-code of zoek naar",
     "telegram.step1Suffix": "in Telegram",
@@ -2898,6 +2906,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "Anslut Telegram",
+    "telegram.openBotFather": "Öppna @BotFather i Telegram",
     "telegram.description": "Koppla en Telegram-bot så du kan chatta med din ClawBox från mobilen.",
     "telegram.step1": "Skanna QR-koden eller sök efter",
     "telegram.step1Suffix": "i Telegram",
@@ -3238,6 +3247,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     // === TelegramStep ===
     "telegram.title": "连接 Telegram",
+    "telegram.openBotFather": "在 Telegram 中打开 @BotFather",
     "telegram.description": "关联一个 Telegram 机器人，从手机随时与 ClawBox 对话。",
     "telegram.step1": "扫描二维码或搜索",
     "telegram.step1Suffix": "（在 Telegram 中）",

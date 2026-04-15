@@ -248,12 +248,12 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-telegram">
-      <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
+      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
         {configuring && (
           <ConfiguringOverlay onDone={onNext} t={t} />
         )}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
-        <h1 className="text-2xl font-bold font-display mb-2 flex items-center gap-2.5">
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2 flex flex-wrap items-center gap-2.5">
           {t("telegram.title")}
           <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">{t("recommended")}</span>
         </h1>
@@ -261,8 +261,8 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
           {t("telegram.description")}
         </p>
 
-        <div className="flex gap-5 items-start mb-5">
-          <div className="shrink-0 p-2 bg-white rounded-lg">
+        <div className="flex flex-col sm:flex-row gap-4 sm:gap-5 items-center sm:items-start mb-4">
+          <div className="hidden sm:block shrink-0 p-2 bg-white rounded-lg">
             <QRCodeSVG
               value="https://t.me/BotFather"
               size={96}
@@ -298,6 +298,15 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             </li>
           </ol>
         </div>
+        <a
+          href="https://t.me/BotFather"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center gap-2 w-full px-4 py-3 mb-5 bg-[#229ED9]/15 hover:bg-[#229ED9]/25 border border-[#229ED9]/40 hover:border-[#229ED9]/60 rounded-lg text-sm font-semibold text-[#5eb8e6] transition-colors no-underline"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>
+          {t("telegram.openBotFather")}
+        </a>
         <label htmlFor="telegram-bot-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5 mt-4">
           {t("telegram.botToken")}
         </label>
@@ -316,7 +325,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             type="button"
             onClick={() => setShowToken((v) => !v)}
             aria-label={showToken ? "Hide token" : "Show token"}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+            className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
               {showToken ? "visibility_off" : "visibility"}
@@ -326,19 +335,19 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         {status && (
           <StatusMessage type={status.type} message={status.message} />
         )}
-        <div className="flex items-center gap-3 mt-5">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 mt-5">
           <button
             type="button"
             onClick={saveTelegram}
             disabled={saving}
-            className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+            className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? t("connecting") : t("settings.connect")}
           </button>
           <button
             type="button"
             onClick={onNext}
-            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
+            className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1 self-center"
           >
             {t("telegram.skipForNow")}
           </button>
