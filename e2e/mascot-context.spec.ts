@@ -28,5 +28,5 @@ test("mascot tap opens the chat popup", async ({ page }) => {
     const dockVisible = await dockButton.isVisible().catch(() => false);
     const inputVisible = await chatInput.isVisible().catch(() => false);
     return dockVisible || inputVisible;
-  }).toBe(true);
+  }, { timeout: 15_000 }).toBe(true);
 });

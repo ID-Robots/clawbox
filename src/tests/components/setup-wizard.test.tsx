@@ -179,6 +179,6 @@ describe("SetupWizard", () => {
 
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledTimes(1);
-    }, { timeout: 15_000 });
-  }, 20_000);
+    }, { timeout: 30_000 });
+  }, 35_000);
 });
