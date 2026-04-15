@@ -20,10 +20,10 @@ describe("GET /setup-api/wifi/status", () => {
 
   it("returns wifi status when connected", async () => {
     mockGetWifiStatus.mockResolvedValue({
-      connected: true,
-      ssid: "HomeNetwork",
-      signal: 80,
-      ip: "192.168.1.100",
+      "GENERAL.STATE": "100 (connected)",
+      "GENERAL.CONNECTION": "HomeNetwork",
+      "IP4.ADDRESS[1]": "192.168.1.100/24",
+      "IP4.GATEWAY": "",
     } as unknown as Awaited<ReturnType<typeof getWifiStatus>>);
 
     const res = await wifiStatusGet();
@@ -32,13 +32,12 @@ describe("GET /setup-api/wifi/status", () => {
     expect(res.status).toBe(200);
     expect(body.connected).toBe(true);
     expect(body.ssid).toBe("HomeNetwork");
-    expect(body.signal).toBe(80);
     expect(body.ip).toBe("192.168.1.100");
   });
 
   it("returns disconnected status", async () => {
     mockGetWifiStatus.mockResolvedValue({
-      connected: false,
+      "GENERAL.STATE": "30 (disconnected)",
     } as unknown as Awaited<ReturnType<typeof getWifiStatus>>);
 
     const res = await wifiStatusGet();

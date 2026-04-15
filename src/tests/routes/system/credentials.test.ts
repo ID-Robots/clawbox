@@ -16,11 +16,16 @@ vi.mock("fs/promises", () => ({
 
 vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
+  get: vi.fn(async () => false),
 }));
 
 vi.mock("@/lib/auth", () => ({
   getSystemUsername: vi.fn(() => process.env.CLAWBOX_USER || "clawbox"),
+  PASSWORD_CONTROL_CHAR_RE: /[\r\n\x00-\x1f\x7f]/,
+  isSafePasswordChars: (s: string) => !/[\r\n\x00-\x1f\x7f]/.test(s),
+  verifyPassword: vi.fn(async () => true),
 }));
+
 
 import { set } from "@/lib/config-store";
 import { getSystemUsername } from "@/lib/auth";

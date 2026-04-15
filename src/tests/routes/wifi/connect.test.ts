@@ -7,6 +7,7 @@ vi.mock("@/lib/network", () => ({
 vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
   setMany: vi.fn(),
+  get: vi.fn(async () => "clawbox"),
 }));
 
 import { switchToClient } from "@/lib/network";
