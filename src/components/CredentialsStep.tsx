@@ -114,6 +114,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     const newHost = `${normalizedHostname}.local`;
     const newSetupUrl = new URL("/setup", window.location.href);
     newSetupUrl.hostname = newHost;
+    // Only ever redirect within the same scheme/port and to a *.local hostname
+    // built from the validated normalizedHostname. This keeps the redirect
+    // narrowly scoped even if window.location.href is unexpected.
+    const isAllowedRedirect =
+      newSetupUrl.protocol === window.location.protocol &&
+      newSetupUrl.port === window.location.port &&
+      newSetupUrl.hostname === newHost &&
+      /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(newSetupUrl.hostname);
     try {
       // Save hostname (applies live; mDNS update is non-fatal on failure)
       try {
@@ -175,14 +183,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       });
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       const currentHost = window.location.hostname.toLowerCase();
-      if (currentHost.endsWith(".local") && currentHost !== newHost) {
+      if (currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect) {
         timeoutRef.current = setTimeout(() => window.location.replace(newSetupUrl.toString()), 1500);
       } else {
         timeoutRef.current = setTimeout(() => onNext(), 1500);
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      if (err instanceof TypeError && err.message.includes("fetch")) {
+      if (err instanceof TypeError && err.message.includes("fetch") && isAllowedRedirect) {
         // Connection dropped mid-save — most likely the hostname just changed
         // and mDNS is pointing at the new name. Probe the new URL before
         // redirecting so we don't strand the user on a dead hostname.
