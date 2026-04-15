@@ -234,9 +234,9 @@ function SetupCompletionOverlay({
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={40}
-                  height={40}
-                  className="h-10 w-10 object-contain"
+                  width={60}
+                  height={60}
+                  className="h-[60px] w-[60px] object-contain"
                   priority
                 />
               </div>
@@ -409,7 +409,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
         setCompletionPhase(2);
         setCompletionComplete(true);
-        await delay(900);
+        await delay(10000);
         if (cancelled) return;
 
         if (onComplete) onComplete();
