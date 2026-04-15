@@ -21,12 +21,28 @@ test("mascot tap opens the chat popup", async ({ page }) => {
 
   const boxImage = page.locator('img[src="/clawbox-box.png"]').first();
   await expect(boxImage).toBeVisible();
-  await page.locator('img[src="/clawbox-crab.png"]').first().click({ force: true });
-  const dockButton = page.getByTitle("Dock to right");
-  const chatInput = page.locator('textarea[placeholder="Type a message..."], textarea[placeholder="Connecting..."]').first();
-  await expect.poll(async () => {
-    const dockVisible = await dockButton.isVisible().catch(() => false);
-    const inputVisible = await chatInput.isVisible().catch(() => false);
-    return dockVisible || inputVisible;
-  }, { timeout: 15_000 }).toBe(true);
+  const mascotImg = page.locator('img[src="/clawbox-crab.png"][alt=""]').first();
+  await expect(mascotImg).toBeVisible();
+  await page.evaluate(() => {
+    const img = document.querySelector('img[src="/clawbox-crab.png"][alt=""]') as HTMLElement | null;
+    if (!img) throw new Error("mascot img not found");
+    const rect = img.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const init: PointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      buttons: 1,
+      clientX: cx,
+      clientY: cy,
+    };
+    img.dispatchEvent(new PointerEvent("pointerdown", init));
+    img.dispatchEvent(new PointerEvent("pointerup", { ...init, buttons: 0 }));
+  });
+  await expect(page.getByTestId("chat-popup")).toBeVisible({ timeout: 15_000 });
 });
