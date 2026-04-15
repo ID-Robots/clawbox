@@ -877,12 +877,7 @@ function ChromeDesktopInner() {
 
   useEffect(() => {
     if (!setupChecked || !setupRequired) return;
-    setOpenWindows((prev) => {
-      if (prev.some((w) => w.appId === "setup")) return prev;
-      const z = nextZIndexRef.current;
-      return [...prev, { id: `setup-${Date.now()}`, appId: "setup", zIndex: z, minimized: false }];
-    });
-    setNextZIndex((z) => z + 1);
+    window.location.replace("/setup");
   }, [setupChecked, setupRequired]);
 
   const handleSetupComplete = useCallback(() => {
@@ -1362,7 +1357,7 @@ function ChromeDesktopInner() {
     setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
   }, [uploadFileWithProgress]);
 
-  if (!setupChecked) {
+  if (!setupChecked || setupRequired) {
     return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
   }
 

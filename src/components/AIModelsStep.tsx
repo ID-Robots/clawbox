@@ -261,7 +261,7 @@ function ClawAIOfferModal({
         role="dialog"
         aria-modal="true"
         aria-label="ClawBox AI token setup"
-        className="relative z-10 w-full max-w-[520px] overflow-hidden rounded-[28px] border border-orange-400/20 bg-[linear-gradient(150deg,rgba(15,23,37,0.985),rgba(22,31,48,0.97)_55%,rgba(11,16,24,0.985))] p-6 shadow-[0_30px_100px_rgba(0,0,0,0.52)] sm:p-7"
+        className="relative z-10 w-full max-w-[520px] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-[28px] border border-orange-400/20 bg-[linear-gradient(150deg,rgba(15,23,37,0.985),rgba(22,31,48,0.97)_55%,rgba(11,16,24,0.985))] p-5 shadow-[0_30px_100px_rgba(0,0,0,0.52)] sm:p-7"
       >
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(249,115,22,0.16),transparent_35%)]" />
 
@@ -279,7 +279,7 @@ function ClawAIOfferModal({
             ClawBox AI · Recommended for owners
           </span>
 
-          <h2 className="mt-4 text-[1.75rem] font-bold leading-[1.1] text-white sm:text-[2rem]">
+          <h2 className="mt-4 text-[1.4rem] font-bold leading-[1.15] text-white sm:text-[2rem]">
             Unlock the recommended ClawBox AI experience
           </h2>
 
@@ -1332,7 +1332,7 @@ export default function AIModelsStep({
 
   return (
     <div className="w-full max-w-[520px]" data-testid={testId}>
-      <div className="card-surface rounded-2xl p-8 relative overflow-hidden">
+      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
         <ClawAIOfferModal
           open={showClawAIOffer && !configuringState}
           onClose={() => setShowClawAIOffer(false)}
@@ -1360,7 +1360,7 @@ export default function AIModelsStep({
         )}
         {/* Hide form content when configuring overlay is shown */}
         <div className={configuringState ? "invisible h-0 overflow-hidden" : ""}>
-        <h1 className="text-2xl font-bold font-display mb-2">
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
           {resolvedTitle}
         </h1>
         <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
@@ -1538,7 +1538,7 @@ export default function AIModelsStep({
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
                     aria-label={showKey ? "Hide key" : "Show key"}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>{showKey ? "visibility_off" : "visibility"}</span>
                   </button>

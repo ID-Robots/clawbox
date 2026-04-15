@@ -80,7 +80,7 @@ function PowerMenu({ onClose, t }: { onClose: () => void; t: (key: string) => st
   };
 
   return (
-    <div ref={ref} className="absolute right-0 top-full mt-1 min-w-[160px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 overflow-hidden">
+    <div ref={ref} className="absolute right-0 top-full mt-1 min-w-[160px] max-w-[calc(100vw-1rem)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 overflow-hidden">
       {acting ? (
         <div className="flex items-center gap-2 px-4 py-3 text-xs text-[var(--text-secondary)]">
           <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
@@ -175,7 +175,7 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
   const tip = tips[step] ?? tips[1];
 
   return (
-    <div ref={ref} className="absolute right-0 top-full mt-1 w-[280px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 p-4">
+    <div ref={ref} className="absolute right-0 top-full mt-1 w-[min(280px,calc(100vw-1rem))] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 p-4">
       <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1.5">{tip.title}</h3>
       <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{tip.body}</p>
     </div>
@@ -409,7 +409,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
         setCompletionPhase(2);
         setCompletionComplete(true);
-        await delay(10000);
+        await delay(2000);
         if (cancelled) return;
 
         if (onComplete) onComplete();
@@ -465,10 +465,10 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             alt="ClawBox"
             width={36}
             height={36}
-            className="w-9 h-9 object-contain"
+            className="w-8 h-8 sm:w-9 sm:h-9 object-contain"
             priority
           />
-          <div className="flex flex-col leading-tight">
+          <div className="hidden sm:flex flex-col leading-tight">
             <span className="text-xl font-bold font-display title-gradient">
               ClawBox
             </span>
@@ -484,7 +484,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               type="button"
               onClick={() => { setShowHelp((v) => !v); setShowPower(false); }}
               aria-label="Need help?"
-              className="flex items-center justify-center w-8 h-8 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
+              className="flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help_outline</span>
             </button>
@@ -495,7 +495,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               type="button"
               onClick={() => { setShowPower((v) => !v); setShowHelp(false); }}
               aria-label="Power options"
-              className="flex items-center justify-center w-8 h-8 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
+              className="flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
             </button>
@@ -505,7 +505,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       </header>
 
       <main
-        className="flex-1 flex flex-col items-center justify-start px-4 pt-2 pb-4 sm:p-6"
+        className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-4 pt-2 pb-4 sm:p-6"
       >
         <div className="w-full flex flex-col items-center my-auto">
         {completionStarted ? (

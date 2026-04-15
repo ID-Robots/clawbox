@@ -1,7 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-test("desktop boots first and opens setup in a window while setup is incomplete", async ({ page }) => {
+test("visiting / while setup is incomplete redirects to /setup full-screen wizard", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: false,
@@ -15,15 +15,13 @@ test("desktop boots first and opens setup in a window while setup is incomplete"
 
   await page.goto("/");
 
-  await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByTestId("desktop-root")).toBeVisible();
-  await expect(page.getByTestId("chrome-window-setup")).toBeVisible();
+  await expect(page).toHaveURL(/\/setup$/);
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
+  await expect(page.getByTestId("desktop-root")).toHaveCount(0);
+  await expect(page.getByTestId("chrome-window-setup")).toHaveCount(0);
 
-  await page.reload();
+  await page.goto("/");
 
-  await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByTestId("desktop-root")).toBeVisible();
-  await expect(page.getByTestId("chrome-window-setup")).toBeVisible();
+  await expect(page).toHaveURL(/\/setup$/);
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
 });
