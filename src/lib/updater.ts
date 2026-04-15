@@ -310,6 +310,10 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
+    await execShell(
+      "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox fetch --quiet --tags origin",
+      { timeout: 20_000 },
+    ).catch(() => {});
     const { stdout } = await execShell(
       "git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox ls-remote --tags --refs origin",
       { timeout: 10_000 },
@@ -319,7 +323,6 @@ export async function getTargetVersion(): Promise<string | null> {
       .split("\n")
       .map((line) => line.match(/refs\/tags\/(v.+)$/)?.[1])
       .filter((t): t is string => !!t);
-    // Only consider strict semver tags (vX.Y.Z)
     const semverTags = tags.filter((t) => /^v\d+\.\d+\.\d+$/.test(t));
     if (semverTags.length === 0) {
       cachedTargetVersion = null;
@@ -327,9 +330,25 @@ export async function getTargetVersion(): Promise<string | null> {
       return null;
     }
     semverTags.sort(compareSemverTags);
-    cachedTargetVersion = semverTags[semverTags.length - 1];
+    // A tag is only a valid update target if the device's current HEAD is an
+    // ancestor of the tag's commit — otherwise the tag sits on a sibling
+    // branch and "updating" would roll local work back. Walk from newest to
+    // oldest and return the first one that passes.
+    for (let i = semverTags.length - 1; i >= 0; i--) {
+      const tag = semverTags[i];
+      const isForward = await execShell(
+        `git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox merge-base --is-ancestor HEAD refs/tags/${tag}`,
+        { timeout: 10_000 },
+      ).then(() => true).catch(() => false);
+      if (isForward) {
+        cachedTargetVersion = tag;
+        targetVersionCacheTime = Date.now();
+        return tag;
+      }
+    }
+    cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
-    return cachedTargetVersion;
+    return null;
   } catch {
     cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
