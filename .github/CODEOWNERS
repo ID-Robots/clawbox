@@ -1,0 +1,5 @@
+# CODEOWNERS — required reviewers for PRs into main.
+# Only members of @ID-Robots/id-robots-core-team can approve and merge.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+*       @ID-Robots/id-robots-core-team
