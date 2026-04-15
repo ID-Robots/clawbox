@@ -132,6 +132,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
+  const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
@@ -532,6 +533,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
   const loadHistory = useCallback(async () => {
+    // Optimistically show the typing bubble if an auto-greet might still run,
+    // so the user sees feedback during the history round-trip (and is locked
+    // out of typing via the greetingPending gate on the input). Bootstrap is
+    // tracked separately from `sending` so the stop button, sendMessage's
+    // re-entry guard, and onThinkingChange aren't tripped before any
+    // generation actually starts.
+    const mightAutoGreet = !greetedRef.current
+    if (mightAutoGreet) {
+      setIsBootstrappingHistory(true)
+      setStreaming('')
+    }
     try {
       const result = await wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Record<string, unknown>
       const msgs = (result.messages as unknown[]) || []
@@ -550,8 +562,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Auto-send a greeting if no history exists (first conversation)
       if (chatMsgs.length === 0 && !greetedRef.current) {
         greetedRef.current = true
+        setIsBootstrappingHistory(false)
         setSending(true)
-        setStreaming('')
         const idempotencyKey = uuid()
         runIdRef.current = idempotencyKey
         try {
@@ -565,9 +577,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           setSending(false)
           runIdRef.current = null
         }
+      } else if (mightAutoGreet) {
+        setIsBootstrappingHistory(false)
       }
     } catch (err) {
       console.error('Failed to load history:', err)
+      if (mightAutoGreet) setIsBootstrappingHistory(false)
     }
   }, [wsRequest])
 
@@ -788,6 +803,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ? { right: 8, bottom: 65 }
           : { left: defaultLeft, bottom: 170 }
 
+  const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
+
   return (
     <div
       data-testid="chat-popup"
@@ -1000,7 +1017,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && (
+        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
@@ -1048,8 +1065,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {/* Typing indicator when sending but no stream yet */}
-        {sending && !streaming && (
+        {/* Typing indicator while bootstrapping or generating but no stream yet */}
+        {(sending || isBootstrappingHistory) && !streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
               padding: '10px 16px',
@@ -1117,8 +1134,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
-          disabled={status !== 'connected'}
+          placeholder={
+            status !== 'connected'
+              ? t("chat.connectingPlaceholder")
+              : greetingPending
+                ? t("chat.greetingPlaceholder")
+                : t("chat.messagePlaceholder")
+          }
+          disabled={status !== 'connected' || greetingPending}
           rows={1}
           style={{
             flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',

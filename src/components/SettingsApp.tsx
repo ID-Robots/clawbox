@@ -837,6 +837,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgSaving, setTgSaving] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
+  const [tgBotInfo, setTgBotInfo] = useState<{ username?: string; firstName?: string; link?: string } | null>(null);
   const [tgReconfigure, setTgReconfigure] = useState(false);
   const tgSaveControllerRef = useRef<AbortController | null>(null);
 
@@ -844,6 +845,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (section !== "telegram") return;
     fetch("/setup-api/telegram/status").then(r => r.json()).then(d => {
       setTgConfigured(d.configured ?? false);
+      if (d.configured && d.username) {
+        setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
+      } else {
+        setTgBotInfo(null);
+      }
     }).catch(() => setTgConfigured(false));
   }, [section]);
 
@@ -1852,13 +1858,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.botConnected")}</div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium">
+                        {tgBotInfo?.firstName || t("settings.botConnected")}
+                      </div>
+                      {tgBotInfo?.username && (
+                        <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">@{tgBotInfo.username}</div>
+                      )}
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
                         <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
                       </div>
                     </div>
                   </div>
+                  {tgBotInfo?.link && (
+                    <a
+                      href={tgBotInfo.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 w-full px-4 py-3 mb-4 bg-[#229ED9]/15 hover:bg-[#229ED9]/25 border border-[#229ED9]/40 hover:border-[#229ED9]/60 rounded-lg text-sm font-semibold text-[#5eb8e6] transition-colors no-underline"
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>
+                      {t("settings.openInTelegram", { name: `@${tgBotInfo.username}` })}
+                    </a>
+                  )}
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
