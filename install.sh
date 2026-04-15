@@ -844,7 +844,7 @@ step_chpasswd() {
     echo "Error: password input file not found" >&2
     exit 1
   fi
-  chpasswd < "$INPUT_FILE"
+  /usr/sbin/chpasswd < "$INPUT_FILE"
   rm -f "$INPUT_FILE"
 }
 
