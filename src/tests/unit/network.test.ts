@@ -81,6 +81,7 @@ describe("network", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    process.env.CLAWBOX_ROOT = "/tmp/clawbox-test-nonexistent-" + Math.random().toString(36).slice(2);
   });
 
   afterEach(() => {

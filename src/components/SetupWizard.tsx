@@ -232,7 +232,7 @@ function SetupCompletionOverlay({
             ) : (
               <div className="relative z-10 flex h-16 w-16 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] setup-finish-fade-in">
                 <Image
-                  src="/clawbox-icon.png"
+                  src="/clawbox-crab.png"
                   alt="ClawBox"
                   width={40}
                   height={40}
