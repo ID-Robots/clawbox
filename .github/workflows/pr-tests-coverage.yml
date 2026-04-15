@@ -50,11 +50,15 @@ jobs:
           fi
 
   comment:
-    if: ${{ github.event_name == 'pull_request' }}
+    # Skip for fork PRs: GITHUB_TOKEN is always read-only on fork PRs regardless
+    # of repo/workflow permissions, so the comment would 403. Native PR checks
+    # UI already shows the same status.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     needs: test
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+      issues: write
     steps:
       - name: Comment PR
         if: ${{ always() }}
