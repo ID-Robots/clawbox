@@ -39,7 +39,7 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await settingsWindow.getByRole("button", { name: "Available Networks" }).click();
   await settingsWindow.getByRole("button", { name: "Guest Network" }).click();
   await settingsWindow.getByPlaceholder("Enter WiFi password").fill("guest-pass");
-  await settingsWindow.getByRole("button", { name: /^Connect$/ }).first().click();
+  await settingsWindow.getByRole("button", { name: /Connect$/ }).last().click();
   await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
