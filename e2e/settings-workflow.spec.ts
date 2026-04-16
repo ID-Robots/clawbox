@@ -50,9 +50,7 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await clawAiTokenInput.fill("cbx-test-token");
   await clawAiTokenInput.press("Enter");
   await expect(settingsWindow.getByText("deepseek-r1")).toBeVisible();
-  await clawAiDialog.getByRole("button", { name: "Close offer" }).evaluate((button) => {
-    (button as HTMLButtonElement).click();
-  });
+  // Dialog auto-closes on successful config; verify provider status shows
   await expect(settingsWindow.getByText("ClawBox AI").first()).toBeVisible();
   await expect(settingsWindow.getByText("llama.cpp Local")).toHaveCount(0);
 
