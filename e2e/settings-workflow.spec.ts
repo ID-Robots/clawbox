@@ -70,7 +70,7 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await expect(settingsWindow.getByText("Bot Connected").last()).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "System" }).click();
-  await expect(settingsWindow.getByText("clawbox")).toBeVisible();
+  await expect(settingsWindow.getByText("clawbox", { exact: true })).toBeVisible();
   await expect(settingsWindow.getByText("Ubuntu 24.04")).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "About" }).click();
