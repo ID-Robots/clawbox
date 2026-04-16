@@ -157,4 +157,18 @@ describe("SettingsApp factory reset overlay", () => {
     expect(await screen.findByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
     expect(screen.getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
   });
+
+  it("selects ClawBox AI when the desktop provider deep-link is fired", async () => {
+    const pendingWindow = window as Window & {
+      __clawboxPendingSettingsSection?: string;
+      __clawboxPendingAiProvider?: string;
+    };
+    pendingWindow.__clawboxPendingSettingsSection = "ai";
+    pendingWindow.__clawboxPendingAiProvider = "clawai";
+
+    render(<SettingsApp ui={defaultUi} />);
+
+    const providerRadio = await screen.findByRole("radio", { name: /ClawBox AI/i });
+    expect(providerRadio).toBeChecked();
+  });
 });

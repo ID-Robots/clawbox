@@ -19,6 +19,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "shelf.appLauncher": "App Launcher",
     "shelf.systemSettings": "System Settings",
     "shelf.chat": "Chat",
+    "shelf.openClawKeep": "Open ClawKeep",
+    "shelf.connectClawBoxAI": "Connect ClawBox AI",
     "shelf.exitFullscreen": "Exit Fullscreen",
     "shelf.fullscreen": "Fullscreen",
     "shelf.power": "Power",

@@ -17,7 +17,7 @@ import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 import {
-  PORTAL_REGISTER_URL,
+  PORTAL_LOGIN_URL,
 } from "@/lib/max-subscription";
 
 interface AIModelsStepProps {
@@ -29,6 +29,8 @@ interface AIModelsStepProps {
   currentProviderId?: string | null;
   currentModel?: string | null;
   openClawAIOfferRequest?: number;
+  requestedProviderId?: string | null;
+  providerSelectionRequest?: number;
   title?: string;
   description?: string;
   configureScope?: "primary" | "local";
@@ -295,7 +297,7 @@ function ClawAIOfferModal({
           </ol>
 
           <a
-            href={PORTAL_REGISTER_URL}
+            href={PORTAL_LOGIN_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl border border-orange-400/25 bg-orange-500/12 px-4 py-2.5 text-sm font-semibold text-orange-50 transition hover:bg-orange-500/18 hover:text-white"
@@ -486,6 +488,8 @@ export default function AIModelsStep({
   currentProviderId = null,
   currentModel = null,
   openClawAIOfferRequest = 0,
+  requestedProviderId = null,
+  providerSelectionRequest = 0,
   title,
   description,
   configureScope = "primary",
@@ -867,7 +871,20 @@ export default function AIModelsStep({
 
   const handleClawAIPrimaryAction = useCallback(() => {
     setStatus(null);
-    setShowClawAIOffer(true);
+    try {
+      const portalWindow = window.open(PORTAL_LOGIN_URL, "_blank", "noopener,noreferrer");
+      if (!portalWindow) {
+        setShowClawAIOffer(true);
+        return;
+      }
+      try {
+        portalWindow.focus();
+      } catch {
+        // Ignore focus failures; the portal is already open.
+      }
+    } catch {
+      setShowClawAIOffer(true);
+    }
   }, []);
 
   const lastHandledOfferRef = useRef(0);
@@ -878,6 +895,16 @@ export default function AIModelsStep({
     selectProvider("clawai");
     setShowClawAIOffer(true);
   }, [allowedProviders, openClawAIOfferRequest, selectProvider]);
+
+  const lastHandledProviderSelectionRef = useRef(0);
+  useEffect(() => {
+    if (!providerSelectionRequest || providerSelectionRequest === lastHandledProviderSelectionRef.current) return;
+    const normalizedRequestedProvider = normalizeSelectableProvider(requestedProviderId);
+    if (!normalizedRequestedProvider) return;
+    if (!allowedProviders.some((provider) => provider.id === normalizedRequestedProvider)) return;
+    lastHandledProviderSelectionRef.current = providerSelectionRequest;
+    selectProvider(normalizedRequestedProvider);
+  }, [allowedProviders, providerSelectionRequest, requestedProviderId, selectProvider]);
 
   const handleClawAIConnectToken = useCallback(async () => {
     if (!apiKey.trim()) return showError(t("ai.enterKey"));
@@ -1561,11 +1588,22 @@ export default function AIModelsStep({
               ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
-              Open the portal, create your token, then come back here to connect this device in seconds.
+              Connect now to open the ClawBox portal and request your token. If that handoff does not work, you can still paste the token manually.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-orange-200/90">
               ClawBox owners also get extended warranty benefits when using ClawBox services.
             </p>
+            <button
+              type="button"
+              onClick={() => {
+                setStatus(null);
+                setShowClawAIOffer(true);
+              }}
+              className="mt-4 inline-flex items-center gap-1.5 bg-transparent p-0 text-xs font-medium text-orange-300 underline decoration-orange-400/40 underline-offset-4 transition hover:text-orange-200"
+            >
+              Paste token manually instead
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>keyboard</span>
+            </button>
           </div>
         )}
 
