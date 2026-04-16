@@ -1402,7 +1402,7 @@ export default function AIModelsStep({
                     <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />
                   )}
                 </span>
-                <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
+                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
                   <AIProviderIcon provider={provider.id} size={22} />
                 </span>
                 <div className="flex-1">

@@ -45,6 +45,10 @@ if [ -n "$PID_PATH" ]; then
   printf '%s\n' "$$" > "$PID_PATH"
 fi
 N_GPU_LAYERS="${LLAMACPP_N_GPU_LAYERS:-99}"
+if ! [[ "$N_GPU_LAYERS" =~ ^[0-9]+$ ]] || [ "$N_GPU_LAYERS" -gt 999 ]; then
+  echo "[llamacpp] Invalid LLAMACPP_N_GPU_LAYERS='${LLAMACPP_N_GPU_LAYERS-}'; falling back to 99"
+  N_GPU_LAYERS=99
+fi
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
