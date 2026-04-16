@@ -679,6 +679,7 @@ export default function AIModelsStep({
 
   const showSuccessAndContinue = useCallback(() => {
     tryCloseOAuthWindow(oauthWindowRef);
+    setShowClawAIOffer(false);
     completeConfiguring();
   }, [completeConfiguring]);
 
@@ -869,9 +870,11 @@ export default function AIModelsStep({
     setShowClawAIOffer(true);
   }, []);
 
+  const lastHandledOfferRef = useRef(0);
   useEffect(() => {
-    if (!openClawAIOfferRequest) return;
+    if (!openClawAIOfferRequest || openClawAIOfferRequest === lastHandledOfferRef.current) return;
     if (!allowedProviders.some((provider) => provider.id === "clawai")) return;
+    lastHandledOfferRef.current = openClawAIOfferRequest;
     selectProvider("clawai");
     setShowClawAIOffer(true);
   }, [allowedProviders, openClawAIOfferRequest, selectProvider]);
@@ -1610,7 +1613,7 @@ export default function AIModelsStep({
             </button>
           )}
         </div>
-        {!embedded && selectedProvider !== "clawai" && (
+        {!embedded && (
           <div className="mt-3 text-center">
             <button
               type="button"
@@ -1618,7 +1621,7 @@ export default function AIModelsStep({
               disabled={saving}
               className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
             >
-              {t("skip")}
+              {configureScope === "local" ? t("skip") : t("ai.skipUseLocalOnly")}
             </button>
           </div>
         )}
