@@ -44,6 +44,7 @@ if [ -n "$PID_PATH" ]; then
   mkdir -p "$(dirname "$PID_PATH")"
   printf '%s\n' "$$" > "$PID_PATH"
 fi
+N_GPU_LAYERS="${LLAMACPP_N_GPU_LAYERS:-99}"
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -53,4 +54,5 @@ exec "$BIN_PATH" \
   --cache-type-k "$CACHE_TYPE_K" \
   --cache-type-v "$CACHE_TYPE_V" \
   --ctx-size "$CTX_SIZE" \
+  --n-gpu-layers "$N_GPU_LAYERS" \
   --jinja
