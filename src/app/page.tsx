@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -418,7 +418,7 @@ function ChromeDesktopInner() {
   }, [iconPositions]);
 
   const handleGridPointerDown = useCallback((e: React.PointerEvent) => {
-    // Only start marquee on left click directly on the grid (not on icons)
+    if (isMobile) return;
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button")) return;
     setSelectedIcons(new Set());
@@ -572,10 +572,30 @@ function ChromeDesktopInner() {
     arrangeIcons();
   }, [installedApps, hiddenInstalledApps, desktopApps, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Get icon position (should always be in iconPositions after effect runs)
+  // Get icon position. On mobile we ignore the persisted desktop layout
+  // (which was built around a single left-aligned column) and lay icons out
+  // in a grid that fills the viewport row-by-row, like a phone home screen.
+  const mobileIconOrder = useMemo(() => {
+    if (!isMobile) return null;
+    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
+    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const all = [...visibleInstalled, ...builtinIds];
+    all.sort((a, b) => {
+      const pa = iconPositions[a] || { row: 999, col: 999 };
+      const pb = iconPositions[b] || { row: 999, col: 999 };
+      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
+    });
+    const map: Record<string, { row: number; col: number }> = {};
+    all.forEach((id, i) => {
+      map[id] = { row: Math.floor(i / GRID_COLS), col: i % GRID_COLS };
+    });
+    return map;
+  }, [isMobile, installedApps, hiddenInstalledApps, desktopApps, iconPositions, GRID_COLS]);
+
   const getIconPosition = useCallback((appId: string, _index: number) => {
+    if (mobileIconOrder && mobileIconOrder[appId]) return mobileIconOrder[appId];
     return iconPositions[appId] || { row: 0, col: 0 };
-  }, [iconPositions]);
+  }, [iconPositions, mobileIconOrder]);
 
   const isGridCellOccupied = useCallback((row: number, col: number, excludeId?: string) => {
     return Object.entries(iconPositions).some(
@@ -595,12 +615,15 @@ function ChromeDesktopInner() {
   }, []);
 
   const handleIconDragStart = useCallback((appId: string, e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+    if (!isMobile) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    let mobileSynced = false;
     const startX = e.clientX;
     const startY = e.clientY;
     let isDragging = false;
-    const DRAG_THRESHOLD = 8; // px before drag activates
+    const DRAG_THRESHOLD = isMobile ? 20 : 8;
     // Check if this icon is part of a multi-selection
     const isGroupDrag = selectedIcons.size > 1 && selectedIcons.has(appId);
     const groupIds = isGroupDrag ? Array.from(selectedIcons) : [appId];
@@ -628,6 +651,12 @@ function ChromeDesktopInner() {
       if (!isDragging && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
       if (!isDragging) {
         isDragging = true;
+        // Sync mobile-computed positions into iconPositions only once a real
+        // drag starts, so taps don't trigger redundant state writes.
+        if (isMobile && mobileIconOrder && !mobileSynced) {
+          mobileSynced = true;
+          setIconPositions(mobileIconOrder);
+        }
         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
         setDraggingIcon(appId);
       }
@@ -723,7 +752,7 @@ function ChromeDesktopInner() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  }, [snapToGrid, isGridCellOccupied, selectedIcons]);
+  }, [snapToGrid, isGridCellOccupied, selectedIcons, isMobile, mobileIconOrder, GRID_COLS]);
 
 
   // Update clock
@@ -1242,24 +1271,6 @@ function ChromeDesktopInner() {
   const allApps = getAllApps();
   const allAppsForLauncher = allApps.filter((app) => app.id !== "setup");
 
-  // ─── Mobile fullscreen splash (every load) ───
-  const [showSplash, setShowSplash] = useState(() => {
-    if (typeof window === "undefined") return false;
-    const isMobileUA = /Android|iPhone|iPad/i.test(navigator.userAgent);
-    const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
-    // Show on mobile browsers, not standalone PWA, not already fullscreen
-    return isMobileUA && !isStandalone && !document.fullscreenElement;
-  });
-
-  const handleSplashTap = useCallback(() => {
-    document.documentElement.requestFullscreen().catch(() => {});
-    setShowSplash(false);
-  }, []);
-
-  const dismissSplash = useCallback(() => {
-    setShowSplash(false);
-  }, []);
-
   // ─── Global drag-and-drop file upload ───
   const [desktopDragOver, setDesktopDragOver] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -1504,29 +1515,6 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {/* Mobile fullscreen splash */}
-      {showSplash && (
-        <div
-          className="fixed inset-0 z-[99999] flex flex-col items-center justify-center bg-[#0a0f1a] cursor-pointer"
-          onClick={handleSplashTap}
-        >
-          <img src="/icon-512.png" alt="ClawBox" className="w-24 h-24 rounded-3xl mb-6 shadow-2xl" />
-          <h1 className="text-2xl font-bold text-white mb-2">ClawBox</h1>
-          <p className="text-white/50 text-sm mb-8">Personal AI Assistant</p>
-          <div className="flex flex-col items-center gap-3">
-            <div className="px-8 py-3 rounded-xl bg-orange-500 text-white font-semibold text-base shadow-lg">
-              Tap to Enter Fullscreen
-            </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); dismissSplash(); }}
-              className="text-white/30 text-xs hover:text-white/50 bg-transparent border-none cursor-pointer mt-2"
-            >
-              Skip
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Desktop wallpaper background */}
       {(() => {
         const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
@@ -1552,8 +1540,8 @@ function ChromeDesktopInner() {
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
-      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%" }}>
+      <div className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && mobileIconOrder ? `${(Math.floor((Object.keys(mobileIconOrder).length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app, i) => {
           const pos = getIconPosition(app.id, i);
           const isBeingDragged = draggingIcon === app.id;
@@ -1725,10 +1713,10 @@ function ChromeDesktopInner() {
       </div>
 
       {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel */}
-      {chatPanelWidth === 0 && (
+      {chatPanelWidth === 0 && !isMobile && (
         <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
       )}
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} />
+      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -1934,7 +1922,7 @@ function ChromeDesktopInner() {
         }}
         onShelfSettings={() => openApp("settings")}
         onChatClick={() => setChatOpen(prev => !prev)}
-        showChatButton={mascotHidden}
+        showChatButton={mascotHidden || isMobile}
         time={time}
       />
 

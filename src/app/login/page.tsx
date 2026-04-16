@@ -19,6 +19,13 @@ function LoginForm() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
+  const [now, setNow] = useState<Date | null>(null);
+
+  useEffect(() => {
+    setNow(new Date());
+    const id = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Incomplete setups should always resume on the dedicated setup route.
   useEffect(() => {
@@ -98,94 +105,109 @@ function LoginForm() {
     );
   }
 
+  const timeStr = now
+    ? now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : "";
+  const dateStr = now
+    ? now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })
+    : "";
+
   return (
-    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "var(--bg-deep)" }}>
-      <div className="w-full max-w-[380px]">
-        <div className="card-surface rounded-2xl p-8">
-          <div className="flex flex-col items-center gap-3 mb-6">
-            <Image src="/clawbox-crab.png" alt="ClawBox" width={120} height={120} className="w-[120px] h-[120px] object-contain animate-welcome-powerup" priority />
-            <h1 className="text-xl font-bold font-display text-[var(--text-primary)]">
-              ClawBox
-            </h1>
-            <p className="text-sm text-[var(--text-muted)]">
-              {t("login.subtitle")}
-            </p>
+    <div
+      className="flex flex-col items-center justify-between sm:justify-center px-5 py-6 sm:py-12 relative overflow-hidden"
+      style={{
+        minHeight: "100dvh",
+        background: "radial-gradient(ellipse at top, rgba(249,115,22,0.15), transparent 60%), radial-gradient(ellipse at bottom, rgba(249,115,22,0.08), transparent 50%), var(--bg-deep)",
+      }}
+    >
+      {/* Mobile clock — hidden on desktop where the card is centered */}
+      <div className="flex flex-col items-center gap-1 pt-8 sm:hidden" aria-hidden="true">
+        <div className="text-[64px] font-light text-white tabular-nums leading-none">{timeStr}</div>
+        <div className="text-sm text-white/60 capitalize">{dateStr}</div>
+      </div>
+
+      <div className="w-full max-w-[380px] flex flex-col items-center gap-6">
+        <div className="flex flex-col items-center gap-3">
+          <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup" priority />
+          <h1 className="text-2xl font-bold font-display text-white">ClawBox</h1>
+          <p className="text-sm text-white/50 text-center">{t("login.subtitle")}</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="w-full flex flex-col gap-4">
+          <div>
+            <label htmlFor="login-password" className="sr-only">{t("login.password")}</label>
+            <div className="relative">
+              <input
+                id="login-password"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t("login.passwordPlaceholder")}
+                autoFocus
+                autoComplete="current-password"
+                className="w-full h-12 px-4 pr-12 bg-white/[0.06] border border-white/10 rounded-xl text-base text-white outline-none focus:border-[var(--coral-bright)] focus:bg-white/[0.08] transition-colors placeholder-white/30"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
+                className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 text-white/40 hover:text-white bg-transparent border-none cursor-pointer"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+                  {showPassword ? "visibility_off" : "visibility"}
+                </span>
+              </button>
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div>
-              <label
-                htmlFor="login-password"
-                className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-              >
-                {t("login.password")}
-              </label>
-              <div className="relative">
-                <input
-                  id="login-password"
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={t("login.passwordPlaceholder")}
-                  autoFocus
-                  autoComplete="current-password"
-                  className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
-                >
-                  <span className="material-symbols-rounded" style={{ fontSize: 18 }}>
-                    {showPassword ? "visibility_off" : "visibility"}
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label
-                htmlFor="login-duration"
-                className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-              >
-                {t("login.duration")}
-              </label>
-              <select
-                id="login-duration"
-                value={duration}
-                onChange={(e) => setDuration(Number(e.target.value))}
-                className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors cursor-pointer appearance-none"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%236b7280'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: "no-repeat",
-                  backgroundPosition: "right 12px center",
-                }}
-              >
-                {DURATION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
+          <div>
+            <span className="block text-[11px] font-semibold text-white/40 uppercase tracking-widest mb-2">
+              {t("login.duration")}
+            </span>
+            <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label={t("login.duration")}>
+              {DURATION_OPTIONS.map((opt) => {
+                const active = duration === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => setDuration(opt.value)}
+                    className={`h-10 rounded-lg text-xs font-medium transition-colors cursor-pointer border ${
+                      active
+                        ? "bg-[var(--coral-bright)]/20 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                        : "bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08] hover:text-white/80"
+                    }`}
+                  >
                     {t(opt.labelKey)}
-                  </option>
-                ))}
-              </select>
+                  </button>
+                );
+              })}
             </div>
+          </div>
 
-            {error && (
-              <div className="px-3.5 py-2.5 rounded-lg text-xs bg-red-500/10 text-red-400 border border-red-500/20">
-                {error}
-              </div>
+          {error && (
+            <div className="px-3.5 py-2.5 rounded-lg text-xs bg-red-500/10 text-red-400 border border-red-500/20">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading || !password.trim()}
+            className="w-full h-12 btn-gradient text-white rounded-xl text-base font-semibold transition transform active:scale-[0.98] hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer flex items-center justify-center gap-2"
+          >
+            {loading && (
+              <span aria-hidden="true" className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
             )}
-
-            <button
-              type="submit"
-              disabled={loading || !password.trim()}
-              className="w-full py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
-            >
-              {loading ? t("login.loggingIn") : t("login.logIn")}
-            </button>
-          </form>
-        </div>
+            {loading ? t("login.loggingIn") : t("login.logIn")}
+          </button>
+        </form>
       </div>
+
+      {/* Spacer for mobile bottom alignment */}
+      <div className="sm:hidden" aria-hidden="true" />
     </div>
   );
 }

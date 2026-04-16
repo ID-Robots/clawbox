@@ -39,7 +39,7 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await settingsWindow.getByRole("button", { name: "Available Networks" }).click();
   await settingsWindow.getByRole("button", { name: "Guest Network" }).click();
   await settingsWindow.getByPlaceholder("Enter WiFi password").fill("guest-pass");
-  await settingsWindow.getByRole("button", { name: "Connect" }).click();
+  await settingsWindow.getByRole("button", { name: /Connect$/ }).last().click();
   await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
@@ -67,10 +67,10 @@ test("settings covers appearance, network, ai, local ai, telegram, system, and a
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();
   await settingsWindow.locator("#settings-tg-token").fill("123456789:ABCdefGHI");
   await settingsWindow.getByRole("button", { name: /Connect$/ }).click();
-  await expect(settingsWindow.getByText("Bot Connected")).toBeVisible();
+  await expect(settingsWindow.getByText("Bot Connected").last()).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "System" }).click();
-  await expect(settingsWindow.getByText("clawbox")).toBeVisible();
+  await expect(settingsWindow.getByText("clawbox", { exact: true })).toBeVisible();
   await expect(settingsWindow.getByText("Ubuntu 24.04")).toBeVisible();
 
   await settingsWindow.getByRole("button", { name: "About" }).click();

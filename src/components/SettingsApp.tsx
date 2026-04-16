@@ -102,6 +102,7 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
   );
 }
 
+type SectionStatus = { subtitle: string | null; dot: "ok" | "warn" | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
@@ -769,9 +770,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null } | null>(null);
   useEffect(() => {
-    if (section !== "ai") return;
+    if (section !== "ai" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
-  }, [section]);
+  }, [section, isMobile]);
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
   const [localAiError, setLocalAiError] = useState<string | null>(null);
@@ -823,13 +824,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
   useEffect(() => {
-    if (section !== "localAi") return;
+    if (section !== "localAi" && !isMobile) return;
     refreshLocalAiStatus();
+    if (section !== "localAi") return;
     const interval = setInterval(() => {
       refreshLocalAiStatus().catch(() => {});
     }, 5000);
     return () => clearInterval(interval);
-  }, [refreshLocalAiStatus, section]);
+  }, [refreshLocalAiStatus, section, isMobile]);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -842,7 +844,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const tgSaveControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (section !== "telegram") return;
+    if (section !== "telegram" && !isMobile) return;
     fetch("/setup-api/telegram/status").then(r => r.json()).then(d => {
       setTgConfigured(d.configured ?? false);
       if (d.configured && d.username) {
@@ -851,7 +853,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setTgBotInfo(null);
       }
     }).catch(() => setTgConfigured(false));
-  }, [section]);
+  }, [section, isMobile]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
@@ -1055,8 +1057,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     <>
         {/* ─── Appearance ─── */}
         {activeSection === "appearance" && (
-          <div className="max-w-2xl space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.appearance")}</h2>
+          <div className="max-w-xl space-y-5">
 
             {/* Wallpaper card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -1255,8 +1256,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── Network ─── */}
         {activeSection === "wifi" && (
-          <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.network")}</h2>
+          <div className="max-w-xl space-y-5">
 
             {/* Connection status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -1644,8 +1644,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── AI Provider ─── */}
         {activeSection === "ai" && (
-          <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.aiProvider")}</h2>
+          <div className="max-w-xl space-y-5">
 
             {/* Provider status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -1654,9 +1653,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {aiProvider === null ? (
-                <div className="flex items-center gap-3 text-[var(--text-muted)] text-sm">
-                  <div className="w-5 h-5 border-2 border-white/15 border-t-[var(--coral-bright)] rounded-full animate-spin" />
-                  {t("settings.checking")}
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
                 </div>
               ) : aiProvider.connected ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
@@ -1709,8 +1711,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── Local AI ─── */}
         {activeSection === "localAi" && (
-          <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Local AI</h2>
+          <div className="max-w-xl space-y-5">
 
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
@@ -1718,9 +1719,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {localAiStatus === null ? (
-                <div className="flex items-center gap-3 text-[var(--text-muted)] text-sm">
-                  <div className="w-5 h-5 border-2 border-white/15 border-t-[var(--coral-bright)] rounded-full animate-spin" />
-                  {t("settings.checking")}
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
                 </div>
               ) : localAiStatus.configured ? (
                 <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
@@ -1837,8 +1841,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── Telegram ─── */}
         {activeSection === "telegram" && (
-          <div className="max-w-lg space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.telegram")}</h2>
+          <div className="max-w-xl space-y-5">
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -1847,9 +1850,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
               </div>
               {tgConfigured === null ? (
-                <div className="flex items-center gap-3 text-[var(--text-muted)] opacity-60 text-sm">
-                  <div className="w-5 h-5 border-2 border-white/15 border-t-orange-400 rounded-full animate-spin" />
-                  {t("settings.checking")}
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
                 </div>
               ) : tgConfigured && !tgReconfigure ? (
                 <div>
@@ -2010,8 +2016,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── System ─── */}
         {activeSection === "system" && (
-          <div className="max-w-2xl space-y-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.system")}</h2>
+          <div className="max-w-xl space-y-5">
 
             {stats ? (
               <>
@@ -2262,7 +2267,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
-          <div className="max-w-md space-y-6">
+          <div className="max-w-xl space-y-6">
             <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
 
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
@@ -2430,41 +2435,88 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     </>
   );
 
+  // ─── Section status (subtitle + indicator dot) shared by mobile list + desktop sidebar ───
+  // SectionStatus type is declared at module scope (above component)
+  const sectionStatus = (id: Section): SectionStatus => {
+    switch (id) {
+      case "appearance": {
+        const sub = ui.wallpaperId.startsWith("custom-")
+          ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
+          : ui.wallpaperId;
+        return { subtitle: sub, dot: null };
+      }
+      case "wifi":
+        if (connectedSSID) return { subtitle: connectedSSID, dot: "ok" };
+        if (ethernet.connected) return { subtitle: ethernet.iface ? `Ethernet (${ethernet.iface})` : "Ethernet", dot: "ok" };
+        return { subtitle: t("settings.notConnected") || "Not connected", dot: "warn" };
+      case "ai": {
+        if (aiProvider === null) return { subtitle: null, dot: null };
+        if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured", dot: "warn" };
+        return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null), dot: "ok" };
+      }
+      case "localAi": {
+        if (localAiStatus === null) return { subtitle: null, dot: null };
+        if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured", dot: null };
+        return { subtitle: localAiStatus.model || localAiStatus.provider, dot: localAiStatus.running ? "ok" : "warn" };
+      }
+      case "telegram": {
+        if (tgConfigured === null) return { subtitle: null, dot: null };
+        if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured", dot: null };
+        return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected"), dot: "ok" };
+      }
+      case "system":
+        return { subtitle: hostname ? `${hostname}.local` : null, dot: null };
+      case "about":
+        return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null, dot: null };
+      default:
+        return { subtitle: null, dot: null };
+    }
+  };
+
   // ─── Mobile layout: full-screen nav or full-screen content ───
   if (isMobile) {
     return (
       <div className="flex flex-col h-full bg-[var(--bg-deep)]">
         {mobileSection === null ? (
-          /* Nav list */
-          <div className="flex-1 overflow-y-auto">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] px-5 pt-4 pb-2">{t("settings.title")}</h2>
-            <nav className="flex flex-col">
-              {NAV_ITEMS.map(item => (
-                <button
-                  key={item.id}
-                  onClick={() => { setSection(item.id); setMobileSection(item.id); }}
-                  className="flex items-center gap-3 px-5 py-3.5 text-sm border-none cursor-pointer transition-colors text-[var(--text-secondary)] hover:bg-white/[0.04] active:bg-white/[0.08]"
-                >
-                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }}>{item.icon}</span>
-                  <span className="flex-1 text-left">{navLabel(item)}</span>
-                  <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>chevron_right</span>
-                </button>
-              ))}
+          /* Nav list — iOS-style grouped rows with status subtitles */
+          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
+            <h2 className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</h2>
+            <nav className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
+              {NAV_ITEMS.map(item => {
+                const { subtitle } = sectionStatus(item.id);
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => { setSection(item.id); setMobileSection(item.id); }}
+                    className="flex items-center gap-4 w-full px-4 py-3.5 text-left border-none cursor-pointer transition-colors bg-transparent hover:bg-white/[0.04] active:bg-white/[0.08]"
+                  >
+                    <span className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--coral-bright)]/15 shrink-0">
+                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 22 }}>{item.icon}</span>
+                    </span>
+                    <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                      <span className="text-[15px] font-medium text-[var(--text-primary)] leading-tight">{navLabel(item)}</span>
+                      {subtitle && (
+                        <span className="text-xs text-[var(--text-muted)] truncate">{subtitle}</span>
+                      )}
+                    </span>
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-40 shrink-0" style={{ fontSize: 20 }}>chevron_right</span>
+                  </button>
+                );
+              })}
             </nav>
           </div>
         ) : (
-          /* Content with back button */
+          /* Content — chrome back closes window in one tap. A small "All settings"
+              link at the top lets the user switch sections without leaving. */
           <>
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border-subtle)] shrink-0">
+            <div className="px-4 pt-3 pb-1 shrink-0">
               <button
                 onClick={() => setMobileSection(null)}
-                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-secondary)] cursor-pointer"
+                className="flex items-center gap-1 text-xs text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer p-1"
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+                <span>{t("settings.title")}</span>
               </button>
-              <span className="text-sm font-medium text-[var(--text-primary)]">
-                {(() => { const nav = NAV_ITEMS.find(i => i.id === mobileSection); return nav ? navLabel(nav) : t("settings.title"); })()}
-              </span>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
               {renderContent()}
@@ -2626,21 +2678,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   return (
     <div className="flex h-full bg-[var(--bg-deep)]">
       {/* Sidebar */}
-      <nav className="w-48 shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-3 flex flex-col">
+      <nav className="w-60 shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {NAV_ITEMS.map(item => {
           const active = activeSection === item.id;
+          const status = sectionStatus(item.id);
           return (
             <button
               key={item.id}
               onClick={() => setSection(item.id)}
-              className={`flex items-center gap-2.5 px-4 py-2.5 text-sm border-none cursor-pointer transition-colors text-left border-l-2 ${
+              className={`flex items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
                 active
-                  ? "bg-white/[0.08] text-[var(--text-primary)] border-l-[var(--coral-bright)]"
-                  : "text-[var(--text-secondary)] border-l-transparent hover:bg-white/[0.04] hover:text-[var(--text-primary)]"
+                  ? "bg-[var(--coral-bright)]/15 text-[var(--text-primary)]"
+                  : "text-[var(--text-secondary)] hover:bg-white/[0.05] hover:text-[var(--text-primary)]"
               }`}
             >
-              <span className="material-symbols-rounded" style={{ fontSize: 18, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
-              {navLabel(item)}
+              <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${active ? "bg-[var(--coral-bright)]/25" : "bg-white/[0.06]"}`}>
+                <span className="material-symbols-rounded" style={{ fontSize: 20, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
+              </span>
+              <span className="flex-1 min-w-0 truncate font-medium">{navLabel(item)}</span>
+              {status.subtitle && <span className="sr-only">{status.subtitle}</span>}
+              {status.dot && (
+                <span
+                  aria-hidden="true"
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    status.dot === "ok" ? "bg-emerald-400" : status.dot === "warn" ? "bg-amber-400" : "bg-white/20"
+                  }`}
+                  title={status.subtitle ?? undefined}
+                />
+              )}
             </button>
           );
         })}
@@ -2648,8 +2713,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       </nav>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
-        {renderContent()}
+      <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center">
+        <div className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
+          {renderContent()}
+        </div>
       </div>
 
       {/* Update confirmation modal */}

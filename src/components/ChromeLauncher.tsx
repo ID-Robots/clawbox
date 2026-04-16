@@ -83,7 +83,10 @@ export default function ChromeLauncher({
         setAnimationState("opening");
         focusTimer = window.setTimeout(() => {
           setAnimationState("open");
-          searchRef.current?.focus();
+          // Skip auto-focus on touch/mobile so the soft keyboard doesn't pop
+          // up automatically (causing a viewport gap above the keyboard).
+          const isTouch = typeof window !== "undefined" && (window.matchMedia("(hover: none) and (pointer: coarse)").matches || window.innerWidth < 768);
+          if (!isTouch) searchRef.current?.focus();
         }, 50);
       }, 0);
     } else if (!isOpen && prevOpenRef.current) {
@@ -194,9 +197,9 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 100 + 32 }}
+        style={{ maxWidth: gridCols * 100 + 32, bottom: 56 }}
         data-testid="app-launcher"
-        className={`fixed bottom-14 left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
+        className={`fixed left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
         onKeyDown={handleKeyDown}

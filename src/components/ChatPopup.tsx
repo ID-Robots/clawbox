@@ -796,7 +796,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const posStyle: React.CSSProperties = panelMode
     ? { right: 0, top: 0, bottom: 56 }
     : mobile
-      ? { left: 0, top: 0, right: 0, bottom: 220 }
+      ? { left: 0, top: 0, right: 0, bottom: 0 }
       : pos
         ? { left: pos.x, top: pos.y, bottom: 'auto' }
         : trayMode
