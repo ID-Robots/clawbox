@@ -1331,7 +1331,7 @@ export default function AIModelsStep({
   const embeddedConnectLabel = t("settings.connect");
 
   return (
-    <div className="w-full max-w-[520px]" data-testid={testId}>
+    <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
       <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
         <ClawAIOfferModal
           open={showClawAIOffer && !configuringState}

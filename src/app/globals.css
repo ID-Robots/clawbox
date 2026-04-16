@@ -63,10 +63,17 @@ body {
   overflow-x: hidden;
   /* Prevent pull-to-refresh on mobile */
   overscroll-behavior-y: contain;
+  background: var(--background);
+}
+
+:fullscreen {
+  background: var(--background);
+}
+::backdrop {
+  background: var(--background);
 }
 
 body {
-  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-body);
   /* Safe area padding for notch/rounded corners */

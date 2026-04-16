@@ -108,9 +108,12 @@ export default function SystemTray({
   }, []);
 
   const handleClose = () => {
-    if (rebootState) return; // Don't close during reboot
+    if (rebootState) return;
     setClosing(true);
-    setTimeout(onClose, 150);
+    setTimeout(() => {
+      onClose();
+      setClosing(false);
+    }, 150);
   };
 
   const handlePower = async (action: "shutdown" | "restart") => {
