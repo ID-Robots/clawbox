@@ -44,6 +44,11 @@ if [ -n "$PID_PATH" ]; then
   mkdir -p "$(dirname "$PID_PATH")"
   printf '%s\n' "$$" > "$PID_PATH"
 fi
+N_GPU_LAYERS="${LLAMACPP_N_GPU_LAYERS:-99}"
+if ! [[ "$N_GPU_LAYERS" =~ ^[0-9]+$ ]] || [ "$N_GPU_LAYERS" -gt 999 ]; then
+  echo "[llamacpp] Invalid LLAMACPP_N_GPU_LAYERS='${LLAMACPP_N_GPU_LAYERS-}'; falling back to 99"
+  N_GPU_LAYERS=99
+fi
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -53,4 +58,5 @@ exec "$BIN_PATH" \
   --cache-type-k "$CACHE_TYPE_K" \
   --cache-type-v "$CACHE_TYPE_V" \
   --ctx-size "$CTX_SIZE" \
+  --n-gpu-layers "$N_GPU_LAYERS" \
   --jinja

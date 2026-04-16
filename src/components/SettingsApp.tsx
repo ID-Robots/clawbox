@@ -833,6 +833,37 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => clearInterval(interval);
   }, [refreshLocalAiStatus, section, isMobile]);
 
+  const [localOnlyMode, setLocalOnlyMode] = useState<boolean | null>(null);
+  const [localOnlyPending, setLocalOnlyPending] = useState(false);
+  useEffect(() => {
+    if (section !== "localAi") return;
+    fetch("/setup-api/local-ai/exclusive", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setLocalOnlyMode(!!d.enabled))
+      .catch(() => setLocalOnlyMode(false));
+  }, [section]);
+  const toggleLocalOnly = useCallback(async (next: boolean) => {
+    setLocalOnlyPending(true);
+    try {
+      const res = await fetch("/setup-api/local-ai/exclusive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
+      setLocalOnlyMode(next);
+      notifyChatModelStateChanged();
+      fetch("/setup-api/ai-models/status", { cache: "no-store" })
+        .then((r) => r.json())
+        .then(setAiProvider)
+        .catch(() => {});
+    } catch (err) {
+      setLocalAiError(err instanceof Error ? err.message : "Failed to toggle local-only mode");
+    } finally {
+      setLocalOnlyPending(false);
+    }
+  }, [notifyChatModelStateChanged]);
+
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
   const [tgShowToken, setTgShowToken] = useState(false);
@@ -1786,6 +1817,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             {localAiError && (
               <div className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
                 {localAiError}
+              </div>
+            )}
+
+            {localAiStatus?.configured && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-semibold text-[var(--text-primary)]">Local-only mode</div>
+                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                      Route everything to the local model. Disables all cloud AI providers (including fallbacks).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label="Local-only mode"
+                    aria-checked={!!localOnlyMode}
+                    disabled={localOnlyPending || localOnlyMode === null}
+                    onClick={() => toggleLocalOnly(!localOnlyMode)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+                      localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
               </div>
             )}
 
