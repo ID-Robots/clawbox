@@ -115,6 +115,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
   const [section, setSection] = useState<Section>("appearance");
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
+  const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
+  const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
 
@@ -136,13 +138,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setMobileSection("ai");
       setOpenClawAIOfferRequest((current) => current + 1);
     };
+    const requestProviderSelection = (providerId: unknown) => {
+      if (typeof providerId !== "string" || !providerId.trim()) return;
+      setSection("ai");
+      setMobileSection("ai");
+      setRequestedAiProviderId(providerId);
+      setProviderSelectionRequest((current) => current + 1);
+    };
     const w = window as Window & {
       __clawboxPendingSettingsSection?: unknown;
       __clawboxPendingClawAiOffer?: unknown;
+      __clawboxPendingAiProvider?: unknown;
     };
     if (w.__clawboxPendingSettingsSection !== undefined) {
       apply(w.__clawboxPendingSettingsSection);
       delete w.__clawboxPendingSettingsSection;
+    }
+    if (w.__clawboxPendingAiProvider !== undefined) {
+      requestProviderSelection(w.__clawboxPendingAiProvider);
+      delete w.__clawboxPendingAiProvider;
     }
     if (w.__clawboxPendingClawAiOffer) {
       requestClawAiOffer();
@@ -150,11 +164,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
     const handler = (event: Event) =>
       apply((event as CustomEvent<{ section?: string }>).detail?.section);
+    const providerHandler = (event: Event) =>
+      requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
     const offerHandler = () => requestClawAiOffer();
     window.addEventListener("clawbox:open-settings-section", handler);
+    window.addEventListener("clawbox:select-ai-provider", providerHandler);
     window.addEventListener("clawbox:open-clawai-offer", offerHandler);
     return () => {
       window.removeEventListener("clawbox:open-settings-section", handler);
+      window.removeEventListener("clawbox:select-ai-provider", providerHandler);
       window.removeEventListener("clawbox:open-clawai-offer", offerHandler);
     };
   }, []);
@@ -1729,6 +1747,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               currentProviderId={aiProvider?.provider ?? null}
               currentModel={aiProvider?.model ?? null}
               openClawAIOfferRequest={openClawAIOfferRequest}
+              requestedProviderId={requestedAiProviderId}
+              providerSelectionRequest={providerSelectionRequest}
               title="Connect AI Provider"
               description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
               onConfigured={() => {

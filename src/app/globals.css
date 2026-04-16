@@ -485,6 +485,34 @@ html {
   animation: welcome-powerup 1.5s ease-in-out infinite;
 }
 
+@keyframes clawbox-notification-shield-blink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.24);
+  }
+  50% {
+    opacity: 0.42;
+    box-shadow: 0 0 0 8px rgba(74, 222, 128, 0);
+  }
+}
+
+@keyframes clawbox-notification-shield-float {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+
+.clawbox-notification-shield-blink {
+  animation: clawbox-notification-shield-blink 1.5s ease-in-out infinite;
+}
+
+.clawbox-notification-shield-float {
+  animation: clawbox-notification-shield-float 1.5s ease-in-out infinite;
+}
+
 /* Custom range slider thumb — orange brand */
 input[type="range"].appearance-none::-webkit-slider-thumb {
   -webkit-appearance: none;

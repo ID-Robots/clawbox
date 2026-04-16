@@ -20,6 +20,7 @@ interface ChromeShelfProps {
   onNewWindow?: (id: string) => void;
   onLauncherClick: () => void;
   onTrayClick: () => void;
+  onClawKeepShieldClick?: () => void;
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -28,6 +29,7 @@ interface ChromeShelfProps {
   onChatClick?: () => void;
   showChatButton?: boolean;
   time: string;
+  clawAiAuthenticated?: boolean;
 }
 
 export default function ChromeShelf({
@@ -36,6 +38,7 @@ export default function ChromeShelf({
   onNewWindow,
   onLauncherClick,
   onTrayClick,
+  onClawKeepShieldClick,
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -44,6 +47,7 @@ export default function ChromeShelf({
   onChatClick,
   showChatButton,
   time,
+  clawAiAuthenticated = false,
 }: ChromeShelfProps) {
   const { t } = useT();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -98,6 +102,13 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && a.id !== "settings")
     : apps.filter(a => a.isPinned === false);
+  const shieldTitle = clawAiAuthenticated
+    ? t("shelf.openClawKeep")
+    : t("shelf.connectClawBoxAI");
+  const shieldClasses = clawAiAuthenticated
+    ? "text-emerald-300"
+    : "text-red-700";
+  const shieldInteractive = typeof onClawKeepShieldClick === "function";
 
   const renderApp = (app: ShelfApp) => (
     <button
@@ -194,6 +205,18 @@ export default function ChromeShelf({
             )}
             <div className="absolute right-2 flex items-center gap-1">
               <button
+                onClick={onClawKeepShieldClick}
+                disabled={!shieldInteractive}
+                aria-disabled={!shieldInteractive}
+                tabIndex={shieldInteractive ? undefined : -1}
+                className={`flex items-center justify-center w-10 h-10 rounded-full transition-colors ${shieldInteractive ? "hover:bg-white/10 active:bg-white/15 cursor-pointer" : "cursor-default opacity-70"}`}
+                title={shieldTitle}
+                aria-label={shieldTitle}
+                data-testid="shelf-clawkeep-shield-button"
+              >
+                <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
+              </button>
+              <button
                 onClick={onTrayClick}
                 className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
                 title={t("shelf.systemSettings")}
@@ -280,6 +303,18 @@ export default function ChromeShelf({
               <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
             </button>
           )}
+          <button
+            onClick={onClawKeepShieldClick}
+            disabled={!shieldInteractive}
+            aria-disabled={!shieldInteractive}
+            tabIndex={shieldInteractive ? undefined : -1}
+            className={`flex items-center justify-center w-10 h-10 rounded-full transition-colors ${shieldInteractive ? "hover:bg-white/10 active:bg-white/15 cursor-pointer" : "cursor-default opacity-70"}`}
+            title={shieldTitle}
+            aria-label={shieldTitle}
+            data-testid="shelf-clawkeep-shield-button"
+          >
+            <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
+          </button>
           <button
             onClick={onTrayClick}
             className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

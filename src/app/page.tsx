@@ -10,6 +10,7 @@ import SystemTray from "@/components/SystemTray";
 import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
+import ClawKeepApp from "@/components/ClawKeepApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
@@ -28,7 +29,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -41,6 +42,7 @@ const apps: AppDef[] = [
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
+  { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -94,6 +96,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     setup: "construction",
     terminal: "terminal",
     files: "folder",
+    clawkeep: "shield_lock",
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
@@ -145,6 +148,12 @@ function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?
   return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
 }
 
+function isClawAiProvider(provider: unknown): boolean {
+  if (typeof provider !== "string") return false;
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "clawai" || normalized === "deepseek";
+}
+
 
 function ChromeDesktopInner() {
   const { t } = useT();
@@ -152,11 +161,14 @@ function ChromeDesktopInner() {
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
+  const [clawAiAuthenticated, setClawAiAuthenticated] = useState(false);
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
     setSetupRequired(!data.setup_complete);
-    setShowClawAiOfferNotification(!!data.setup_complete && !data.ai_model_configured);
+    const hasClawAi = isClawAiProvider(data.ai_model_provider) && !!data.ai_model_configured;
+    setClawAiAuthenticated(hasClawAi);
+    setShowClawAiOfferNotification(!!data.setup_complete && !hasClawAi);
     return data;
   }, []);
 
@@ -916,10 +928,12 @@ function ChromeDesktopInner() {
   }, [syncSetupStatus]);
 
   useEffect(() => {
-    const handlePrimaryAiConfigured = () => setShowClawAiOfferNotification(false);
+    const handlePrimaryAiConfigured = () => {
+      void syncSetupStatus().catch(() => {});
+    };
     window.addEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
     return () => window.removeEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
-  }, []);
+  }, [syncSetupStatus]);
 
   // ─── Android back button / browser back handling ───
   useEffect(() => {
@@ -1078,18 +1092,26 @@ function ChromeDesktopInner() {
     openApp("settings");
   }, [openApp]);
 
-  const openClawAiOffer = useCallback(() => {
+  const openClawAiProviderSettings = useCallback(() => {
     const w = window as Window & {
       __clawboxPendingSettingsSection?: string;
-      __clawboxPendingClawAiOffer?: boolean;
+      __clawboxPendingAiProvider?: string;
     };
     w.__clawboxPendingSettingsSection = "ai";
-    w.__clawboxPendingClawAiOffer = true;
+    w.__clawboxPendingAiProvider = "clawai";
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "ai" } }));
-    window.dispatchEvent(new Event("clawbox:open-clawai-offer"));
+    window.dispatchEvent(new CustomEvent("clawbox:select-ai-provider", { detail: { providerId: "clawai" } }));
     openAppRef.current("settings");
     setShowClawAiOfferNotification(false);
   }, []);
+
+  const openClawKeepOrAiProvider = useCallback(() => {
+    if (clawAiAuthenticated) {
+      openApp("clawkeep");
+      return;
+    }
+    openClawAiProviderSettings();
+  }, [clawAiAuthenticated, openApp, openClawAiProviderSettings]);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -1206,6 +1228,8 @@ function ChromeDesktopInner() {
         ) : null;
       case "files":
         return <FilesApp />;
+      case "clawkeep":
+        return <ClawKeepApp />;
       case "browser":
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":
@@ -1470,18 +1494,25 @@ function ChromeDesktopInner() {
 
           {showClawAiOfferNotification && (
             <div
-              className="rounded-xl bg-[#1e2030] border border-orange-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+              className="rounded-xl bg-[#1e2030] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
               role="status"
               aria-live="polite"
             >
               <div className="flex items-start gap-3 px-4 py-3">
-                <div className="w-9 h-9 rounded-full bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
-                  <span className="material-symbols-rounded text-orange-300" style={{ fontSize: 20 }}>smart_toy</span>
+                <div
+                  className="clawbox-notification-shield-blink w-9 h-9 rounded-full bg-green-500/15 border border-green-400/30 flex items-center justify-center shrink-0"
+                >
+                  <span
+                    className="material-symbols-rounded clawbox-notification-shield-float text-green-300"
+                    style={{ fontSize: 20 }}
+                  >
+                    shield
+                  </span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-white">Start free with ClawBox AI</div>
+                  <div className="text-sm font-semibold text-white">Free backup with ClawBox AI</div>
                   <div className="text-xs leading-relaxed text-white/60 mt-0.5">
-                    You finished setup without a cloud AI provider. Connect ClawBox AI anytime for the recommended out-of-box experience.
+                    Add ClawBox AI as your free desktop backup and keep a ready-to-use provider one click away.
                   </div>
                 </div>
                 <button
@@ -1493,16 +1524,16 @@ function ChromeDesktopInner() {
                 </button>
               </div>
               <div className="px-4 pb-2">
-                <div className="rounded-lg border border-orange-400/15 bg-orange-500/10 px-3 py-2 text-[11px] leading-relaxed text-orange-50/90">
-                  Open the portal, create your token, and finish connecting ClawBox AI in seconds.
+                <div className="rounded-lg border border-green-400/15 bg-green-500/10 px-3 py-2 text-[11px] leading-relaxed text-green-50/90">
+                  We’ll open AI Provider settings with ClawBox AI already selected so you can log in right away.
                 </div>
               </div>
               <div className="flex items-center gap-2 px-4 pb-3">
                 <button
-                  onClick={openClawAiOffer}
-                  className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
+                  onClick={openClawAiProviderSettings}
+                  className="flex-1 px-3 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
                 >
-                  Start free
+                  Login with ClawBox AI
                 </button>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
@@ -1911,6 +1942,7 @@ function ChromeDesktopInner() {
         onTrayClick={() => {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
+        onClawKeepShieldClick={openClawKeepOrAiProvider}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
@@ -1924,6 +1956,7 @@ function ChromeDesktopInner() {
         onChatClick={() => setChatOpen(prev => !prev)}
         showChatButton={mascotHidden || isMobile}
         time={time}
+        clawAiAuthenticated={clawAiAuthenticated}
       />
 
 
