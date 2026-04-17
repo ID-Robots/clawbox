@@ -56,6 +56,14 @@ interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   text: string
   timestamp: number
+  /**
+   * Visual variant for `system` role messages. "error" is the default
+   * (red pill) and is what surfaces for WebSocket failures, model-switch
+   * errors, and similar user-visible problems. "success" (green pill)
+   * is for confirmations — e.g. "Switched chat to X" after the user
+   * picks a new model. Ignored for 'user' and 'assistant' roles.
+   */
+  variant?: 'success' | 'error'
 }
 
 interface ChatModelState {
@@ -693,6 +701,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         role: 'system',
         text: `Switched chat to ${target.model}.`,
         timestamp: Date.now(),
+        variant: 'success',
       }])
       retryCountRef.current = 0
       connect()
@@ -1069,9 +1078,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               background: msg.role === 'user'
                 ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
                 : msg.role === 'system'
-                  ? 'rgba(239,68,68,0.15)'
+                  ? (msg.variant === 'success' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)')
                   : 'rgba(255,255,255,0.06)',
-              color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+              color: msg.role === 'user'
+                ? '#fff'
+                : msg.role === 'system'
+                  ? (msg.variant === 'success' ? '#22c55e' : '#ef4444')
+                  : 'rgba(255,255,255,0.85)',
               fontSize: 13.5,
               lineHeight: 1.45,
               wordBreak: 'break-word',
