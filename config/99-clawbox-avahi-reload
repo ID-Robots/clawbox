@@ -1,0 +1,35 @@
+#!/bin/sh
+# NetworkManager dispatcher hook — force avahi to re-announce on every
+# interface state change so clients with stale negative mDNS caches
+# (especially Windows) can re-resolve `<hostname>.local` within seconds
+# of the device coming back on the network, not the 15 minutes Windows
+# would otherwise hold a cached NXDOMAIN.
+#
+# Dispatcher arg 1 is the interface name, arg 2 is the action.
+# We care about: up, down, dhcp4-change, dhcp6-change, connectivity-change.
+#
+# Installed by install.sh step_hostname_mdns at
+# /etc/NetworkManager/dispatcher.d/99-clawbox-avahi-reload
+# and marked executable (NetworkManager ignores non-executable hooks).
+
+IFACE="$1"
+ACTION="$2"
+
+case "$ACTION" in
+  up|down|dhcp4-change|dhcp6-change|connectivity-change)
+    # Ignore the hotspot's own transitions so we don't reload avahi
+    # mid-handshake when start-ap.sh is bringing its AP up.
+    case "$IFACE" in
+      lo|""|veth*|docker*|br-*)
+        exit 0
+        ;;
+    esac
+    if [ -x /usr/bin/avahi-daemon ] || [ -x /usr/sbin/avahi-daemon ]; then
+      # --reload is cheap and synchronous; it triggers a fresh
+      # announcement burst on all active interfaces.
+      avahi-daemon --reload >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0
