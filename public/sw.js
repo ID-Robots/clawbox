@@ -1,9 +1,14 @@
 // ClawBox Service Worker — PWA installability + asset caching
-const CACHE_NAME = 'clawbox-v2'
+//
+// Bumping CACHE_NAME here is the supported way to invalidate previously
+// cached assets on existing installs — the `activate` handler deletes any
+// cache whose name doesn't match, so users get a clean slate on next visit.
+const CACHE_NAME = 'clawbox-v3'
 const PRECACHE = [
   '/',
   '/icon-192.png',
   '/icon-512.png',
+  '/clawbox-icon.png',
   '/clawbox-logo.png',
   '/clawbox-crab.png',
   '/clawbox-wallpaper.jpeg',
