@@ -11,6 +11,9 @@ test("clawkeep keeps backup setup to one simple local flow", async ({ page }) =>
       ai_model_configured: true,
       telegram_configured: true,
     },
+    preferences: {
+      ff_clawkeep_enabled: 1,
+    },
   });
 
   await page.goto("/");
@@ -41,6 +44,9 @@ test("clawkeep keeps cloud setup lightweight and easy to scan", async ({ page })
       password_configured: true,
       ai_model_configured: false,
       telegram_configured: true,
+    },
+    preferences: {
+      ff_clawkeep_enabled: 1,
     },
   });
 
