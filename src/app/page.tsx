@@ -162,7 +162,6 @@ function isBuiltInAppEnabled(appId: string, featureFlags: Record<string, boolean
   return true;
 }
 
-
 function ChromeDesktopInner() {
   const { t } = useT();
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
