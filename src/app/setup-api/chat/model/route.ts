@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, type OpenClawConfig } from "@/lib/openclaw-config";
+import {
+  inferConfiguredLocalModel,
+  readConfig,
+  restartGateway,
+  runOpenclawConfigSet,
+  applyModelOverrideToAllAgentSessions,
+  parseFullyQualifiedModel,
+  type OpenClawConfig,
+} from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 
 export const dynamic = "force-dynamic";
@@ -296,13 +304,41 @@ export async function POST(request: Request) {
       await sqliteSet(PRIMARY_MODEL_KEY, state.activeModel);
     }
 
-    // runOpenclawConfigSet retries on transient ConfigMutationConflictError
-    // so users switching chat models don't see a bogus failure when the
-    // gateway reloads concurrently with the write. Leave timeoutMs on the
-    // helper's default — the OpenClaw CLI itself takes 10-12 s per call
-    // on Jetson Orin hardware, so a tighter bound here was producing
-    // spurious "timed out" errors on every legitimate invocation.
+    // 1. Update the agent-level default so any *future* session starts
+    //    with the user's chosen model. runOpenclawConfigSet retries on
+    //    transient ConfigMutationConflictError and uses a 30 s per-attempt
+    //    timeout by default (CLI startup alone is ~10 s on Jetson Orin),
+    //    so users switching chat models don't see a bogus failure when the
+    //    gateway reloads concurrently with the write.
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
+
+    // 2. Sweep every existing session's per-session override to the
+    //    same model, tagged `source: "user"` so OpenClaw's per-turn
+    //    model resolver returns early and leaves the override alone
+    //    on each subsequent message. Without this step, changing the
+    //    chat model dropdown only affected newly-opened sessions —
+    //    the currently-open chat pane kept routing to whatever
+    //    provider its `modelOverrideSource: "auto"` entry had picked,
+    //    making the UI dropdown feel broken. (NB: "manual" *looks*
+    //    like the right string but isn't recognised anywhere in the
+    //    OpenClaw dist; only "user" is sticky. See the docstring on
+    //    `applyModelOverrideToAllAgentSessions`.)
+    const parsed = parseFullyQualifiedModel(targetModel);
+    if (parsed) {
+      try {
+        await applyModelOverrideToAllAgentSessions({
+          provider: parsed.provider,
+          modelId: parsed.modelId,
+          source: "user",
+        });
+      } catch (err) {
+        // Non-fatal: the default change (step 1) still takes effect
+        // for brand-new sessions. Worst case the user has to /reset
+        // the open chat. Log and continue.
+        console.error("[chat/model] Failed to sweep session overrides:", err);
+      }
+    }
+
     await restartGateway();
 
     const nextState = await loadChatModelState();

@@ -141,8 +141,156 @@ function spawnOpenclawConfigSet(
   });
 }
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
+
+// Fields on each entry of `<agents-dir>/<agent>/sessions/sessions.json`
+// that OpenClaw reads to decide which provider/model a running session
+// uses. These are *independent* of `agents.defaults.model.primary` —
+// that's just the seed for newly-opened sessions. Existing sessions
+// use whichever values are baked into this per-session record, and
+// OpenClaw's own auto-picker will re-populate them at chat time unless
+// `modelOverrideSource` is already "manual".
+const SESSION_OVERRIDE_FIELDS = [
+  "providerOverride",
+  "modelOverride",
+  "modelOverrideSource",
+  "authProfileOverride",
+  "authProfileOverrideSource",
+  "modelProvider",
+  "model",
+] as const;
+
+interface SessionOverrideUpdate {
+  /** Provider id, e.g. "llamacpp", "deepseek", "openai". */
+  provider: string;
+  /** Model id within the provider, e.g. "gemma4-e2b-it-q4_0". */
+  modelId: string;
+  /**
+   * Source tag stored alongside the override. Pass **"user"** for any
+   * user-initiated choice (UI clicks, explicit Local-only toggle).
+   * OpenClaw's per-turn model resolver returns early when it sees
+   * `modelOverrideSource === "user"` on an existing entry, which is
+   * the only reliable way to make an override stick against the
+   * auto-picker. `"manual"` is *not* a sticky value — OpenClaw's
+   * resolver doesn't special-case it and will happily overwrite it
+   * back to `"auto"` on the next turn. Pass `"auto"` only when the
+   * caller is the resolver itself (not us).
+   */
+  source?: "user" | "manual" | "auto";
+  /** Auth profile key. Defaults to `<provider>:default`. */
+  authProfile?: string;
+}
+
+async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
+  const results: string[] = [];
+  let entries: string[];
+  try {
+    entries = await fs.readdir(agentsDir);
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    const candidate = path.join(agentsDir, entry, "sessions", "sessions.json");
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) results.push(candidate);
+    } catch {
+      // No sessions directory for this agent — skip.
+    }
+  }
+  return results;
+}
+
+async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise<void> {
+  const tmp = `${filePath}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+  await fs.rename(tmp, filePath);
+}
+
+/**
+ * Rewrite every session's per-session model/provider override across
+ * every agent on disk to the given target, tagged with the given
+ * source. Returns how many sessions were touched.
+ *
+ * Use `source: "user"` (also the default) when the caller is acting
+ * on a direct user choice — chat-panel model dropdown, Local-only
+ * toggle, etc. OpenClaw's per-turn model resolver explicitly returns
+ * early for entries whose `modelOverrideSource === "user"`, which is
+ * the only value that survives the auto-picker re-evaluating on
+ * every message. `"manual"` looks reasonable but is not special-cased
+ * anywhere in the OpenClaw dist and gets silently overwritten back
+ * to `"auto"` on the next turn.
+ *
+ * Writes are atomic (temp + rename). If any individual sessions.json
+ * fails to parse/write, the error is logged and the sweep continues —
+ * one bad file should not block the rest.
+ */
+export async function applyModelOverrideToAllAgentSessions(
+  update: SessionOverrideUpdate,
+  opts: { agentsDir?: string } = {},
+): Promise<{ filesUpdated: number; sessionsUpdated: number }> {
+  const agentsDir = opts.agentsDir ?? AGENTS_DIR;
+  const source = update.source ?? "user";
+  const authProfile = update.authProfile ?? `${update.provider}:default`;
+
+  let filesUpdated = 0;
+  let sessionsUpdated = 0;
+
+  const files = await listAgentSessionsFiles(agentsDir);
+  for (const file of files) {
+    let parsed: Record<string, Record<string, unknown>>;
+    try {
+      const raw = await fs.readFile(file, "utf-8");
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      console.error(`[openclaw-config] Skipping unreadable sessions file ${file}:`, err);
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+
+    let fileDirty = false;
+    for (const sessionKey of Object.keys(parsed)) {
+      const session = parsed[sessionKey];
+      if (!session || typeof session !== "object") continue;
+      session.providerOverride = update.provider;
+      session.modelOverride = update.modelId;
+      session.modelOverrideSource = source;
+      session.authProfileOverride = authProfile;
+      session.authProfileOverrideSource = source;
+      session.modelProvider = update.provider;
+      session.model = update.modelId;
+      fileDirty = true;
+      sessionsUpdated += 1;
+    }
+
+    if (!fileDirty) continue;
+    try {
+      await atomicWriteSessionsFile(file, parsed);
+      filesUpdated += 1;
+    } catch (err) {
+      console.error(`[openclaw-config] Failed to write patched sessions file ${file}:`, err);
+    }
+  }
+
+  return { filesUpdated, sessionsUpdated };
+}
+
+/**
+ * Parse a fully-qualified model id "<provider>/<modelId>" (e.g.
+ * "llamacpp/gemma4-e2b-it-q4_0"). Returns null when the format is
+ * unrecognised — callers should fall back to skipping the session
+ * sweep rather than writing a broken override.
+ */
+export function parseFullyQualifiedModel(fq: string): { provider: string; modelId: string } | null {
+  const idx = fq.indexOf("/");
+  if (idx <= 0 || idx === fq.length - 1) return null;
+  return { provider: fq.slice(0, idx), modelId: fq.slice(idx + 1) };
+}
+// Expose field list for downstream callers (e.g. exclusive/route.ts
+// which still needs to snapshot + restore the raw per-field state).
+export const SESSION_OVERRIDE_FIELD_LIST: readonly string[] = SESSION_OVERRIDE_FIELDS;
 
 export interface OpenClawConfig {
   [key: string]: unknown;
