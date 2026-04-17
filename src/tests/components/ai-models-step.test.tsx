@@ -172,11 +172,11 @@ describe("AIModelsStep variants", () => {
     expect(getByText("ClawBox owners also get extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
     expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
 
-    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
+    fireEvent.click(getByRole("button", { name: /Paste token manually instead/i }));
 
     expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
     expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
-    expect(getByRole("link", { name: /Open portal/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal/register");
+    expect(getByRole("link", { name: /Open portal/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal");
     expect(getByLabelText(/Paste your portal token/i, { selector: "input" })).toBeInTheDocument();
     expect(getByRole("button", { name: /Connect to ClawBox AI/i })).toBeInTheDocument();
     expect(getByText("ClawBox owners keep access to extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
@@ -204,6 +204,41 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
   });
 
+  it("closes the ClawBox AI popup when the provider becomes connected", async () => {
+    const { getByRole, queryByRole, rerender } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="openai"
+        openClawAIOfferRequest={1}
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
+
+    rerender(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="openai"
+        openClawAIOfferRequest={1}
+        currentProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
+    });
+  });
+
   it("submits the pasted ClawBox AI token to the configure route", async () => {
     const { getByLabelText, getByRole } = render(
       <AIModelsStep
@@ -219,7 +254,7 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
+    fireEvent.click(getByRole("button", { name: /Paste token manually instead/i }));
     fireEvent.change(getByLabelText(/Paste your portal token/i, { selector: "input" }), {
       target: { value: "portal-token-123" },
     });
@@ -320,5 +355,62 @@ describe("AIModelsStep variants", () => {
     expect(
       fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
     ).toBe(false);
+  });
+
+  it("starts the ClawBox AI portal flow and polls the local callback status", async () => {
+    const onConfigured = vi.fn();
+    const openMock = vi.fn(() => ({ focus: vi.fn(), close: vi.fn(), closed: false }));
+    vi.stubGlobal("open", openMock);
+    let pollCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: [] }) };
+      }
+      if (url === "/setup-api/ai-models/clawai/start") {
+        return {
+          ok: true,
+          json: async () => ({ url: "https://openclawhardware.dev/portal/connect?state=abc" }),
+        };
+      }
+      if (url === "/setup-api/ai-models/clawai/status") {
+        pollCount += 1;
+        return {
+          ok: true,
+          json: async () => (pollCount > 1 ? { status: "complete" } : { status: "pending" }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    }));
+
+    const { getByRole } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        onConfigured={onConfigured}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/clawai/start", expect.objectContaining({
+        method: "POST",
+      }));
+    });
+    expect(openMock).toHaveBeenCalledWith("https://openclawhardware.dev/portal/connect?state=abc", "_blank", "noopener,noreferrer");
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/clawai/status", { cache: "no-store" });
+    });
+    await waitFor(() => {
+      expect(onConfigured).toHaveBeenCalledTimes(1);
+    }, { timeout: 3000 });
+    vi.unstubAllGlobals();
   });
 });

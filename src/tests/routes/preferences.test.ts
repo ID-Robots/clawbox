@@ -78,7 +78,7 @@ describe("/setup-api/preferences", () => {
     it("sets allowed preferences", async () => {
       const req = new Request("http://localhost/setup-api/preferences", {
         method: "POST",
-        body: JSON.stringify({ wp_opacity: 80, desktop_theme: "dark" }),
+        body: JSON.stringify({ wp_opacity: 80, desktop_theme: "dark", ff_clawkeep_enabled: 1 }),
       });
       const res = await POST(req);
       const body = await res.json();
@@ -86,6 +86,7 @@ describe("/setup-api/preferences", () => {
       expect(mockSetMany).toHaveBeenCalledWith({
         "pref:wp_opacity": 80,
         "pref:desktop_theme": "dark",
+        "pref:ff_clawkeep_enabled": 1,
       });
     });
 

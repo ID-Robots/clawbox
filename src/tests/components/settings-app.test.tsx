@@ -83,9 +83,11 @@ function jsonResponse(data: unknown) {
 
 describe("SettingsApp factory reset overlay", () => {
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
       const url = input.toString();
 
+      if (url === "/setup-api/preferences?keys=ff_clawkeep_enabled") return jsonResponse({ ff_clawkeep_enabled: 0 });
+      if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
       if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
       if (url === "/setup-api/update/versions") {
@@ -170,5 +172,26 @@ describe("SettingsApp factory reset overlay", () => {
 
     const providerRadio = await screen.findByRole("radio", { name: /ClawBox AI/i });
     expect(providerRadio).toBeChecked();
+  });
+
+  it("toggles feature flags from the About section", async () => {
+    render(<SettingsApp ui={defaultUi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Feature Flags/i }));
+
+    const panel = await screen.findByTestId("feature-flags-panel");
+    expect(within(panel).getByText("ClawKeep")).toBeInTheDocument();
+
+    const toggle = within(panel).getByRole("button", { pressed: false });
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/preferences", expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ff_clawkeep_enabled: 1 }),
+      }));
+    });
   });
 });

@@ -229,6 +229,17 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     ssid: "ClawBox-Setup",
     enabled: true,
   };
+  const clawKeepState = {
+    initialized: false,
+    passwordSet: false,
+    mode: null as "local" | "cloud" | "both" | null,
+    localEnabled: false,
+    localPath: null as string | null,
+    chunkCount: 0,
+    lastSync: null as string | null,
+    lastSyncCommit: null as string | null,
+    recent: [] as Array<{ hash: string; date: string; message: string }>,
+  };
   let updateBranch: string | null = null;
   let gatewayHealthChecksRemaining = 0;
   let chatActiveSource: "primary" | "local" | null = setupState.ai_model_configured
@@ -249,6 +260,50 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     },
     enabled: false,
     cdpPort: 18800,
+  };
+
+  const buildClawKeepStatus = (sourcePath: string) => {
+    const normalizedSource = normalizeDir(sourcePath);
+    const parentDir = splitPath(normalizedSource).dir;
+    const sourceName = normalizedSource.split("/").filter(Boolean).pop() ?? normalizedSource;
+    const sourceExists = normalizedSource === ""
+      ? true
+      : (files[parentDir] ?? []).some((entry) => entry.type === "directory" && entry.name === sourceName);
+    const cloudEnabled = clawKeepState.mode === "cloud" || clawKeepState.mode === "both";
+    return {
+      initialized: clawKeepState.initialized,
+      sourcePath: normalizedSource,
+      sourceAbsolutePath: `/home/clawbox/${normalizedSource}`.replace(/\/+$/, ""),
+      sourceExists,
+      backup: {
+        mode: clawKeepState.mode,
+        passwordSet: clawKeepState.passwordSet,
+        workspaceId: "workspace-demo",
+        chunkCount: clawKeepState.chunkCount,
+        lastSync: clawKeepState.lastSync,
+        lastSyncCommit: clawKeepState.lastSyncCommit,
+        local: {
+          enabled: clawKeepState.localEnabled,
+          path: clawKeepState.localPath ? `/home/clawbox/${clawKeepState.localPath}` : null,
+          lastSync: clawKeepState.localEnabled ? clawKeepState.lastSync : null,
+          ready: clawKeepState.localEnabled,
+        },
+        cloud: {
+          enabled: cloudEnabled,
+          connected: setupState.ai_model_configured,
+          available: true,
+          providerLabel: "ClawBox AI",
+          endpoint: "https://openclawhardware.dev/api/clawkeep/device-backups",
+          lastSync: cloudEnabled ? clawKeepState.lastSync : null,
+        },
+      },
+      headCommit: clawKeepState.initialized ? "abc123" : null,
+      trackedFiles: sourceExists ? 1 : 0,
+      totalSnaps: clawKeepState.recent.length,
+      dirtyFiles: 0,
+      clean: true,
+      recent: clawKeepState.recent,
+    };
   };
 
   const storeCategories = Array.from(
@@ -789,6 +844,75 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       }
       await fulfillJson(route, { success: true });
       return;
+    }
+
+    if (path === "/setup-api/clawkeep") {
+      if (method === "GET") {
+        const sourcePath = normalizeDir(url.searchParams.get("sourcePath"));
+        if (!sourcePath) {
+          await fulfillJson(route, { error: "sourcePath is required" }, 400);
+          return;
+        }
+        await fulfillJson(route, buildClawKeepStatus(sourcePath));
+        return;
+      }
+
+      if (method === "POST") {
+        const payload = await readRequestJson<{
+          action?: string;
+          sourcePath?: string;
+          localPath?: string;
+          cloudEnabled?: boolean;
+          password?: string;
+          message?: string;
+        }>(route);
+        const sourcePath = normalizeDir(payload.sourcePath ?? "");
+        if (!sourcePath) {
+          await fulfillJson(route, { error: "sourcePath is required" }, 400);
+          return;
+        }
+
+        switch (payload.action) {
+          case "init":
+            clawKeepState.initialized = true;
+            await fulfillJson(route, buildClawKeepStatus(sourcePath));
+            return;
+          case "configure": {
+            const localPath = normalizeDir(payload.localPath ?? "");
+            const cloudEnabled = !!payload.cloudEnabled;
+            clawKeepState.passwordSet = typeof payload.password === "string" && payload.password.length >= 8;
+            clawKeepState.localEnabled = !!localPath;
+            clawKeepState.localPath = localPath || null;
+            clawKeepState.mode = localPath && cloudEnabled ? "both" : localPath ? "local" : cloudEnabled ? "cloud" : null;
+            await fulfillJson(route, { status: buildClawKeepStatus(sourcePath), message: "Saved settings" });
+            return;
+          }
+          case "snap": {
+            const now = new Date().toISOString();
+            clawKeepState.recent = [
+              {
+                hash: `snap-${Date.now()}`,
+                date: now,
+                message: payload.message || "backup",
+              },
+              ...clawKeepState.recent,
+            ].slice(0, 8);
+            await fulfillJson(route, { message: "Snapshot saved" });
+            return;
+          }
+          case "sync": {
+            const now = new Date().toISOString();
+            clawKeepState.lastSync = now;
+            clawKeepState.lastSyncCommit = "abc123";
+            clawKeepState.chunkCount = Math.max(clawKeepState.chunkCount, 1);
+            await fulfillJson(route, { status: buildClawKeepStatus(sourcePath), message: "Backup complete" });
+            return;
+          }
+          default:
+            await fulfillJson(route, { error: "Unknown action" }, 400);
+            return;
+        }
+      }
     }
 
     if (path === "/setup-api/telegram/status") {

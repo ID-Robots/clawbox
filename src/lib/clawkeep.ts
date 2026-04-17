@@ -4,12 +4,14 @@ import os from "os";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { getAll } from "@/lib/config-store";
 
 const exec = promisify(execFile);
 
 const FILES_ROOT = path.resolve(process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox"));
 const CLAWKEEP_DIR = ".clawkeep";
 const CONFIG_PATH = path.join(CLAWKEEP_DIR, "config.json");
+const CLAWKEEP_CLOUD_SYNC_URL = process.env.CLAWKEEP_CLOUD_SYNC_URL?.trim() || "https://openclawhardware.dev/api/clawkeep/device-backups";
 const DEFAULT_IGNORE = [
   "# ClawKeep ignore - patterns here are synced to .gitignore",
   "# Add anything you don't want versioned",
@@ -56,6 +58,7 @@ const TAG_LENGTH = 16;
 const ALGORITHM = "aes-256-gcm";
 const CK01_HEADER_LENGTH = MAGIC_CK01.length + SALT_LENGTH + NONCE_LENGTH;
 const CK02_HEADER_LENGTH = MAGIC_CK02.length + NONCE_LENGTH;
+const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 
 export interface ClawKeepLogEntry {
   hash: string;
@@ -69,14 +72,26 @@ export interface ClawKeepStatus {
   sourceAbsolutePath: string;
   sourceExists: boolean;
   backup: {
-    target: string | null;
-    targetLabel: string;
+    mode: "local" | "cloud" | "both" | null;
     passwordSet: boolean;
-    wrappedKeySet: boolean;
     workspaceId: string | null;
     chunkCount: number;
     lastSync: string | null;
     lastSyncCommit: string | null;
+    local: {
+      enabled: boolean;
+      path: string | null;
+      lastSync: string | null;
+      ready: boolean;
+    };
+    cloud: {
+      enabled: boolean;
+      connected: boolean;
+      available: boolean;
+      providerLabel: string;
+      endpoint: string | null;
+      lastSync: string | null;
+    };
   };
   headCommit: string | null;
   trackedFiles: number;
@@ -86,9 +101,17 @@ export interface ClawKeepStatus {
   recent: ClawKeepLogEntry[];
 }
 
+interface BackupCloudConfig {
+  enabled?: boolean;
+  endpoint?: string | null;
+  provider?: string | null;
+  lastSync?: string | null;
+}
+
 interface BackupConfig {
   target?: string | null;
   local?: { path?: string | null } | null;
+  cloud?: BackupCloudConfig | null;
   passwordHash?: string;
   wrappedKey?: string;
   workspaceId?: string | null;
@@ -129,6 +152,24 @@ interface Manifest {
 interface ClawKeepSecrets {
   passwordHash?: string;
   encryptionKey?: string;
+}
+
+interface CloudAuthState {
+  connected: boolean;
+  token: string;
+  providerLabel: string;
+}
+
+interface ConfigureTargetsInput {
+  localPath?: string | null;
+  cloudEnabled?: boolean;
+  password?: string;
+}
+
+interface SyncOutcome {
+  chunkCount: number;
+  lastSync: string;
+  lastSyncCommit: string;
 }
 
 function resolveManagedPath(relativePath: string): string {
@@ -182,7 +223,11 @@ function secretsFilePath(sourceDir: string) {
 function sanitizeConfig(config: ClawKeepConfig): ClawKeepConfig {
   const next: ClawKeepConfig = {
     ...config,
-    backup: config.backup ? { ...config.backup } : undefined,
+    backup: config.backup ? {
+      ...config.backup,
+      local: config.backup.local ? { ...config.backup.local } : undefined,
+      cloud: config.backup.cloud ? { ...config.backup.cloud } : undefined,
+    } : undefined,
   };
   if (next.backup) {
     delete next.backup.passwordHash;
@@ -343,16 +388,6 @@ function encryptChunkWithKey(buffer: Buffer, key: Buffer) {
   return Buffer.concat([MAGIC_CK02, nonce, encrypted, tag]);
 }
 
-function encryptChunk(buffer: Buffer, password: string) {
-  const salt = crypto.randomBytes(SALT_LENGTH);
-  const nonce = crypto.randomBytes(NONCE_LENGTH);
-  const key = crypto.scryptSync(password, salt, KEY_LENGTH, { N: 16384, r: 8, p: 1 });
-  const cipher = crypto.createCipheriv(ALGORITHM, key, nonce);
-  const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([MAGIC_CK01, salt, nonce, encrypted, tag]);
-}
-
 function decryptChunk(encBuffer: Buffer, password: string | null, key: Buffer | null) {
   if (encBuffer.length < CK02_HEADER_LENGTH + TAG_LENGTH) {
     throw new Error("Invalid chunk: too small");
@@ -424,7 +459,7 @@ function writeManifest(targetDir: string, workspaceId: string, manifest: Manifes
   const workspaceDir = path.join(targetDir, workspaceId);
   ensureDirectory(workspaceDir);
   const payload = Buffer.from(JSON.stringify(manifest, null, 2), "utf8");
-  const encrypted = key ? encryptChunkWithKey(payload, key) : encryptChunk(payload, password!);
+  const encrypted = key ? encryptChunkWithKey(payload, key) : Buffer.from(payload);
   fs.writeFileSync(path.join(workspaceDir, "manifest.enc"), encrypted);
 }
 
@@ -456,26 +491,45 @@ function resolveBackupSecrets(sourceDir: string, config: ClawKeepConfig) {
   return { passwordHash: legacyPasswordHash, key };
 }
 
-function resolveConfigForSync(
-  sourceDir: string,
-  getKey: (config: ClawKeepConfig) => Buffer | null = (config) => resolveBackupSecrets(sourceDir, config)?.key ?? null,
-) {
-  const config = loadConfig(sourceDir);
-  const backup = config.backup ?? {};
-  if (backup.target !== "local" || !backup.local?.path) {
-    throw new Error("Configure a local backup target first");
-  }
-  const key = getKey(config);
-  if (!key) {
-    throw new Error("Set an encryption password first");
-  }
-  return { config, backup, key };
+function resolveBackupMode(backup: BackupConfig | undefined): "local" | "cloud" | "both" | null {
+  const hasLocal = !!backup?.local?.path;
+  const hasCloud = !!backup?.cloud?.enabled;
+  if (hasLocal && hasCloud) return "both";
+  if (hasLocal) return "local";
+  if (hasCloud) return "cloud";
+  return null;
 }
 
-async function writeEncryptedChunkFromFile(sourcePath: string, destinationPath: string, key: Buffer) {
-  const nonce = crypto.randomBytes(NONCE_LENGTH);
-  ensureDirectory(path.dirname(destinationPath));
+async function getCloudAuthState(): Promise<CloudAuthState> {
+  const config = await getAll().catch(() => ({} as Record<string, unknown>));
+  const token = typeof config[CLAWBOX_AI_TOKEN_CONFIG_KEY] === "string"
+    ? config[CLAWBOX_AI_TOKEN_CONFIG_KEY].trim()
+    : "";
+  return {
+    connected: token.length > 0,
+    token,
+    providerLabel: "ClawBox AI",
+  };
+}
 
+function resolveConfigForSync(sourceDir: string) {
+  const config = loadConfig(sourceDir);
+  const backup = config.backup ?? {};
+  const hasLocal = !!backup.local?.path;
+  const hasCloud = !!backup.cloud?.enabled;
+  if (!hasLocal && !hasCloud) {
+    throw new Error("Choose at least one backup destination first");
+  }
+  const secrets = resolveBackupSecrets(sourceDir, config);
+  if (!secrets?.key) {
+    throw new Error("Set an encryption password first");
+  }
+  return { config, backup, key: secrets.key };
+}
+
+async function createEncryptedChunkFile(sourcePath: string, key: Buffer) {
+  const destinationPath = path.join(os.tmpdir(), `clawkeep-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.enc`);
+  const nonce = crypto.randomBytes(NONCE_LENGTH);
   await new Promise<void>((resolve, reject) => {
     const input = fs.createReadStream(sourcePath);
     const cipher = crypto.createCipheriv(ALGORITHM, key, nonce);
@@ -500,17 +554,15 @@ async function writeEncryptedChunkFromFile(sourcePath: string, destinationPath: 
         fail(headerError);
         return;
       }
-
       cipher.pipe(output, { end: false });
       input.pipe(cipher);
     });
 
     cipher.on("end", () => {
       if (settled) return;
-      const tag = cipher.getAuthTag();
-      output.write(tag, (writeError) => {
-        if (writeError) {
-          fail(writeError);
+      output.write(cipher.getAuthTag(), (tagError) => {
+        if (tagError) {
+          fail(tagError);
           return;
         }
         output.end(() => {
@@ -522,7 +574,10 @@ async function writeEncryptedChunkFromFile(sourcePath: string, destinationPath: 
     });
   });
 
-  return fs.statSync(destinationPath).size;
+  return {
+    path: destinationPath,
+    size: fs.statSync(destinationPath).size,
+  };
 }
 
 function ensureSourceAndTargetAreSeparate(sourceDir: string, targetDir: string) {
@@ -534,9 +589,135 @@ function ensureSourceAndTargetAreSeparate(sourceDir: string, targetDir: string) 
   }
 }
 
+function buildManifest(base: Manifest | null, workspaceId: string) {
+  return base ?? {
+    version: 1,
+    workspaceId,
+    createdAt: new Date().toISOString(),
+    chunks: [],
+    lastSync: null,
+    totalCommits: 0,
+    compactedAt: null,
+  };
+}
+
+function applyManifestChunk(
+  manifest: Manifest,
+  chunkId: string,
+  headCommit: string,
+  lastSyncCommit: string | null,
+  commitCount: number,
+  encryptedSize: number,
+) {
+  const createdAt = new Date().toISOString();
+  manifest.chunks.push({
+    id: chunkId,
+    type: manifest.chunks.length === 0 ? "full" : "incremental",
+    fromCommit: manifest.chunks.length === 0 ? null : lastSyncCommit,
+    toCommit: headCommit,
+    commitCount,
+    size: encryptedSize,
+    createdAt,
+  });
+  manifest.lastSync = createdAt;
+  manifest.totalCommits += commitCount;
+}
+
+async function syncToLocalTarget(targetDir: string, workspaceId: string, chunkId: string, encryptedChunkPath: string, encryptedSize: number, key: Buffer, headCommit: string, lastSyncCommit: string | null, commitCount: number): Promise<SyncOutcome> {
+  const existingManifest = readManifest(targetDir, workspaceId, null, key);
+  const manifest = buildManifest(existingManifest, workspaceId);
+  const workspaceDir = path.join(targetDir, workspaceId);
+  ensureDirectory(workspaceDir);
+  fs.copyFileSync(encryptedChunkPath, path.join(workspaceDir, chunkId));
+  applyManifestChunk(manifest, chunkId, headCommit, lastSyncCommit, commitCount, encryptedSize);
+  writeManifest(targetDir, workspaceId, manifest, null, key);
+  return {
+    chunkCount: manifest.chunks.length,
+    lastSync: manifest.lastSync ?? new Date().toISOString(),
+    lastSyncCommit: headCommit,
+  };
+}
+
+async function syncToCloudTarget({
+  sourcePath,
+  workspaceId,
+  chunkId,
+  encryptedChunkPath,
+  encryptedSize,
+  headCommit,
+  lastSyncCommit,
+  commitCount,
+  endpoint,
+  token,
+}: {
+  sourcePath: string;
+  workspaceId: string;
+  chunkId: string;
+  encryptedChunkPath: string;
+  encryptedSize: number;
+  headCommit: string;
+  lastSyncCommit: string | null;
+  commitCount: number;
+  endpoint: string;
+  token: string;
+}) {
+  if (!token) {
+    throw new Error("Connect ClawBox AI before turning on cloud backup");
+  }
+  if (!endpoint) {
+    throw new Error("Cloud backup endpoint is not configured on this device");
+  }
+
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch {
+    throw new Error("Cloud backup failed: invalid endpoint configuration");
+  }
+  if (!["http:", "https:"].includes(parsedEndpoint.protocol)) {
+    throw new Error("Cloud backup failed: invalid endpoint configuration");
+  }
+
+  const manifest = buildManifest(null, workspaceId);
+  applyManifestChunk(manifest, chunkId, headCommit, lastSyncCommit, commitCount, encryptedSize);
+  const payload = new FormData();
+  payload.set("workspaceId", workspaceId);
+  payload.set("chunkId", chunkId);
+  payload.set("sourcePath", sourcePath);
+  payload.set("manifest", JSON.stringify(manifest));
+  const maybeFsWithBlob = fs as typeof fs & {
+    openAsBlob?: (filePath: string, options?: { type?: string }) => Promise<Blob>;
+  };
+  const chunkBlob = typeof maybeFsWithBlob.openAsBlob === "function"
+    ? await maybeFsWithBlob.openAsBlob(encryptedChunkPath, { type: "application/octet-stream" })
+    : new Blob([fs.readFileSync(encryptedChunkPath)]);
+  payload.set("chunk", chunkBlob, chunkId);
+
+  const response = await fetch(parsedEndpoint.toString(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-ClawKeep-Workspace": workspaceId,
+    },
+    body: payload,
+  });
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    console.error("Cloud backup error response:", response.status, bodyText);
+    throw new Error(`Cloud backup failed (${response.status})`);
+  }
+
+  return {
+    chunkCount: manifest.chunks.length,
+    lastSync: manifest.lastSync ?? new Date().toISOString(),
+    lastSyncCommit: headCommit,
+  };
+}
+
 export async function getClawKeepStatus(relativeSourcePath: string): Promise<ClawKeepStatus> {
   const sourceDir = resolveManagedPath(relativeSourcePath);
   const sourceExists = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isDirectory();
+  const cloudAuth = await getCloudAuthState();
   if (!sourceExists) {
     return {
       initialized: false,
@@ -544,14 +725,21 @@ export async function getClawKeepStatus(relativeSourcePath: string): Promise<Cla
       sourceAbsolutePath: toDisplayPath(relativeSourcePath),
       sourceExists: false,
       backup: {
-        target: null,
-        targetLabel: "Not configured",
+        mode: null,
         passwordSet: false,
-        wrappedKeySet: false,
         workspaceId: null,
         chunkCount: 0,
         lastSync: null,
         lastSyncCommit: null,
+        local: { enabled: false, path: null, lastSync: null, ready: false },
+        cloud: {
+          enabled: false,
+          connected: cloudAuth.connected,
+          available: !!CLAWKEEP_CLOUD_SYNC_URL,
+          providerLabel: cloudAuth.providerLabel,
+          endpoint: CLAWKEEP_CLOUD_SYNC_URL || null,
+          lastSync: null,
+        },
       },
       headCommit: null,
       trackedFiles: 0,
@@ -570,14 +758,21 @@ export async function getClawKeepStatus(relativeSourcePath: string): Promise<Cla
       sourceAbsolutePath: sourceDir,
       sourceExists: true,
       backup: {
-        target: null,
-        targetLabel: "Not configured",
+        mode: null,
         passwordSet: false,
-        wrappedKeySet: false,
         workspaceId: null,
         chunkCount: 0,
         lastSync: null,
         lastSyncCommit: null,
+        local: { enabled: false, path: null, lastSync: null, ready: false },
+        cloud: {
+          enabled: false,
+          connected: cloudAuth.connected,
+          available: !!CLAWKEEP_CLOUD_SYNC_URL,
+          providerLabel: cloudAuth.providerLabel,
+          endpoint: CLAWKEEP_CLOUD_SYNC_URL || null,
+          lastSync: null,
+        },
       },
       headCommit: null,
       trackedFiles: 0,
@@ -593,6 +788,7 @@ export async function getClawKeepStatus(relativeSourcePath: string): Promise<Cla
   const secrets = resolveBackupSecrets(sourceDir, config);
   const rawStatus = await runGit(sourceDir, ["status", "--porcelain"]).catch(() => "");
   const parsedStatus = parseStatus(rawStatus);
+  const mode = resolveBackupMode(backup);
 
   return {
     initialized: true,
@@ -600,16 +796,26 @@ export async function getClawKeepStatus(relativeSourcePath: string): Promise<Cla
     sourceAbsolutePath: sourceDir,
     sourceExists: true,
     backup: {
-      target: backup.target ?? null,
-      targetLabel: backup.target === "local" && backup.local?.path
-        ? backup.local.path
-        : "Not configured",
+      mode,
       passwordSet: !!secrets?.passwordHash,
-      wrappedKeySet: !!secrets?.key,
       workspaceId: backup.workspaceId ?? null,
       chunkCount: backup.chunkCount ?? 0,
       lastSync: backup.lastSync ?? null,
       lastSyncCommit: backup.lastSyncCommit ?? null,
+      local: {
+        enabled: !!backup.local?.path,
+        path: backup.local?.path ?? null,
+        lastSync: backup.lastSync ?? null,
+        ready: !!backup.local?.path && !!secrets?.key,
+      },
+      cloud: {
+        enabled: !!backup.cloud?.enabled,
+        connected: cloudAuth.connected,
+        available: !!CLAWKEEP_CLOUD_SYNC_URL,
+        providerLabel: cloudAuth.providerLabel,
+        endpoint: backup.cloud?.endpoint ?? (CLAWKEEP_CLOUD_SYNC_URL || null),
+        lastSync: backup.cloud?.lastSync ?? null,
+      },
     },
     headCommit: await getHeadCommit(sourceDir),
     trackedFiles: await getTrackedFiles(sourceDir),
@@ -639,7 +845,7 @@ export async function initClawKeep(relativeSourcePath: string) {
   await runGit(sourceDir, ["config", "user.email", "backup@clawkeep.local"]);
 
   const config: ClawKeepConfig = {
-    version: "0.1.0",
+    version: "0.2.0",
     createdAt: new Date().toISOString(),
     remote: null,
     watchInterval: 5000,
@@ -647,6 +853,7 @@ export async function initClawKeep(relativeSourcePath: string) {
     backup: {
       target: null,
       local: { path: null },
+      cloud: { enabled: false, endpoint: CLAWKEEP_CLOUD_SYNC_URL, provider: "clawai", lastSync: null },
       chunkCount: 0,
       lastSync: null,
       lastSyncCommit: null,
@@ -660,27 +867,63 @@ export async function initClawKeep(relativeSourcePath: string) {
   return await getClawKeepStatus(relativeSourcePath);
 }
 
-export async function configureClawKeepLocalTarget(relativeSourcePath: string, relativeTargetPath: string, password: string) {
+export async function configureClawKeepTargets(relativeSourcePath: string, input: ConfigureTargetsInput) {
   const sourceDir = resolveManagedPath(relativeSourcePath);
-  const targetDir = resolveManagedPath(relativeTargetPath);
-  ensureSourceAndTargetAreSeparate(sourceDir, targetDir);
-  ensureDirectory(targetDir);
-
   const config = loadConfig(sourceDir);
   if (!config.backup) config.backup = {};
-  const workspaceId = config.backup.workspaceId || `${path.basename(sourceDir)}-${crypto.randomBytes(4).toString("hex")}`;
+  const existingSecrets = resolveBackupSecrets(sourceDir, config);
+  const trimmedPassword = input.password?.trim() ?? "";
+  const trimmedLocalPath = input.localPath?.trim() ?? "";
+  const localEnabled = trimmedLocalPath.length > 0;
+  const cloudEnabled = !!input.cloudEnabled;
 
-  config.backup.target = "local";
-  config.backup.local = { path: targetDir };
-  config.backup.workspaceId = workspaceId;
+  if (!localEnabled && !cloudEnabled) {
+    throw new Error("Choose a local folder, cloud backup, or both");
+  }
+  if (trimmedPassword && trimmedPassword.length < 8) {
+    throw new Error("Password must be at least 8 characters");
+  }
+  if (!trimmedPassword && !existingSecrets?.passwordHash) {
+    throw new Error("Password must be at least 8 characters");
+  }
+
+  if (localEnabled) {
+    const targetDir = resolveManagedPath(trimmedLocalPath);
+    ensureSourceAndTargetAreSeparate(sourceDir, targetDir);
+    ensureDirectory(targetDir);
+    config.backup.local = { path: targetDir };
+  } else {
+    config.backup.local = { path: null };
+  }
+
+  config.backup.cloud = {
+    enabled: cloudEnabled,
+    endpoint: CLAWKEEP_CLOUD_SYNC_URL,
+    provider: "clawai",
+    lastSync: config.backup.cloud?.lastSync ?? null,
+  };
+  config.backup.target = resolveBackupMode(config.backup);
+  config.backup.workspaceId = config.backup.workspaceId || `${path.basename(sourceDir)}-${crypto.randomBytes(4).toString("hex")}`;
   saveConfig(sourceDir, config);
 
-  saveSecrets(sourceDir, {
-    passwordHash: hashPassword(password),
-    encryptionKey: deriveEncryptionKey(password).toString("base64"),
-  });
+  if (trimmedPassword) {
+    saveSecrets(sourceDir, {
+      passwordHash: hashPassword(trimmedPassword),
+      encryptionKey: deriveEncryptionKey(trimmedPassword).toString("base64"),
+    });
+  } else if (existingSecrets) {
+    saveSecrets(sourceDir, existingSecrets);
+  }
 
   return await getClawKeepStatus(relativeSourcePath);
+}
+
+export async function configureClawKeepLocalTarget(relativeSourcePath: string, relativeTargetPath: string, password: string) {
+  return await configureClawKeepTargets(relativeSourcePath, {
+    localPath: relativeTargetPath,
+    cloudEnabled: false,
+    password,
+  });
 }
 
 export async function snapClawKeep(relativeSourcePath: string, message?: string) {
@@ -710,7 +953,7 @@ export async function snapClawKeep(relativeSourcePath: string, message?: string)
 export async function syncClawKeep(relativeSourcePath: string) {
   const sourceDir = resolveManagedPath(relativeSourcePath);
   const { config, backup, key } = resolveConfigForSync(sourceDir);
-  const targetDir = backup.local?.path!;
+  const cloudAuth = await getCloudAuthState();
   const workspaceId = backup.workspaceId || `${path.basename(sourceDir)}-${crypto.randomBytes(4).toString("hex")}`;
   const headCommit = await getHeadCommit(sourceDir);
   if (!headCommit) {
@@ -736,57 +979,93 @@ export async function syncClawKeep(relativeSourcePath: string) {
     };
   }
 
-  const manifest = readManifest(targetDir, workspaceId, null, key) ?? {
-    version: 1,
-    workspaceId,
-    createdAt: new Date().toISOString(),
-    chunks: [],
-    lastSync: null,
-    totalCommits: 0,
-    compactedAt: null,
-  };
+  const commitCount = await countCommits(sourceDir, lastSyncCommit, headCommit);
+  const chunkId = `chunk-${String((backup.chunkCount ?? 0) + 1).padStart(6, "0")}.enc`;
+  const bundlePath = await createBundle(sourceDir, lastSyncCommit);
+  let encryptedChunk: { path: string; size: number } | null = null;
+  const destinations: string[] = [];
+  const warnings: string[] = [];
+  let lastSyncAt = new Date().toISOString();
 
-  const chunkId = `chunk-${String(manifest.chunks.length + 1).padStart(6, "0")}.enc`;
-  const workspaceDir = path.join(targetDir, workspaceId);
-  ensureDirectory(workspaceDir);
-
-  const bundlePath = await createBundle(sourceDir, manifest.chunks.length === 0 ? null : lastSyncCommit);
-  let encryptedSize = 0;
   try {
-    encryptedSize = await writeEncryptedChunkFromFile(bundlePath, path.join(workspaceDir, chunkId), key);
+    encryptedChunk = await createEncryptedChunkFile(bundlePath, key);
+
+    if (backup.local?.path) {
+      const localOutcome = await syncToLocalTarget(
+        backup.local.path,
+        workspaceId,
+        chunkId,
+        encryptedChunk.path,
+        encryptedChunk.size,
+        key,
+        headCommit,
+        lastSyncCommit,
+        commitCount,
+      );
+      lastSyncAt = localOutcome.lastSync;
+      destinations.push("local");
+    }
+
+    if (backup.cloud?.enabled) {
+      try {
+        const cloudOutcome = await syncToCloudTarget({
+          sourcePath: relativeSourcePath,
+          workspaceId,
+          chunkId,
+          encryptedChunkPath: encryptedChunk.path,
+          encryptedSize: encryptedChunk.size,
+          headCommit,
+          lastSyncCommit,
+          commitCount,
+          endpoint: backup.cloud.endpoint?.trim() || CLAWKEEP_CLOUD_SYNC_URL,
+          token: cloudAuth.token,
+        });
+        config.backup ??= {};
+        config.backup.cloud = {
+          ...(config.backup.cloud ?? {}),
+          enabled: true,
+          endpoint: backup.cloud.endpoint?.trim() || CLAWKEEP_CLOUD_SYNC_URL,
+          provider: "clawai",
+          lastSync: cloudOutcome.lastSync,
+        };
+        lastSyncAt = cloudOutcome.lastSync;
+        destinations.push("cloud");
+      } catch (error) {
+        warnings.push(error instanceof Error ? error.message : "Cloud backup failed");
+      }
+    }
   } finally {
     try {
       fs.unlinkSync(bundlePath);
     } catch {
       // Ignore temp bundle cleanup failures.
     }
+    if (encryptedChunk?.path) {
+      try {
+        fs.unlinkSync(encryptedChunk.path);
+      } catch {
+        // Ignore encrypted temp cleanup failures.
+      }
+    }
   }
 
-  const commitCount = await countCommits(sourceDir, manifest.chunks.length === 0 ? null : lastSyncCommit, headCommit);
-  manifest.chunks.push({
-    id: chunkId,
-    type: manifest.chunks.length === 0 ? "full" : "incremental",
-    fromCommit: manifest.chunks.length === 0 ? null : lastSyncCommit,
-    toCommit: headCommit,
-    commitCount,
-    size: encryptedSize,
-    createdAt: new Date().toISOString(),
-  });
-  manifest.lastSync = new Date().toISOString();
-  manifest.totalCommits += commitCount;
-  writeManifest(targetDir, workspaceId, manifest, null, key);
+  if (destinations.length === 0) {
+    throw new Error(warnings[0] ?? "No backup destination completed successfully");
+  }
 
-  if (!config.backup) config.backup = {};
+  config.backup ??= {};
   config.backup.workspaceId = workspaceId;
-  config.backup.chunkCount = manifest.chunks.length;
-  config.backup.lastSync = manifest.lastSync;
+  config.backup.chunkCount = (config.backup.chunkCount ?? 0) + 1;
+  config.backup.lastSync = lastSyncAt;
   config.backup.lastSyncCommit = headCommit;
+  config.backup.target = resolveBackupMode(config.backup);
   saveConfig(sourceDir, config);
 
+  const warningSuffix = warnings.length > 0 ? ` Cloud warning: ${warnings.join(" ")}` : "";
   return {
     ok: true,
     synced: true,
-    message: `Synced ${manifest.chunks.length} encrypted backup chunk${manifest.chunks.length === 1 ? "" : "s"}`,
+    message: `Backed up to ${destinations.join(" + ")}.${warningSuffix}`.trim(),
     status: await getClawKeepStatus(relativeSourcePath),
   };
 }

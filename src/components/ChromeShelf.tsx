@@ -109,6 +109,20 @@ export default function ChromeShelf({
     ? "text-emerald-300"
     : "text-red-700";
   const shieldInteractive = typeof onClawKeepShieldClick === "function";
+  const renderShieldButton = () => {
+    if (!shieldInteractive) return null;
+    return (
+      <button
+        onClick={onClawKeepShieldClick}
+        className="flex items-center justify-center w-10 h-10 rounded-full transition-colors hover:bg-white/10 active:bg-white/15 cursor-pointer"
+        title={shieldTitle}
+        aria-label={shieldTitle}
+        data-testid="shelf-clawkeep-shield-button"
+      >
+        <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
+      </button>
+    );
+  };
 
   const renderApp = (app: ShelfApp) => (
     <button
@@ -204,18 +218,7 @@ export default function ChromeShelf({
               </button>
             )}
             <div className="absolute right-2 flex items-center gap-1">
-              <button
-                onClick={onClawKeepShieldClick}
-                disabled={!shieldInteractive}
-                aria-disabled={!shieldInteractive}
-                tabIndex={shieldInteractive ? undefined : -1}
-                className={`flex items-center justify-center w-10 h-10 rounded-full transition-colors ${shieldInteractive ? "hover:bg-white/10 active:bg-white/15 cursor-pointer" : "cursor-default opacity-70"}`}
-                title={shieldTitle}
-                aria-label={shieldTitle}
-                data-testid="shelf-clawkeep-shield-button"
-              >
-                <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
-              </button>
+              {renderShieldButton()}
               <button
                 onClick={onTrayClick}
                 className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -303,18 +306,7 @@ export default function ChromeShelf({
               <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
             </button>
           )}
-          <button
-            onClick={onClawKeepShieldClick}
-            disabled={!shieldInteractive}
-            aria-disabled={!shieldInteractive}
-            tabIndex={shieldInteractive ? undefined : -1}
-            className={`flex items-center justify-center w-10 h-10 rounded-full transition-colors ${shieldInteractive ? "hover:bg-white/10 active:bg-white/15 cursor-pointer" : "cursor-default opacity-70"}`}
-            title={shieldTitle}
-            aria-label={shieldTitle}
-            data-testid="shelf-clawkeep-shield-button"
-          >
-            <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
-          </button>
+          {renderShieldButton()}
           <button
             onClick={onTrayClick}
             className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

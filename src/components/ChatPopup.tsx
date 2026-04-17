@@ -72,7 +72,12 @@ interface ChatModelState {
   local: { available: boolean; label: string | null; model: string | null }
 }
 
+// clawai is the builtin default provider, so when it is available we show
+// the user-facing option label (usually "ClawBox AI"). For other providers,
+// we surface the technical model identifier via option.model and fall back to
+// a setup prompt when the provider is not yet available.
 function getChatModelOptionText(option: ChatModelState['options'][number]) {
+  if (option.available && option.provider === 'clawai') return option.label || option.id
   if (option.available && option.model) return option.model
   return `${option.label} - Set up in Settings`
 }
