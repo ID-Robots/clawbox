@@ -47,7 +47,14 @@ as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 
 # Run a command as the clawbox user with login environment
 # Explicit PATH ensures bun/node are found even inside systemd services
-as_clawbox_login() { su - "$CLAWBOX_USER" -c "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"; }
+as_clawbox_login() {
+  # On Jetson, CUDA tools live at /usr/local/cuda/bin but aren't on the login
+  # shell's PATH by default. Include them so cmake / nvcc / llama.cpp builds
+  # can find the toolkit during `as_clawbox_login` invocations.
+  local cuda_prefix=""
+  [ -x /usr/local/cuda/bin/nvcc ] && cuda_prefix="/usr/local/cuda/bin:"
+  su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
+}
 
 ensure_env_setting() {
   local env_file="$1"
@@ -804,6 +811,14 @@ step_llamacpp_install() {
   local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
   local ENABLE_GGML_CUDA="OFF"
 
+  # On Jetson, nvcc ships at /usr/local/cuda/bin but isn't on systemd's PATH,
+  # so `command -v nvcc` fails and we silently fall back to a CPU-only build.
+  # Probe the standard location and add it to PATH so detection works regardless
+  # of how install.sh is invoked (interactive shell vs systemd unit).
+  if ! command -v nvcc &>/dev/null && [ -x /usr/local/cuda/bin/nvcc ]; then
+    export PATH="/usr/local/cuda/bin:$PATH"
+  fi
+
   if command -v nvcc &>/dev/null; then
     ENABLE_GGML_CUDA="ON"
   fi
@@ -822,16 +837,38 @@ step_llamacpp_install() {
     echo "  Hugging Face CLI already installed"
   fi
 
+  # Determine if a rebuild is needed. Rebuild when:
+  #   a) llama-server is missing, OR
+  #   b) CUDA is now available but the installed binary was built CPU-only
+  #      (common upgrade case for existing installs that predate the fix above).
+  local needs_rebuild="false"
   if [ ! -x /usr/local/bin/llama-server ]; then
-    echo "  Installing llama.cpp server..."
+    needs_rebuild="true"
+  elif [ "$ENABLE_GGML_CUDA" = "ON" ] \
+       && ! ldd /usr/local/bin/llama-server 2>/dev/null | grep -qiE 'libcuda|libcublas|libcudart'; then
+    echo "  Existing llama-server was built without CUDA — rebuilding with GPU support"
+    needs_rebuild="true"
+  fi
+
+  if [ "$needs_rebuild" = "true" ]; then
+    echo "  Installing llama.cpp server (CUDA=$ENABLE_GGML_CUDA)..."
     if [ ! -d "$LLAMA_DIR/.git" ]; then
       as_clawbox git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
     fi
-    as_clawbox_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=$ENABLE_GGML_CUDA"
+    # Pin CUDA architectures to Jetson Orin's sm_87 so cmake doesn't spend
+    # ~15 extra minutes probing / compiling kernels for datacenter and
+    # desktop GPUs we don't target. Without this, configure on Jetson ARM
+    # can take 20–30 minutes and the resulting binary is 8x larger than
+    # needed.
+    local LLAMACPP_CMAKE_FLAGS=(-DCMAKE_BUILD_TYPE=Release "-DGGML_CUDA=$ENABLE_GGML_CUDA")
+    if [ "$ENABLE_GGML_CUDA" = "ON" ]; then
+      LLAMACPP_CMAKE_FLAGS+=(-DCMAKE_CUDA_ARCHITECTURES=87)
+    fi
+    as_clawbox_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build ${LLAMACPP_CMAKE_FLAGS[*]}"
     as_clawbox_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"
     install -m 755 "$LLAMA_DIR/build/bin/llama-server" /usr/local/bin/llama-server
   else
-    echo "  llama-server already installed"
+    echo "  llama-server already installed (CUDA=$ENABLE_GGML_CUDA)"
   fi
 
   ensure_llamacpp_model_cached
