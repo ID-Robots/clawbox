@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  configureClawKeepLocalTarget,
+  configureClawKeepTargets,
   getClawKeepStatus,
   initClawKeep,
   snapClawKeep,
@@ -39,14 +39,22 @@ export async function POST(req: NextRequest) {
       case "init":
         return NextResponse.json(await initClawKeep(sourcePath));
       case "configure": {
-        if (typeof body.targetPath !== "string" || !body.targetPath.trim()) {
-          return NextResponse.json({ error: "targetPath is required" }, { status: 400 });
-        }
-        if (typeof body.password !== "string" || body.password.length < 8) {
+        if (typeof body.password === "string" && body.password.trim().length > 0 && body.password.trim().length < 8) {
           return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
         }
+        const localPath = typeof body.localPath === "string"
+          ? body.localPath
+          : (typeof body.targetPath === "string" ? body.targetPath : "");
+        const cloudEnabled = !!body.cloudEnabled;
+        if (!localPath.trim() && !cloudEnabled) {
+          return NextResponse.json({ error: "Choose a local folder, cloud backup, or both" }, { status: 400 });
+        }
         return NextResponse.json(
-          await configureClawKeepLocalTarget(sourcePath, body.targetPath, body.password),
+          await configureClawKeepTargets(sourcePath, {
+            localPath,
+            cloudEnabled,
+            password: typeof body.password === "string" ? body.password : undefined,
+          }),
         );
       }
       case "snap":

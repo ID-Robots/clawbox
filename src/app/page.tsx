@@ -20,6 +20,7 @@ import ChatPopup from "@/components/ChatPopup";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
+import { FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
@@ -154,6 +155,13 @@ function isClawAiProvider(provider: unknown): boolean {
   return normalized === "clawai" || normalized === "deepseek";
 }
 
+function isBuiltInAppEnabled(appId: string, featureFlags: Record<string, boolean>) {
+  if (appId === "clawkeep") {
+    return !!featureFlags[FEATURE_FLAG_KEYS.clawkeep];
+  }
+  return true;
+}
+
 
 function ChromeDesktopInner() {
   const { t } = useT();
@@ -162,13 +170,25 @@ function ChromeDesktopInner() {
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
   const [clawAiAuthenticated, setClawAiAuthenticated] = useState(false);
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({
+    [FEATURE_FLAG_KEYS.clawkeep]: false,
+  });
+  const featureFlagsRef = useRef(featureFlags);
+
+  useEffect(() => {
+    featureFlagsRef.current = featureFlags;
+  }, [featureFlags]);
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
     setSetupRequired(!data.setup_complete);
     const hasClawAi = isClawAiProvider(data.ai_model_provider) && !!data.ai_model_configured;
     setClawAiAuthenticated(hasClawAi);
-    setShowClawAiOfferNotification(!!data.setup_complete && !hasClawAi);
+    setShowClawAiOfferNotification(
+      !!data.setup_complete &&
+      !hasClawAi &&
+      !!featureFlagsRef.current[FEATURE_FLAG_KEYS.clawkeep],
+    );
     return data;
   }, []);
 
@@ -247,16 +267,25 @@ function ChromeDesktopInner() {
       .then(r => r.json())
       .then((data: Record<string, unknown>) => {
         prefsLoaded.current = true;
+        const clawkeepEnabled = isFeatureFlagEnabled(data[FEATURE_FLAG_KEYS.clawkeep]);
         // Wallpaper
         if (data.wp_id) setWallpaperId(String(data.wp_id));
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
         if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
+        setFeatureFlags({
+          [FEATURE_FLAG_KEYS.clawkeep]: clawkeepEnabled,
+        });
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, { name: string; color: string; iconUrl: string }>);
         // Desktop
-        if (Array.isArray(data.desktop_apps)) setDesktopApps(data.desktop_apps as string[]);
+        if (Array.isArray(data.desktop_apps)) {
+          const nextFlags = {
+            [FEATURE_FLAG_KEYS.clawkeep]: clawkeepEnabled,
+          };
+          setDesktopApps((data.desktop_apps as string[]).filter((appId) => isBuiltInAppEnabled(appId, nextFlags)));
+        }
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
         if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
@@ -287,6 +316,28 @@ function ChromeDesktopInner() {
       })
       .catch(() => { prefsLoaded.current = true; });
   }, []);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail ?? {};
+      setFeatureFlags((current) => ({
+        ...current,
+        [FEATURE_FLAG_KEYS.clawkeep]: isFeatureFlagEnabled(detail[FEATURE_FLAG_KEYS.clawkeep]),
+      }));
+    };
+    window.addEventListener("clawbox:feature-flags-changed", handler);
+    return () => window.removeEventListener("clawbox:feature-flags-changed", handler);
+  }, []);
+
+  useEffect(() => {
+    if (featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
+      setDesktopApps((current) => (current.includes("clawkeep") ? current : [...current, "clawkeep"]));
+      return;
+    }
+    setDesktopApps((current) => current.filter((appId) => appId !== "clawkeep"));
+    setOpenWindows((current) => current.filter((windowItem) => windowItem.appId !== "clawkeep"));
+    setShowClawAiOfferNotification(false);
+  }, [featureFlags]);
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
@@ -846,7 +897,7 @@ function ChromeDesktopInner() {
       }
     }
     return [
-      ...apps,
+      ...apps.filter((app) => isBuiltInAppEnabled(app.id, featureFlags)),
       ...installedAppDefs,
       {
         id: "setup",
@@ -858,7 +909,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta]);
+  }, [featureFlags, installedApps, installedMeta]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -1106,12 +1157,16 @@ function ChromeDesktopInner() {
   }, []);
 
   const openClawKeepOrAiProvider = useCallback(() => {
+    if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
+      openUpdateSettings();
+      return;
+    }
     if (clawAiAuthenticated) {
       openApp("clawkeep");
       return;
     }
     openClawAiProviderSettings();
-  }, [clawAiAuthenticated, openApp, openClawAiProviderSettings]);
+  }, [clawAiAuthenticated, featureFlags, openApp, openClawAiProviderSettings, openUpdateSettings]);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -1229,7 +1284,7 @@ function ChromeDesktopInner() {
       case "files":
         return <FilesApp />;
       case "clawkeep":
-        return <ClawKeepApp />;
+        return <ClawKeepApp onOpenAiProviderSettings={openClawAiProviderSettings} />;
       case "browser":
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":
@@ -1433,7 +1488,7 @@ function ChromeDesktopInner() {
         </div>
       )}
       {(updateAvailable || showClawAiOfferNotification) && (
-        <div className="fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
+        <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
           {updateAvailable && (() => {
             const cb = updateAvailable.clawbox;
@@ -1468,13 +1523,13 @@ function ChromeDesktopInner() {
                   </div>
                   <button
                     onClick={dismissUpdateNotification}
-                    className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
                     aria-label={t("updateNotification.dismiss")}
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
                   </button>
                 </div>
-                <div className="flex items-center gap-2 px-4 pb-3">
+                <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
                   <button
                     onClick={openUpdateSettings}
                     className="flex-1 px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
@@ -1517,7 +1572,7 @@ function ChromeDesktopInner() {
                 </div>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
-                  className="w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                  className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
                   aria-label="Dismiss ClawBox AI offer"
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
@@ -1528,7 +1583,7 @@ function ChromeDesktopInner() {
                   We’ll open AI Provider settings with ClawBox AI already selected so you can log in right away.
                 </div>
               </div>
-              <div className="flex items-center gap-2 px-4 pb-3">
+              <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
                 <button
                   onClick={openClawAiProviderSettings}
                   className="flex-1 px-3 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
@@ -1942,7 +1997,7 @@ function ChromeDesktopInner() {
         onTrayClick={() => {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
-        onClawKeepShieldClick={openClawKeepOrAiProvider}
+        onClawKeepShieldClick={featureFlags[FEATURE_FLAG_KEYS.clawkeep] ? openClawKeepOrAiProvider : undefined}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

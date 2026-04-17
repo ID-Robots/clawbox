@@ -13,6 +13,7 @@ import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { cleanVersion } from "@/lib/version-utils";
+import { FEATURE_FLAGS, FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
 
 /* ── Types ── */
 
@@ -223,6 +224,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [betaEnabled, setBetaEnabled] = useState(false);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [betaSaving, setBetaSaving] = useState(false);
+  const [featureFlagsOpen, setFeatureFlagsOpen] = useState(false);
+  const [featureFlagsSaving, setFeatureFlagsSaving] = useState<string | null>(null);
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({
+    [FEATURE_FLAG_KEYS.clawkeep]: false,
+  });
   const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const updatePollControllerRef = useRef<AbortController | null>(null);
 
@@ -285,6 +291,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.branch === "beta") setBetaEnabled(true); })
       .catch(() => {});
+    fetch(`/setup-api/preferences?keys=${FEATURE_FLAGS.map((flag) => flag.key).join(",")}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || typeof data !== "object") return;
+        setFeatureFlags((current) => {
+          const next = { ...current };
+          for (const flag of FEATURE_FLAGS) {
+            next[flag.key] = isFeatureFlagEnabled((data as Record<string, unknown>)[flag.key]);
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
   }, []);
 
 
@@ -335,6 +354,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
     } catch {} finally { setBetaSaving(false); }
   };
+
+  const toggleFeatureFlag = useCallback(async (key: string, enabled: boolean) => {
+    setFeatureFlagsSaving(key);
+    setFeatureFlags((current) => ({ ...current, [key]: enabled }));
+    try {
+      const response = await fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [key]: enabled ? 1 : 0 }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to save feature flag");
+      }
+      window.dispatchEvent(new CustomEvent("clawbox:feature-flags-changed", {
+        detail: { [key]: enabled ? 1 : 0 },
+      }));
+    } catch {
+      setFeatureFlags((current) => ({ ...current, [key]: !enabled }));
+    } finally {
+      setFeatureFlagsSaving(null);
+    }
+  }, []);
 
   const triggerUpdate = async () => {
     setUpdateStarted(true);
@@ -2404,6 +2445,54 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {t("settings.discordCommunity")}
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
+
+            <div className="bg-white/5 rounded-xl px-4 py-3 space-y-3">
+              <button
+                type="button"
+                onClick={() => setFeatureFlagsOpen((value) => !value)}
+                aria-expanded={featureFlagsOpen}
+                aria-controls="feature-flags-panel"
+                className="w-full flex items-center gap-3 text-left bg-transparent border-none cursor-pointer p-0"
+              >
+                <span className="material-symbols-rounded text-cyan-300" style={{ fontSize: 20 }}>flag</span>
+                <div>
+                  <div className="text-sm text-[var(--text-primary)]">Feature Flags</div>
+                  <div className="text-xs text-[var(--text-muted)]">Enable or disable in-progress features on this device.</div>
+                </div>
+                <span className="material-symbols-rounded ml-auto text-[var(--text-muted)]" style={{ fontSize: 18 }}>
+                  {featureFlagsOpen ? "expand_less" : "expand_more"}
+                </span>
+              </button>
+
+              {featureFlagsOpen && (
+                <div id="feature-flags-panel" className="space-y-3 pt-2 border-t border-[var(--border-subtle)]" data-testid="feature-flags-panel">
+                  {FEATURE_FLAGS.map((flag) => {
+                    const enabled = !!featureFlags[flag.key];
+                    const saving = featureFlagsSaving === flag.key;
+                    return (
+                      <div key={flag.key} className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm text-[var(--text-primary)]">{flag.label}</div>
+                          <div className="text-xs text-[var(--text-muted)] mt-1">{flag.description}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleFeatureFlag(flag.key, !enabled)}
+                          disabled={saving}
+                          aria-pressed={enabled}
+                          className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${enabled ? "bg-emerald-500" : "bg-white/15"} ${saving ? "opacity-50" : ""}`}
+                        >
+                          <span
+                            className="absolute w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200"
+                            style={{ left: 2, transform: enabled ? "translateX(18px)" : "translateX(0)" }}
+                          />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
             {/* Beta toggle */}
             <div className="bg-white/5 rounded-xl px-4 py-3">

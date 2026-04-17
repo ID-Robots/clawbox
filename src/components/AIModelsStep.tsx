@@ -590,6 +590,9 @@ export default function AIModelsStep({
   const oauthStartControllerRef = useRef<AbortController | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
+  const clawAiStartControllerRef = useRef<AbortController | null>(null);
+  const clawAiPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clawAiWindowRef = useRef<Window | null>(null);
 
   useEffect(() => {
     if (!allowedProviders.some((provider) => provider.id === selectedProvider)) {
@@ -627,6 +630,23 @@ export default function AIModelsStep({
     pollControllerRef.current?.abort();
   }, []);
 
+  const stopClawAiPolling = useCallback(() => {
+    if (clawAiPollRef.current) {
+      clearTimeout(clawAiPollRef.current);
+      clawAiPollRef.current = null;
+    }
+    clawAiStartControllerRef.current?.abort();
+    clawAiStartControllerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (normalizedCurrentProvider !== "clawai") return;
+    stopClawAiPolling();
+    setSaving(false);
+    setShowClawAIOffer(false);
+    setStatus((current) => (current?.type === "error" ? null : current));
+  }, [normalizedCurrentProvider, stopClawAiPolling]);
+
   useEffect(() => {
     fetch("/setup-api/ai-models/oauth/providers")
       .then((res) => res.json())
@@ -640,6 +660,8 @@ export default function AIModelsStep({
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
       pollControllerRef.current?.abort();
+      clawAiStartControllerRef.current?.abort();
+      if (clawAiPollRef.current) clearTimeout(clawAiPollRef.current);
     };
   }, []);
 
@@ -683,9 +705,38 @@ export default function AIModelsStep({
 
   const showSuccessAndContinue = useCallback(() => {
     tryCloseOAuthWindow(oauthWindowRef);
+    tryCloseOAuthWindow(clawAiWindowRef);
     setShowClawAIOffer(false);
     completeConfiguring();
   }, [completeConfiguring]);
+
+  useEffect(() => {
+    const handleClawAiAuthMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (!event.data || typeof event.data !== "object") return;
+      if ((event.data as { type?: string }).type !== "clawbox-clawai-auth") return;
+
+      const authMessage = event.data as { status?: "complete" | "error"; message?: string };
+      if (authMessage.status === "complete") {
+        stopClawAiPolling();
+        setSaving(false);
+        showSuccessAndContinue();
+        return;
+      }
+
+      if (authMessage.status === "error") {
+        stopClawAiPolling();
+        setSaving(false);
+        setShowClawAIOffer(true);
+        showError(authMessage.message || "ClawBox AI login failed");
+      }
+    };
+
+    window.addEventListener("message", handleClawAiAuthMessage);
+    return () => {
+      window.removeEventListener("message", handleClawAiAuthMessage);
+    };
+  }, [showError, showSuccessAndContinue, stopClawAiPolling]);
 
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
@@ -869,23 +920,79 @@ export default function AIModelsStep({
     await saveProviderConfig({ provider: "clawai", apiKey: apiKey.trim() });
   }, [apiKey, saveProviderConfig]);
 
-  const handleClawAIPrimaryAction = useCallback(() => {
-    setStatus(null);
+  const pollClawAiStatus = useCallback(async () => {
     try {
-      const portalWindow = window.open(PORTAL_LOGIN_URL, "_blank", "noopener,noreferrer");
+      const response = await fetch("/setup-api/ai-models/clawai/status", { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(await extractError(response, "Failed to check ClawBox AI login"));
+      }
+      const data = await response.json() as { status?: string; error?: string | null };
+      if (data.status === "complete") {
+        stopClawAiPolling();
+        setSaving(false);
+        showSuccessAndContinue();
+        return;
+      }
+      if (data.status === "error") {
+        stopClawAiPolling();
+        setSaving(false);
+        setShowClawAIOffer(true);
+        showError(data.error || "ClawBox AI login failed");
+        return;
+      }
+      clawAiPollRef.current = setTimeout(() => {
+        void pollClawAiStatus();
+      }, 1500);
+    } catch (err) {
+      stopClawAiPolling();
+      setSaving(false);
+      setShowClawAIOffer(true);
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }, [extractError, showError, showSuccessAndContinue, stopClawAiPolling]);
+
+  const handleClawAIPrimaryAction = useCallback(async () => {
+    setStatus(null);
+    setSaving(true);
+    stopClawAiPolling();
+    clawAiStartControllerRef.current?.abort();
+    const controller = new AbortController();
+    clawAiStartControllerRef.current = controller;
+    try {
+      const response = await fetch("/setup-api/ai-models/clawai/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: configureScope }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!response.ok) {
+        throw new Error(await extractError(response, "Failed to start ClawBox AI login"));
+      }
+      const data = await response.json() as { url?: string };
+      if (!data.url) {
+        throw new Error("ClawBox AI login URL was not returned");
+      }
+      const portalWindow = window.open(data.url, "_blank", "noopener,noreferrer");
       if (!portalWindow) {
+        setSaving(false);
         setShowClawAIOffer(true);
         return;
       }
+      clawAiWindowRef.current = portalWindow;
       try {
         portalWindow.focus();
       } catch {
         // Ignore focus failures; the portal is already open.
       }
-    } catch {
+      void pollClawAiStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setSaving(false);
       setShowClawAIOffer(true);
+      showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, []);
+  }, [configureScope, extractError, pollClawAiStatus, showError, stopClawAiPolling]);
 
   const lastHandledOfferRef = useRef(0);
   useEffect(() => {

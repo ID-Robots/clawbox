@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import ClawKeepPathPicker from "@/components/ClawKeepPathPicker";
 
 interface ClawKeepLogEntry {
   hash: string;
@@ -14,14 +15,26 @@ interface ClawKeepStatus {
   sourceAbsolutePath: string;
   sourceExists: boolean;
   backup: {
-    target: string | null;
-    targetLabel: string;
+    mode: "local" | "cloud" | "both" | null;
     passwordSet: boolean;
-    wrappedKeySet: boolean;
     workspaceId: string | null;
     chunkCount: number;
     lastSync: string | null;
     lastSyncCommit: string | null;
+    local: {
+      enabled: boolean;
+      path: string | null;
+      lastSync: string | null;
+      ready: boolean;
+    };
+    cloud: {
+      enabled: boolean;
+      connected: boolean;
+      available: boolean;
+      providerLabel: string;
+      endpoint: string | null;
+      lastSync: string | null;
+    };
   };
   headCommit: string | null;
   trackedFiles: number;
@@ -31,15 +44,14 @@ interface ClawKeepStatus {
   recent: ClawKeepLogEntry[];
 }
 
-interface FileEntry {
-  name: string;
-  type: "file" | "directory";
+interface ClawKeepAppProps {
+  onOpenAiProviderSettings?: () => void;
 }
 
 const HOME_PREFIX = "/home/clawbox";
 
-function describePath(relativePath: string) {
-  return relativePath ? `${HOME_PREFIX}/${relativePath}` : HOME_PREFIX;
+function describePath(relativePath: string | null | undefined) {
+  return relativePath ? `${HOME_PREFIX}/${relativePath.replace(/^\/+/, "")}` : HOME_PREFIX;
 }
 
 function timeAgo(date: string) {
@@ -53,218 +65,62 @@ function timeAgo(date: string) {
   return `${days}d ago`;
 }
 
-function PathPicker({
-  open,
-  title,
-  onClose,
-  onSelect,
-}: {
-  open: boolean;
-  title: string;
-  onClose: () => void;
-  onSelect: (path: string) => void;
-}) {
-  const [currentPath, setCurrentPath] = useState("");
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const modalRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
+async function extractErrorMessage(response: Response, fallback: string) {
+  const bodyText = await response.text().catch(() => "");
+  if (!bodyText) return `${fallback} (${response.status})`;
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: string };
+    if (parsed.error) return parsed.error;
+  } catch {
+    // Fall through to the raw body text below.
+  }
+  return `${fallback} (${response.status}): ${bodyText}`;
+}
 
-  const load = useCallback(async (dir: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => "");
-        let errorMessage = `Failed to read folders in ${dir || "home"} (${response.status})`;
-        if (bodyText) {
-          try {
-            const parsed = JSON.parse(bodyText) as { error?: string };
-            if (parsed.error) errorMessage = parsed.error;
-          } catch {
-            errorMessage = `${errorMessage}: ${bodyText}`;
-          }
-        }
-        throw new Error(errorMessage);
-      }
-      const data = await response.json() as { files: FileEntry[] };
-      setEntries((data.files as FileEntry[]).filter((entry) => entry.type === "directory"));
-      setCurrentPath(dir);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to read folders");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+function normalizeBackupLocalPath(backupPath: string | null | undefined) {
+  return backupPath?.replace(/^\/home\/clawbox\/?/, "") ?? "";
+}
 
-  useEffect(() => {
-    if (!open) return;
-    void load("");
-  }, [load, open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const modal = modalRef.current;
-    if (!modal) return;
-    const focusable = () =>
-      Array.from(
-        modal.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-    const initial = focusable()[0];
-    initial?.focus();
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const elements = focusable();
-      if (elements.length === 0) return;
-      const first = elements[0];
-      const last = elements[elements.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, open]);
-
-  const breadcrumbs = useMemo(
-    () => ["Home", ...currentPath.split("/").filter(Boolean)],
-    [currentPath],
-  );
-
-  if (!open) return null;
-
+function hasBackupConfigChanged(
+  status: ClawKeepStatus | null,
+  localEnabled: boolean,
+  cloudEnabled: boolean,
+  localPath: string,
+) {
   return (
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="w-full max-w-[560px] rounded-[28px] border border-white/10 bg-[#121927] shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-          <div>
-            <div id={titleId} className="text-lg font-semibold text-white">{title}</div>
-            <div className="text-xs text-white/50">{describePath(currentPath)}</div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/70 transition hover:bg-white/10"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-1 border-b border-white/10 px-5 py-3">
-          {breadcrumbs.map((crumb, index) => {
-            const next = index === 0 ? "" : currentPath.split("/").filter(Boolean).slice(0, index).join("/");
-            return (
-              <button
-                key={`${crumb}-${index}`}
-                type="button"
-                onClick={() => void load(next)}
-                className="rounded-full bg-white/5 px-3 py-1 text-xs text-white/80 transition hover:bg-white/10"
-              >
-                {crumb}
-              </button>
-            );
-          })}
-        </div>
-        <div className="max-h-[360px] overflow-y-auto px-5 py-4">
-          {loading && <div className="py-8 text-sm text-white/60">Loading folders...</div>}
-          {error && <div className="rounded-xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
-          {!loading && !error && (
-            <div className="space-y-2">
-              {entries.length === 0 && (
-                <div className="rounded-xl border border-white/8 bg-white/[0.03] px-4 py-4 text-sm text-white/55">
-                  No folders in this location yet.
-                </div>
-              )}
-              {entries.map((entry) => {
-                const nextPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-                return (
-                  <button
-                    key={nextPath}
-                    type="button"
-                    onClick={() => void load(nextPath)}
-                    className="flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-left transition hover:border-orange-400/25 hover:bg-orange-500/8"
-                  >
-                    <span className="material-symbols-rounded text-orange-300" style={{ fontSize: 20 }}>folder</span>
-                    <span className="text-sm font-medium text-white">{entry.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center justify-between border-t border-white/10 px-5 py-4">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl bg-white/5 px-4 py-2 text-sm text-white/70 transition hover:bg-white/10"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => onSelect(currentPath)}
-            className="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600"
-          >
-            Use this folder
-          </button>
-        </div>
-      </div>
-    </div>
+    !status?.backup.passwordSet ||
+    localEnabled !== !!status?.backup.local.enabled ||
+    cloudEnabled !== !!status?.backup.cloud.enabled ||
+    (localEnabled && localPath !== (status?.backup.local.path?.replace(/^\/home\/clawbox\/?/, "") ?? ""))
   );
 }
 
-export default function ClawKeepApp() {
+export default function ClawKeepApp({ onOpenAiProviderSettings }: ClawKeepAppProps) {
   const [sourcePath, setSourcePath] = useState("Documents");
-  const [targetPath, setTargetPath] = useState("Backups/clawkeep");
+  const [localPath, setLocalPath] = useState("Backups/clawkeep");
   const [password, setPassword] = useState("");
-  const [message, setMessage] = useState("");
+  const [localEnabled, setLocalEnabled] = useState(true);
+  const [cloudEnabled, setCloudEnabled] = useState(false);
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [picker, setPicker] = useState<"source" | "target" | null>(null);
+  const [picker, setPicker] = useState<"source" | "local" | null>(null);
 
   const loadStatus = useCallback(async (nextSourcePath: string) => {
     setError(null);
     try {
       const response = await fetch(`/setup-api/clawkeep?sourcePath=${encodeURIComponent(nextSourcePath)}`, { cache: "no-store" });
       if (!response.ok) {
-        const bodyText = await response.text().catch(() => "");
-        let errorMessage = `Failed to load ClawKeep for ${nextSourcePath} (${response.status})`;
-        if (bodyText) {
-          try {
-            const parsed = JSON.parse(bodyText) as { error?: string };
-            if (parsed.error) errorMessage = parsed.error;
-          } catch {
-            errorMessage = `${errorMessage}: ${bodyText}`;
-          }
-        }
-        throw new Error(errorMessage);
+        throw new Error(await extractErrorMessage(response, `Failed to load ClawKeep for ${nextSourcePath}`));
       }
-      const data = await response.json();
-      setStatus(data as ClawKeepStatus);
+      const data = await response.json() as ClawKeepStatus;
+      setStatus(data);
+      setLocalEnabled(data.backup.local.enabled || !data.backup.mode);
+      setCloudEnabled(data.backup.cloud.enabled);
+      if (data.backup.local.path) {
+        setLocalPath(normalizeBackupLocalPath(data.backup.local.path));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load ClawKeep");
     }
@@ -285,15 +141,7 @@ export default function ClawKeepApp() {
         body: JSON.stringify({ sourcePath, ...body }),
       });
       if (!response.ok) {
-        let errorMessage = `ClawKeep request failed (${response.status})`;
-        try {
-          const parsed = await response.json() as { error?: string };
-          if (parsed.error) errorMessage = parsed.error;
-        } catch {
-          const bodyText = await response.text().catch(() => "");
-          if (bodyText) errorMessage = `${errorMessage}: ${bodyText}`;
-        }
-        throw new Error(errorMessage);
+        throw new Error(await extractErrorMessage(response, "ClawKeep request failed"));
       }
       const data = await response.json();
       if ("status" in data && data.status) {
@@ -303,24 +151,71 @@ export default function ClawKeepApp() {
       }
       if (typeof data.message === "string") {
         setNotice(data.message);
-      } else {
-        setNotice("Done");
       }
-      if (body.action === "configure") {
-        setPassword("");
-      }
+      return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "ClawKeep request failed");
+      const message = err instanceof Error ? err.message : "ClawKeep request failed";
+      setError(message);
+      throw err;
     } finally {
       setBusy(false);
     }
   }, [sourcePath]);
 
+  const handleSavePlan = useCallback(async () => {
+    const trimmedPassword = password.trim();
+    if (trimmedPassword.length < 8 && !status?.backup.passwordSet) {
+      setError("Choose a password with at least 8 characters.");
+      return;
+    }
+    await runAction({
+      action: "configure",
+      localPath: localEnabled ? localPath : "",
+      cloudEnabled,
+      password: trimmedPassword.length >= 8 ? trimmedPassword : password,
+    });
+    if (trimmedPassword.length >= 8) setPassword("");
+  }, [cloudEnabled, localEnabled, localPath, password, runAction, status?.backup.passwordSet]);
+
+  const handleBackupNow = useCallback(async () => {
+    const trimmedPassword = password.trim();
+    const needsConfigUpdate = hasBackupConfigChanged(status, localEnabled, cloudEnabled, localPath);
+    if (needsConfigUpdate && trimmedPassword.length < 8 && !status?.backup.passwordSet) {
+      setError("Choose a password with at least 8 characters before turning on backup.");
+      return;
+    }
+    if (!status?.initialized) {
+      await runAction({ action: "init" });
+    }
+    if (needsConfigUpdate) {
+      await runAction({
+        action: "configure",
+        localPath: localEnabled ? localPath : "",
+        cloudEnabled,
+        password: trimmedPassword.length >= 8 ? trimmedPassword : password,
+      });
+      if (trimmedPassword.length >= 8) setPassword("");
+    }
+    await runAction({ action: "snap", message: `backup ${new Date().toISOString()}` });
+    await runAction({ action: "sync" });
+  }, [cloudEnabled, localEnabled, localPath, password, runAction, status]);
+
+  const canBackup = localEnabled || cloudEnabled;
+  const cloudNeedsConnection = cloudEnabled && !status?.backup.cloud.connected;
+  const destinationLabel = localEnabled && cloudEnabled
+    ? "This device + Cloud"
+    : localEnabled
+      ? "This device"
+      : cloudEnabled
+        ? "Cloud"
+        : "Choose a destination";
+  const primaryActionLabel = status?.initialized ? "Back up now" : "Turn on backup";
+
   return (
-    <div className="h-full overflow-y-auto bg-[linear-gradient(180deg,#0f1726_0%,#101826_45%,#0b1320_100%)]">
-      <PathPicker
+    <div data-testid="clawkeep-app" className="h-full overflow-y-auto bg-[linear-gradient(180deg,#0f1726_0%,#101826_45%,#0b1320_100%)]">
+      <ClawKeepPathPicker
         open={picker === "source"}
-        title="Choose a source folder to protect"
+        title="Choose the folder you want to protect"
         onClose={() => setPicker(null)}
         onSelect={(path) => {
           setSourcePath(path);
@@ -328,63 +223,51 @@ export default function ClawKeepApp() {
           void loadStatus(path);
         }}
       />
-      <PathPicker
-        open={picker === "target"}
-        title="Choose a backup target on this device"
+      <ClawKeepPathPicker
+        open={picker === "local"}
+        title="Choose where local backup copies should live"
         onClose={() => setPicker(null)}
         onSelect={(path) => {
-          setTargetPath(path);
+          setLocalPath(path);
           setPicker(null);
         }}
       />
 
-      <div className="mx-auto flex max-w-5xl flex-col gap-6 p-5 sm:p-6">
-        <div className="rounded-[32px] border border-white/10 bg-[linear-gradient(135deg,rgba(249,115,22,0.16),rgba(249,115,22,0.03)_35%,rgba(255,255,255,0.02)_100%)] p-6 shadow-[0_20px_80px_rgba(0,0,0,0.35)]">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="max-w-2xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-orange-400/20 bg-orange-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-orange-100">
+      <div className="mx-auto flex max-w-4xl flex-col gap-5 p-5 sm:p-6">
+        {error && <div className="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
+        {notice && <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-50">{notice}</div>}
+
+        <section className="rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(19,27,42,0.98),rgba(15,22,36,0.98))] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.28)] sm:p-6">
+          <div className="mx-auto max-w-2xl space-y-5">
+            <div className="space-y-2">
+              <div className="inline-flex w-fit items-center gap-2 rounded-full border border-orange-400/20 bg-orange-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-orange-100">
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }}>shield_lock</span>
-                ClawKeep Local
+                Simple backup
               </div>
-              <h1 className="mt-4 text-3xl font-bold text-white">Private backups, copied to this device first</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/72">
-                This first ClawBox version vendors the ClawKeep local backup flow: protect one folder, snapshot changes with Git, and sync encrypted backup chunks to another device path.
-                Server upload can layer on top next.
+              <h1 className="text-3xl font-bold text-white">Back up one folder</h1>
+              <p className="max-w-xl text-sm leading-relaxed text-white/70">
+                Choose what to protect, where copies should go, and press one button.
               </p>
             </div>
-            <div className="grid min-w-[260px] grid-cols-2 gap-3">
+
+            <div className="grid gap-3 sm:grid-cols-3">
               <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Snaps</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{status?.totalSnaps ?? 0}</div>
+                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Folder</div>
+                <div className="mt-2 text-sm font-semibold text-white">{sourcePath || "Not chosen"}</div>
               </div>
               <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Encrypted Chunks</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{status?.backup.chunkCount ?? 0}</div>
+                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Destination</div>
+                <div className="mt-2 text-sm font-semibold text-white">{destinationLabel}</div>
+              </div>
+              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Last backup</div>
+                <div className="mt-2 text-sm font-semibold text-white">{status?.backup.lastSync ? timeAgo(status.backup.lastSync) : "Never"}</div>
               </div>
             </div>
-          </div>
-        </div>
 
-        {error && (
-          <div className="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-            {error}
-          </div>
-        )}
-        {notice && (
-          <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-50">
-            {notice}
-          </div>
-        )}
-
-        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-          <section className="rounded-[28px] border border-white/10 bg-[#131b2a]/95 p-5">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-rounded text-orange-300" style={{ fontSize: 20 }}>folder_managed</span>
-              <h2 className="text-lg font-semibold text-white">Protected Folder</h2>
-            </div>
-            <div className="mt-5 space-y-4">
+            <div className="space-y-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-5">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Source path</label>
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Folder</label>
                 <div className="flex gap-2">
                   <input
                     value={sourcePath}
@@ -392,188 +275,128 @@ export default function ClawKeepApp() {
                     className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-orange-400/40"
                     placeholder="Documents"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setPicker("source")}
-                    className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]"
-                  >
+                  <button type="button" onClick={() => setPicker("source")} className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]">
                     Browse
                   </button>
                 </div>
                 <div className="mt-2 text-xs text-white/45">{describePath(sourcePath)}</div>
               </div>
 
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => void loadStatus(sourcePath)}
-                  disabled={busy}
-                  className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/[0.08] disabled:opacity-50"
-                >
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void runAction({ action: "init" })}
-                  disabled={busy}
-                  className="rounded-2xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:opacity-50"
-                >
-                  {status?.initialized ? "Protected" : "Protect this folder"}
-                </button>
+              <div>
+                <div className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Where to copy it</div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {[
+                    { id: "local", label: "This device", active: localEnabled && !cloudEnabled, onClick: () => { setLocalEnabled(true); setCloudEnabled(false); } },
+                    { id: "cloud", label: "Cloud", active: !localEnabled && cloudEnabled, onClick: () => { setLocalEnabled(false); setCloudEnabled(true); } },
+                    { id: "both", label: "Both", active: localEnabled && cloudEnabled, onClick: () => { setLocalEnabled(true); setCloudEnabled(true); } },
+                  ].map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      data-testid={option.id === "cloud" ? "cloud-toggle" : undefined}
+                      aria-pressed={option.active}
+                      onClick={option.onClick}
+                      className={`rounded-2xl border px-4 py-3 text-left text-sm font-medium transition ${
+                        option.active
+                          ? "border-emerald-400/30 bg-emerald-500/12 text-white"
+                          : "border-white/10 bg-white/[0.03] text-white/75 hover:bg-white/[0.06]"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Status</div>
-                  <div className="mt-2 text-sm font-medium text-white">
-                    {status?.initialized ? "ClawKeep is active here" : "Not initialized yet"}
+              {localEnabled && (
+                <div>
+                  <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Local folder</label>
+                  <div className="flex gap-2">
+                    <input
+                      value={localPath}
+                      onChange={(event) => setLocalPath(event.target.value.replace(/^\/+/, ""))}
+                      className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/40"
+                      placeholder="Backups/clawkeep"
+                    />
+                    <button type="button" onClick={() => setPicker("local")} className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]">
+                      Browse
+                    </button>
                   </div>
-                  <div className="mt-1 text-xs text-white/50">
-                    {status?.sourceExists ? "Folder exists on device." : "Folder will be created when you initialize it."}
-                  </div>
+                  <div className="mt-2 text-xs text-white/45">{describePath(localPath)}</div>
                 </div>
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Working tree</div>
-                  <div className="mt-2 text-sm font-medium text-white">
-                    {status?.clean ? "No unsnapped changes" : `${status?.dirtyFiles ?? 0} pending change${status?.dirtyFiles === 1 ? "" : "s"}`}
+              )}
+
+              {cloudEnabled && (
+                <div className="rounded-2xl border border-emerald-400/15 bg-emerald-500/8 p-4">
+                  <div className="text-sm font-semibold text-white">{status?.backup.cloud.providerLabel ?? "ClawBox AI"}</div>
+                  <div className="mt-1 text-xs text-white/65">
+                    {status?.backup.cloud.connected
+                      ? "Cloud backup is ready."
+                      : "Connect ClawBox AI first."}
                   </div>
-                  <div className="mt-1 text-xs text-white/50">
-                    {status?.trackedFiles ?? 0} tracked files
-                  </div>
+                  {!status?.backup.cloud.connected && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenAiProviderSettings?.()}
+                      className="mt-3 rounded-xl border border-emerald-300/20 bg-emerald-500/15 px-3 py-2 text-sm font-medium text-emerald-50 transition hover:bg-emerald-500/20"
+                    >
+                      Connect ClawBox AI
+                    </button>
+                  )}
                 </div>
-              </div>
+              )}
 
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Snapshot message</label>
-                <div className="flex gap-2">
-                  <input
-                    value={message}
-                    onChange={(event) => setMessage(event.target.value)}
-                    className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-orange-400/40"
-                    placeholder="manual snapshot"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void runAction({ action: "snap", message })}
-                    disabled={busy || !status?.initialized}
-                    className="rounded-2xl bg-white/8 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/12 disabled:opacity-50"
-                  >
-                    Snap now
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="rounded-[28px] border border-white/10 bg-[#131b2a]/95 p-5">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-rounded text-emerald-300" style={{ fontSize: 20 }}>encrypted</span>
-              <h2 className="text-lg font-semibold text-white">Local Backup Target</h2>
-            </div>
-            <div className="mt-5 space-y-4">
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Target path</label>
-                <div className="flex gap-2">
-                  <input
-                    value={targetPath}
-                    onChange={(event) => setTargetPath(event.target.value.replace(/^\/+/, ""))}
-                    className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/40"
-                    placeholder="Backups/clawkeep"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPicker("target")}
-                    className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]"
-                  >
-                    Browse
-                  </button>
-                </div>
-                <div className="mt-2 text-xs text-white/45">{describePath(targetPath)}</div>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Encryption password</label>
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Password</label>
                 <input
                   type="password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/40"
-                  placeholder={status?.backup.passwordSet ? "Enter a new password only if you want to rotate it" : "At least 8 characters"}
+                  placeholder={status?.backup.passwordSet ? "Leave blank to keep your current password" : "At least 8 characters"}
                 />
-                <div className="mt-2 text-xs text-white/45">
-                  This local-only phase stores wrapped key material in the protected folder so future syncs can run without asking again.
-                </div>
+                <div className="mt-2 text-xs text-white/45">One password protects every copy.</div>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Target</div>
-                  <div className="mt-2 text-sm font-medium text-white">{status?.backup.targetLabel ?? "Not configured"}</div>
-                  <div className="mt-1 text-xs text-white/50">
-                    {status?.backup.passwordSet ? "Password configured" : "Password not set"}
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Last sync</div>
-                  <div className="mt-2 text-sm font-medium text-white">
-                    {status?.backup.lastSync ? timeAgo(status.backup.lastSync) : "Never synced"}
-                  </div>
-                  <div className="mt-1 text-xs text-white/50">
-                    Workspace {status?.backup.workspaceId ?? "pending"}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap items-center gap-3 pt-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    const trimmedPassword = password.trim();
-                    void runAction({ action: "configure", targetPath, password: trimmedPassword });
-                  }}
-                  disabled={busy || !status?.initialized || password.trim().length < 8}
-                  className="rounded-2xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                  onClick={() => void handleBackupNow()}
+                  disabled={busy || !canBackup || cloudNeedsConnection}
+                  className="rounded-2xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
                 >
-                  Save local target
+                  {primaryActionLabel}
                 </button>
                 <button
                   type="button"
-                  onClick={() => void runAction({ action: "sync" })}
-                  disabled={busy || !status?.initialized || !status?.backup.passwordSet || status?.backup.target !== "local"}
-                  className="rounded-2xl border border-emerald-400/20 bg-emerald-500/12 px-4 py-2.5 text-sm font-semibold text-emerald-50 transition hover:bg-emerald-500/18 disabled:opacity-50"
+                  onClick={() => void handleSavePlan()}
+                  disabled={busy || !canBackup || cloudNeedsConnection}
+                  className="rounded-2xl border border-white/10 bg-white/[0.04] px-5 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08] disabled:opacity-50"
                 >
-                  Sync encrypted backup
+                  Save settings
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void loadStatus(sourcePath)}
+                  disabled={busy}
+                  className="text-sm font-medium text-white/60 transition hover:text-white disabled:opacity-50"
+                >
+                  Refresh
                 </button>
               </div>
+
+              <div className="rounded-2xl border border-white/8 bg-black/15 px-4 py-3 text-sm text-white/72">
+                {status?.initialized
+                  ? `${sourcePath || "This folder"} is protected. ${status?.backup.chunkCount ? `${status.backup.chunkCount} encrypted chunk${status.backup.chunkCount === 1 ? "" : "s"} stored.` : "Run backup any time."}`
+                  : "Your first backup will set everything up automatically."}
+              </div>
+
+              {status?.recent[0] && (
+                <div className="text-xs text-white/45">
+                  Latest snap: {status.recent[0].message} · {timeAgo(status.recent[0].date)}
+                </div>
+              )}
             </div>
-          </section>
-        </div>
-
-        <section className="rounded-[28px] border border-white/10 bg-[#131b2a]/95 p-5">
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 20 }}>history</span>
-            <h2 className="text-lg font-semibold text-white">Recent Timeline</h2>
-          </div>
-          <div className="mt-5 space-y-3">
-            {!status?.recent.length && (
-              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-4 text-sm text-white/55">
-                No snapshots yet. Initialize the folder, then create a manual snapshot or sync after making changes.
-              </div>
-            )}
-            {status?.recent.map((entry) => (
-              <div
-                key={entry.hash}
-                className="flex items-center justify-between gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-white">{entry.message}</div>
-                  <div className="mt-1 text-xs text-white/45">{entry.hash.slice(0, 8)} · {timeAgo(entry.date)}</div>
-                </div>
-                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.14em] text-white/55">
-                  snap
-                </div>
-              </div>
-            ))}
           </div>
         </section>
       </div>
