@@ -1,13 +1,10 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, findOpenclawBin, readConfig, restartGateway, type OpenClawConfig } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, type OpenClawConfig } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 
 export const dynamic = "force-dynamic";
 
-const exec = promisify(execFile);
 const PRIMARY_MODEL_KEY = "chat:primary-provider-model";
 
 type ChatModelSource = "primary" | "local";
@@ -299,8 +296,13 @@ export async function POST(request: Request) {
       await sqliteSet(PRIMARY_MODEL_KEY, state.activeModel);
     }
 
-    const openclawBin = findOpenclawBin();
-    await exec(openclawBin, ["config", "set", "agents.defaults.model.primary", targetModel], { timeout: 10000 });
+    // runOpenclawConfigSet retries on transient ConfigMutationConflictError
+    // so users switching chat models don't see a bogus failure when the
+    // gateway reloads concurrently with the write. Leave timeoutMs on the
+    // helper's default — the OpenClaw CLI itself takes 10-12 s per call
+    // on Jetson Orin hardware, so a tighter bound here was producing
+    // spurious "timed out" errors on every legitimate invocation.
+    await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
     await restartGateway();
 
     const nextState = await loadChatModelState();

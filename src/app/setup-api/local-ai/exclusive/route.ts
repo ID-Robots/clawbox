@@ -1,20 +1,25 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { execFile as execFileCb } from "child_process";
-import { promisify } from "util";
 import { get, set, setMany } from "@/lib/config-store";
-import { findOpenclawBin, readConfig, restartGateway } from "@/lib/openclaw-config";
-
-const execFile = promisify(execFileCb);
+import { readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
 const MODE_KEY = "local_only_mode";
 
+// Route OpenClaw config mutations through the shared retry-aware helper.
+// The gateway reload + gateway-pre-start.sh write the same config file
+// concurrently, so a bare `openclaw config set` here can fail with
+// ConfigMutationConflictError mid-toggle — leaving the primary model
+// flipped but fallbacks still populated, and local_only_mode unset.
+// That half-applied state is visible in the UI as a failed toggle while
+// the user's chat actually continues routing to the cloud fallback.
 async function setConfig(key: string, valueJson: string) {
-  const bin = findOpenclawBin();
-  await execFile(bin, ["config", "set", key, valueJson, "--json"], { timeout: 10_000 });
+  // Leave timeoutMs on the helper's default — the OpenClaw CLI takes
+  // 10-12 s per invocation on Jetson, so tighter bounds here produced
+  // spurious "timed out" errors that made Local-only mode fail to toggle.
+  await runOpenclawConfigSet([key, valueJson, "--json"]);
 }
 
 export async function GET() {

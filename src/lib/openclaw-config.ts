@@ -1,11 +1,140 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 
 const exec = promisify(execFile);
+
+/**
+ * Options for {@link runOpenclawConfigSet}.
+ */
+export interface OpenclawConfigSetOptions {
+  /**
+   * Per-attempt timeout in ms. Default: 30_000.
+   *
+   * OpenClaw's CLI is a full Node.js program that loads the whole gateway
+   * SDK, parses plugins, and validates the config schema on every
+   * invocation. On a NVIDIA Jetson Orin Nano this startup cost alone is
+   * 10-12 s per call — measured consistently with three sequential runs
+   * when the box was otherwise idle. A 30 s per-attempt budget gives a
+   * healthy safety margin on the target hardware. Callers on faster
+   * machines (dev boxes, CI) can override down to 10 s if they want
+   * stricter bounds.
+   */
+  timeoutMs?: number;
+  /** Maximum attempts including the first try. Default: 4. */
+  maxAttempts?: number;
+  /** Linear backoff base — delay between attempts is `baseBackoffMs * attempt`. Default: 100. */
+  baseBackoffMs?: number;
+  /** Spawn uid (for cases where the calling process runs as a different user). */
+  uid?: number;
+  /** Spawn gid (paired with `uid`). */
+  gid?: number;
+  /** Working directory for the spawned process. Default: `/home/clawbox`. */
+  cwd?: string;
+  /** Extra env overrides merged over the default `{ HOME: "/home/clawbox", ...process.env }`. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Run `openclaw config set <args>` with automatic retry on
+ * `ConfigMutationConflictError`.
+ *
+ * OpenClaw's config writer uses optimistic concurrency (content-hash based)
+ * and its gateway process reloads on file changes. When ClawBox issues
+ * multiple `config set` calls back-to-back, or a `config set` races with the
+ * gateway touching `meta.lastTouchedAt` during a reload, one of the writes
+ * can fail with `ConfigMutationConflictError: config changed since last
+ * load`. The mutation itself is safe to retry — the next attempt re-reads
+ * the fresh hash and converges.
+ *
+ * This helper retries *only* on that specific error (other failures bubble
+ * up immediately) with a short linear backoff, so callers don't need to
+ * handle the race individually.
+ */
+export async function runOpenclawConfigSet(
+  args: string[],
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  const {
+    timeoutMs = 30_000,
+    maxAttempts = 4,
+    baseBackoffMs = 100,
+  } = options;
+
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await spawnOpenclawConfigSet(args, { ...options, timeoutMs });
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const isConflict = /ConfigMutationConflictError/i.test(lastError.message);
+      if (!isConflict || attempt === maxAttempts) {
+        throw lastError;
+      }
+      const delayMs = baseBackoffMs * attempt;
+      console.warn(
+        `[openclaw-config] ConfigMutationConflictError on attempt ${attempt}/${maxAttempts}; retrying after ${delayMs}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError ?? new Error("runOpenclawConfigSet exhausted retries");
+}
+
+function spawnOpenclawConfigSet(
+  args: string[],
+  options: OpenclawConfigSetOptions & { timeoutMs: number },
+): Promise<void> {
+  const bin = findOpenclawBin();
+  const { timeoutMs, uid, gid } = options;
+  const cwd = options.cwd ?? "/home/clawbox";
+  const env = { ...process.env, HOME: "/home/clawbox", ...(options.env ?? {}) };
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn(bin, ["config", "set", ...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd,
+      ...(uid !== undefined ? { uid } : {}),
+      ...(gid !== undefined ? { gid } : {}),
+      env,
+    });
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`${bin} config set timed out after ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+
+    child.on("close", (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `${bin} config set exited with code ${code}`));
+      }
+    });
+  });
+}
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
