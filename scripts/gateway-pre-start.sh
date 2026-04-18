@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
 # Ensure gateway config is valid before OpenClaw gateway starts.
+#
+# Previous versions of this script invoked `openclaw config set` once per
+# key (7 keys × ~10 s CLI startup on Jetson = ~70 s of dead time between
+# systemd "starting" and the gateway actually listening on LAN). During
+# that window, the desktop's OpenClaw iframe polls gateway endpoints,
+# gets refused, and renders a "Reload gateway" prompt. Clicking it
+# worked because the delay had elapsed by then — user-hostile but
+# functional.
+#
+# Now we do a single read-modify-write on openclaw.json in Python.
+# Values that already match what the gateway expects don't get touched
+# (so `meta.lastTouchedAt` doesn't flap on every restart), and the
+# whole script completes in < 1 s. This shaves ~70 s off every gateway
+# restart — not just first boot, but skill install/uninstall, Telegram
+# reconfigure, AI-provider change, Local-only toggle, chat model
+# switch, and crash-triggered restart.
 set -euo pipefail
 
 OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
@@ -22,65 +38,125 @@ if [ -f "$HOSTNAME_ENV" ]; then
   fi
 fi
 
-# Fix invalid config keys that prevent gateway from starting
-if [ -f "$OPENCLAW_CONFIG" ]; then
-  python3 -c "
-import json, sys
-with open('$OPENCLAW_CONFIG') as f:
-    c = json.load(f)
-changed = False
-d = c.get('agents',{}).get('defaults',{})
-for k in ['tools','systemPromptSuffix']:
-    if k in d:
-        del d[k]
-        changed = True
-g = c.get('gateway',{})
-if g.get('bind') not in (None,'auto','lan','loopback','custom','tailnet'):
-    g['bind'] = 'lan'
-    changed = True
-if changed:
-    with open('$OPENCLAW_CONFIG','w') as f:
-        json.dump(c, f, indent=2)
-    print('  Fixed invalid OpenClaw config keys')
-" 2>/dev/null || true
-fi
-
-"$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
-
-# Build the allowlist dynamically. The hardcoded set (mDNS hostname +
-# loopback + hotspot AP IPs) is always included, and on top of that we
-# enumerate every IPv4 currently assigned to a real network interface
-# on this host so any client hitting us via the device's LAN IP
-# (http://192.168.x.y, http://10.0.x.y, etc.) is accepted. Without this
-# dynamic part, users on Windows hitting the IP directly — because
-# `clawbox.local` resolution is still warming up on their machine —
-# get a "origin not allowed" gateway rejection, the Control UI
-# silently falls back to the secondary (cloud) model, and local chat
-# with Gemma quietly stops working.
-LAN_IPS=""
+# Build the dynamic part of the allowedOrigins list — one entry per IPv4
+# currently assigned to a real network interface on this host so any
+# client hitting us via the device's LAN IP (http://192.168.x.y,
+# http://10.0.x.y, etc.) is accepted. Without this, Windows clients
+# hitting the IP directly — because `clawbox.local` resolution is still
+# warming up — get an "origin not allowed" gateway rejection, the
+# Control UI silently falls back to the secondary (cloud) model, and
+# local chat with Gemma quietly stops working.
+LAN_IPS=()
 if command -v ip >/dev/null 2>&1; then
-  # `ip -o -4 addr` prints one line per address, e.g.
-  # "3: wlP1p1s0  inet 192.168.1.58/24 ..." — we grab the address,
-  # strip loopback and link-local (169.254/16), and emit one JSON entry
-  # per remaining IP.
   while read -r ip4; do
     case "$ip4" in
       127.*|169.254.*|"") continue ;;
     esac
-    LAN_IPS="${LAN_IPS},\"http://${ip4}\""
-  done <<EOF_IPS
-$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
-EOF_IPS
+    LAN_IPS+=("http://${ip4}")
+  done < <(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
 fi
 
-"$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins "[\"http://${CONFIGURED_HOSTNAME}.local\",\"http://localhost\",\"http://127.0.0.1\",\"http://10.42.0.1\",\"http://10.43.0.1\"${LAN_IPS}]" --json 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.bind lan 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.mode local 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.auth.token clawbox 2>/dev/null || true
+# One Python pass: read → update only the fields that differ → atomic
+# rename. Skips every `openclaw config set` call if the file on disk
+# already matches the target state. The CLI calls below (gateway
+# restart + MCP server) are guarded by their own idempotency checks.
+export CLAWBOX_HOSTNAME="$CONFIGURED_HOSTNAME"
+# Serialize the LAN_IPS bash array into an env var Python can parse —
+# newline-separated is bash-safe (IPv4s contain no newlines).
+if [ ${#LAN_IPS[@]} -gt 0 ]; then
+  printf -v CLAWBOX_LAN_IPS '%s\n' "${LAN_IPS[@]}"
+else
+  CLAWBOX_LAN_IPS=""
+fi
+export CLAWBOX_LAN_IPS
 
-# Register ClawBox MCP server (only if not already set)
+python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys, tempfile
+
+cfg_path = sys.argv[1]
+hostname = os.environ.get("CLAWBOX_HOSTNAME", "clawbox")
+lan_ips = [line for line in os.environ.get("CLAWBOX_LAN_IPS", "").split("\n") if line]
+
+allowed_origins = [
+    f"http://{hostname}.local",
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://10.42.0.1",
+    "http://10.43.0.1",
+    *lan_ips,
+]
+
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
+except json.JSONDecodeError:
+    # Corrupt file — start from an empty object and let the gateway
+    # re-seed on first write; the alternative is refusing to boot.
+    cfg = {}
+
+changed = False
+
+# Strip invalid agent keys that prevent gateway from starting.
+agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
+for k in ("tools", "systemPromptSuffix"):
+    if k in agents_defaults:
+        del agents_defaults[k]
+        changed = True
+
+gateway = cfg.setdefault("gateway", {})
+control_ui = gateway.setdefault("controlUi", {})
+auth = gateway.setdefault("auth", {})
+
+def set_if(obj, key, value):
+    global changed
+    if obj.get(key) != value:
+        obj[key] = value
+        changed = True
+
+set_if(control_ui, "allowInsecureAuth", True)
+set_if(control_ui, "dangerouslyDisableDeviceAuth", True)
+# Compare allowedOrigins as sets since ordering shouldn't force a
+# rewrite — the gateway doesn't care about the order, and the LAN IP
+# enumeration can reorder entries between boots.
+if set(control_ui.get("allowedOrigins", []) or []) != set(allowed_origins):
+    control_ui["allowedOrigins"] = allowed_origins
+    changed = True
+
+# Normalize bind to "lan" if missing or set to something the gateway
+# would reject (e.g. an invalid value the user hand-edited in).
+valid_binds = ("auto", "lan", "loopback", "custom", "tailnet")
+if gateway.get("bind") not in valid_binds:
+    gateway["bind"] = "lan"
+    changed = True
+
+set_if(gateway, "mode", "local")
+set_if(auth, "mode", "token")
+set_if(auth, "token", "clawbox")
+
+if changed:
+    # Atomic write so a crash mid-rewrite can't leave a half-written
+    # file where the gateway would refuse to boot.
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp_path, cfg_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+    print("  Updated gateway config")
+else:
+    print("  Gateway config already correct, skipping write")
+PY
+
+# Register ClawBox MCP server (only if not already set). Kept as a CLI
+# call because MCP config has richer schema validation in the CLI path
+# and we only hit this branch on fresh installs / factory resets.
 if ! python3 -c "import json; c=json.load(open('$OPENCLAW_CONFIG')); assert c.get('mcp',{}).get('servers',{}).get('clawbox',{}).get('command')" 2>/dev/null; then
   "$OPENCLAW_BIN" config set mcp.servers.clawbox '{"command":"/home/clawbox/.bun/bin/bun","args":["run","/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],"env":{"CLAWBOX_API_BASE":"http://127.0.0.1:80"}}' --json 2>/dev/null || true
 fi
