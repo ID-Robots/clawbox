@@ -47,7 +47,34 @@ fi
 
 "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
-"$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins "[\"http://${CONFIGURED_HOSTNAME}.local\",\"http://localhost\",\"http://127.0.0.1\",\"http://10.42.0.1\",\"http://10.43.0.1\"]" --json 2>/dev/null || true
+
+# Build the allowlist dynamically. The hardcoded set (mDNS hostname +
+# loopback + hotspot AP IPs) is always included, and on top of that we
+# enumerate every IPv4 currently assigned to a real network interface
+# on this host so any client hitting us via the device's LAN IP
+# (http://192.168.x.y, http://10.0.x.y, etc.) is accepted. Without this
+# dynamic part, users on Windows hitting the IP directly — because
+# `clawbox.local` resolution is still warming up on their machine —
+# get a "origin not allowed" gateway rejection, the Control UI
+# silently falls back to the secondary (cloud) model, and local chat
+# with Gemma quietly stops working.
+LAN_IPS=""
+if command -v ip >/dev/null 2>&1; then
+  # `ip -o -4 addr` prints one line per address, e.g.
+  # "3: wlP1p1s0  inet 192.168.1.58/24 ..." — we grab the address,
+  # strip loopback and link-local (169.254/16), and emit one JSON entry
+  # per remaining IP.
+  while read -r ip4; do
+    case "$ip4" in
+      127.*|169.254.*|"") continue ;;
+    esac
+    LAN_IPS="${LAN_IPS},\"http://${ip4}\""
+  done <<EOF_IPS
+$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+EOF_IPS
+fi
+
+"$OPENCLAW_BIN" config set gateway.controlUi.allowedOrigins "[\"http://${CONFIGURED_HOSTNAME}.local\",\"http://localhost\",\"http://127.0.0.1\",\"http://10.42.0.1\",\"http://10.43.0.1\"${LAN_IPS}]" --json 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.bind lan 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.mode local 2>/dev/null || true
 "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
