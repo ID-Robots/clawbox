@@ -417,11 +417,15 @@ export default function VNCApp() {
       {pasteOpen && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={closePasteModal}>
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="vnc-paste-dialog-title"
+            aria-describedby="vnc-paste-dialog-desc"
             className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-white mb-1">{t("vnc.pasteToRemote")}</h3>
-            <p className="text-xs text-white/50 mb-3">{t("vnc.pasteHelp")}</p>
+            <h3 id="vnc-paste-dialog-title" className="text-sm font-semibold text-white mb-1">{t("vnc.pasteToRemote")}</h3>
+            <p id="vnc-paste-dialog-desc" className="text-xs text-white/50 mb-3">{t("vnc.pasteHelp")}</p>
             <textarea
               ref={pasteTextareaRef}
               value={pasteText}
@@ -437,6 +441,8 @@ export default function VNCApp() {
               }}
               rows={5}
               placeholder={t("vnc.pastePlaceholder")}
+              aria-labelledby="vnc-paste-dialog-title"
+              aria-describedby="vnc-paste-dialog-desc"
               className="w-full px-3 py-2 bg-white/[0.04] border border-white/10 rounded-lg text-sm text-white outline-none focus:border-orange-400/60 focus:bg-white/[0.06] placeholder-white/25 resize-y"
             />
             <div className="flex items-center justify-end gap-2 mt-4">

@@ -325,10 +325,21 @@ export async function POST(req: Request) {
       case "close-browser": {
         try {
           await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 30000 });
-        } catch {}
+        } catch (err) {
+          // Non-fatal: the pkill + lock-cleanup fallback below still gets the
+          // browser down. Log so ops can see if systemctl itself is wedged.
+          console.warn("[browser] systemctl stop clawbox-browser.service failed:", err);
+        }
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
-        } catch {}
+        } catch (err) {
+          // pkill exits non-zero when it finds no matching processes — that's
+          // the happy path after systemctl already stopped the service, not a
+          // real failure. Log at debug volume only.
+          if (err instanceof Error && !/Command failed/.test(err.message)) {
+            console.warn("[browser] pkill clawbox-browser failed:", err);
+          }
+        }
         await new Promise(r => setTimeout(r, 1000));
         await cleanBrowserLocks();
         return NextResponse.json({ ok: true });
