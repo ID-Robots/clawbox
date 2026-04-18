@@ -793,6 +793,10 @@ step_post_update() {
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
+  # unit + autocutsel package. Devices installed before the display-:99 move
+  # and the clipboard-sync addition get both here without needing a reinstall.
+  step_vnc_refresh || echo "  Warning: vnc_refresh step failed (non-fatal)"
 }
 
 step_polkit_rules() {
@@ -1105,6 +1109,66 @@ FIRSTBOOTVNC
   echo "  First reboot will re-ensure VNC services are active"
 }
 
+step_vnc_refresh() {
+  # Idempotent subset of step_vnc_install, safe to run on every update path.
+  # Picks up changes to the clawbox-vnc.service unit (e.g. the CLAWBOX_VNC_MODE
+  # env var added when we moved VNC off display :0) and installs packages
+  # added in later PRs (e.g. autocutsel for bidirectional VNC clipboard sync).
+  # Without this step, existing devices updating via the in-app updater never
+  # receive those fixes — they'd keep mirroring GDM's greeter + have no
+  # clipboard support until the owner did a fresh install.
+  #
+  # Deliberately a narrow subset of step_vnc_install — no firstboot-pending
+  # flag, no websockify unit rewrite, no clawbox-browser unit re-copy. All of
+  # those are already on-disk from the original install and re-touching them
+  # here risks extra reboot-time reruns (the firstboot flag) or racey restarts
+  # of services that aren't involved in this particular bugfix.
+  #
+  # apt-get may collide with unattended-upgrades or a user-triggered install,
+  # so wait for the dpkg lock first. Make the install non-fatal — a transient
+  # apt failure here shouldn't block the more important unit refresh below.
+  wait_for_apt
+  if ! apt-get install -y -qq autocutsel; then
+    echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  fi
+
+  local unit_path=/etc/systemd/system/clawbox-vnc.service
+  local unit_tmp
+  unit_tmp="$(mktemp)"
+  cat > "$unit_tmp" <<VNCSVC
+[Unit]
+Description=ClawBox VNC (virtual desktop)
+After=network.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+Environment=CLAWBOX_VNC_MODE=virtual
+ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCSVC
+
+  # Only reload + restart when the unit actually changed — the restart
+  # disconnects any active VNC viewer, so we don't want to kick sessions
+  # on an idempotent re-run. Websockify is tied to the VNC service via
+  # Requires=, but that only propagates *stops*, not restarts, so we
+  # bounce it alongside when the VNC unit changed to keep the proxy
+  # aligned with the freshly-restarted server.
+  if [ ! -f "$unit_path" ] || ! cmp -s "$unit_tmp" "$unit_path"; then
+    install -m 644 "$unit_tmp" "$unit_path"
+    systemctl daemon-reload
+    systemctl restart clawbox-vnc.service clawbox-websockify.service || true
+    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual, autocutsel installed)"
+  else
+    echo "  VNC service already up-to-date, skipping restart"
+  fi
+  rm -f "$unit_tmp"
+}
+
 step_desktop_theme() {
   local theme_script="$PROJECT_DIR/scripts/apply-desktop-theme.sh"
   local autostart_dir="$CLAWBOX_HOME/.config/autostart"
@@ -1188,7 +1252,7 @@ step_browser_launch() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
-  chromium_install ai_tools_install vnc_install
+  chromium_install ai_tools_install vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
   network_setup set_hostname setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
