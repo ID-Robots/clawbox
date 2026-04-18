@@ -223,11 +223,15 @@ export async function POST(req: Request) {
 
         const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 });
-          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 });
+          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 30000 });
+          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 30000 });
           await persistBrowserEnabled(true);
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Failed to enable browser integration" },
+            { status: 500 },
+          );
         }
 
         let enableRestartOk = true;
@@ -244,10 +248,14 @@ export async function POST(req: Request) {
       case "disable": {
         const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 10000 });
+          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 30000 });
           await persistBrowserEnabled(false);
         } catch (err) {
           console.error("[browser] Failed to unset tools config:", err);
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Failed to disable browser integration" },
+            { status: 500 },
+          );
         }
 
         let disableRestartOk = true;
@@ -316,11 +324,22 @@ export async function POST(req: Request) {
 
       case "close-browser": {
         try {
-          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
-        } catch {}
+          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 30000 });
+        } catch (err) {
+          // Non-fatal: the pkill + lock-cleanup fallback below still gets the
+          // browser down. Log so ops can see if systemctl itself is wedged.
+          console.warn("[browser] systemctl stop clawbox-browser.service failed:", err);
+        }
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
-        } catch {}
+        } catch (err) {
+          // pkill exits non-zero when it finds no matching processes — that's
+          // the happy path after systemctl already stopped the service, not a
+          // real failure. Log at debug volume only.
+          if (err instanceof Error && !/Command failed/.test(err.message)) {
+            console.warn("[browser] pkill clawbox-browser failed:", err);
+          }
+        }
         await new Promise(r => setTimeout(r, 1000));
         await cleanBrowserLocks();
         return NextResponse.json({ ok: true });

@@ -969,22 +969,26 @@ step_ai_tools_install() {
 
 step_vnc_install() {
   # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
-  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils
+  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
   chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
   chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
 
-  # Systemd service for VNC
+  # Systemd service for VNC — force virtual display mode. On headless
+  # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
+  # the greeter and invisible to VNC viewers. Xvfb :99 gives a clean
+  # dedicated surface that matches what the browser service targets.
   cat > /etc/systemd/system/clawbox-vnc.service <<VNCSVC
 [Unit]
-Description=ClawBox VNC (mirrors display or virtual desktop)
-After=display-manager.service network.target
+Description=ClawBox VNC (virtual desktop)
+After=network.target
 
 [Service]
 Type=simple
 User=$CLAWBOX_USER
+Environment=CLAWBOX_VNC_MODE=virtual
 ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
 Restart=on-failure
 RestartSec=5

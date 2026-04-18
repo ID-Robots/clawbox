@@ -1,9 +1,14 @@
 #!/bin/bash
 # Mirrors the physical display :0 if accessible,
 # otherwise starts a minimal virtual desktop (openbox) for GUI apps.
+#
+# Override with CLAWBOX_VNC_MODE=virtual to skip :0 mirroring and always
+# use the virtual Xvfb display — useful on headless Jetsons where :0 is
+# GDM's greeter, which blocks apps launched into it from being visible.
 set -uo pipefail
 
 VNC_PORT="${VNC_PORT:-5900}"
+VNC_MODE="${CLAWBOX_VNC_MODE:-auto}"
 STATE_DIR="${HOME}/.cache/clawbox"
 STATE_FILE="${STATE_DIR}/vnc-display.env"
 THEME_SCRIPT="$(cd "$(dirname "$0")" && pwd)/apply-desktop-theme.sh"
@@ -46,11 +51,13 @@ find_xauth() {
   return 1
 }
 
-XAUTH=$(find_xauth 2>/dev/null)
-if [ -n "$XAUTH" ] && display_ready :0 "$XAUTH"; then
-  echo "[vnc] Display :0 found — mirroring"
-  record_vnc_display ":0" "$XAUTH"
-  exec x11vnc -display :0 -auth "$XAUTH" -rfbport "$VNC_PORT" -forever -shared -nopw -localhost -noxdamage
+if [ "$VNC_MODE" != "virtual" ]; then
+  XAUTH=$(find_xauth 2>/dev/null)
+  if [ -n "$XAUTH" ] && display_ready :0 "$XAUTH"; then
+    echo "[vnc] Display :0 found — mirroring"
+    record_vnc_display ":0" "$XAUTH"
+    exec x11vnc -display :0 -auth "$XAUTH" -rfbport "$VNC_PORT" -forever -shared -nopw -localhost -noxdamage
+  fi
 fi
 
 # ─── Virtual desktop ─────────────────────────────────────────────────────────
@@ -129,5 +136,13 @@ OBMENU
   openbox --config-file "$OB_CONFIG_DIR/rc.xml" &
 fi
 sleep 1
+
+# autocutsel keeps the X CLIPBOARD and PRIMARY selections alive even after
+# the window that produced them closes, so copy/paste between the VNC client
+# and guest apps (Chromium, xterm, etc.) survives focus changes.
+if command -v autocutsel &>/dev/null; then
+  autocutsel -fork -selection CLIPBOARD 2>/dev/null || true
+  autocutsel -fork -selection PRIMARY 2>/dev/null || true
+fi
 
 exec x11vnc -display ":${VDISPLAY}" -rfbport "${VNC_PORT}" -forever -shared -nopw -localhost -noxdamage
