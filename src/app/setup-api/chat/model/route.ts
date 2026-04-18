@@ -182,7 +182,16 @@ async function loadChatModelState() {
     }
   }
 
-  const primaryOptions = sortPrimaryOptions([...configuredPrimaryOptions.values()]);
+  // When Local-only mode is on, the cloud providers are intentionally
+  // disabled — dropping them from the dropdown is the UX that matches
+  // the toggle's promise ("Route everything to the local model.
+  // Disables all cloud AI providers"). Without this the user can still
+  // pick GPT/Claude/DeepSeek in the chat dropdown while Local-only is
+  // lit up, and the chat then quietly talks to the cloud provider.
+  const localOnlyMode = !!configStore.local_only_mode;
+  const primaryOptions = localOnlyMode
+    ? []
+    : sortPrimaryOptions([...configuredPrimaryOptions.values()]);
   const localOption: ChatModelOption = localModel
     ? {
         id: localModel,
