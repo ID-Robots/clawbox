@@ -9,6 +9,7 @@ import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
+import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
@@ -927,23 +928,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgToken, setTgToken] = useState("");
   const [tgShowToken, setTgShowToken] = useState(false);
   const [tgSaving, setTgSaving] = useState(false);
+  const [tgConfiguring, setTgConfiguring] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
   const [tgBotInfo, setTgBotInfo] = useState<{ username?: string; firstName?: string; link?: string } | null>(null);
   const [tgReconfigure, setTgReconfigure] = useState(false);
   const tgSaveControllerRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    if (section !== "telegram" && !isMobile) return;
-    fetch("/setup-api/telegram/status").then(r => r.json()).then(d => {
+  const refreshTelegramStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/telegram/status");
+      const d = await r.json();
       setTgConfigured(d.configured ?? false);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
       } else {
         setTgBotInfo(null);
       }
-    }).catch(() => setTgConfigured(false));
-  }, [section, isMobile]);
+    } catch {
+      setTgConfigured(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section !== "telegram" && !isMobile) return;
+    refreshTelegramStatus();
+  }, [section, isMobile, refreshTelegramStatus]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
@@ -954,6 +964,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const controller = new AbortController();
     tgSaveControllerRef.current = controller;
     setTgSaving(true);
+    setTgConfiguring(true);
     setTgStatus(null);
     try {
       const res = await fetch("/setup-api/telegram/configure", {
@@ -965,6 +976,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (controller.signal.aborted) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
@@ -976,10 +988,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setTgReconfigure(false);
         setTgToken("");
       } else {
+        setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
+      setTgConfiguring(false);
       setTgStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
       if (!controller.signal.aborted) setTgSaving(false);
@@ -2026,8 +2040,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             {/* Setup card — shown when not configured or reconfiguring */}
-            {(tgConfigured === false || tgReconfigure) && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+            {(tgConfigured === false || tgReconfigure || tgConfiguring) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 relative overflow-hidden">
+                {tgConfiguring && (
+                  <TelegramConfiguringOverlay
+                    onDone={() => {
+                      setTgConfiguring(false);
+                      refreshTelegramStatus();
+                    }}
+                  />
+                )}
+                <div className={tgConfiguring ? "invisible h-0 overflow-hidden" : ""}>
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
                   <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
@@ -2115,6 +2138,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("cancel")}
                     </button>
                   )}
+                </div>
                 </div>
               </div>
             )}
