@@ -1123,9 +1123,19 @@ step_vnc_refresh() {
   # those are already on-disk from the original install and re-touching them
   # here risks extra reboot-time reruns (the firstboot flag) or racey restarts
   # of services that aren't involved in this particular bugfix.
-  apt-get install -y -qq autocutsel
+  #
+  # apt-get may collide with unattended-upgrades or a user-triggered install,
+  # so wait for the dpkg lock first. Make the install non-fatal — a transient
+  # apt failure here shouldn't block the more important unit refresh below.
+  wait_for_apt
+  if ! apt-get install -y -qq autocutsel; then
+    echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  fi
 
-  cat > /etc/systemd/system/clawbox-vnc.service <<VNCSVC
+  local unit_path=/etc/systemd/system/clawbox-vnc.service
+  local unit_tmp
+  unit_tmp="$(mktemp)"
+  cat > "$unit_tmp" <<VNCSVC
 [Unit]
 Description=ClawBox VNC (virtual desktop)
 After=network.target
@@ -1142,9 +1152,21 @@ RestartSec=5
 WantedBy=multi-user.target
 VNCSVC
 
-  systemctl daemon-reload
-  systemctl restart clawbox-vnc.service || true
-  echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual, autocutsel installed)"
+  # Only reload + restart when the unit actually changed — the restart
+  # disconnects any active VNC viewer, so we don't want to kick sessions
+  # on an idempotent re-run. Websockify is tied to the VNC service via
+  # Requires=, but that only propagates *stops*, not restarts, so we
+  # bounce it alongside when the VNC unit changed to keep the proxy
+  # aligned with the freshly-restarted server.
+  if [ ! -f "$unit_path" ] || ! cmp -s "$unit_tmp" "$unit_path"; then
+    install -m 644 "$unit_tmp" "$unit_path"
+    systemctl daemon-reload
+    systemctl restart clawbox-vnc.service clawbox-websockify.service || true
+    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual, autocutsel installed)"
+  else
+    echo "  VNC service already up-to-date, skipping restart"
+  fi
+  rm -f "$unit_tmp"
 }
 
 step_desktop_theme() {
