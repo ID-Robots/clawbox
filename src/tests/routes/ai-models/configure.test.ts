@@ -31,10 +31,11 @@ vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
+  runOpenclawConfigSet: vi.fn(),
 }));
 
 import { getAll, setMany } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -101,6 +102,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockSetMany.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
+    vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
 
     const mod = await import("@/app/setup-api/ai-models/configure/route");
     configurePost = mod.POST;
@@ -207,8 +209,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       }),
     );
 
-    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.deepseek");
-    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
     expect(providerDef.apiKey).toBe("portal-token-123");
 
     expect(mockSetMany).toHaveBeenCalledWith(
@@ -248,7 +250,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
     expect(commands).toContain("config set gateway.auth.mode token");
@@ -272,7 +274,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }),
     );
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
@@ -293,7 +295,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).not.toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
@@ -340,7 +342,7 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("returns 500 when spawn command fails", async () => {
-    mockSpawn.mockImplementation(() => createFailingChildProcess("Command failed"));
+    vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("Command failed"));
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
@@ -411,7 +413,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-test",
     }));
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-chat"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
@@ -436,7 +438,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(false);
   });
@@ -452,7 +454,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
@@ -470,7 +472,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
@@ -487,8 +489,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.deepseek");
-    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://openclawhardware.dev/api/ai");
     expect(providerDef.apiKey).toBe("stored-portal-token");
@@ -509,12 +511,12 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "gemma-q4",
     }));
 
-    const commands = mockSpawn.mock.calls.map((call) => call[1]?.join(" ") ?? "");
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands.some((command) => command.includes("config set models.providers.llamacpp"))).toBe(true);
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma-q4");
 
-    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.llamacpp");
-    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.llamacpp");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
     const modelDef = providerDef?.models?.[0] ?? {};
 
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
@@ -528,8 +530,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "llama3.2:3b",
     }));
 
-    const providerCall = mockSpawn.mock.calls.find((call) => call[1]?.[2] === "models.providers.ollama");
-    const providerDef = providerCall ? JSON.parse(providerCall[1]?.[3] ?? "{}") : {};
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.ollama");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
 
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/ollama");
   });

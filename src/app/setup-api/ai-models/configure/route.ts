@@ -8,6 +8,7 @@ import { getAll, setMany } from "@/lib/config-store";
 import {
   restartGateway,
   findOpenclawBin,
+  runOpenclawConfigSet,
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
@@ -95,6 +96,20 @@ interface AuthProfilesFile {
 }
 
 function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<void> {
+  // Route `openclaw config set …` through the shared retry-aware helper in
+  // openclaw-config.ts so callers automatically survive transient
+  // `ConfigMutationConflictError` races (gateway touching the config during
+  // reload, or two successive writes from this route landing in the same tick).
+  // Non-openclaw invocations (e.g. `sudo optimize-ollama.sh`) keep the
+  // one-shot spawn below unchanged — no retry semantics apply there.
+  if (cmd === OPENCLAW_BIN && args[0] === "config" && args[1] === "set") {
+    return runOpenclawConfigSet(args.slice(2), {
+      timeoutMs,
+      uid: CLAWBOX_UID,
+      gid: CLAWBOX_GID,
+    });
+  }
+
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = spawn(cmd, args, {

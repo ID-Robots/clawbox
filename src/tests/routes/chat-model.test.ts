@@ -9,6 +9,7 @@ vi.mock("util", () => ({
 }));
 
 vi.mock("@/lib/config-store", () => ({
+  DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  runOpenclawConfigSet: vi.fn(),
 }));
 
 vi.mock("@/lib/sqlite-store", () => ({
@@ -25,7 +27,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { promisify } from "util";
 
@@ -40,6 +42,7 @@ describe("/setup-api/chat/model", () => {
 
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
+    vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
 
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",
@@ -189,11 +192,10 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mockExec).toHaveBeenCalledWith(
-      "/usr/local/bin/openclaw",
-      ["config", "set", "agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"],
-      { timeout: 10000 },
-    );
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "llamacpp/gemma4-e2b-it-q4_0",
+    ]);
     expect(restartGateway).toHaveBeenCalled();
     expect(body.activeSource).toBe("local");
     expect(body.activeLabel).toBe("Gemma 4 Local");
@@ -246,11 +248,10 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mockExec).toHaveBeenCalledWith(
-      "/usr/local/bin/openclaw",
-      ["config", "set", "agents.defaults.model.primary", "deepseek/deepseek-chat"],
-      { timeout: 10000 },
-    );
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "deepseek/deepseek-chat",
+    ]);
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
   });
