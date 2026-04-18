@@ -1948,19 +1948,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       Route everything to the local model. Disables all cloud AI providers (including fallbacks).
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-label="Local-only mode"
-                    aria-checked={!!localOnlyMode}
-                    disabled={localOnlyPending || localOnlyMode === null}
-                    onClick={() => toggleLocalOnly(!localOnlyMode)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-                      localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                    }`}
-                  >
-                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {localOnlyPending && (
+                      <span
+                        className="material-symbols-rounded animate-spin text-[var(--text-muted)]"
+                        style={{ fontSize: 18 }}
+                        aria-hidden="true"
+                      >
+                        progress_activity
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-label="Local-only mode"
+                      aria-checked={!!localOnlyMode}
+                      aria-busy={localOnlyPending}
+                      disabled={localOnlyPending || localOnlyMode === null}
+                      onClick={() => toggleLocalOnly(!localOnlyMode)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
+                        localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
