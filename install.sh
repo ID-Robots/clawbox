@@ -343,7 +343,20 @@ read_configured_hostname() {
   printf '%s' "$valid"
 }
 
-# Set system hostname and update avahi so mDNS advertises <name>.local.
+# Set system hostname and install the hardened avahi config so mDNS
+# advertises <name>.local reliably.
+#
+# Hardening goals (full rationale in config/avahi-daemon.conf):
+#   - Shorter rate-limit window + larger burst so Windows' chatty
+#     parallel A/AAAA/SRV/PTR queries don't trip avahi's throttle and
+#     trigger a 15-minute negative-cache on the client.
+#   - Cross-family (publish-a-on-ipv6 / publish-aaaa-on-ipv4) so dual-
+#     stack clients resolve on the first attempt.
+#   - use-iff-running=no so we announce the instant an address is
+#     assigned, not after IFF_RUNNING flips on.
+#   - A NetworkManager dispatcher hook forces avahi to re-announce on
+#     every interface up/down / DHCP change so stale negative caches
+#     on clients expire within seconds instead of 15 minutes.
 apply_hostname() {
   local name
   name=$(validate_hostname "${1:-}") || name=""
@@ -352,18 +365,59 @@ apply_hostname() {
     return 1
   fi
   hostnamectl set-hostname "$name"
-  if [ ! -f "$AVAHI_CONF" ]; then
-    echo "  Warning: $AVAHI_CONF not found, skipping avahi configuration"
-    return
+
+  # Install ClawBox's hardened avahi config if we have one in the repo.
+  # Keep the distro default as .bak.orig the first time so operators can
+  # diff and revert if needed.
+  # Prefer the canonical project copy under $PROJECT_DIR, but fall back to
+  # the config shipped next to the installer script. This matters on the
+  # fresh-install path where the network setup step runs before `git pull`
+  # has populated $PROJECT_DIR — the installer is being executed straight
+  # out of the cloned tarball at that moment.
+  local clawbox_avahi_src="$PROJECT_DIR/config/avahi-daemon.conf"
+  if [ ! -f "$clawbox_avahi_src" ] && [ -f "$(dirname "$0")/config/avahi-daemon.conf" ]; then
+    clawbox_avahi_src="$(dirname "$0")/config/avahi-daemon.conf"
   fi
-  cp -n "$AVAHI_CONF" "${AVAHI_CONF}.bak" 2>/dev/null || true
-  if grep -q '^#\?host-name=' "$AVAHI_CONF"; then
+  if [ -f "$clawbox_avahi_src" ]; then
+    if [ -f "$AVAHI_CONF" ] && [ ! -f "${AVAHI_CONF}.bak.orig" ]; then
+      cp "$AVAHI_CONF" "${AVAHI_CONF}.bak.orig"
+    fi
+    install -m 644 "$clawbox_avahi_src" "$AVAHI_CONF"
+    # Rewrite the host-name line to match the configured device hostname.
     sed -i "s/^#\\?host-name=.*/host-name=$name/" "$AVAHI_CONF"
-  elif grep -q '^\[server\]' "$AVAHI_CONF"; then
-    sed -i "/^\\[server\\]/a host-name=$name" "$AVAHI_CONF"
+    echo "  Installed hardened avahi-daemon.conf (host-name=$name)"
+  elif [ -f "$AVAHI_CONF" ]; then
+    # Fallback when install.sh runs from a repo that doesn't have the
+    # new config file (older deployments): just rewrite the host-name
+    # line in the distro default, same as before.
+    cp -n "$AVAHI_CONF" "${AVAHI_CONF}.bak" 2>/dev/null || true
+    if grep -q '^#\?host-name=' "$AVAHI_CONF"; then
+      sed -i "s/^#\\?host-name=.*/host-name=$name/" "$AVAHI_CONF"
+    elif grep -q '^\[server\]' "$AVAHI_CONF"; then
+      sed -i "/^\\[server\\]/a host-name=$name" "$AVAHI_CONF"
+    else
+      printf '\n[server]\nhost-name=%s\n' "$name" >> "$AVAHI_CONF"
+    fi
   else
-    printf '\n[server]\nhost-name=%s\n' "$name" >> "$AVAHI_CONF"
+    echo "  Warning: $AVAHI_CONF not found and no repo config to install"
   fi
+
+  # Install the NetworkManager dispatcher hook that reloads avahi on
+  # every interface state change, so clients' negative caches flush.
+  local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
+  local dispatcher_src="$PROJECT_DIR/config/99-clawbox-avahi-reload"
+  if [ ! -f "$dispatcher_src" ] && [ -f "$(dirname "$0")/config/99-clawbox-avahi-reload" ]; then
+    dispatcher_src="$(dirname "$0")/config/99-clawbox-avahi-reload"
+  fi
+  if [ -f "$dispatcher_src" ] && [ -d "$dispatcher_dir" ]; then
+    install -m 755 "$dispatcher_src" "$dispatcher_dir/99-clawbox-avahi-reload"
+    # NetworkManager requires dispatcher scripts to be owned by root and
+    # not world-writable — install(1) defaults already match, but make it
+    # explicit so future permission tightening doesn't silently disable.
+    chown root:root "$dispatcher_dir/99-clawbox-avahi-reload"
+    echo "  Installed NetworkManager dispatcher for avahi re-announce"
+  fi
+
   systemctl restart avahi-daemon
   echo "  Hostname set to '$name', avahi restarted"
 }
@@ -731,6 +785,12 @@ step_post_update() {
   # Triggered by the in-app updater so existing devices pick up new dispatcher
   # scripts, sysctls, etc. without a full reinstall. Keep this list small and
   # idempotent.
+  # step_set_hostname re-runs apply_hostname, which redeploys the hardened
+  # avahi-daemon.conf + 99-clawbox-avahi-reload dispatcher hook. Without this
+  # call, devices updating via the in-app updater never receive the mDNS
+  # fixes from this PR — they'd keep failing to resolve <hostname>.local on
+  # Windows until the owner did a fresh install.
+  step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
 }
