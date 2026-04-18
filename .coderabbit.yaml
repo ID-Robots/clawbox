@@ -9,6 +9,7 @@ reviews:
       - main
       - master
       - develop
+      - beta
       - "clawbox-*"
   path_instructions:
     - path: "src/app/**/*.ts*"
