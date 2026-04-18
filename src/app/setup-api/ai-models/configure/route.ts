@@ -12,6 +12,8 @@ import {
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
+  applyModelOverrideToAllAgentSessions,
+  parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
 import {
   getDefaultLlamaCppModel,
@@ -588,7 +590,38 @@ export async function POST(request: Request) {
       await ensureFallbackModel(config.defaultModel);
     }
 
-    // 8. Restart OpenClaw gateway so it picks up the new auth profile and model
+    // 8. Sweep every existing session's per-session override to the new
+    //    primary model, tagged `source: "user"` so OpenClaw's per-turn
+    //    model resolver returns early and doesn't flip the session back
+    //    to the previous provider on the first message after the switch.
+    //    Without this, a session that was bound to e.g. openai-codex
+    //    keeps routing to openai-codex even after the user changes the
+    //    primary provider to ClawBox AI / DeepSeek / etc. — the new
+    //    default only seeds future sessions. Mirror of the sweep in
+    //    /setup-api/chat/model (see PR #73 for context on why "user" is
+    //    the only sticky source value).
+    //
+    //    Only sweep when this configure call actually set a new primary
+    //    (skip for local-only local-AI setups that leave the primary
+    //    alone).
+    if (!isLocalScope || shouldPromoteLocalToPrimary) {
+      const parsedPrimary = parseFullyQualifiedModel(config.defaultModel);
+      if (parsedPrimary) {
+        try {
+          await applyModelOverrideToAllAgentSessions({
+            provider: parsedPrimary.provider,
+            modelId: parsedPrimary.modelId,
+            source: "user",
+          });
+        } catch (err) {
+          // Non-fatal: the default change above still takes effect for
+          // brand-new sessions; worst case the user resets the open chat.
+          console.error("[configure] Failed to sweep session overrides:", err);
+        }
+      }
+    }
+
+    // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
     try {
       await restartGateway();
     } catch (err) {

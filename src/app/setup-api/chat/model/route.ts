@@ -31,6 +31,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   clawai: "ClawBox AI",
   anthropic: "Anthropic Claude",
   openai: "OpenAI GPT",
+  "openai-codex": "OpenAI Codex",
   google: "Google Gemini",
   openrouter: "OpenRouter",
   ollama: "Ollama Local",
