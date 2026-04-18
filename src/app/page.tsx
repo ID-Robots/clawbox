@@ -615,9 +615,22 @@ function ChromeDesktopInner() {
         positions[id] = { row: Math.floor(i / cols), col: i % cols };
       });
     } else {
-      // Desktop: single column, top-left aligned
+      // Desktop: fill column-by-column, top-to-bottom, wrapping to the next
+      // column once the current one would overflow the visible viewport.
+      // Previously this always used col: 0, which piled every icon into a
+      // single vertical column that ran off the bottom of the screen as
+      // soon as the user had more icons than fit.
+      //
+      // Leave a small margin at the bottom for the taskbar (~60 px) so the
+      // last icon in a column isn't clipped by it.
+      const TASKBAR_RESERVE = 72;
+      const viewportHeight = typeof window !== "undefined" ? window.innerHeight : CELL_H * 6;
+      const rowsPerColumn = Math.max(1, Math.floor((viewportHeight - TASKBAR_RESERVE) / CELL_H));
+      const maxCols = Math.max(1, GRID_COLS);
       allIconIds.forEach((id, i) => {
-        positions[id] = { row: i, col: 0 };
+        const col = Math.min(Math.floor(i / rowsPerColumn), maxCols - 1);
+        const row = i - col * rowsPerColumn;
+        positions[id] = { row, col };
       });
     }
     setIconPositions(positions);
