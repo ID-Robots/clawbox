@@ -137,4 +137,12 @@ OBMENU
 fi
 sleep 1
 
+# autocutsel keeps the X CLIPBOARD and PRIMARY selections alive even after
+# the window that produced them closes, so copy/paste between the VNC client
+# and guest apps (Chromium, xterm, etc.) survives focus changes.
+if command -v autocutsel &>/dev/null; then
+  autocutsel -fork -selection CLIPBOARD 2>/dev/null || true
+  autocutsel -fork -selection PRIMARY 2>/dev/null || true
+fi
+
 exec x11vnc -display ":${VDISPLAY}" -rfbport "${VNC_PORT}" -forever -shared -nopw -localhost -noxdamage

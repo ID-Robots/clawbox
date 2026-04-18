@@ -32,6 +32,13 @@ export default function VNCApp() {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [vncInfo, setVncInfo] = useState<{ host: string; wsPort: number } | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const pasteTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Mirrors pasteOpen so the focus/keyboard handlers (which live in effect
+  // closures and can't see React state updates directly) can short-circuit
+  // when the paste modal is open.
+  const pasteOpenRef = useRef(false);
 
   const checkVnc = useCallback(async () => {
     try {
@@ -132,6 +139,18 @@ export default function VNCApp() {
           if (e.detail?.clean === false) setError("Connection lost unexpectedly");
         });
 
+        // Remote → local: when the guest copies, push the text into the
+        // host browser's clipboard so the user can paste it elsewhere.
+        rfb.addEventListener("clipboard", (e: CustomEvent) => {
+          const text = e.detail?.text;
+          if (typeof text !== "string" || !text) return;
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).catch(() => {
+              // Host browser blocked the write (permissions / focus). Non-fatal.
+            });
+          }
+        });
+
         rfbRef.current = rfb;
       } catch (err) {
         setStatus("error");
@@ -162,10 +181,12 @@ export default function VNCApp() {
     const interactionHost = container.closest("[data-chrome-window-content]") ?? container.parentElement;
 
     const onFocusIn = () => {
+      if (pasteOpenRef.current) return;
       activateVncInput();
     };
 
     const onWheelCapture = (event: WheelEvent) => {
+      if (pasteOpenRef.current) return;
       const target = event.target as Node | null;
       if (!target || !container.contains(target)) return;
       activateVncInput();
@@ -173,6 +194,7 @@ export default function VNCApp() {
     };
 
     const onFocusOut = (e: PointerEvent | MouseEvent) => {
+      if (pasteOpenRef.current) return;
       const target = e.target as Node | null;
       if (!target) return;
       if (chromeWindow?.contains(target)) return;
@@ -180,11 +202,44 @@ export default function VNCApp() {
       deactivateVncInput();
     };
 
+    // Local → remote: the `paste` event only fires on editable elements,
+    // and the VNC canvas is not editable — so we listen for Ctrl/Cmd+V
+    // directly. On each shortcut we read the host clipboard via the async
+    // Clipboard API and push it into the guest's X CLIPBOARD selection via
+    // RFB (x11vnc turns that message into an X selection). noVNC continues
+    // to forward the V keystroke itself, so Chromium / terminals on the
+    // guest see "Ctrl+V pressed" and paste from the freshly-updated CLIPBOARD.
+    //
+    // navigator.clipboard.readText() requires a secure context (HTTPS or
+    // localhost). On LAN-served HTTP (http://clawbox.local, http://192.168.x.x)
+    // the browser rejects the read and we silently no-op — the user can still
+    // paste manually via the guest's context menu.
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (pasteOpenRef.current) return;
+      if (!vncFocusedRef.current) return;
+      const isPasteShortcut =
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "v";
+      if (!isPasteShortcut) return;
+      if (!navigator.clipboard?.readText) return;
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) rfbRef.current?.clipboardPasteFrom(text);
+        })
+        .catch(() => {
+          // Non-secure origin or clipboard permission denied — silently skip.
+        });
+    };
+
     container.addEventListener("mousedown", onFocusIn, true);
     container.addEventListener("pointerdown", onFocusIn, true);
     container.addEventListener("mouseenter", onFocusIn);
     container.addEventListener("focusin", onFocusIn);
     container.addEventListener("wheel", onWheelCapture, { capture: true, passive: false });
+    container.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("mousedown", onFocusOut, true);
     document.addEventListener("pointerdown", onFocusOut, true);
     window.addEventListener("blur", deactivateVncInput);
@@ -192,6 +247,7 @@ export default function VNCApp() {
     // ChromeWindow disables pointer events on its content host during drag/resize.
     // Re-focus the VNC canvas as soon as the content host becomes interactive again.
     const observer = interactionHost ? new MutationObserver(() => {
+      if (pasteOpenRef.current) return;
       if (interactionHost instanceof HTMLElement && interactionHost.style.pointerEvents !== "none" && vncFocusedRef.current) {
         focusVncSurface();
       }
@@ -208,6 +264,7 @@ export default function VNCApp() {
       container.removeEventListener("mouseenter", onFocusIn);
       container.removeEventListener("focusin", onFocusIn);
       container.removeEventListener("wheel", onWheelCapture, true);
+      container.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("mousedown", onFocusOut, true);
       document.removeEventListener("pointerdown", onFocusOut, true);
       window.removeEventListener("blur", deactivateVncInput);
@@ -296,6 +353,35 @@ export default function VNCApp() {
     checkVnc();
   }, [checkVnc]);
 
+  const openPasteModal = useCallback(() => {
+    setPasteText("");
+    pasteOpenRef.current = true;
+    setPasteOpen(true);
+    // Stop the VNC-input handlers from grabbing focus back onto the canvas
+    // while the textarea needs it for the user's Ctrl+V.
+    deactivateVncInput();
+    // Defer focus until the textarea mounts.
+    requestAnimationFrame(() => pasteTextareaRef.current?.focus());
+  }, [deactivateVncInput]);
+
+  const closePasteModal = useCallback(() => {
+    pasteOpenRef.current = false;
+    setPasteOpen(false);
+    setPasteText("");
+    focusVncSurface();
+  }, [focusVncSurface]);
+
+  const sendPaste = useCallback(() => {
+    const text = pasteText;
+    if (text.length > 0) {
+      rfbRef.current?.clipboardPasteFrom(text);
+    }
+    pasteOpenRef.current = false;
+    setPasteOpen(false);
+    setPasteText("");
+    focusVncSurface();
+  }, [focusVncSurface, pasteText]);
+
   if (status === "error" && !vncInfo) {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-black text-white/70 gap-4 p-8">
@@ -317,6 +403,62 @@ export default function VNCApp() {
       tabIndex={0}
       className="h-full overflow-hidden bg-black relative"
     >
+      {status === "connected" && (
+        <button
+          type="button"
+          onClick={openPasteModal}
+          title={t("vnc.pasteToRemote")}
+          className="absolute top-3 right-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white/90 bg-black/60 hover:bg-black/80 backdrop-blur-sm border border-white/10 transition-colors cursor-pointer"
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 16 }}>content_paste</span>
+          {t("vnc.pasteToRemote")}
+        </button>
+      )}
+      {pasteOpen && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={closePasteModal}>
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-white mb-1">{t("vnc.pasteToRemote")}</h3>
+            <p className="text-xs text-white/50 mb-3">{t("vnc.pasteHelp")}</p>
+            <textarea
+              ref={pasteTextareaRef}
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  sendPaste();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  closePasteModal();
+                }
+              }}
+              rows={5}
+              placeholder={t("vnc.pastePlaceholder")}
+              className="w-full px-3 py-2 bg-white/[0.04] border border-white/10 rounded-lg text-sm text-white outline-none focus:border-orange-400/60 focus:bg-white/[0.06] placeholder-white/25 resize-y"
+            />
+            <div className="flex items-center justify-end gap-2 mt-4">
+              <button
+                type="button"
+                onClick={closePasteModal}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer"
+              >
+                {t("cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={sendPaste}
+                disabled={pasteText.length === 0}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium text-white bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 cursor-pointer"
+              >
+                {t("vnc.sendPaste")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {(status === "connecting" || status === "disconnected") && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-white/50 gap-3 z-10">
           {status === "connecting" ? (

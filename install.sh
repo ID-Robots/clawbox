@@ -969,7 +969,7 @@ step_ai_tools_install() {
 
 step_vnc_install() {
   # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
-  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils
+  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
