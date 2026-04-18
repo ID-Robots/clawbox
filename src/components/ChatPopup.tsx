@@ -10,6 +10,10 @@ import * as kv from '@/lib/client-kv'
 
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
+// During a skill install the gateway restarts to load the new skill, so
+// extend the retry budget to quadruple so the chat reconnects automatically
+// once it comes back instead of forcing the user to click Try again.
+const SKILL_INSTALL_MAX_RETRIES = MAX_RETRIES * 4
 const RETRY_DELAY = 3000
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 function saveMascotSnippet(text: string) {
@@ -333,8 +337,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
     } catch {
-      // Auto-retry if gateway config not ready yet
-      if (retryCountRef.current < MAX_RETRIES) {
+      // Auto-retry if gateway config not ready yet. Extend the budget
+      // during skill-install windows so the chat silently recovers once
+      // the restarted gateway finishes reloading skills.
+      const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+      if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
@@ -497,7 +504,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
     const onClose = () => {
       wsRef.current = null
-      if (retryCountRef.current < MAX_RETRIES) {
+      // While a skill install is in-flight the gateway is restarting to
+      // load the new skill — use the extended retry budget so the chat
+      // reconnects automatically once it comes back, instead of bailing
+      // out with 'Could not connect to gateway' and making the user click
+      // Try again manually. The normal cap still applies outside of
+      // skill-install windows.
+      const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+      if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
@@ -779,6 +793,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
 
+  // Safety net: if the chat ever lands in the error state while a skill
+  // install is still in flight, auto-retry the connection instead of
+  // making the user click the manual Try-again button. The main defense
+  // is the quadrupled retry budget in onClose / gateway-config fetch;
+  // this effect covers any path that bypasses them.
+  useEffect(() => {
+    if (status !== 'error' || !reloadingSkill) return
+    const timer = setTimeout(() => {
+      retryCountRef.current = 0
+      connect()
+    }, RETRY_DELAY)
+    return () => clearTimeout(timer)
+  }, [status, reloadingSkill, connect])
+
   // Notify parent of thinking state
   useEffect(() => { onThinkingChange?.(sending) }, [sending, onThinkingChange])
 
@@ -1007,7 +1035,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'error' && (
+        {status === 'error' && !reloadingSkill && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
