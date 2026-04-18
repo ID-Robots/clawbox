@@ -19,6 +19,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  applyModelOverrideToAllAgentSessions: vi.fn(),
+  parseFullyQualifiedModel: vi.fn(),
 }));
 
 vi.mock("@/lib/sqlite-store", () => ({
@@ -27,7 +29,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { promisify } from "util";
 
@@ -43,6 +45,12 @@ describe("/setup-api/chat/model", () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(parseFullyQualifiedModel).mockImplementation((fq: string) => {
+      const idx = fq.indexOf("/");
+      if (idx <= 0) return null;
+      return { provider: fq.slice(0, idx), modelId: fq.slice(idx + 1) };
+    });
 
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",
