@@ -5,9 +5,29 @@ import { useT } from "@/lib/i18n";
 
 interface TelegramConfiguringOverlayProps {
   onDone: () => void;
+  /**
+   * Optional promise the overlay awaits before transitioning to the
+   * final "ready" phase. When the caller knows the configure request is
+   * still in flight (SettingsApp's POST to /telegram/configure), passing
+   * its success promise here prevents the overlay from declaring victory
+   * while the gateway restart is still happening. The overlay still also
+   * polls gateway health — both signals must be ready before phase 4.
+   */
+  waitFor?: Promise<void>;
+  /**
+   * Max ms to poll gateway health before giving up. When the poll times
+   * out, the overlay calls onDone() without transitioning to phase 4 so
+   * the parent can surface its own error instead of falsely reporting
+   * "ready". Default: 60_000.
+   */
+  healthTimeoutMs?: number;
 }
 
-export default function TelegramConfiguringOverlay({ onDone }: TelegramConfiguringOverlayProps) {
+export default function TelegramConfiguringOverlay({
+  onDone,
+  waitFor,
+  healthTimeoutMs = 60_000,
+}: TelegramConfiguringOverlayProps) {
   const { t } = useT();
 
   const CONFIGURING_STEPS = [
@@ -34,19 +54,21 @@ export default function TelegramConfiguringOverlay({ onDone }: TelegramConfiguri
       });
     }
 
-    async function pollGatewayHealth() {
-      const maxAttempts = 30;
+    async function pollGatewayHealth(): Promise<boolean> {
+      const pollIntervalMs = 2000;
+      const maxAttempts = Math.ceil(healthTimeoutMs / pollIntervalMs);
       for (let i = 0; i < maxAttempts; i++) {
-        if (cancelledRef.current) return;
+        if (cancelledRef.current) return false;
         try {
-          const res = await fetch("/setup-api/gateway/health");
+          const res = await fetch("/setup-api/gateway/health", { cache: "no-store" });
           if (res.ok) {
             const data = await res.json();
-            if (data.available) return;
+            if (data.available) return true;
           }
         } catch { /* gateway not ready yet */ }
-        await delay(2000);
+        await delay(pollIntervalMs);
       }
+      return false;
     }
 
     async function run() {
@@ -62,8 +84,23 @@ export default function TelegramConfiguringOverlay({ onDone }: TelegramConfiguri
       if (cancelledRef.current) return;
       setPhase(3);
 
-      await pollGatewayHealth();
+      // Wait for BOTH signals before declaring ready:
+      //   1. the caller's configure request has succeeded (waitFor)
+      //   2. gateway health reports available again after the restart
+      // Running them concurrently matches the phase-3 "waiting gateway"
+      // spinner the user already sees — we don't want to add more delay,
+      // just make sure neither completes prematurely.
+      const [ready] = await Promise.all([
+        pollGatewayHealth(),
+        waitFor ?? Promise.resolve(),
+      ]);
       if (cancelledRef.current) return;
+      if (!ready) {
+        // Gateway never came back within healthTimeoutMs — hand control
+        // back to the parent without pretending we finished.
+        onDone();
+        return;
+      }
 
       setPhase(4);
       await delay(1500);
@@ -78,7 +115,7 @@ export default function TelegramConfiguringOverlay({ onDone }: TelegramConfiguri
       cancelledRef.current = true;
       timers.forEach((t) => clearTimeout(t));
     };
-  }, [onDone]);
+  }, [onDone, waitFor, healthTimeoutMs]);
 
   useEffect(() => {
     const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
@@ -97,7 +134,17 @@ export default function TelegramConfiguringOverlay({ onDone }: TelegramConfiguri
         .tg-step-enter { animation: tg-fade-in 0.3s ease-out both }
       `}</style>
 
-      <div className="relative w-24 h-24 flex items-center justify-center">
+      {/* Screen-reader-only live region — announces phase transitions
+          without repeating the purely decorative spinner animation. */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {phase === 0
+          ? t("telegram.botTokenVerified")
+          : phase === 4
+          ? t("telegram.botReady")
+          : `${t("telegram.settingUpTelegram")} — ${CONFIGURING_STEPS[phase]?.label ?? ""}`}
+      </div>
+
+      <div className="relative w-24 h-24 flex items-center justify-center" aria-hidden="true">
         <div className="absolute inset-0 rounded-full border-2 border-sky-500/20" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite" }} />
         <div className="absolute inset-2 rounded-full border border-sky-500/10" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite 0.5s" }} />
 
