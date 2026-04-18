@@ -9,6 +9,7 @@ import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
+import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
@@ -927,23 +928,47 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgToken, setTgToken] = useState("");
   const [tgShowToken, setTgShowToken] = useState(false);
   const [tgSaving, setTgSaving] = useState(false);
+  const [tgConfiguring, setTgConfiguring] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
   const [tgBotInfo, setTgBotInfo] = useState<{ username?: string; firstName?: string; link?: string } | null>(null);
   const [tgReconfigure, setTgReconfigure] = useState(false);
+  // Promise the overlay awaits before declaring "ready". Resolves when
+  // POST /telegram/configure returns success; rejects on failure. This
+  // prevents the overlay from completing based on gateway-health alone —
+  // during the restart window the old gateway can still answer /health
+  // until it actually goes down, which would falsely flash "ready" at
+  // the user before the new bot is live.
+  const [tgConfigurePromise, setTgConfigurePromise] = useState<Promise<void> | undefined>(undefined);
   const tgSaveControllerRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    if (section !== "telegram" && !isMobile) return;
-    fetch("/setup-api/telegram/status").then(r => r.json()).then(d => {
+  const refreshTelegramStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/telegram/status", { cache: "no-store" });
+      if (!r.ok) {
+        // Don't clobber existing state on a transient error (gateway
+        // restarting, 5xx, etc.) — keep the last known bot info visible.
+        console.warn("[telegram] /setup-api/telegram/status returned", r.status);
+        return;
+      }
+      const d = await r.json();
       setTgConfigured(d.configured ?? false);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
       } else {
         setTgBotInfo(null);
       }
-    }).catch(() => setTgConfigured(false));
-  }, [section, isMobile]);
+    } catch (err) {
+      // Network error — likewise keep the last known state instead of
+      // flashing "not configured" at the user mid-restart.
+      console.warn("[telegram] refresh failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section !== "telegram" && !isMobile) return;
+    refreshTelegramStatus();
+  }, [section, isMobile, refreshTelegramStatus]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
@@ -954,7 +979,24 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const controller = new AbortController();
     tgSaveControllerRef.current = controller;
     setTgSaving(true);
+    setTgConfiguring(true);
     setTgStatus(null);
+
+    // Resolver/rejecter exposed so the overlay can await the configure
+    // outcome in parallel with its own gateway-health poll. Only when
+    // BOTH succeed does the overlay transition to its final "ready"
+    // phase — see TelegramConfiguringOverlay's `waitFor` prop.
+    const {
+      promise: configurePromise,
+      resolve: configureResolve,
+      reject: configureReject,
+    } = Promise.withResolvers<void>();
+    // Swallow the rejection at the promise level so unhandled-rejection
+    // doesn't fire; the overlay handles the failed state via its own
+    // error path (we also call setTgConfiguring(false) below).
+    configurePromise.catch(() => {});
+    setTgConfigurePromise(configurePromise);
+
     try {
       const res = await fetch("/setup-api/telegram/configure", {
         method: "POST",
@@ -962,24 +1004,40 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ botToken: tgToken.trim() }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        configureReject(new Error("aborted"));
+        return;
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        configureReject(new Error(data.error || "configure failed"));
+        setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
       const data = await res.json();
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        configureReject(new Error("aborted"));
+        return;
+      }
       if (data.success) {
+        configureResolve();
         setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
       } else {
+        configureReject(new Error(data.error || "configure returned success=false"));
+        setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        configureReject(err);
+        return;
+      }
+      configureReject(err);
+      setTgConfiguring(false);
       setTgStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
       if (!controller.signal.aborted) setTgSaving(false);
@@ -2026,8 +2084,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             {/* Setup card — shown when not configured or reconfiguring */}
-            {(tgConfigured === false || tgReconfigure) && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+            {(tgConfigured === false || tgReconfigure || tgConfiguring) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 relative overflow-hidden">
+                {tgConfiguring && (
+                  <TelegramConfiguringOverlay
+                    waitFor={tgConfigurePromise}
+                    onDone={() => {
+                      setTgConfiguring(false);
+                      setTgConfigurePromise(undefined);
+                      refreshTelegramStatus();
+                    }}
+                  />
+                )}
+                <div className={tgConfiguring ? "invisible h-0 overflow-hidden" : ""}>
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
                   <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
@@ -2115,6 +2184,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("cancel")}
                     </button>
                   )}
+                </div>
                 </div>
               </div>
             )}
