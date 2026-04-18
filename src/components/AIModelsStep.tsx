@@ -788,6 +788,11 @@ export default function AIModelsStep({
   const configuringCompleted = configuringState?.completed ?? false;
 
   useEffect(() => {
+    if (selectedProvider === "llamacpp") checkLlamaCppStatus();
+    if (selectedProvider === "ollama") checkOllamaStatus();
+  }, [selectedProvider, checkLlamaCppStatus, checkOllamaStatus]);
+
+  useEffect(() => {
     if (configuringKind !== "generic" || configuringCompleted) return;
 
     const timers = CONFIGURING_STEP_DELAYS.map((delay, index) =>

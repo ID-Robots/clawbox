@@ -118,7 +118,11 @@ describe("AIModelsStep variants", () => {
     expect(queryByText("ClawBox AI")).not.toBeInTheDocument();
     expect(queryByText("OpenAI GPT")).not.toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
-    expect(getByText("Enable Gemma 4")).toBeInTheDocument();
+    // With the mocked hook returning llamaCppInstalled: true (i.e. Gemma is
+    // already on disk but the runtime is idle), the panel renders a green
+    // "configured" pill instead of the install button. Users should only see
+    // the orange "Enable Gemma 4" call-to-action on truly fresh devices.
+    expect(getByText("Gemma 4 is already configured")).toBeInTheDocument();
   });
 
   it("skips Local AI setup by advancing to the next step", async () => {
