@@ -152,7 +152,10 @@ export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
 // use whichever values are baked into this per-session record, and
 // OpenClaw's own auto-picker will re-populate them at chat time unless
 // `modelOverrideSource` is already "manual".
-const SESSION_OVERRIDE_FIELDS = [
+//
+// Exported for downstream callers (e.g. exclusive/route.ts) that need
+// to snapshot + restore the raw per-field state.
+export const SESSION_OVERRIDE_FIELDS = [
   "providerOverride",
   "modelOverride",
   "modelOverrideSource",
@@ -240,19 +243,18 @@ export async function applyModelOverrideToAllAgentSessions(
 
   const files = await listAgentSessionsFiles(agentsDir);
   for (const file of files) {
-    let parsed: Record<string, Record<string, unknown>>;
+    let parsed: unknown;
     try {
-      const raw = await fs.readFile(file, "utf-8");
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(await fs.readFile(file, "utf-8"));
     } catch (err) {
       console.error(`[openclaw-config] Skipping unreadable sessions file ${file}:`, err);
       continue;
     }
     if (!parsed || typeof parsed !== "object") continue;
 
-    let fileDirty = false;
-    for (const sessionKey of Object.keys(parsed)) {
-      const session = parsed[sessionKey];
+    const sessions = parsed as Record<string, Record<string, unknown>>;
+    let touchedInFile = 0;
+    for (const session of Object.values(sessions)) {
       if (!session || typeof session !== "object") continue;
       session.providerOverride = update.provider;
       session.modelOverride = update.modelId;
@@ -261,14 +263,14 @@ export async function applyModelOverrideToAllAgentSessions(
       session.authProfileOverrideSource = source;
       session.modelProvider = update.provider;
       session.model = update.modelId;
-      fileDirty = true;
-      sessionsUpdated += 1;
+      touchedInFile += 1;
     }
 
-    if (!fileDirty) continue;
+    if (touchedInFile === 0) continue;
     try {
-      await atomicWriteSessionsFile(file, parsed);
+      await atomicWriteSessionsFile(file, sessions);
       filesUpdated += 1;
+      sessionsUpdated += touchedInFile;
     } catch (err) {
       console.error(`[openclaw-config] Failed to write patched sessions file ${file}:`, err);
     }
@@ -288,9 +290,6 @@ export function parseFullyQualifiedModel(fq: string): { provider: string; modelI
   if (idx <= 0 || idx === fq.length - 1) return null;
   return { provider: fq.slice(0, idx), modelId: fq.slice(idx + 1) };
 }
-// Expose field list for downstream callers (e.g. exclusive/route.ts
-// which still needs to snapshot + restore the raw per-field state).
-export const SESSION_OVERRIDE_FIELD_LIST: readonly string[] = SESSION_OVERRIDE_FIELDS;
 
 export interface OpenClawConfig {
   [key: string]: unknown;
