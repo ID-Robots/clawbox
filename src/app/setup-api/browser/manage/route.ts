@@ -223,11 +223,15 @@ export async function POST(req: Request) {
 
         const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 10000 });
-          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 10000 });
+          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 30000 });
+          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 30000 });
           await persistBrowserEnabled(true);
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Failed to enable browser integration" },
+            { status: 500 },
+          );
         }
 
         let enableRestartOk = true;
@@ -244,10 +248,14 @@ export async function POST(req: Request) {
       case "disable": {
         const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 10000 });
+          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 30000 });
           await persistBrowserEnabled(false);
         } catch (err) {
           console.error("[browser] Failed to unset tools config:", err);
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Failed to disable browser integration" },
+            { status: 500 },
+          );
         }
 
         let disableRestartOk = true;
@@ -316,7 +324,7 @@ export async function POST(req: Request) {
 
       case "close-browser": {
         try {
-          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 10000 });
+          await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 30000 });
         } catch {}
         try {
           await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
