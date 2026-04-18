@@ -96,8 +96,13 @@ function spawnOpenclawConfigSet(
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    // stdin + stdout are "ignore" so the child isn't blocked writing into a
+    // pipe no one is reading — OpenClaw's CLI can produce a lot of stdout
+    // under verbose/debug modes, and with a full kernel pipe buffer it would
+    // deadlock waiting for someone to drain it. We only care about stderr,
+    // which carries the ConfigMutationConflictError signature used for retry.
     const child = spawn(bin, ["config", "set", ...args], {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
