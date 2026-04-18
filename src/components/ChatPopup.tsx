@@ -388,8 +388,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             const wasProviderChange = reloadReasonRef.current === 'provider'
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
-            setMessages([])
-            greetedRef.current = true // prevent auto-greet
+            // Only reset the transcript for skill install/uninstall/etc.
+            // Provider changes keep the visible history so the user's
+            // earlier context isn't wiped — only the backend session
+            // override changed, not the conversation semantics.
+            if (!wasProviderChange) {
+              setMessages([])
+              greetedRef.current = true // prevent auto-greet
+            }
             const evt = skillEventRef.current
             skillEventRef.current = null
             // Build context message about the skill change
@@ -844,7 +850,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // also gets us the quadrupled retry budget for the reconnect, so
     // slower restarts don't trigger the 'Could not connect to gateway'
     // fallback UI.
-    const providerHandler = makeHandler('provider')
+    const providerReloadHandler = makeHandler('provider')
+    const providerHandler = (e: Event) => {
+      providerReloadHandler(e)
+      // The configure route restarts the gateway before returning its
+      // response, and the Settings event fires *after* the response —
+      // so by the time we get here the WS may already have reconnected
+      // on its own. If so, no future `hello` is coming to trip the
+      // reload branch in the resolve callback, and the overlay would
+      // stay up forever. Force a fresh connect() so the resolve-branch
+      // fires exactly once, right now, with reloadReasonRef=='provider'.
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        try { wsRef.current.close() } catch { /* ignore */ }
+      }
+      retryCountRef.current = 0
+      connect()
+    }
     window.addEventListener('clawbox-skill-installed', skillHandler)
     window.addEventListener('clawbox:primary-ai-configured', providerHandler)
     return () => {
