@@ -213,10 +213,14 @@ function ConfiguringOverlay({
         </div>
       )}
 
-      {/* Reassuring footer */}
+      {/* Local providers (llama.cpp / Ollama) compile and download multi-GB
+         models — can take 10-15 min on Jetson. Cloud providers finish in
+         seconds, so they get the shorter generic copy. */}
       {!completed && phase >= 1 && (
         <p className="text-xs text-[var(--text-muted)] text-center mt-2 aimodels-step-enter">
-          {t("ai.pleaseDontClose")}
+          {provider === "llamacpp" || provider === "ollama"
+            ? t("ai.pleaseDontCloseLocal")
+            : t("ai.pleaseDontClose")}
         </p>
       )}
     </div>
