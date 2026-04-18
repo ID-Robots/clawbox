@@ -60,15 +60,26 @@ export default function LlamaCppModelPanel({
         </p>
       </div>
 
-      <button
-        type="button"
-        onClick={() => saveLlamaCppConfig(selectedLlamaCppModel)}
-        disabled={!!llamaCppSaving}
-        className={buttonClassName}
-      >
-        {llamaCppSaving && buttonSpinner}
-        {llamaCppSaving ? "Enabling Gemma 4..." : llamaCppRunning ? "Enable Gemma 4" : "Enable Gemma 4"}
-      </button>
+      {llamaCppInstalled && !llamaCppSaving ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-3 px-5 py-3 rounded-lg font-semibold text-sm border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 flex items-center gap-2"
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 20 }}>check_circle</span>
+          {llamaCppRunning ? "Gemma 4 is enabled and running" : "Gemma 4 is already configured"}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => saveLlamaCppConfig(selectedLlamaCppModel)}
+          disabled={!!llamaCppSaving}
+          className={buttonClassName}
+        >
+          {llamaCppSaving && buttonSpinner}
+          {llamaCppSaving ? "Enabling Gemma 4..." : "Enable Gemma 4"}
+        </button>
+      )}
 
       {llamaCppSaving && llamaCppProgress && (
         <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
