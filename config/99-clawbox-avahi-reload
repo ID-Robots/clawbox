@@ -24,10 +24,20 @@ case "$ACTION" in
         exit 0
         ;;
     esac
-    if [ -x /usr/bin/avahi-daemon ] || [ -x /usr/sbin/avahi-daemon ]; then
+    # NetworkManager runs dispatchers with a minimal PATH that often
+    # excludes /usr/sbin, so `avahi-daemon` as a bare command can fail
+    # even when the binary is installed. Resolve to an absolute path at
+    # dispatch time and invoke that explicitly.
+    AVAHI_DAEMON=""
+    if [ -x /usr/sbin/avahi-daemon ]; then
+      AVAHI_DAEMON=/usr/sbin/avahi-daemon
+    elif [ -x /usr/bin/avahi-daemon ]; then
+      AVAHI_DAEMON=/usr/bin/avahi-daemon
+    fi
+    if [ -n "$AVAHI_DAEMON" ]; then
       # --reload is cheap and synchronous; it triggers a fresh
       # announcement burst on all active interfaces.
-      avahi-daemon --reload >/dev/null 2>&1 || true
+      "$AVAHI_DAEMON" --reload >/dev/null 2>&1 || true
     fi
     ;;
 esac

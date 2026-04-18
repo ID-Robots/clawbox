@@ -369,7 +369,15 @@ apply_hostname() {
   # Install ClawBox's hardened avahi config if we have one in the repo.
   # Keep the distro default as .bak.orig the first time so operators can
   # diff and revert if needed.
+  # Prefer the canonical project copy under $PROJECT_DIR, but fall back to
+  # the config shipped next to the installer script. This matters on the
+  # fresh-install path where the network setup step runs before `git pull`
+  # has populated $PROJECT_DIR — the installer is being executed straight
+  # out of the cloned tarball at that moment.
   local clawbox_avahi_src="$PROJECT_DIR/config/avahi-daemon.conf"
+  if [ ! -f "$clawbox_avahi_src" ] && [ -f "$(dirname "$0")/config/avahi-daemon.conf" ]; then
+    clawbox_avahi_src="$(dirname "$0")/config/avahi-daemon.conf"
+  fi
   if [ -f "$clawbox_avahi_src" ]; then
     if [ -f "$AVAHI_CONF" ] && [ ! -f "${AVAHI_CONF}.bak.orig" ]; then
       cp "$AVAHI_CONF" "${AVAHI_CONF}.bak.orig"
@@ -398,6 +406,9 @@ apply_hostname() {
   # every interface state change, so clients' negative caches flush.
   local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
   local dispatcher_src="$PROJECT_DIR/config/99-clawbox-avahi-reload"
+  if [ ! -f "$dispatcher_src" ] && [ -f "$(dirname "$0")/config/99-clawbox-avahi-reload" ]; then
+    dispatcher_src="$(dirname "$0")/config/99-clawbox-avahi-reload"
+  fi
   if [ -f "$dispatcher_src" ] && [ -d "$dispatcher_dir" ]; then
     install -m 755 "$dispatcher_src" "$dispatcher_dir/99-clawbox-avahi-reload"
     # NetworkManager requires dispatcher scripts to be owned by root and
@@ -774,6 +785,12 @@ step_post_update() {
   # Triggered by the in-app updater so existing devices pick up new dispatcher
   # scripts, sysctls, etc. without a full reinstall. Keep this list small and
   # idempotent.
+  # step_set_hostname re-runs apply_hostname, which redeploys the hardened
+  # avahi-daemon.conf + 99-clawbox-avahi-reload dispatcher hook. Without this
+  # call, devices updating via the in-app updater never receive the mDNS
+  # fixes from this PR — they'd keep failing to resolve <hostname>.local on
+  # Windows until the owner did a fresh install.
+  step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
 }
