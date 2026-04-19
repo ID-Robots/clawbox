@@ -7,7 +7,13 @@ Wants=network-online.target
 Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox/clawbox
-ExecStart=/home/clawbox/.bun/bin/bun run production-server.js
+# Runs production-server.js under Node, not Bun. Bun's WebSocket client
+# has incompatibilities with Playwright's `connectOverCDP` — the CDP WS
+# handshake to desktop Chromium never completes under Bun, which the agent
+# surfaces as "Browser control is currently blocked by a CDP connection
+# timeout (ws://127.0.0.1:18800)". Node.js 22 runs the same standalone
+# bundle fine. Bun is still used for build (`bun run build`).
+ExecStart=/usr/bin/node /home/clawbox/clawbox/production-server.js
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env

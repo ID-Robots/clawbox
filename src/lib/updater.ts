@@ -52,7 +52,8 @@ export interface UpdateState {
   error?: string;
 }
 
-export const RESTART_STEP_ID = "restart";
+export { RESTART_STEP_ID } from "./update-constants";
+import { RESTART_STEP_ID } from "./update-constants";
 
 /** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
 function waitForTermination(): Promise<void> {
