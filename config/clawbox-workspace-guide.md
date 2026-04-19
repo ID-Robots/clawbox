@@ -6,7 +6,7 @@ _This file is seeded by ClawBox's `gateway-pre-start.sh` into `~/.openclaw/works
 
 ## Skills
 
-**Where user-installed skills live:** `~/.openclaw/workspace/skills/<skill-id>/`
+**Where user-installed skills live:** `<workspace>/skills/<skill-id>/`, where `<workspace>` is whatever `agents.defaults.workspace` resolves to in `~/.openclaw/openclaw.json`. On a default ClawBox install that's `~/.openclaw/workspace/`, but power-users may point it elsewhere — always read the config value rather than assuming the default.
 
 That is the **only** directory to check when someone asks "do I have skill X installed?" or "what skills are available?". Each skill directory contains `SKILL.md` (the manifest), and optionally `scripts/`, `hooks/`, `assets/`, `references/`.
 
@@ -51,7 +51,7 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 | Tool | Purpose |
 |---|---|
-| `ui_open_app` | Open a built-in ClawBox desktop app (chat, files, settings, store, vnc, terminal, browser-setup) |
+| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
 | `ui_list_apps` | Enumerate installed desktop apps |
 | `ui_notify` | Show a toast notification on the ClawBox desktop |
 | `app_search` | Search the ClawBox App Store |

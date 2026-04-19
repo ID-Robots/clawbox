@@ -170,16 +170,39 @@ fi
 # falls back to guessing paths — which has misled it before (e.g.
 # checking .npm-global/.../openclaw/skills for user skills and finding
 # "nothing", even though the skill is installed at
-# ~/.openclaw/workspace/skills/).
+# <workspace>/skills/).
 #
-# Idempotent: only writes when the shipped template differs from the
-# on-disk copy, so a later edit from the agent / user doesn't get
-# clobbered on every gateway restart.
-CLAWBOX_WORKSPACE="/home/clawbox/.openclaw/workspace"
+# Resolve the workspace from agents.defaults.workspace in openclaw.json,
+# matching the same logic getSkillsDir() uses on the ClawBox API side —
+# falls back to ~/.openclaw/workspace when unset, handles absolute vs
+# tilde-relative vs bare-name values, and is safe when the file is
+# missing (fresh factory-reset state).
+CLAWBOX_WORKSPACE="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys
+default = os.path.expanduser("~/.openclaw/workspace")
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    ws = cfg.get("agents", {}).get("defaults", {}).get("workspace")
+except (FileNotFoundError, json.JSONDecodeError, KeyError):
+    ws = None
+if isinstance(ws, str) and ws.strip():
+    ws = os.path.expanduser(ws.strip())
+    print(ws if os.path.isabs(ws) else os.path.join(os.path.expanduser("~/.openclaw"), ws))
+else:
+    print(default)
+PY
+)"
 CLAWBOX_GUIDE_SRC="/home/clawbox/clawbox/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
-  if [ ! -f "$CLAWBOX_GUIDE_DST" ] || ! cmp -s "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
+  # Seed-if-missing rather than overwrite-on-diff. The agent and the
+  # user may personalize CLAWBOX.md (add device-specific notes, remove
+  # sections that don't apply). Overwriting on every gateway start
+  # would clobber those edits. If the shipped template changes and an
+  # operator wants to pull it in, they can delete the file; the next
+  # gateway start will re-seed.
+  if [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
     install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"
     echo "  Seeded CLAWBOX.md in OpenClaw workspace"
   fi
