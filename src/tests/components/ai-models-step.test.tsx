@@ -104,6 +104,11 @@ describe("AIModelsStep variants", () => {
         description="Local models first"
         configureScope="local"
         testId="local-ai-test"
+        // Gemma is currently the active chat provider — required for the
+        // panel to render the "configured" pill rather than the orange
+        // "Switch to Gemma 4" call-to-action (which appears when Gemma is
+        // on disk but some other provider is primary).
+        currentProviderId="llamacpp"
       />,
     );
 
@@ -118,10 +123,6 @@ describe("AIModelsStep variants", () => {
     expect(queryByText("ClawBox AI")).not.toBeInTheDocument();
     expect(queryByText("OpenAI GPT")).not.toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
-    // With the mocked hook returning llamaCppInstalled: true (i.e. Gemma is
-    // already on disk but the runtime is idle), the panel renders a green
-    // "configured" pill instead of the install button. Users should only see
-    // the orange "Enable Gemma 4" call-to-action on truly fresh devices.
     expect(getByText("Gemma 4 is already configured")).toBeInTheDocument();
   });
 
