@@ -160,3 +160,60 @@ PY
 if ! python3 -c "import json; c=json.load(open('$OPENCLAW_CONFIG')); assert c.get('mcp',{}).get('servers',{}).get('clawbox',{}).get('command')" 2>/dev/null; then
   "$OPENCLAW_BIN" config set mcp.servers.clawbox '{"command":"/home/clawbox/.bun/bin/bun","args":["run","/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],"env":{"CLAWBOX_API_BASE":"http://127.0.0.1:80"}}' --json 2>/dev/null || true
 fi
+
+# Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
+# context includes ClawBox-specific guidance (where user-installed skills
+# actually live, how to control the desktop Chromium via the browser_*
+# MCP tools, how to install/uninstall skills through the App Store
+# instead of manipulating the filesystem directly). Without this, the
+# base OpenClaw agent defaults don't know any of those conventions and
+# falls back to guessing paths — which has misled it before (e.g.
+# checking .npm-global/.../openclaw/skills for user skills and finding
+# "nothing", even though the skill is installed at
+# <workspace>/skills/).
+#
+# Resolve the workspace from agents.defaults.workspace in openclaw.json,
+# matching the same logic getSkillsDir() uses on the ClawBox API side —
+# falls back to ~/.openclaw/workspace when unset, handles absolute vs
+# tilde-relative vs bare-name values, and is safe when the file is
+# missing (fresh factory-reset state).
+CLAWBOX_WORKSPACE="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys
+default = os.path.expanduser("~/.openclaw/workspace")
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    ws = cfg.get("agents", {}).get("defaults", {}).get("workspace")
+except (FileNotFoundError, json.JSONDecodeError, KeyError):
+    ws = None
+if isinstance(ws, str) and ws.strip():
+    ws = os.path.expanduser(ws.strip())
+    print(ws if os.path.isabs(ws) else os.path.join(os.path.expanduser("~/.openclaw"), ws))
+else:
+    print(default)
+PY
+)"
+CLAWBOX_GUIDE_SRC="/home/clawbox/clawbox/config/clawbox-workspace-guide.md"
+CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
+if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
+  # Seed-if-missing rather than overwrite-on-diff. The agent and the
+  # user may personalize CLAWBOX.md (add device-specific notes, remove
+  # sections that don't apply). Overwriting on every gateway start
+  # would clobber those edits. If the shipped template changes and an
+  # operator wants to pull it in, they can delete the file; the next
+  # gateway start will re-seed.
+  if [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
+    install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"
+    echo "  Seeded CLAWBOX.md in OpenClaw workspace"
+  fi
+
+  # Append a one-liner reference to AGENTS.md if it exists and doesn't
+  # already mention CLAWBOX.md, so the agent loads our guide as part of
+  # its session-start context without us having to overwrite AGENTS.md
+  # (which the agent may have personalized).
+  CLAWBOX_AGENTS_MD="$CLAWBOX_WORKSPACE/AGENTS.md"
+  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "CLAWBOX.md" "$CLAWBOX_AGENTS_MD"; then
+    printf '\n\n## ClawBox integration\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, and how to install/uninstall skills through the App Store.\n' >> "$CLAWBOX_AGENTS_MD"
+    echo "  Appended CLAWBOX.md reference to AGENTS.md"
+  fi
+fi
