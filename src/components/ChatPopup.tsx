@@ -379,11 +379,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
-          // If a skill was just installed/uninstalled, start fresh session
+          // If a skill was just installed/uninstalled, start fresh session.
+          // Provider changes re-use the same flag for retry-budget + overlay
+          // purposes, but we skip the auto-send prompt for them (no skill
+          // changed, there's nothing to confirm) — just reset and hand
+          // control back to the user.
           if (skillInstalledRef.current) {
+            const wasProviderChange = reloadReasonRef.current === 'provider'
             skillInstalledRef.current = false
-            setMessages([])
-            greetedRef.current = true // prevent auto-greet
+            reloadReasonRef.current = 'skill' // reset for next reload
+            // Only reset the transcript for skill install/uninstall/etc.
+            // Provider changes keep the visible history so the user's
+            // earlier context isn't wiped — only the backend session
+            // override changed, not the conversation semantics.
+            if (!wasProviderChange) {
+              setMessages([])
+              greetedRef.current = true // prevent auto-greet
+            }
             const evt = skillEventRef.current
             skillEventRef.current = null
             // Build context message about the skill change
@@ -400,9 +412,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // Complete the progress bar
             if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
             setReloadProgress(100)
-            // Small delay to show 100%, then switch to sending dots
-            setTimeout(() => {
+            // Small delay to show 100%, then either auto-send the skill
+            // context message (skill install/uninstall) or, for a
+            // provider change, just drop the overlay and surface a
+            // green "Switched chat to X" banner so the user has an
+            // explicit confirmation the new provider is active.
+            setTimeout(async () => {
               setReloadingSkill(false)
+              if (wasProviderChange) {
+                // Refresh chat/model state so we can label the banner with
+                // the new active provider. Fire-and-forget — if the fetch
+                // fails the worst case is we don't show the banner, not
+                // that the chat is broken.
+                try {
+                  const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
+                  const state = await res.json() as ChatModelState
+                  setChatModelState(state)
+                  const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
+                  setMessages(prev => [...prev, {
+                    role: 'system',
+                    text: `Switched chat to ${label}.`,
+                    timestamp: Date.now(),
+                    variant: 'success',
+                  }])
+                } catch {
+                  // Ignore — banner is best-effort confirmation only.
+                }
+                return
+              }
               setSending(true)
               setMessages([{ role: 'user', text: contextMsg.replace(/\[System:.*?\]\s*/g, ''), timestamp: Date.now() }])
               wsRequest('chat.send', {
@@ -774,12 +811,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const skillEventRef = useRef<{ action: string; name?: string; id?: string } | null>(null)
   const [reloadingSkill, setReloadingSkill] = useState(false)
   const [reloadProgress, setReloadProgress] = useState(0)
+  const [reloadReason, setReloadReason] = useState<'skill' | 'provider'>('skill')
+  // Duplicate of reloadReason behind a ref because the WebSocket `hello`
+  // resolve callback is created once (inside a useCallback with [] deps)
+  // and captures whatever reloadReason state was at mount time —
+  // without this ref, the `wasProviderChange` branch would never fire
+  // because the state update from the event handler doesn't propagate
+  // into that frozen closure.
+  const reloadReasonRef = useRef<'skill' | 'provider'>('skill')
   const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   useEffect(() => {
-    const handler = (e: Event) => {
+    const makeHandler = (reason: 'skill' | 'provider') => (e: Event) => {
       const detail = (e as CustomEvent).detail || {}
       skillInstalledRef.current = true
       skillEventRef.current = detail
+      reloadReasonRef.current = reason
+      setReloadReason(reason)
       setReloadingSkill(true)
       setReloadProgress(0)
       retryCountRef.current = 0
@@ -795,9 +842,35 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
       }, 200)
     }
-    window.addEventListener('clawbox-skill-installed', handler)
+    const skillHandler = makeHandler('skill')
+    // Treat a primary-AI-provider change the same as a skill install:
+    // the gateway is restarting, the chat WS is about to drop, and
+    // without the progress overlay the user sees the chat freeze until
+    // the bare retry loop reconnects. Reusing the skillInstalledRef flag
+    // also gets us the quadrupled retry budget for the reconnect, so
+    // slower restarts don't trigger the 'Could not connect to gateway'
+    // fallback UI.
+    const providerReloadHandler = makeHandler('provider')
+    const providerHandler = (e: Event) => {
+      providerReloadHandler(e)
+      // The configure route restarts the gateway before returning its
+      // response, and the Settings event fires *after* the response —
+      // so by the time we get here the WS may already have reconnected
+      // on its own. If so, no future `hello` is coming to trip the
+      // reload branch in the resolve callback, and the overlay would
+      // stay up forever. Force a fresh connect() so the resolve-branch
+      // fires exactly once, right now, with reloadReasonRef=='provider'.
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        try { wsRef.current.close() } catch { /* ignore */ }
+      }
+      retryCountRef.current = 0
+      connect()
+    }
+    window.addEventListener('clawbox-skill-installed', skillHandler)
+    window.addEventListener('clawbox:primary-ai-configured', providerHandler)
     return () => {
-      window.removeEventListener('clawbox-skill-installed', handler)
+      window.removeEventListener('clawbox-skill-installed', skillHandler)
+      window.removeEventListener('clawbox:primary-ai-configured', providerHandler)
       if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
     }
   }, [])
@@ -1024,7 +1097,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
-                  <span>Reloading skills...</span>
+                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : 'Reloading skills...'}</span>
                   <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
                     <div style={{
                       height: '100%', borderRadius: 2, background: '#f97316',
