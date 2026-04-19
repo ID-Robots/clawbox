@@ -149,6 +149,11 @@ async function updateClawBoxAndReboot(): Promise<void> {
   await waitForTermination();
 }
 
+// First-time `npm install -g openclaw` on cold Jetson caches routinely runs
+// 2-3 min; the old 120 s budget surfaced as a scary X on 'Updating OpenClaw'
+// even when the install ultimately succeeded in the background.
+const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
+
 const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
@@ -177,7 +182,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "openclaw_install",
     label: "Updating OpenClaw",
-    timeoutMs: 120_000,
+    timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,
   },
   {
