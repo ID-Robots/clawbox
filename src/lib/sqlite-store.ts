@@ -1,14 +1,20 @@
-// Generic key-value store backed by SQLite via bun:sqlite. Used for desktop
-// state that should persist server-side (across browsers, devices, and
-// incognito sessions) — e.g. dismissed update-notification fingerprints.
+// Key-value store for desktop state that should persist server-side
+// (dismissed update-notification fingerprints, chat model selection,
+// browser enable toggle).
 //
-// `bun:sqlite` is a Bun-only builtin and is not understood by Next.js's
-// Turbopack/Webpack bundler. We dodge static analysis with an indirect eval
-// so the import is only resolved at runtime, where the production server
-// runs under Bun (`bun run production-server.js`).
+// The production server now runs under Node (see config/clawbox-setup.service
+// — Bun's WebSocket client is incompatible with Playwright CDP), so
+// `bun:sqlite` isn't available. When the Bun builtin can't be resolved the
+// store falls back transparently to the JSON-backed config-store. All
+// callers use the simple get/set/delete API, so the backend swap is
+// invisible to them.
 
 import path from "path";
 import fs from "fs";
+import { get as configGet, set as configSet } from "./config-store";
+
+// Prefix for fallback entries so they don't collide with other pref: keys.
+const FALLBACK_PREFIX = "sqlite-kv:";
 
 const DB_PATH = path.join(
   process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
@@ -32,19 +38,27 @@ type BunSqliteModule = {
   Database: new (path: string, options?: { create?: boolean }) => BunSqliteDatabase;
 };
 
-let dbPromise: Promise<BunSqliteDatabase> | null = null;
+let dbPromise: Promise<BunSqliteDatabase | null> | null = null;
+let fallbackLogged = false;
 
-async function getDb(): Promise<BunSqliteDatabase> {
+async function getDb(): Promise<BunSqliteDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = (async () => {
-    // Indirect eval keeps the bundler from trying to resolve "bun:sqlite"
-    // at build time. At runtime (under Bun) this becomes a normal dynamic
-    // import of the builtin module.
-    const sqlite = (await (0, eval)('import("bun:sqlite")')) as BunSqliteModule;
+    // Only wrap the indirect-eval import in try/catch — a genuine SQLite
+    // error (corrupt DB, PRAGMA failure, missing table) should propagate
+    // and surface rather than silently swallowing writes to JSON.
+    let sqlite: BunSqliteModule;
+    try {
+      sqlite = (await (0, eval)('import("bun:sqlite")')) as BunSqliteModule;
+    } catch {
+      if (!fallbackLogged) {
+        fallbackLogged = true;
+        console.info("[sqlite-store] bun:sqlite unavailable (running under Node); falling back to JSON config-store");
+      }
+      return null;
+    }
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     const handle = new sqlite.Database(DB_PATH, { create: true });
-    // WAL gives concurrent reads while a write is in progress; matters
-    // because multiple desktop tabs may poll these endpoints in parallel.
     handle.exec("PRAGMA journal_mode = WAL");
     handle.exec(`
       CREATE TABLE IF NOT EXISTS kv (
@@ -60,21 +74,33 @@ async function getDb(): Promise<BunSqliteDatabase> {
 
 export async function sqliteGet(key: string): Promise<string | null> {
   const db = await getDb();
-  const row = db
-    .query<{ value: string }>("SELECT value FROM kv WHERE key = ?")
-    .get(key);
-  return row?.value ?? null;
+  if (db) {
+    const row = db
+      .query<{ value: string }>("SELECT value FROM kv WHERE key = ?")
+      .get(key);
+    return row?.value ?? null;
+  }
+  const val = await configGet(`${FALLBACK_PREFIX}${key}`);
+  return typeof val === "string" ? val : null;
 }
 
 export async function sqliteSet(key: string, value: string): Promise<void> {
   const db = await getDb();
-  db.query(
-    "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
-      "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-  ).run(key, value, Date.now());
+  if (db) {
+    db.query(
+      "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    ).run(key, value, Date.now());
+    return;
+  }
+  await configSet(`${FALLBACK_PREFIX}${key}`, value);
 }
 
 export async function sqliteDelete(key: string): Promise<void> {
   const db = await getDb();
-  db.query("DELETE FROM kv WHERE key = ?").run(key);
+  if (db) {
+    db.query("DELETE FROM kv WHERE key = ?").run(key);
+    return;
+  }
+  await configSet(`${FALLBACK_PREFIX}${key}`, undefined);
 }

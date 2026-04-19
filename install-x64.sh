@@ -613,7 +613,8 @@ step_start_gateway() {
 step_start_ui() {
   fuser -k "$PORT/tcp" 2>/dev/null || true
   sleep 1
-  as_user bash -c "cd $PROJECT_DIR && CLAWBOX_ROOT=$PROJECT_DIR PORT=$PORT HOSTNAME=0.0.0.0 $BUN run production-server.js > /tmp/clawbox-ui.log 2>&1 &"
+  # Run under Node (not Bun) — see config/clawbox-setup.service for why.
+  as_user bash -c "cd $PROJECT_DIR && CLAWBOX_ROOT=$PROJECT_DIR PORT=$PORT HOSTNAME=0.0.0.0 /usr/bin/node production-server.js > /tmp/clawbox-ui.log 2>&1 &"
   sleep 3
   if curl -s "http://localhost:$PORT" > /dev/null 2>&1; then
     echo "  ClawBox UI running on port $PORT"
@@ -722,5 +723,5 @@ echo "  UI Logs:      /tmp/clawbox-ui.log"
 echo "  Gateway Logs: /tmp/openclaw-gateway.log"
 echo ""
 echo "  To stop:    fuser -k ${PORT}/tcp"
-echo "  To restart: cd $PROJECT_DIR && PORT=$PORT HOSTNAME=0.0.0.0 bun run production-server.js"
+echo "  To restart: cd $PROJECT_DIR && PORT=$PORT HOSTNAME=0.0.0.0 node production-server.js"
 echo ""
