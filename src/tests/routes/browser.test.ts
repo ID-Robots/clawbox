@@ -27,6 +27,7 @@ const mockPage = vi.hoisted(() => ({
   goBack: vi.fn().mockResolvedValue(undefined),
   goForward: vi.fn().mockResolvedValue(undefined),
   reload: vi.fn().mockResolvedValue(undefined),
+  close: vi.fn().mockResolvedValue(undefined),
 }));
 
 const mockContext = vi.hoisted(() => ({
@@ -37,6 +38,8 @@ const mockContext = vi.hoisted(() => ({
 const mockBrowser = vi.hoisted(() => ({
   contexts: vi.fn(() => [mockContext]),
   close: vi.fn().mockResolvedValue(undefined),
+  isConnected: vi.fn(() => true),
+  on: vi.fn(),
 }));
 
 const connectOverCDP = vi.hoisted(() => vi.fn().mockResolvedValue(mockBrowser));
@@ -119,11 +122,13 @@ describe("/setup-api/browser", () => {
     mockPage.goBack.mockResolvedValue(undefined);
     mockPage.goForward.mockResolvedValue(undefined);
     mockPage.reload.mockResolvedValue(undefined);
+    mockPage.close.mockResolvedValue(undefined);
 
     mockContext.pages.mockReturnValue([mockPage]);
     mockContext.newPage.mockResolvedValue(mockPage);
     mockBrowser.contexts.mockReturnValue([mockContext]);
     mockBrowser.close.mockResolvedValue(undefined);
+    mockBrowser.isConnected.mockReturnValue(true);
     connectOverCDP.mockResolvedValue(mockBrowser);
     execFileMock.mockImplementation((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
       const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
@@ -138,7 +143,7 @@ describe("/setup-api/browser", () => {
   it("launches a browser session by attaching to desktop Chromium over CDP", async () => {
     const { body } = await launchSession();
 
-    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800");
+    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", { timeout: 10_000 });
     expect(mockPage.bringToFront).toHaveBeenCalled();
     expect(body.sessionId).toBeDefined();
     expect(body.url).toBe("https://www.google.com");
@@ -188,12 +193,13 @@ describe("/setup-api/browser", () => {
     expect(body.url).toBeDefined();
   });
 
-  it("disconnects the automation session on close", async () => {
+  it("closes the session's page on close (keeps shared CDP connection alive)", async () => {
     const { body: launchBody } = await launchSession();
 
     const { body } = await sendAction("close", launchBody.sessionId);
     expect(body.ok).toBe(true);
-    expect(mockBrowser.close).toHaveBeenCalled();
+    expect(mockPage.close).toHaveBeenCalled();
+    expect(mockBrowser.close).not.toHaveBeenCalled();
   });
 
   it("handles click action", async () => {
