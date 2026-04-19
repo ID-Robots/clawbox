@@ -25,6 +25,22 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+// Hoisted so the vi.mock factories below (which are themselves hoisted by
+// vitest) can see these. A plain const declaration at file-body position
+// would be in the TDZ when the mock factory evaluates.
+const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() => ({
+  // Mirror real `parseFullyQualifiedModel` byte-for-byte — a sloppier
+  // split-on-"/" mock would accept "foo/" where the real impl rejects it,
+  // masking real regressions. Inlined to avoid `vi.importActual` which
+  // would pull in openclaw-config's side-effectful init.
+  parseFullyQualifiedModelImpl(fq: string) {
+    const idx = fq.indexOf("/");
+    if (idx <= 0 || idx === fq.length - 1) return null;
+    return { provider: fq.slice(0, idx), modelId: fq.slice(idx + 1) };
+  },
+  LLAMACPP_PROXY_BASE_URL: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   restartGateway: vi.fn(),
@@ -32,10 +48,35 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  // Added by PR #83 — the configure route sweeps agent sessions so the
+  // new primary provider takes effect on the open chat without a reset.
+  applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
+  parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
+}));
+
+// llamacpp / local-ai-runtime have pure getters, but local-ai-runtime
+// transitively imports `@/instrumentation-node` (which starts a server).
+// Mock both to keep tests hermetic.
+vi.mock("@/lib/llamacpp", () => ({
+  getDefaultLlamaCppModel: vi.fn().mockReturnValue("gemma4-e2b-it-q4_0"),
+  getLlamaCppContextWindow: vi.fn().mockReturnValue(131072),
+  // Real impl defaults to `getLlamaCppContextWindow()` when the env var is unset.
+  getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
+  getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue(LLAMACPP_PROXY_BASE_URL),
+}));
+
+vi.mock("@/lib/local-ai-runtime", () => ({
+  getLocalAiProxyBaseUrl: vi.fn((provider: string) =>
+    provider === "llamacpp"
+      ? LLAMACPP_PROXY_BASE_URL
+      : `http://127.0.0.1/setup-api/local-ai/${provider}`,
+  ),
 }));
 
 import { getAll, setMany } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -44,6 +85,13 @@ const mockInferConfiguredLocalModel = vi.mocked(inferConfiguredLocalModel);
 const mockReadOpenClawConfig = vi.mocked(readConfig);
 const mockRestartGateway = vi.mocked(restartGateway);
 const mockFs = vi.mocked(fsp);
+const mockApplyModelOverrideToAllAgentSessions = vi.mocked(applyModelOverrideToAllAgentSessions);
+const mockParseFullyQualifiedModel = vi.mocked(parseFullyQualifiedModel);
+const mockGetDefaultLlamaCppModel = vi.mocked(getDefaultLlamaCppModel);
+const mockGetLlamaCppContextWindow = vi.mocked(getLlamaCppContextWindow);
+const mockGetLlamaCppMaxTokens = vi.mocked(getLlamaCppMaxTokens);
+const mockGetLlamaCppProxyBaseUrl = vi.mocked(getLlamaCppProxyBaseUrl);
+const mockGetLocalAiProxyBaseUrl = vi.mocked(getLocalAiProxyBaseUrl);
 
 // Create a mock child process that immediately succeeds
 function createSuccessfulChildProcess(): ChildProcess {
@@ -103,6 +151,21 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockRestartGateway.mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
+
+    // Re-apply implementations cleared by vi.clearAllMocks above. Factory
+    // defaults set in `vi.mock(...)` hold across vi.resetModules but are
+    // wiped by mockClear call history cleanup, so we seed them per-test.
+    mockApplyModelOverrideToAllAgentSessions.mockResolvedValue(undefined);
+    mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
+    mockGetDefaultLlamaCppModel.mockReturnValue("gemma4-e2b-it-q4_0");
+    mockGetLlamaCppContextWindow.mockReturnValue(131072);
+    mockGetLlamaCppMaxTokens.mockReturnValue(131072);
+    mockGetLlamaCppProxyBaseUrl.mockReturnValue(LLAMACPP_PROXY_BASE_URL);
+    mockGetLocalAiProxyBaseUrl.mockImplementation((provider) =>
+      provider === "llamacpp"
+        ? LLAMACPP_PROXY_BASE_URL
+        : `http://127.0.0.1/setup-api/local-ai/${provider}`,
+    );
 
     const mod = await import("@/app/setup-api/ai-models/configure/route");
     configurePost = mod.POST;
