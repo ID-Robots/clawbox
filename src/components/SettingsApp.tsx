@@ -12,7 +12,7 @@ import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
-import type { UpdateState } from "@/lib/updater";
+import { RESTART_STEP_ID, type UpdateState } from "@/lib/updater";
 import { cleanVersion } from "@/lib/version-utils";
 import { FEATURE_FLAGS, FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
 
@@ -266,17 +266,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
 
-  // Auto-dismiss the update overlay for OpenClaw-only updates (no device restart).
+  // Auto-dismiss the update overlay once the update finishes. Full updates
+  // (with a `restart` step) get a longer grace window and a hard navigation
+  // to `/` so the browser picks up any freshly built client bundle; scoped
+  // updates just clear the overlay in place.
   useEffect(() => {
     if (updateState?.phase !== "completed") return;
-    const isFullUpdate = updateState.steps.some(s => s.id === "restart");
-    if (isFullUpdate) return;
+    const isFullUpdate = updateState.steps.some(s => s.id === RESTART_STEP_ID);
     const timer = setTimeout(() => {
+      if (isFullUpdate) {
+        stopUpdatePolling();
+        // replace() instead of assigning href so Back doesn't land on the
+        // stale Settings URL whose in-memory state is already gone.
+        window.location.replace("/");
+        return;
+      }
       setUpdateStarted(false);
       setUpdateError(null);
       setUpdateState(null);
       stopUpdatePolling();
-    }, 3000);
+    }, isFullUpdate ? 5000 : 3000);
     return () => clearTimeout(timer);
   }, [updateState?.phase, updateState?.steps, stopUpdatePolling]);
 
@@ -3208,7 +3217,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </h2>
               <p className="text-sm text-white/40">
                 {updateState?.phase === "completed"
-                  ? (updateState.steps.some(s => s.id === "restart") ? t("settings.restartingDevice") : t("settings.updateDone"))
+                  ? (updateState.steps.some(s => s.id === RESTART_STEP_ID) ? t("settings.restartingDevice") : t("settings.updateDone"))
                   : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
               </p>
             </div>
