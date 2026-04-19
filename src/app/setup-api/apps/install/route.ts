@@ -9,15 +9,27 @@ import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/l
 
 const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
 
+const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+
 function titleCaseFromSlug(slug: string): string {
-  return slug.split("-").filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
+  // Split on `-` and `_` since the appId validator accepts either. All-
+  // separator inputs (e.g. "---") would otherwise return "" and the desktop
+  // would render a blank label; fall back to the raw slug in that case.
+  const parts = slug.split(/[-_]+/).filter(Boolean);
+  if (parts.length === 0) return slug;
+  return parts.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 
 async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
+  // Use the remote Store icon URL as the fallback iconUrl so the client's
+  // <InstalledAppIcon> has a second source when the local icon download
+  // in the POST handler failed. Matches what AppStore.tsx's apiToStoreApp
+  // stores for UI-initiated installs, so both paths produce identical meta.
+  const remoteIconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
   const fallback: InstalledMeta = {
     name: titleCaseFromSlug(appId),
     color: DEFAULT_CATEGORY_COLOR,
-    iconUrl: `/setup-api/apps/icon/${appId}`,
+    iconUrl: remoteIconUrl,
   };
   try {
     const q = appId.replace(/-/g, " ");
@@ -31,7 +43,7 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
     return {
       name: match.name ?? fallback.name,
       color: (match.category && CATEGORY_COLORS[match.category]) || DEFAULT_CATEGORY_COLOR,
-      iconUrl: fallback.iconUrl,
+      iconUrl: remoteIconUrl,
     };
   } catch (err) {
     console.warn(`[apps/install] Store metadata lookup failed for ${appId}:`, err instanceof Error ? err.message : err);
@@ -43,7 +55,6 @@ export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 const ICONS_DIR = path.join(DATA_DIR, "icons");
-const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
 
 
 export async function POST(req: Request) {
@@ -110,6 +121,14 @@ export async function POST(req: Request) {
         const alreadyListed = list.includes(appId);
         // Re-install of a fully-registered app: skip the Store fetch and the
         // no-op write so MCP retries don't thrash the upstream API.
+        //
+        // Tradeoff: if the very first install happened while the Store was
+        // unreachable, `lookupStoreMeta` returned the title-cased fallback
+        // and we wrote that here. Every subsequent re-install short-circuits,
+        // so the fallback meta is sticky — the user only gets the real
+        // name/color back by uninstalling + reinstalling. Accepted because
+        // the upstream-hammer case is more common than the offline-install
+        // case.
         if (!alreadyListed || !metaMap[appId]) {
           const storeMeta = await lookupStoreMeta(appId);
           const nextUpdates: Record<string, unknown> = {
