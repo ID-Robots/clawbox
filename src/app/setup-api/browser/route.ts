@@ -86,7 +86,10 @@ async function ensureDesktopBrowserRunning(): Promise<void> {
     console.warn("[Browser] systemctl start clawbox-browser.service failed:", err instanceof Error ? err.message : err);
   }
 
-  for (let i = 0; i < 10; i++) {
+  // 6 × 1 s = 6 s max — agent UX matters more than slack for a slow cold
+  // start. systemctl already returned, so Chromium is launching now; if
+  // it's not up in 6 s it's wedged.
+  for (let i = 0; i < 6; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (await isDesktopBrowserReady()) return;
   }
@@ -110,9 +113,15 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
     const pw = await getPlaywright();
     await ensureDesktopBrowserRunning();
     try {
-      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, { timeout: 10_000 });
+      // 30 s matches Playwright's own default — previously 10 s to fail fast
+      // against the Bun-WS hang, which is no longer relevant now that we
+      // run under Node.
+      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, { timeout: 30_000 });
       browser.on("disconnected", () => {
         if (cachedBrowser === browser) cachedBrowser = null;
+        // Also drop a stale in-flight promise so a disconnect that races
+        // with another caller doesn't hand out a promise for a dead browser.
+        cachedBrowserPromise = null;
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
       cachedBrowser = browser;

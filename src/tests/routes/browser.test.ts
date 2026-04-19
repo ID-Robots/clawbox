@@ -143,7 +143,7 @@ describe("/setup-api/browser", () => {
   it("launches a browser session by attaching to desktop Chromium over CDP", async () => {
     const { body } = await launchSession();
 
-    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", { timeout: 10_000 });
+    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", { timeout: 30_000 });
     expect(mockPage.bringToFront).toHaveBeenCalled();
     expect(body.sessionId).toBeDefined();
     expect(body.url).toBe("https://www.google.com");
@@ -200,6 +200,15 @@ describe("/setup-api/browser", () => {
     expect(body.ok).toBe(true);
     expect(mockPage.close).toHaveBeenCalled();
     expect(mockBrowser.close).not.toHaveBeenCalled();
+  });
+
+  it("reuses the shared CDP connection across launches", async () => {
+    await launchSession();
+    await launchSession();
+    // Both launches resolve through the same cached Browser — connectOverCDP
+    // must fire exactly once. Regressing to per-launch attach re-introduces
+    // the stale-client pile-up that caused the original CDP timeout.
+    expect(connectOverCDP).toHaveBeenCalledTimes(1);
   });
 
   it("handles click action", async () => {

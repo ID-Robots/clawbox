@@ -39,29 +39,35 @@ type BunSqliteModule = {
 };
 
 let dbPromise: Promise<BunSqliteDatabase | null> | null = null;
+let fallbackLogged = false;
 
 async function getDb(): Promise<BunSqliteDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = (async () => {
+    // Only wrap the indirect-eval import in try/catch — a genuine SQLite
+    // error (corrupt DB, PRAGMA failure, missing table) should propagate
+    // and surface rather than silently swallowing writes to JSON.
+    let sqlite: BunSqliteModule;
     try {
-      // Indirect eval keeps the bundler from trying to resolve "bun:sqlite"
-      // at build time. Under Node this import throws and we return null so
-      // callers fall through to the JSON-backed branch below.
-      const sqlite = (await (0, eval)('import("bun:sqlite")')) as BunSqliteModule;
-      fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-      const handle = new sqlite.Database(DB_PATH, { create: true });
-      handle.exec("PRAGMA journal_mode = WAL");
-      handle.exec(`
-        CREATE TABLE IF NOT EXISTS kv (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL,
-          updated_at INTEGER NOT NULL
-        )
-      `);
-      return handle;
+      sqlite = (await (0, eval)('import("bun:sqlite")')) as BunSqliteModule;
     } catch {
+      if (!fallbackLogged) {
+        fallbackLogged = true;
+        console.info("[sqlite-store] bun:sqlite unavailable (running under Node); falling back to JSON config-store");
+      }
       return null;
     }
+    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+    const handle = new sqlite.Database(DB_PATH, { create: true });
+    handle.exec("PRAGMA journal_mode = WAL");
+    handle.exec(`
+      CREATE TABLE IF NOT EXISTS kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+    return handle;
   })();
   return dbPromise;
 }
