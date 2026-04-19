@@ -489,10 +489,14 @@ step_openclaw_install() {
   LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
   local TARGET="${LATEST:-$OPENCLAW_VERSION}"
   if [ -x "$OPENCLAW_BIN" ]; then
-    local INSTALLED
+    local INSTALLED INSTALLED_VER
+    # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
+    # we can compare exactly against the bare npm version. Literal "=" on the
+    # full string would always miss because of the prefix/hash.
     INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
+    INSTALLED_VER=$(echo "$INSTALLED" | awk '{print $2}')
     echo "  Installed: $INSTALLED, Target: $TARGET"
-    if [ "$INSTALLED" = "$TARGET" ]; then
+    if [ "$INSTALLED_VER" = "$TARGET" ]; then
       echo "  OpenClaw is already up to date"
       return 0
     fi
