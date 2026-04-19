@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 
 const STORE_API = "/setup-api/apps/store";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
@@ -9,21 +10,6 @@ const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
 // Brand orange from openclawhardware.dev
 const BRAND_ORANGE = "#fe6e00";
 const BRAND_ORANGE_LIGHT = "#ff8b1a";
-
-const CATEGORY_COLORS: Record<string, string> = {
-  "smart-home": "#3b82f6",
-  "productivity": "#8b5cf6",
-  "social-media": "#ec4899",
-  "finance": "#22c55e",
-  "developer": "#a78bfa",
-  "security": "#ef4444",
-  "health": "#10b981",
-  "shopping": "#f97316",
-  "entertainment": "#8b5cf6",
-  "weather-travel": "#06b6d4",
-  "writing": "#6366f1",
-  "ai-automation": "#eab308",
-};
 
 interface StoreApp {
   id: string;
@@ -71,7 +57,7 @@ function apiToStoreApp(app: ApiApp): StoreApp {
     name: app.name,
     description: app.summary,
     rating: app.rating,
-    color: CATEGORY_COLORS[app.category] || "#6b7280",
+    color: CATEGORY_COLORS[app.category] || DEFAULT_CATEGORY_COLOR,
     category: app.category,
     iconUrl: `${STORE_ICONS_BASE}/${app.slug}.png`,
     developer: app.developer,

@@ -3,8 +3,41 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, CONFIG_ROOT } from "@/lib/config-store";
+import { DATA_DIR, CONFIG_ROOT, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { reloadGateway, getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
+import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
+
+const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
+
+function titleCaseFromSlug(slug: string): string {
+  return slug.split("-").filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
+}
+
+async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
+  const fallback: InstalledMeta = {
+    name: titleCaseFromSlug(appId),
+    color: DEFAULT_CATEGORY_COLOR,
+    iconUrl: `/setup-api/apps/icon/${appId}`,
+  };
+  try {
+    const q = appId.replace(/-/g, " ");
+    const res = await fetch(`${STORE_SEARCH_API}?q=${encodeURIComponent(q)}&limit=50`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return fallback;
+    const data = await res.json() as { apps?: Array<{ slug?: string; name?: string; category?: string }> };
+    const match = (data.apps ?? []).find((a) => a.slug === appId);
+    if (!match) return fallback;
+    return {
+      name: match.name ?? fallback.name,
+      color: (match.category && CATEGORY_COLORS[match.category]) || DEFAULT_CATEGORY_COLOR,
+      iconUrl: fallback.iconUrl,
+    };
+  } catch (err) {
+    console.warn(`[apps/install] Store metadata lookup failed for ${appId}:`, err instanceof Error ? err.message : err);
+    return fallback;
+  }
+}
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +96,34 @@ export async function POST(req: Request) {
     // Reload the OpenClaw gateway so it picks up the new skill
     let reloadError: string | undefined;
     if (clawhubResult.success) {
+      // Keep the desktop's `installed_apps` and `installed_meta` preferences
+      // in sync. Without this, installs through MCP / CLI land on disk but
+      // are invisible on the desktop — the UI filters out apps that have no
+      // meta (see page.tsx), and it only refreshes on page mount.
+      try {
+        const all = await configGetAll();
+        const list = Array.isArray(all["pref:installed_apps"]) ? (all["pref:installed_apps"] as string[]) : [];
+        const metaMap = (all["pref:installed_meta"] && typeof all["pref:installed_meta"] === "object"
+          ? all["pref:installed_meta"]
+          : {}) as Record<string, InstalledMeta>;
+
+        const alreadyListed = list.includes(appId);
+        // Re-install of a fully-registered app: skip the Store fetch and the
+        // no-op write so MCP retries don't thrash the upstream API.
+        if (!alreadyListed || !metaMap[appId]) {
+          const storeMeta = await lookupStoreMeta(appId);
+          const nextUpdates: Record<string, unknown> = {
+            "pref:installed_meta": { ...metaMap, [appId]: storeMeta },
+          };
+          if (!alreadyListed) {
+            nextUpdates["pref:installed_apps"] = [...list, appId];
+          }
+          await configSetMany(nextUpdates);
+        }
+      } catch (err) {
+        console.warn("[apps/install] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
+      }
+
       try {
         await reloadGateway();
       } catch (err) {
