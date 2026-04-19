@@ -12,7 +12,8 @@ import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
-import { RESTART_STEP_ID, type UpdateState } from "@/lib/updater";
+import type { UpdateState } from "@/lib/updater";
+import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { FEATURE_FLAGS, FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
 
