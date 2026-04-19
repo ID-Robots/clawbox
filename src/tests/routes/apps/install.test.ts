@@ -23,6 +23,8 @@ vi.mock("fs", () => ({
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/tmp/test-data",
   CONFIG_ROOT: "/tmp/test-data",
+  getAll: vi.fn().mockResolvedValue({}),
+  setMany: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({

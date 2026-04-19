@@ -21,6 +21,7 @@ import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import { FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
+import type { InstalledMeta } from "@/lib/store-categories";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
@@ -216,7 +217,7 @@ function ChromeDesktopInner() {
   const [date, setDate] = useState("");
   const [installedApps, setInstalledApps] = useState<string[]>([]);
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
-  const [installedMeta, setInstalledMeta] = useState<Record<string, { name: string; color: string; iconUrl: string }>>({});
+  const [installedMeta, setInstalledMeta] = useState<Record<string, InstalledMeta>>({});
 
   // ─── Desktop shortcuts for built-in apps ───
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
@@ -277,7 +278,7 @@ function ChromeDesktopInner() {
         });
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
-        if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, { name: string; color: string; iconUrl: string }>);
+        if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
         // Desktop
         if (Array.isArray(data.desktop_apps)) {
           const nextFlags = {
@@ -891,7 +892,7 @@ function ChromeDesktopInner() {
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
-      const meta = installedMeta[appId] as Record<string, string> | undefined;
+      const meta = installedMeta[appId];
       if (meta) {
         const isWebapp = !!meta.webappUrl;
         const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
