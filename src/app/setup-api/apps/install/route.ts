@@ -40,9 +40,16 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
     const data = await res.json() as { apps?: Array<{ slug?: string; name?: string; category?: string }> };
     const match = (data.apps ?? []).find((a) => a.slug === appId);
     if (!match) return fallback;
+    // hasOwnProperty.call so a malicious `category: "__proto__"` from the
+    // remote Store doesn't resolve to an inherited property.
+    const category = match.category;
+    const color = typeof category === "string"
+      && Object.prototype.hasOwnProperty.call(CATEGORY_COLORS, category)
+      ? CATEGORY_COLORS[category]
+      : DEFAULT_CATEGORY_COLOR;
     return {
       name: match.name ?? fallback.name,
-      color: (match.category && CATEGORY_COLORS[match.category]) || DEFAULT_CATEGORY_COLOR,
+      color,
       iconUrl: remoteIconUrl,
     };
   } catch (err) {
@@ -106,6 +113,7 @@ export async function POST(req: Request) {
 
     // Reload the OpenClaw gateway so it picks up the new skill
     let reloadError: string | undefined;
+    let preferenceSyncError: string | undefined;
     if (clawhubResult.success) {
       // Keep the desktop's `installed_apps` and `installed_meta` preferences
       // in sync. Without this, installs through MCP / CLI land on disk but
@@ -119,28 +127,32 @@ export async function POST(req: Request) {
           : {}) as Record<string, InstalledMeta>;
 
         const alreadyListed = list.includes(appId);
-        // Re-install of a fully-registered app: skip the Store fetch and the
-        // no-op write so MCP retries don't thrash the upstream API.
+        const hasMeta = !!metaMap[appId];
+        const nextUpdates: Record<string, unknown> = {};
+
+        // Only fetch Store metadata when we don't already have it. Preserves
+        // any previously-written (possibly richer) meta — including handling
+        // the partial-state case where the list entry is missing but the
+        // meta entry still exists.
         //
-        // Tradeoff: if the very first install happened while the Store was
-        // unreachable, `lookupStoreMeta` returned the title-cased fallback
-        // and we wrote that here. Every subsequent re-install short-circuits,
-        // so the fallback meta is sticky — the user only gets the real
-        // name/color back by uninstalling + reinstalling. Accepted because
-        // the upstream-hammer case is more common than the offline-install
-        // case.
-        if (!alreadyListed || !metaMap[appId]) {
+        // Sticky-fallback caveat: if the very first install happened while
+        // the Store was unreachable, `lookupStoreMeta` wrote the title-cased
+        // fallback and subsequent re-installs won't refresh it. The user
+        // gets the real name/color back by uninstalling + reinstalling.
+        // Accepted because thrashing the Store API on every retry is worse.
+        if (!hasMeta) {
           const storeMeta = await lookupStoreMeta(appId);
-          const nextUpdates: Record<string, unknown> = {
-            "pref:installed_meta": { ...metaMap, [appId]: storeMeta },
-          };
-          if (!alreadyListed) {
-            nextUpdates["pref:installed_apps"] = [...list, appId];
-          }
+          nextUpdates["pref:installed_meta"] = { ...metaMap, [appId]: storeMeta };
+        }
+        if (!alreadyListed) {
+          nextUpdates["pref:installed_apps"] = [...list, appId];
+        }
+        if (Object.keys(nextUpdates).length > 0) {
           await configSetMany(nextUpdates);
         }
       } catch (err) {
-        console.warn("[apps/install] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
+        preferenceSyncError = err instanceof Error ? err.message : String(err);
+        console.warn("[apps/install] Failed to update installed_apps/meta preferences:", preferenceSyncError);
       }
 
       try {
@@ -151,13 +163,17 @@ export async function POST(req: Request) {
       }
     }
 
+    // `ok` flips to false when preference sync failed so MCP/CLI callers
+    // can detect it — install+icon succeeded on disk but the desktop
+    // won't see the new skill without the prefs being written.
     return NextResponse.json({
-      ok: true,
+      ok: !preferenceSyncError,
       appId,
       iconSaved,
       iconPath: iconSaved ? `/setup-api/apps/icon/${appId}` : null,
       clawhub: clawhubResult,
       reloadError,
+      preferenceSyncError,
     });
   } catch (err) {
     console.error("[apps/install] Install failed:", err instanceof Error ? err.message : err);
