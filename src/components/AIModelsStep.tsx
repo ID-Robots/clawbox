@@ -561,6 +561,13 @@ export default function AIModelsStep({
     [genericSteps, llamaCppInstallSteps, ollamaInstallSteps],
   );
   const [selectedProvider, setSelectedProvider] = useState<string | null>(resolvedDefaultProvider);
+  // Once the user picks a radio (via selectProvider), stop auto-syncing the
+  // selection from the currently-active provider. Without this, polling on
+  // the parent (Settings refreshes localAiStatus every few seconds, which
+  // bumps currentProviderId) would flip the radio back to whatever is
+  // currently active — so a user on Ollama who clicks "Gemma 4" sees the
+  // radio flip straight back to Ollama within a second.
+  const userSelectedProviderRef = useRef(false);
   const [authMode, setAuthMode] = useState<AuthMode>("local");
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
@@ -614,7 +621,15 @@ export default function AIModelsStep({
     if (!normalizedCurrentProvider) return;
     if (!allowedProviders.some((provider) => provider.id === normalizedCurrentProvider)) return;
 
-    setSelectedProvider(normalizedCurrentProvider);
+    // Respect a user's explicit radio click — once they've picked a
+    // provider, don't yank the selection back to whatever the parent
+    // reports as currently-active. Still update the selected model slug
+    // inside the active provider's panel, because that affects which
+    // item is highlighted inside the list and isn't the same as the
+    // provider-switch.
+    if (!userSelectedProviderRef.current) {
+      setSelectedProvider(normalizedCurrentProvider);
+    }
 
     if (typeof currentModel === "string") {
       if (currentModel.startsWith("ollama/")) {
@@ -863,6 +878,7 @@ export default function AIModelsStep({
   const selectProvider = useCallback((id: string) => {
     stopPolling();
     const provider = allowedProviders.find((p) => p.id === id);
+    userSelectedProviderRef.current = true;
     setSelectedProvider(id);
     // Pick the first auth mode that's actually available
     const options = provider?.authOptions.filter((opt) => {
@@ -1605,6 +1621,7 @@ export default function AIModelsStep({
             <LlamaCppModelPanel
               llamaCppRunning={llamaCppRunning}
               llamaCppInstalled={llamaCppInstalled}
+              llamaCppIsActive={normalizedCurrentProvider === "llamacpp"}
               llamaCppSaving={llamaCppSaving}
               llamaCppProgress={llamaCppProgress}
               selectedLlamaCppModel={selectedLlamaCppModel}

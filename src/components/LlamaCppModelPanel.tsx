@@ -7,6 +7,15 @@ import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 interface LlamaCppModelPanelProps {
   llamaCppRunning: boolean;
   llamaCppInstalled: boolean;
+  /**
+   * Whether Gemma 4 (via llama.cpp) is the currently *active* local AI
+   * provider. When Gemma is installed but another provider (e.g. Ollama)
+   * is active, we still want to offer a way to switch TO Gemma — without
+   * this, the panel was rendering the "already configured" pill and no
+   * button, leaving users stuck on the wrong provider with nothing to
+   * click.
+   */
+  llamaCppIsActive?: boolean;
   llamaCppSaving: string | false;
   llamaCppProgress?: string | null;
   selectedLlamaCppModel: string;
@@ -24,6 +33,7 @@ const DEFAULT_SPINNER = (
 export default function LlamaCppModelPanel({
   llamaCppRunning,
   llamaCppInstalled,
+  llamaCppIsActive = false,
   llamaCppSaving,
   llamaCppProgress,
   selectedLlamaCppModel,
@@ -36,6 +46,29 @@ export default function LlamaCppModelPanel({
     if (selectedLlamaCppModel) return;
     setSelectedLlamaCppModel(getDefaultLlamaCppModel());
   }, [selectedLlamaCppModel, setSelectedLlamaCppModel]);
+
+  let description: string;
+  if (llamaCppRunning && llamaCppIsActive) {
+    description = "Gemma 4 is enabled and ready to use.";
+  } else if (llamaCppInstalled && !llamaCppIsActive) {
+    description = "Gemma 4 is already installed on this device. Switch to it to make it the active local AI.";
+  } else if (llamaCppInstalled) {
+    description = "Gemma 4 is already installed on this device. Enable it to start the local runtime and keep ClawBox working offline.";
+  } else {
+    description = "Enable Gemma 4 to install a local model that keeps ClawBox working even when cloud providers are unavailable.";
+  }
+
+  const showConfiguredPill = llamaCppInstalled && llamaCppIsActive && !llamaCppSaving;
+  const canSwitchToGemma = llamaCppInstalled && !llamaCppIsActive;
+
+  let buttonLabel: string;
+  if (llamaCppSaving) {
+    buttonLabel = "Enabling Gemma 4...";
+  } else if (canSwitchToGemma) {
+    buttonLabel = "Switch to Gemma 4";
+  } else {
+    buttonLabel = "Enable Gemma 4";
+  }
 
   return (
     <div className="space-y-3">
@@ -52,15 +85,11 @@ export default function LlamaCppModelPanel({
           </div>
         </div>
         <p className="mt-3 text-sm text-[var(--text-secondary)] leading-relaxed">
-          {llamaCppRunning
-            ? "Gemma 4 is enabled and ready to use."
-            : llamaCppInstalled
-              ? "Gemma 4 is already installed on this device. Enable it to start the local runtime and keep ClawBox working offline."
-              : "Enable Gemma 4 to install a local model that keeps ClawBox working even when cloud providers are unavailable."}
+          {description}
         </p>
       </div>
 
-      {llamaCppInstalled && !llamaCppSaving ? (
+      {showConfiguredPill ? (
         <div
           role="status"
           aria-live="polite"
@@ -77,7 +106,7 @@ export default function LlamaCppModelPanel({
           className={buttonClassName}
         >
           {llamaCppSaving && buttonSpinner}
-          {llamaCppSaving ? "Enabling Gemma 4..." : "Enable Gemma 4"}
+          {buttonLabel}
         </button>
       )}
 
