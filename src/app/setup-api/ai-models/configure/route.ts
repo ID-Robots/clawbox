@@ -76,7 +76,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "google:default",
   },
   openrouter: {
-    defaultModel: "openrouter/moonshotai/kimi-k2.5",
+    defaultModel: "openrouter/moonshotai/kimi-k2-0905",
     profileKey: "openrouter:default",
   },
   ollama: {

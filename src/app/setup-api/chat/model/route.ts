@@ -47,7 +47,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openai: "openai/gpt-5.4",
   "openai-codex": "openai-codex/gpt-5.4",
   google: "google/gemini-2.0-flash",
-  openrouter: "openrouter/moonshotai/kimi-k2.5",
+  openrouter: "openrouter/moonshotai/kimi-k2-0905",
 };
 
 function isLocalModel(model: string | null | undefined): boolean {
