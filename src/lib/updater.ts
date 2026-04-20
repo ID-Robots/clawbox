@@ -23,6 +23,7 @@ interface UpdateStepDef {
   timeoutMs: number;
   command?: string;
   requiresRoot?: boolean;
+  failFast?: boolean;
   customRun?: () => Promise<void>;
 }
 
@@ -58,6 +59,27 @@ import { RESTART_STEP_ID } from "./update-constants";
 /** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
 function waitForTermination(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 30_000));
+}
+
+function getLastLogLine(logText: string): string | null {
+  const lines = logText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] : null;
+}
+
+async function readRootStepFailure(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-u", `clawbox-root-update@${stepId}.service`, "-n", "40", "--no-pager", "-o", "cat"],
+      { timeout: 10_000 },
+    );
+    return getLastLogLine(stdout);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -153,6 +175,13 @@ async function updateClawBoxAndReboot(): Promise<void> {
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
 
 const UPDATE_STEPS: UpdateStepDef[] = [
+  {
+    id: "bootstrap_updater",
+    label: "Refreshing updater scripts",
+    timeoutMs: 120_000,
+    requiresRoot: true,
+    failFast: true,
+  },
   {
     id: "apt_update",
     label: "Updating system packages",
@@ -535,11 +564,19 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
+      let message = err instanceof Error ? err.message : "Unknown error";
+      if (step.requiresRoot) {
+        const rootFailure = await readRootStepFailure(step.id);
+        if (rootFailure) message = rootFailure;
+      }
       state.steps[i].status = "failed";
       state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
       failed = true;
+      if (step.failFast) {
+        state.error = message;
+        break;
+      }
     }
   }
 
