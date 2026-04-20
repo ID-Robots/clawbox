@@ -3261,6 +3261,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             {(updateError || updateState?.phase === "failed") && (
               <div className="space-y-4">
                 <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
+                {updateState?.steps.some((step) => step.status === "failed") && (
+                  <div className="w-full max-w-xs space-y-2 text-left">
+                    {updateState.steps
+                      .filter((step) => step.status === "failed")
+                      .map((step) => (
+                        <div
+                          key={`${step.id}-error`}
+                          className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs text-red-300/90"
+                        >
+                          <span className="font-semibold text-red-300">{step.label}:</span>{" "}
+                          {step.error || t("unknownError")}
+                        </div>
+                      ))}
+                  </div>
+                )}
                 <button
                   onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
                   className="px-6 py-2.5 bg-white/10 text-white rounded-xl text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"

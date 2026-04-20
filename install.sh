@@ -252,6 +252,7 @@ step_ensure_user() {
 }
 
 wait_for_apt() {
+  local max_wait="${1:-900}"
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
     if [ $waited -eq 0 ]; then
@@ -259,24 +260,24 @@ wait_for_apt() {
     fi
     sleep 5
     waited=$((waited + 5))
-    if [ $waited -ge 300 ]; then
-      echo "  Warning: apt lock held for 5+ minutes, proceeding anyway"
-      break
+    if [ $waited -ge "$max_wait" ]; then
+      echo "Error: apt lock is still held after $((max_wait / 60)) minutes. Another updater (often unattended-upgrades) is still running; try again shortly." >&2
+      return 1
     fi
   done
 }
 
 step_apt_update() {
   wait_for_apt
-  apt-get update -qq
-  apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
   else
     echo "  Installing Node.js 22..."
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y -qq nodejs
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
     echo "  Node.js $(node --version) installed"
   fi
 }
@@ -426,6 +427,67 @@ step_set_hostname() {
   apply_hostname "$(read_configured_hostname)"
 }
 
+is_safe_git_ref() {
+  local ref="${1:-}"
+  [ -n "$ref" ] || return 1
+  git check-ref-format --branch "$ref" >/dev/null 2>&1
+}
+
+resolve_update_branch() {
+  UPDATE_TARGET_LOCAL="main"
+  UPDATE_TARGET_UPSTREAM="origin/main"
+
+  local pinned=""
+  if [ -f "$PROJECT_DIR/.update-branch" ]; then
+    pinned=$(head -n 1 "$PROJECT_DIR/.update-branch" | tr -d '[:space:]')
+    if [ -n "$pinned" ] && is_safe_git_ref "$pinned"; then
+      UPDATE_TARGET_LOCAL="$pinned"
+      UPDATE_TARGET_UPSTREAM="origin/$pinned"
+      return 0
+    fi
+  fi
+
+  local current upstream
+  current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [ -n "$current" ] && [ "$current" != "main" ] && is_safe_git_ref "$current"; then
+    upstream=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse --abbrev-ref "${current}@{u}" 2>/dev/null || true)
+    if [ -n "$upstream" ] && is_safe_git_ref "$upstream"; then
+      UPDATE_TARGET_LOCAL="$current"
+      UPDATE_TARGET_UPSTREAM="$upstream"
+    fi
+  fi
+}
+
+sync_repo_to_update_target() {
+  local target_branch="$1"
+  local upstream_branch="$2"
+
+  if [ ! -d "$PROJECT_DIR/.git" ]; then
+    echo "Error: $PROJECT_DIR is not a git repository" >&2
+    exit 1
+  fi
+
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$target_branch" 2>/dev/null; then
+    if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
+      echo "Error: failed to checkout branch '$target_branch'" >&2
+      exit 1
+    fi
+  fi
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard "$upstream_branch"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+}
+
+step_bootstrap_updater() {
+  # Pull the latest repo files (especially install.sh) before any later update
+  # steps run. The current root service finishes under the old script, but the
+  # next root step will launch a fresh shell against the updated install.sh.
+  step_fix_git_perms
+  resolve_update_branch
+  echo "  Refreshing updater files on branch '$UPDATE_TARGET_LOCAL'..."
+  sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+}
+
 step_git_pull() {
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
@@ -448,9 +510,10 @@ step_git_pull() {
       fi
     fi
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
-    # Fix .git ownership — git operations run as root create root-owned files
-    # which block the clawbox user from pulling later (e.g. FETCH_HEAD)
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
+    # Fix project ownership — git operations run as root can leave both git
+    # metadata and working-tree files owned by root, which blocks later pulls
+    # and writes by the clawbox user.
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
   fi
 }
 
@@ -823,7 +886,7 @@ step_start_services() {
 
 step_nvidia_jetpack() {
   wait_for_apt
-  apt-get install -y nvidia-jetpack
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-jetpack
 }
 
 step_performance_mode() {
@@ -1036,8 +1099,9 @@ step_ai_tools_install() {
 }
 
 step_vnc_install() {
+  wait_for_apt
   # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
-  apt-get install -y x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
@@ -1132,7 +1196,7 @@ step_vnc_refresh() {
   # so wait for the dpkg lock first. Make the install non-fatal — a transient
   # apt failure here shouldn't block the more important unit refresh below.
   wait_for_apt
-  if ! apt-get install -y -qq autocutsel; then
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel; then
     echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
   fi
 
@@ -1255,7 +1319,7 @@ step_browser_launch() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
+  bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
   chromium_install ai_tools_install vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
   network_setup set_hostname setup_config system_config

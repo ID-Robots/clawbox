@@ -158,6 +158,7 @@ describe("updater", () => {
 
       expect(state.phase).toBe("idle");
       expect(state.steps.length).toBeGreaterThan(0);
+      expect(state.steps[0].id).toBe("bootstrap_updater");
       expect(state.currentStepIndex).toBe(-1);
     });
 
@@ -221,6 +222,73 @@ describe("updater", () => {
 
       const state = updater.getUpdateState();
       expect(state.phase).toBe("running");
+    });
+
+    it("uses the root step journal output when a root update step fails", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@apt_update.service": new Error("systemctl failed"),
+        "/usr/bin/journalctl": {
+          stdout: "Waiting for apt lock...\nE: Could not get lock /var/lib/dpkg/lock-frontend\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        const state = updater.getUpdateState();
+        const aptStep = state.steps.find((step) => step.id === "apt_update");
+        expect(aptStep?.status).toBe("failed");
+      });
+
+      const state = updater.getUpdateState();
+      const aptStep = state.steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.status).toBe("failed");
+      expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
+    });
+
+    it("stops the update sequence when bootstrap_updater fails", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@bootstrap_updater.service": new Error("systemctl failed"),
+        "/usr/bin/journalctl": {
+          stdout: "fatal: invalid branch name in .update-branch\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        const state = updater.getUpdateState();
+        const bootstrapStep = state.steps.find((step) => step.id === "bootstrap_updater");
+        expect(bootstrapStep?.status).toBe("failed");
+        expect(state.phase).toBe("failed");
+      });
+
+      const state = updater.getUpdateState();
+      const aptStep = state.steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.status).toBe("pending");
+      expect(state.error).toBe("fatal: invalid branch name in .update-branch");
     });
   });
 

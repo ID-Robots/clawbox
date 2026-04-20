@@ -40,7 +40,18 @@ describe("VNC desktop config", () => {
       "utf8",
     );
 
+    expect(installScript).toContain("step_vnc_install() {\n  wait_for_apt");
     expect(installScript).toContain("systemctl restart clawbox-vnc.service clawbox-websockify.service || true");
+  });
+
+  it("exposes the updater bootstrap step through the root step dispatcher", () => {
+    const installScript = fs.readFileSync(
+      path.join(process.cwd(), "install.sh"),
+      "utf8",
+    );
+
+    expect(installScript).toContain("step_bootstrap_updater()");
+    expect(installScript).toContain("bootstrap_updater apt_update nvidia_jetpack");
   });
 
   it("schedules a one-time VNC bring-up on the first reboot after install", () => {

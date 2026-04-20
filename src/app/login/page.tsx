@@ -19,10 +19,9 @@ function LoginForm() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
-  const [now, setNow] = useState<Date | null>(null);
+  const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
-    setNow(new Date());
     const id = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
@@ -105,12 +104,8 @@ function LoginForm() {
     );
   }
 
-  const timeStr = now
-    ? now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
-    : "";
-  const dateStr = now
-    ? now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })
-    : "";
+  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const dateStr = now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
 
   return (
     <div
@@ -122,8 +117,8 @@ function LoginForm() {
     >
       {/* Mobile clock — hidden on desktop where the card is centered */}
       <div className="flex flex-col items-center gap-1 pt-8 sm:hidden" aria-hidden="true">
-        <div className="text-[64px] font-light text-white tabular-nums leading-none">{timeStr}</div>
-        <div className="text-sm text-white/60 capitalize">{dateStr}</div>
+        <div className="text-[64px] font-light text-white tabular-nums leading-none" suppressHydrationWarning>{timeStr}</div>
+        <div className="text-sm text-white/60 capitalize" suppressHydrationWarning>{dateStr}</div>
       </div>
 
       <div className="w-full max-w-[380px] flex flex-col items-center gap-6">
