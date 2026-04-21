@@ -615,14 +615,19 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands.some((command) => command.includes("config set models.providers.openrouter"))).toBe(true);
-    expect(commands).toContain("config set agents.defaults.model.primary openrouter/anthropic/claude-haiku-4-5");
+    expect(commands).toContain("config set agents.defaults.model.primary openrouter/anthropic/claude-haiku-4.5");
 
     const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.openrouter");
     const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(providerDef.api).toBe("openai-completions");
-    expect(providerDef.models?.[0]?.id).toBe("anthropic/claude-haiku-4-5");
+    // Every curated model must be listed so mid-conversation switches
+    // (in the chat popup secondary dropdown) are routable.
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("anthropic/claude-haiku-4.5");
+    expect(modelIds).toContain("google/gemini-2.0-flash-001");
+    expect(modelIds.length).toBeGreaterThan(10);
   });
 
   it("honors an openrouter model picked by the user", async () => {

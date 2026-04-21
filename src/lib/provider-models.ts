@@ -30,6 +30,15 @@ export interface ProviderCatalog {
   allowCustom: boolean;
 }
 
+// IMPORTANT: every `id` below must be a real model the provider's API
+// currently accepts. Invented/speculative slugs (e.g. guessing a version
+// that hasn't shipped) produce a 400 from the upstream and the chat
+// silently falls back to the local model. When adding entries, verify
+// against the provider's docs — don't guess based on marketing names.
+//
+// Anthropic uses hyphen-dash versioning (claude-haiku-4-5), OpenRouter
+// uses dot versioning (anthropic/claude-haiku-4.5) for the SAME model.
+// Keep the two catalogs in sync when a new version ships.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   {
     id: "claude-haiku-4-5",
@@ -37,27 +46,32 @@ export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
     hint: "Fast, cheap, strong tool use.",
   },
   {
-    id: "claude-sonnet-4-6",
-    label: "Claude Sonnet 4.6",
+    id: "claude-sonnet-4-5",
+    label: "Claude Sonnet 4.5",
     hint: "Flagship, best balance.",
   },
   {
-    id: "claude-opus-4-7",
-    label: "Claude Opus 4.7",
+    id: "claude-opus-4-1",
+    label: "Claude Opus 4.1",
     hint: "Max reasoning, slower and pricier.",
   },
 ] as const;
 
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   {
-    id: "gpt-5.4",
-    label: "GPT-5.4",
+    id: "gpt-5",
+    label: "GPT-5",
     hint: "Flagship.",
   },
   {
     id: "gpt-5-mini",
     label: "GPT-5 Mini",
     hint: "Cheap, very fast.",
+  },
+  {
+    id: "gpt-5-nano",
+    label: "GPT-5 Nano",
+    hint: "Cheapest, lightweight.",
   },
 ] as const;
 
@@ -66,6 +80,11 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
     id: "gemini-2.0-flash",
     label: "Gemini 2.0 Flash",
     hint: "Very fast, multimodal.",
+  },
+  {
+    id: "gemini-2.5-flash",
+    label: "Gemini 2.5 Flash",
+    hint: "Fast, balanced.",
   },
   {
     id: "gemini-2.5-pro",
@@ -78,13 +97,13 @@ export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
-    defaultModelId: "claude-sonnet-4-6",
+    defaultModelId: "claude-sonnet-4-5",
     allowCustom: true,
   },
   openai: {
     provider: "openai",
     models: OPENAI_MODELS,
-    defaultModelId: "gpt-5.4",
+    defaultModelId: "gpt-5",
     allowCustom: true,
   },
   google: {

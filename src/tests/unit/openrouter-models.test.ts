@@ -27,12 +27,12 @@ describe("openrouter-models", () => {
 
   describe("isValidOpenRouterModelId", () => {
     it.each([
-      "anthropic/claude-haiku-4-5",
+      "anthropic/claude-haiku-4.5",
       "openai/gpt-5-mini",
       "moonshotai/kimi-k2-0905",
       "meta-llama/llama-3.3-70b-instruct",
-      "x-ai/grok-4-1-fast",
-      "deepseek/deepseek-chat-v3",
+      "x-ai/grok-4-fast",
+      "deepseek/deepseek-chat-v3.1",
     ])("accepts valid slug %s", (slug) => {
       expect(isValidOpenRouterModelId(slug)).toBe(true);
     });
@@ -49,14 +49,14 @@ describe("openrouter-models", () => {
     });
 
     it("tolerates surrounding whitespace", () => {
-      expect(isValidOpenRouterModelId("  anthropic/claude-haiku-4-5  ")).toBe(true);
+      expect(isValidOpenRouterModelId("  anthropic/claude-haiku-4.5  ")).toBe(true);
     });
   });
 
   describe("extractOpenRouterSlug", () => {
     it("extracts the slug from a fully-qualified openrouter model", () => {
-      expect(extractOpenRouterSlug("openrouter/anthropic/claude-haiku-4-5")).toBe(
-        "anthropic/claude-haiku-4-5",
+      expect(extractOpenRouterSlug("openrouter/anthropic/claude-haiku-4.5")).toBe(
+        "anthropic/claude-haiku-4.5",
       );
     });
 
