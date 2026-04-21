@@ -18,3 +18,4 @@ code-source-code/
 .omx/
 playwright-report/
 test-results/
+scripts/nm-dispatcher-failover.sh
