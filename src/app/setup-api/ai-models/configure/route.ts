@@ -22,7 +22,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
-import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId } from "@/lib/provider-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -610,23 +610,32 @@ export async function POST(request: Request) {
       // provider definition the runtime has no baseUrl to call — the chat
       // turn silently returns `usage: 0/0/0` and the UI appears dead.
       // Writing this entry restores the full OpenAI-compatible path.
-      // The `models` array is used for UI enumeration only; OpenClaw
-      // routes any `openrouter/<slug>` string through the same baseUrl, so
-      // listing just the default is enough to make every OpenRouter model
-      // reachable via `agents.defaults.model.primary`.
+      //
+      // The `models` array drives model resolution: OpenClaw looks up
+      // `agents.defaults.model.primary` (or a per-session override) in
+      // this list to pick up contextWindow/maxTokens. Listing only the
+      // initial default would pin the user to that one model — any
+      // mid-conversation switch (curated or custom) would fail silently
+      // because the runtime can't resolve the new slug. Seeding the full
+      // curated list here (plus the user-picked id, even if off-list)
+      // makes every in-UI option immediately routeable without a re-save.
       const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
+      const modelIds = new Set<string>([
+        defaultModelId,
+        ...OPENROUTER_CURATED_MODELS.map((option) => option.id),
+      ]);
       const providerDef = JSON.stringify({
         baseUrl: "https://openrouter.ai/api/v1",
         api: "openai-completions",
         apiKey: "openrouter-ref",
-        models: [{
-          id: defaultModelId,
-          name: defaultModelId,
+        models: Array.from(modelIds).map((id) => ({
+          id,
+          name: id,
           input: ["text"],
           contextWindow: 131072,
           maxTokens: 8192,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        }],
+        })),
       });
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.providers.openrouter", providerDef, "--json",
