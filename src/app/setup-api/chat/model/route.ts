@@ -279,6 +279,7 @@ export async function POST(request: Request) {
     }
 
     const state = await loadChatModelState();
+    const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
     let targetModel: string | null = null;
 
     if (typeof body.model === "string" && body.model.trim()) {
@@ -302,6 +303,25 @@ export async function POST(request: Request) {
         );
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
+        }
+        // Fail-fast check: for OpenRouter specifically, OpenClaw needs
+        // the model to be listed in `models.providers.openrouter.models`
+        // or the gateway silently falls back to local with no error
+        // message the user can see. If it's not in the configured list,
+        // reject here so the chat popup shows a real error instead.
+        // (Other providers like anthropic/openai/google have built-in
+        // model catalogs in OpenClaw so we don't need this guard for them.)
+        if (parsed.provider === "openrouter") {
+          const providerDef = openclawConfig.models?.providers?.openrouter;
+          const configuredIds = providerDef?.models?.map((m: { id?: string }) => m?.id).filter(Boolean) ?? [];
+          if (configuredIds.length > 0 && !configuredIds.includes(parsed.modelId)) {
+            return NextResponse.json(
+              {
+                error: `Model ${requestedModel} is not in the configured OpenRouter catalog. Re-save OpenRouter in Settings to refresh the model list.`,
+              },
+              { status: 400 },
+            );
+          }
         }
         targetModel = requestedModel;
       }
