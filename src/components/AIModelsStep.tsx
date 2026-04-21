@@ -592,7 +592,18 @@ export default function AIModelsStep({
   // from the currently-configured model so their existing pick survives;
   // if the current model isn't in the catalog (user typed a custom ID),
   // we flip into custom-input mode so it isn't silently overwritten.
-  const activeCatalog = useMemo(() => getProviderCatalog(selectedProvider), [selectedProvider]);
+  // Provider+authMode selects the effective catalog. Subscription mode for
+  // OpenAI routes through the `openai-codex` namespace (ChatGPT backend),
+  // whose catalog is completely different from the token-mode `openai`
+  // API catalog — `gpt-5.4` only exists via codex, `gpt-5` only via the
+  // public API. Matching the catalog to the actual namespace prevents
+  // the picker from offering IDs that the upstream will reject.
+  const activeCatalog = useMemo(() => {
+    if (selectedProvider === "openai" && authMode === "subscription") {
+      return getProviderCatalog("openai-codex");
+    }
+    return getProviderCatalog(selectedProvider);
+  }, [selectedProvider, authMode]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [customModelId, setCustomModelId] = useState<string>("");
   const [useCustomModel, setUseCustomModel] = useState<boolean>(false);
@@ -604,7 +615,10 @@ export default function AIModelsStep({
       setUseCustomModel(false);
       return;
     }
-    const currentModelId = extractProviderModelId(currentModel, selectedProvider);
+    // Extract modelId under the catalog's namespace, NOT the selected
+    // provider's name — for openai+subscription these differ
+    // (openai-codex vs openai).
+    const currentModelId = extractProviderModelId(currentModel, activeCatalog.provider);
     if (!currentModelId) {
       setSelectedModelId(activeCatalog.defaultModelId);
       setCustomModelId("");
@@ -984,13 +998,17 @@ export default function AIModelsStep({
     // Only include a `model` field when the provider has a catalog AND
     // we're on token auth (subscription mode uses its own hard-coded
     // model via subscriptionOverride on the backend).
-    if (activeCatalog && authMode !== "subscription") {
+    // Include the user's chosen model for any provider with a catalog.
+    // activeCatalog resolves to openai-codex for openai+subscription, so
+    // validation passes against the correct namespace — the backend
+    // writes the fully-qualified default using the same namespace.
+    if (activeCatalog) {
       const requestedId = useCustomModel ? customModelId.trim() : selectedModelId;
       if (!requestedId) {
         return showError(`Please choose a model for ${selectedProvider}`);
       }
-      if (!isValidModelId(selectedProvider, requestedId)) {
-        return showError(`Invalid model ID for ${selectedProvider}: ${requestedId}`);
+      if (!isValidModelId(activeCatalog.provider, requestedId)) {
+        return showError(`Invalid model ID for ${activeCatalog.provider}: ${requestedId}`);
       }
       payload.model = requestedId;
     }
@@ -1124,6 +1142,14 @@ export default function AIModelsStep({
     showConfiguring();
 
     try {
+      // For subscription flows (ChatGPT/Codex OAuth), include the
+      // user's model pick so the backend writes openai-codex/<chosen>
+      // instead of the PROVIDERS subscriptionOverride default. Without
+      // this, picking a model in the wizard would silently be ignored
+      // for OAuth providers.
+      const subscriptionModel = activeCatalog
+        ? (useCustomModel ? customModelId.trim() : selectedModelId)
+        : "";
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1135,6 +1161,7 @@ export default function AIModelsStep({
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
           ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
+          ...(subscriptionModel ? { model: subscriptionModel } : {}),
         }),
         signal: controller.signal,
       });
@@ -1151,7 +1178,7 @@ export default function AIModelsStep({
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, selectedProvider, showConfiguring, showError, showSuccessAndContinue]);
+  }, [activeCatalog, configureScope, customModelId, extractError, selectedModelId, selectedProvider, showConfiguring, showError, showSuccessAndContinue, useCustomModel]);
 
   // --- Device auth flow (OpenAI, Google) ---
 

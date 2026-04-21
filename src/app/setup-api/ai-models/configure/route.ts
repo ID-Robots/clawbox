@@ -393,26 +393,39 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
-    } else if (
-      authMode !== "subscription"
-      && typeof bodyModel === "string"
-      && bodyModel.trim()
-      && (isOpenRouter || provider === "anthropic" || provider === "openai" || provider === "google")
-    ) {
+    } else if (typeof bodyModel === "string" && bodyModel.trim()) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
       // from silently saving a broken primary. We don't check against
       // the curated list — users can type newer model IDs we haven't
-      // added yet. Subscription mode (OAuth) is excluded because it
-      // swaps in its own hard-coded model via subscriptionOverride.
+      // added yet.
+      //
+      // Provider namespace differs between auth modes:
+      //   openai + token        → openai/<id>       (api.openai.com)
+      //   openai + subscription → openai-codex/<id> (chatgpt.com backend)
+      // The two catalogs are NOT the same — `gpt-5.4` only exists on
+      // openai-codex; `gpt-5` only exists on openai direct. The
+      // `config.defaultModel` was already set to the correct namespace
+      // above by applying subscriptionOverride, so we derive the
+      // target provider from the existing default instead of `provider`.
       const requestedModel = bodyModel.trim();
-      if (!isValidModelId(provider, requestedModel)) {
-        return NextResponse.json(
-          { error: `Invalid model ID for ${provider}: ${requestedModel}` },
-          { status: 400 },
-        );
+      const targetProvider = config.defaultModel.split("/", 1)[0];
+      const supportedProviders = new Set([
+        "openrouter",
+        "anthropic",
+        "openai",
+        "openai-codex",
+        "google",
+      ]);
+      if (supportedProviders.has(targetProvider)) {
+        if (!isValidModelId(targetProvider, requestedModel)) {
+          return NextResponse.json(
+            { error: `Invalid model ID for ${targetProvider}: ${requestedModel}` },
+            { status: 400 },
+          );
+        }
+        config.defaultModel = `${targetProvider}/${requestedModel}`;
       }
-      config.defaultModel = `${provider}/${requestedModel}`;
     }
 
     // 1. Write token to auth-profiles.json

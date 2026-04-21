@@ -75,6 +75,44 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   },
 ] as const;
 
+// OpenAI ChatGPT subscription (Codex) models. Available when the user
+// authenticates via OAuth instead of pasting an API key. IDs verified
+// against `openclaw models list --provider openai-codex --all` — the
+// ChatGPT backend uses its own internal versioning separate from the
+// platform API (e.g. `gpt-5.4` here has no equivalent on api.openai.com).
+export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
+  {
+    id: "gpt-5.4",
+    label: "GPT-5.4",
+    hint: "Default. ChatGPT flagship.",
+  },
+  {
+    id: "gpt-5.4-mini",
+    label: "GPT-5.4 Mini",
+    hint: "Fast, cheap.",
+  },
+  {
+    id: "gpt-5.4-pro",
+    label: "GPT-5.4 Pro",
+    hint: "Max reasoning.",
+  },
+  {
+    id: "gpt-5.2-codex",
+    label: "GPT-5.2 Codex",
+    hint: "Coding-specialized.",
+  },
+  {
+    id: "gpt-5.3-codex-spark",
+    label: "GPT-5.3 Codex Spark",
+    hint: "Newer coding model.",
+  },
+  {
+    id: "gpt-5.1-codex-max",
+    label: "GPT-5.1 Codex Max",
+    hint: "Large-context coding.",
+  },
+] as const;
+
 export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   {
     id: "gemini-2.0-flash",
@@ -104,6 +142,12 @@ export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
     provider: "openai",
     models: OPENAI_MODELS,
     defaultModelId: "gpt-5",
+    allowCustom: true,
+  },
+  "openai-codex": {
+    provider: "openai-codex",
+    models: OPENAI_CODEX_MODELS,
+    defaultModelId: "gpt-5.4",
     allowCustom: true,
   },
   google: {
