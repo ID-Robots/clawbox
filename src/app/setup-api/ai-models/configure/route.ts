@@ -22,6 +22,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { OPENROUTER_DEFAULT_MODEL_ID, isValidOpenRouterModelId } from "@/lib/openrouter-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
@@ -76,7 +77,11 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "google:default",
   },
   openrouter: {
-    defaultModel: "openrouter/moonshotai/kimi-k2-0905",
+    // Default pre-selection when user reaches the OpenRouter screen. The
+    // user can override via `model` in the request body — see the picker
+    // in AIModelsStep. Single source of truth: OPENROUTER_DEFAULT_MODEL_ID
+    // in src/lib/openrouter-models.ts.
+    defaultModel: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
     profileKey: "openrouter:default",
   },
   ollama: {
@@ -325,6 +330,7 @@ export async function POST(request: Request) {
       expiresIn?: number;
       projectId?: string;
       scope?: ConfigureScope;
+      model?: string;
     };
     try {
       body = await request.json();
@@ -332,7 +338,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary" } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
@@ -386,6 +392,20 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
+    } else if (isOpenRouter && typeof bodyModel === "string" && bodyModel.trim()) {
+      // User picked a model in the wizard (curated list or custom ID).
+      // Validate the shape to stop empty strings / obvious typos from
+      // silently saving a broken primary. Anything that passes
+      // isValidOpenRouterModelId will route cleanly via the provider
+      // def we write below.
+      const requestedModel = bodyModel.trim();
+      if (!isValidOpenRouterModelId(requestedModel)) {
+        return NextResponse.json(
+          { error: `Invalid OpenRouter model ID: ${requestedModel}. Expected <org>/<model> format.` },
+          { status: 400 },
+        );
+      }
+      config.defaultModel = `openrouter/${requestedModel}`;
     }
 
     // 1. Write token to auth-profiles.json

@@ -10,6 +10,11 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import {
+  OPENROUTER_DEFAULT_MODEL_ID,
+  extractOpenRouterSlug,
+  isValidOpenRouterModelId,
+} from "@/lib/openrouter-models";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +52,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openai: "openai/gpt-5.4",
   "openai-codex": "openai-codex/gpt-5.4",
   google: "google/gemini-2.0-flash",
-  openrouter: "openrouter/moonshotai/kimi-k2-0905",
+  openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
 function isLocalModel(model: string | null | undefined): boolean {
@@ -282,10 +287,24 @@ export async function POST(request: Request) {
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
       const targetOption = state.options.find((option) => option.model === requestedModel);
-      if (!targetOption?.available || !targetOption.model) {
-        return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
+      if (targetOption?.available && targetOption.model) {
+        targetModel = targetOption.model;
+      } else {
+        // Power-user path: OpenRouter exposes 340+ models but we only
+        // surface ~12 curated ones in the dropdown. Accept any valid
+        // openrouter/<slug> as long as the openrouter auth profile
+        // exists — OpenClaw routes every openrouter/* model through
+        // the same baseUrl, so we don't need per-model wiring.
+        const openrouterSlug = extractOpenRouterSlug(requestedModel);
+        const openrouterConfigured = state.options.some(
+          (option) => option.provider === "openrouter" && option.available,
+        );
+        if (openrouterSlug && openrouterConfigured && isValidOpenRouterModelId(openrouterSlug)) {
+          targetModel = requestedModel;
+        } else {
+          return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
+        }
       }
-      targetModel = targetOption.model;
     } else {
       if (body.source !== "primary" && body.source !== "local") {
         return NextResponse.json({ error: "Invalid chat model source" }, { status: 400 });

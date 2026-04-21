@@ -96,6 +96,10 @@ function getChatModelOptionText(option: ChatModelState['options'][number]) {
 
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
+import {
+  OPENROUTER_CURATED_MODELS,
+  extractOpenRouterSlug,
+} from '@/lib/openrouter-models'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -1008,6 +1012,95 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               </span>
             </div>
           )}
+          {(() => {
+            // Inline OpenRouter model switcher: appears next to the provider
+            // dropdown when the active option is an OpenRouter model. Lets
+            // power users hot-swap between OpenRouter's 340+ models mid-chat
+            // without opening Settings. If the currently-active slug isn't in
+            // our curated list (e.g. the user typed a custom one in the
+            // wizard), we prepend it so the select reflects reality.
+            if (!chatModelState) return null
+            const activeOption = chatModelState.options.find(
+              (option) => option.id === chatModelState.activeOptionId,
+            )
+            if (!activeOption || activeOption.provider !== 'openrouter') return null
+            const activeSlug = extractOpenRouterSlug(chatModelState.activeModel)
+            if (!activeSlug) return null
+            const curatedHasActive = OPENROUTER_CURATED_MODELS.some(
+              (option) => option.id === activeSlug,
+            )
+            const modelOptions = curatedHasActive
+              ? OPENROUTER_CURATED_MODELS
+              : [
+                  { id: activeSlug, label: activeSlug, hint: 'Custom model' },
+                  ...OPENROUTER_CURATED_MODELS,
+                ]
+            return (
+              <div
+                onPointerDown={stopHeaderDrag}
+                style={{
+                  position: 'relative',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  maxWidth: 200,
+                  marginLeft: 6,
+                }}
+              >
+                <select
+                  aria-label="OpenRouter model"
+                  value={activeSlug}
+                  onChange={(e) => {
+                    const slug = e.target.value
+                    if (slug === activeSlug) return
+                    void switchChatModel({
+                      model: `openrouter/${slug}`,
+                      label: `openrouter/${slug}`,
+                    })
+                  }}
+                  onPointerDown={stopHeaderDrag}
+                  disabled={switchingModel}
+                  style={{
+                    appearance: 'none',
+                    WebkitAppearance: 'none',
+                    MozAppearance: 'none',
+                    width: '100%',
+                    background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    color: '#fff',
+                    borderRadius: 10,
+                    padding: '6px 28px 6px 10px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    outline: 'none',
+                    cursor: switchingModel ? 'default' : 'pointer',
+                  }}
+                >
+                  {modelOptions.map((option) => (
+                    <option
+                      key={option.id}
+                      value={option.id}
+                      style={{ background: '#111827', color: '#fff' }}
+                    >
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  className="material-symbols-rounded"
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 8,
+                    fontSize: 16,
+                    color: 'rgba(255,255,255,0.35)',
+                    pointerEvents: 'none',
+                  }}
+                >
+                  unfold_more
+                </span>
+              </div>
+            )
+          })()}
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (
