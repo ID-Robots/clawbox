@@ -105,6 +105,21 @@ for k in ("tools", "systemPromptSuffix"):
         del agents_defaults[k]
         changed = True
 
+# Security migration: older ClawBox versions silently wrote
+# channels.telegram.dmPolicy="open" + allowFrom=["*"] at bot-token setup,
+# which opened the bot — and the agent's shell/file/system_power tools —
+# to any Telegram user who found the handle. Strip those keys on every
+# gateway start so updated devices re-secure themselves without needing
+# a bot-token reconfigure or factory reset. No-op on already-safe configs.
+channels = cfg.get("channels")
+if isinstance(channels, dict):
+    telegram = channels.get("telegram")
+    if isinstance(telegram, dict):
+        for k in ("dmPolicy", "allowFrom"):
+            if k in telegram:
+                del telegram[k]
+                changed = True
+
 gateway = cfg.setdefault("gateway", {})
 control_ui = gateway.setdefault("controlUi", {})
 auth = gateway.setdefault("auth", {})

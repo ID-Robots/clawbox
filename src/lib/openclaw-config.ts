@@ -298,6 +298,7 @@ export interface OpenClawConfig {
       enabled?: boolean;
       botToken?: string;
       dmPolicy?: string;
+      allowFrom?: string[];
       [key: string]: unknown;
     };
   };
@@ -466,12 +467,19 @@ export async function setTelegramToken(botToken: string): Promise<void> {
   if (!config.channels) {
     config.channels = {};
   }
+  // Do NOT set `dmPolicy` or `allowFrom` here. OpenClaw's default
+  // (`dmPolicy: "pairing"`) requires the owner to approve every new sender
+  // via an in-Telegram pairing code before the agent responds. Writing
+  // `dmPolicy: "open"` + `allowFrom: ["*"]` would open the bot — and with it
+  // the agent's shell/file/system_power tools — to any Telegram user who
+  // finds the handle. Reconfiguring a bot token on a device with those
+  // values already stored should re-secure the channel, so strip them here
+  // too rather than merging on top of the stale insecure config.
+  const { dmPolicy: _dmPolicy, allowFrom: _allowFrom, ...rest } = config.channels.telegram ?? {};
   config.channels.telegram = {
-    ...config.channels.telegram,
+    ...rest,
     enabled: true,
     botToken,
-    dmPolicy: "open",
-    allowFrom: ["*"],
   };
   await writeConfig(config);
 }

@@ -708,8 +708,37 @@ step_openclaw_config() {
     local TG_TOKEN
     TG_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
     if [ -n "$TG_TOKEN" ]; then
-      as_clawbox "$OPENCLAW_BIN" config set channels.telegram \
-        "{\"enabled\":true,\"botToken\":\"$TG_TOKEN\",\"dmPolicy\":\"open\",\"allowFrom\":[\"*\"]}" --json
+      # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
+      # setTelegramToken for the security rationale. `openclaw config set`
+      # may deep-merge instead of replace, which would leave legacy
+      # `dmPolicy:"open"` / `allowFrom:["*"]` values alive. Do the
+      # read-modify-write ourselves with a destructure-strip so the
+      # installer can't leave insecure values behind, matching what
+      # install-x64.sh and src/lib/openclaw-config.ts:setTelegramToken
+      # do on their paths.
+      as_clawbox env TG_TOKEN="$TG_TOKEN" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const botToken = process.env.TG_TOKEN;
+const cfgPath = process.env.CFG;
+let cfg = {};
+try {
+  cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+} catch (err) {
+  // Only tolerate "file missing" — any other read/parse error (EACCES,
+  // corrupt JSON, transient IO) must abort, otherwise we'd silently
+  // overwrite a real-but-unreadable config with only the Telegram channel,
+  // wiping auth profiles, gateway settings, AI provider config, etc.
+  if (!err || err.code !== "ENOENT") throw err;
+}
+if (!cfg.channels) cfg.channels = {};
+const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
+cfg.channels.telegram = { ...rest, enabled: true, botToken };
+fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+const tmp = `${cfgPath}.tmp`;
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+fs.renameSync(tmp, cfgPath);
+NODE
       echo "  Telegram channel registered"
     fi
   fi
