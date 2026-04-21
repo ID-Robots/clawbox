@@ -20,11 +20,10 @@ import {
   PORTAL_LOGIN_URL,
 } from "@/lib/max-subscription";
 import {
-  OPENROUTER_CURATED_MODELS,
-  OPENROUTER_DEFAULT_MODEL_ID,
-  extractOpenRouterSlug,
-  isValidOpenRouterModelId,
-} from "@/lib/openrouter-models";
+  extractProviderModelId,
+  getProviderCatalog,
+  isValidModelId,
+} from "@/lib/provider-models";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -587,29 +586,42 @@ export default function AIModelsStep({
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
-  // OpenRouter model picker. When the active provider is already OpenRouter
-  // we seed from the fully-qualified currentModel (e.g.
-  // "openrouter/anthropic/claude-haiku-4-5") so the user's existing pick
-  // survives re-entry to the screen. If the configured slug isn't in our
-  // curated list, we show it via the custom-input path.
-  const initialOpenRouterSlug = useMemo(() => {
-    const slug = extractOpenRouterSlug(currentModel);
-    return slug && isValidOpenRouterModelId(slug) ? slug : OPENROUTER_DEFAULT_MODEL_ID;
-  }, [currentModel]);
-  const initialUseCustomOpenRouter = useMemo(() => {
-    const slug = extractOpenRouterSlug(currentModel);
-    if (!slug || !isValidOpenRouterModelId(slug)) return false;
-    return !OPENROUTER_CURATED_MODELS.some((option) => option.id === slug);
-  }, [currentModel]);
-  const [openRouterModel, setOpenRouterModel] = useState<string>(
-    initialUseCustomOpenRouter ? OPENROUTER_DEFAULT_MODEL_ID : initialOpenRouterSlug,
-  );
-  const [openRouterCustomModel, setOpenRouterCustomModel] = useState<string>(
-    initialUseCustomOpenRouter ? initialOpenRouterSlug : "",
-  );
-  const [useCustomOpenRouterModel, setUseCustomOpenRouterModel] = useState<boolean>(
-    initialUseCustomOpenRouter,
-  );
+  // Per-provider model picker. The catalog (see src/lib/provider-models.ts)
+  // gives us a default modelId + curated list for Anthropic, OpenAI, Google,
+  // and OpenRouter. When the user re-enters the screen we try to pre-seed
+  // from the currently-configured model so their existing pick survives;
+  // if the current model isn't in the catalog (user typed a custom ID),
+  // we flip into custom-input mode so it isn't silently overwritten.
+  const activeCatalog = useMemo(() => getProviderCatalog(selectedProvider), [selectedProvider]);
+  const [selectedModelId, setSelectedModelId] = useState<string>("");
+  const [customModelId, setCustomModelId] = useState<string>("");
+  const [useCustomModel, setUseCustomModel] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!activeCatalog || !selectedProvider) {
+      setSelectedModelId("");
+      setCustomModelId("");
+      setUseCustomModel(false);
+      return;
+    }
+    const currentModelId = extractProviderModelId(currentModel, selectedProvider);
+    if (!currentModelId) {
+      setSelectedModelId(activeCatalog.defaultModelId);
+      setCustomModelId("");
+      setUseCustomModel(false);
+      return;
+    }
+    const inCatalog = activeCatalog.models.some((option) => option.id === currentModelId);
+    if (inCatalog) {
+      setSelectedModelId(currentModelId);
+      setCustomModelId("");
+      setUseCustomModel(false);
+    } else {
+      setSelectedModelId(activeCatalog.defaultModelId);
+      setCustomModelId(currentModelId);
+      setUseCustomModel(true);
+    }
+  }, [activeCatalog, currentModel, selectedProvider]);
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
   const [showClawAIOffer, setShowClawAIOffer] = useState(false);
 
@@ -969,17 +981,18 @@ export default function AIModelsStep({
       apiKey: apiKey.trim(),
       authMode,
     };
-    if (selectedProvider === "openrouter") {
-      const requestedSlug = useCustomOpenRouterModel
-        ? openRouterCustomModel.trim()
-        : openRouterModel;
-      if (!requestedSlug) {
-        return showError("Please choose an OpenRouter model");
+    // Only include a `model` field when the provider has a catalog AND
+    // we're on token auth (subscription mode uses its own hard-coded
+    // model via subscriptionOverride on the backend).
+    if (activeCatalog && authMode !== "subscription") {
+      const requestedId = useCustomModel ? customModelId.trim() : selectedModelId;
+      if (!requestedId) {
+        return showError(`Please choose a model for ${selectedProvider}`);
       }
-      if (!isValidOpenRouterModelId(requestedSlug)) {
-        return showError(`Invalid OpenRouter model ID: ${requestedSlug}`);
+      if (!isValidModelId(selectedProvider, requestedId)) {
+        return showError(`Invalid model ID for ${selectedProvider}: ${requestedId}`);
       }
-      payload.model = requestedSlug;
+      payload.model = requestedId;
     }
     await saveProviderConfig(payload);
   };
@@ -1754,22 +1767,22 @@ export default function AIModelsStep({
                   </button>
                 </div>
                 <p className="mt-1.5 text-xs text-[var(--text-muted)]">{activeAuth.hint}</p>
-                {selected.id === "openrouter" && (
+                {activeCatalog && (
                   <div className="mt-4">
                     <label
-                      htmlFor="ai-openrouter-model"
+                      htmlFor="ai-provider-model"
                       className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
                     >
                       Model
                     </label>
-                    {!useCustomOpenRouterModel ? (
+                    {!useCustomModel ? (
                       <select
-                        id="ai-openrouter-model"
-                        value={openRouterModel}
-                        onChange={(e) => setOpenRouterModel(e.target.value)}
+                        id="ai-provider-model"
+                        value={selectedModelId}
+                        onChange={(e) => setSelectedModelId(e.target.value)}
                         className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors"
                       >
-                        {OPENROUTER_CURATED_MODELS.map((option) => (
+                        {activeCatalog.models.map((option) => (
                           <option key={option.id} value={option.id}>
                             {option.label} — {option.hint}
                           </option>
@@ -1777,27 +1790,35 @@ export default function AIModelsStep({
                       </select>
                     ) : (
                       <input
-                        id="ai-openrouter-model"
+                        id="ai-provider-model"
                         type="text"
-                        value={openRouterCustomModel}
-                        onChange={(e) => setOpenRouterCustomModel(e.target.value)}
-                        placeholder="org/model-id (e.g. mistralai/mistral-large)"
+                        value={customModelId}
+                        onChange={(e) => setCustomModelId(e.target.value)}
+                        placeholder={
+                          selected.id === "openrouter"
+                            ? "org/model-id (e.g. mistralai/mistral-large)"
+                            : `model-id (e.g. ${activeCatalog.defaultModelId})`
+                        }
                         spellCheck={false}
                         autoComplete="off"
                         className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
                       />
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setUseCustomOpenRouterModel((v) => !v)}
-                      className="mt-1.5 bg-transparent p-0 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
-                    >
-                      {useCustomOpenRouterModel
-                        ? "Pick from curated list"
-                        : "Enter a custom model ID…"}
-                    </button>
+                    {activeCatalog.allowCustom && (
+                      <button
+                        type="button"
+                        onClick={() => setUseCustomModel((v) => !v)}
+                        className="mt-1.5 bg-transparent p-0 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
+                      >
+                        {useCustomModel
+                          ? "Pick from curated list"
+                          : "Enter a custom model ID…"}
+                      </button>
+                    )}
                     <p className="mt-1.5 text-xs text-[var(--text-muted)]">
-                      OpenRouter exposes 340+ models. You can switch models later from the chat window.
+                      {selected.id === "openrouter"
+                        ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
+                        : "You can switch between the curated models from the chat window anytime."}
                     </p>
                   </div>
                 )}

@@ -22,7 +22,8 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
-import { OPENROUTER_DEFAULT_MODEL_ID, isValidOpenRouterModelId } from "@/lib/openrouter-models";
+import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { isValidModelId } from "@/lib/provider-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
@@ -392,20 +393,26 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
-    } else if (isOpenRouter && typeof bodyModel === "string" && bodyModel.trim()) {
-      // User picked a model in the wizard (curated list or custom ID).
-      // Validate the shape to stop empty strings / obvious typos from
-      // silently saving a broken primary. Anything that passes
-      // isValidOpenRouterModelId will route cleanly via the provider
-      // def we write below.
+    } else if (
+      authMode !== "subscription"
+      && typeof bodyModel === "string"
+      && bodyModel.trim()
+      && (isOpenRouter || provider === "anthropic" || provider === "openai" || provider === "google")
+    ) {
+      // User picked a specific model in the wizard (curated list or
+      // custom ID). Validate shape to stop empty strings / obvious typos
+      // from silently saving a broken primary. We don't check against
+      // the curated list — users can type newer model IDs we haven't
+      // added yet. Subscription mode (OAuth) is excluded because it
+      // swaps in its own hard-coded model via subscriptionOverride.
       const requestedModel = bodyModel.trim();
-      if (!isValidOpenRouterModelId(requestedModel)) {
+      if (!isValidModelId(provider, requestedModel)) {
         return NextResponse.json(
-          { error: `Invalid OpenRouter model ID: ${requestedModel}. Expected <org>/<model> format.` },
+          { error: `Invalid model ID for ${provider}: ${requestedModel}` },
           { status: 400 },
         );
       }
-      config.defaultModel = `openrouter/${requestedModel}`;
+      config.defaultModel = `${provider}/${requestedModel}`;
     }
 
     // 1. Write token to auth-profiles.json

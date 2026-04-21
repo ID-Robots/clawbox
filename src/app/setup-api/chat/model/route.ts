@@ -10,11 +10,8 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import {
-  OPENROUTER_DEFAULT_MODEL_ID,
-  extractOpenRouterSlug,
-  isValidOpenRouterModelId,
-} from "@/lib/openrouter-models";
+import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 
 export const dynamic = "force-dynamic";
 
@@ -290,20 +287,23 @@ export async function POST(request: Request) {
       if (targetOption?.available && targetOption.model) {
         targetModel = targetOption.model;
       } else {
-        // Power-user path: OpenRouter exposes 340+ models but we only
-        // surface ~12 curated ones in the dropdown. Accept any valid
-        // openrouter/<slug> as long as the openrouter auth profile
-        // exists — OpenClaw routes every openrouter/* model through
-        // the same baseUrl, so we don't need per-model wiring.
-        const openrouterSlug = extractOpenRouterSlug(requestedModel);
-        const openrouterConfigured = state.options.some(
-          (option) => option.provider === "openrouter" && option.available,
+        // Power-user path: accept any valid <provider>/<modelId> as long
+        // as that provider has a configured auth profile. This backs
+        // both the chat popup's inline model switcher and custom
+        // model IDs entered in the wizard/Settings. Without this escape
+        // hatch the curated-list dropdown would be the only reachable
+        // surface and newer/region-specific models would be unavailable.
+        const parsed = parseModelSlug(requestedModel);
+        if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
+          return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
+        }
+        const providerConfigured = state.options.some(
+          (option) => option.provider === parsed.provider && option.available,
         );
-        if (openrouterSlug && openrouterConfigured && isValidOpenRouterModelId(openrouterSlug)) {
-          targetModel = requestedModel;
-        } else {
+        if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
+        targetModel = requestedModel;
       }
     } else {
       if (body.source !== "primary" && body.source !== "local") {

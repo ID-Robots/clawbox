@@ -84,22 +84,22 @@ interface ChatModelState {
   local: { available: boolean; label: string | null; model: string | null }
 }
 
-// clawai is the builtin default provider, so when it is available we show
-// the user-facing option label (usually "ClawBox AI"). For other providers,
-// we surface the technical model identifier via option.model and fall back to
-// a setup prompt when the provider is not yet available.
+// Left dropdown is the provider selector — always show the friendly
+// provider label (e.g. "Anthropic Claude", "OpenAI GPT") so users don't
+// see a raw fully-qualified model id. When the provider has multiple
+// curated models a secondary dropdown appears next to this one for
+// model selection (see renderProviderModelPicker).
 function getChatModelOptionText(option: ChatModelState['options'][number]) {
-  if (option.available && option.provider === 'clawai') return option.label || option.id
-  if (option.available && option.model) return option.model
-  return `${option.label} - Set up in Settings`
+  if (!option.available) return `${option.label} - Set up in Settings`
+  return option.label || option.id
 }
 
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
 import {
-  OPENROUTER_CURATED_MODELS,
-  extractOpenRouterSlug,
-} from '@/lib/openrouter-models'
+  extractProviderModelId,
+  getProviderCatalog,
+} from '@/lib/provider-models'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -1013,27 +1013,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </div>
           )}
           {(() => {
-            // Inline OpenRouter model switcher: appears next to the provider
-            // dropdown when the active option is an OpenRouter model. Lets
-            // power users hot-swap between OpenRouter's 340+ models mid-chat
-            // without opening Settings. If the currently-active slug isn't in
-            // our curated list (e.g. the user typed a custom one in the
-            // wizard), we prepend it so the select reflects reality.
+            // Inline model switcher: renders next to the provider dropdown
+            // whenever the active provider has multiple curated models.
+            // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
+            // variants, Gemini variants, or OpenRouter's 340+ models
+            // mid-chat without opening Settings. If the current model
+            // isn't in our curated list (custom ID typed in Settings),
+            // we prepend it as a "Custom" entry so the select reflects
+            // reality.
             if (!chatModelState) return null
             const activeOption = chatModelState.options.find(
               (option) => option.id === chatModelState.activeOptionId,
             )
-            if (!activeOption || activeOption.provider !== 'openrouter') return null
-            const activeSlug = extractOpenRouterSlug(chatModelState.activeModel)
-            if (!activeSlug) return null
-            const curatedHasActive = OPENROUTER_CURATED_MODELS.some(
-              (option) => option.id === activeSlug,
+            if (!activeOption?.provider) return null
+            const catalog = getProviderCatalog(activeOption.provider)
+            if (!catalog || catalog.models.length < 2) return null
+            const activeModelId = extractProviderModelId(
+              chatModelState.activeModel,
+              activeOption.provider,
+            )
+            if (!activeModelId) return null
+            const curatedHasActive = catalog.models.some(
+              (option) => option.id === activeModelId,
             )
             const modelOptions = curatedHasActive
-              ? OPENROUTER_CURATED_MODELS
+              ? catalog.models
               : [
-                  { id: activeSlug, label: activeSlug, hint: 'Custom model' },
-                  ...OPENROUTER_CURATED_MODELS,
+                  { id: activeModelId, label: activeModelId, hint: 'Custom model' },
+                  ...catalog.models,
                 ]
             return (
               <div
@@ -1047,14 +1054,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 }}
               >
                 <select
-                  aria-label="OpenRouter model"
-                  value={activeSlug}
+                  aria-label={`${activeOption.label} model`}
+                  value={activeModelId}
                   onChange={(e) => {
-                    const slug = e.target.value
-                    if (slug === activeSlug) return
+                    const nextId = e.target.value
+                    if (nextId === activeModelId) return
                     void switchChatModel({
-                      model: `openrouter/${slug}`,
-                      label: `openrouter/${slug}`,
+                      model: `${activeOption.provider}/${nextId}`,
+                      label: nextId,
                     })
                   }}
                   onPointerDown={stopHeaderDrag}
