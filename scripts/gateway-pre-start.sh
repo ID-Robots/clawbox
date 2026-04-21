@@ -120,6 +120,35 @@ if isinstance(channels, dict):
                 del telegram[k]
                 changed = True
 
+# Migration: devices that configured OpenRouter before the provider-def
+# fix have `auth.profiles.openrouter:default` set but no
+# `models.providers.openrouter` entry, so OpenClaw's runtime has no
+# baseUrl to call and every chat turn silently returns `usage: 0/0/0`.
+# Fix those in place on gateway start. The configure route now writes the
+# provider def on new setups, so only legacy devices will hit this branch.
+# The `models` array is UI-only — OpenClaw routes any `openrouter/<slug>`
+# through the same baseUrl, so listing just the current default is enough.
+auth_profiles = cfg.get("auth", {}).get("profiles", {}) if isinstance(cfg.get("auth"), dict) else {}
+has_openrouter_auth = isinstance(auth_profiles, dict) and "openrouter:default" in auth_profiles
+models_providers = cfg.setdefault("models", {}).setdefault("providers", {})
+if has_openrouter_auth and not models_providers.get("openrouter"):
+    primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary", "")
+    default_model = primary[len("openrouter/"):] if isinstance(primary, str) and primary.startswith("openrouter/") else "moonshotai/kimi-k2-0905"
+    models_providers["openrouter"] = {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "api": "openai-completions",
+        "apiKey": "openrouter-ref",
+        "models": [{
+            "id": default_model,
+            "name": default_model,
+            "input": ["text"],
+            "contextWindow": 131072,
+            "maxTokens": 8192,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        }],
+    }
+    changed = True
+
 gateway = cfg.setdefault("gateway", {})
 control_ui = gateway.setdefault("controlUi", {})
 auth = gateway.setdefault("auth", {})
