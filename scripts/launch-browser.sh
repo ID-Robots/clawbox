@@ -92,9 +92,6 @@ if ! wait_for_display "$DISPLAY" "${XAUTHORITY:-}"; then
   exit 1
 fi
 
-# Reset profile on each start to avoid corruption from version changes
-# (This is a CDP automation browser, not a persistent user browser)
-rm -rf "$PROFILE"
 mkdir -p "$PROFILE"
 
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
@@ -107,7 +104,6 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --no-default-browser-check \
   --start-maximized \
   --disable-gpu \
-  --no-sandbox \
   --disable-dev-shm-usage \
   --disable-background-networking \
   --password-store=basic \
