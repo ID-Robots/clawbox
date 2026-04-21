@@ -97,19 +97,39 @@ export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
     hint: "Max reasoning.",
   },
   {
+    id: "gpt-5.3-codex",
+    label: "GPT-5.3 Codex",
+    hint: "Codex coding model.",
+  },
+  {
+    id: "gpt-5.3-codex-spark",
+    label: "GPT-5.3 Codex Spark",
+    hint: "Newer Codex variant.",
+  },
+  {
+    id: "gpt-5.2",
+    label: "GPT-5.2",
+    hint: "Prior flagship.",
+  },
+  {
     id: "gpt-5.2-codex",
     label: "GPT-5.2 Codex",
     hint: "Coding-specialized.",
   },
   {
-    id: "gpt-5.3-codex-spark",
-    label: "GPT-5.3 Codex Spark",
-    hint: "Newer coding model.",
+    id: "gpt-5.1",
+    label: "GPT-5.1",
+    hint: "Legacy flagship.",
   },
   {
     id: "gpt-5.1-codex-max",
     label: "GPT-5.1 Codex Max",
     hint: "Large-context coding.",
+  },
+  {
+    id: "gpt-5.1-codex-mini",
+    label: "GPT-5.1 Codex Mini",
+    hint: "Compact coding.",
   },
 ] as const;
 
