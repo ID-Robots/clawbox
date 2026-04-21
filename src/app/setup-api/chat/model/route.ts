@@ -46,9 +46,9 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: "deepseek/deepseek-chat",
   deepseek: "deepseek/deepseek-chat",
   anthropic: "anthropic/claude-sonnet-4-6",
-  openai: "openai/gpt-5.4",
+  openai: "openai/gpt-5",
   "openai-codex": "openai-codex/gpt-5.4",
-  google: "google/gemini-2.0-flash",
+  google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 

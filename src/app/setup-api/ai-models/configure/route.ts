@@ -74,7 +74,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     },
   },
   google: {
-    defaultModel: "google/gemini-2.0-flash",
+    defaultModel: "google/gemini-2.5-flash",
     profileKey: "google:default",
   },
   openrouter: {

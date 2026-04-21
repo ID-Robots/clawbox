@@ -36,24 +36,37 @@ export interface ProviderCatalog {
 // silently falls back to the local model. When adding entries, verify
 // against the provider's docs — don't guess based on marketing names.
 //
-// Anthropic uses hyphen-dash versioning (claude-haiku-4-5), OpenRouter
-// uses dot versioning (anthropic/claude-haiku-4.5) for the SAME model.
-// Keep the two catalogs in sync when a new version ships.
+// Anthropic direct API uses hyphen-dash versioning (claude-haiku-4-5),
+// OpenRouter mirrors with dot versioning (anthropic/claude-haiku-4.5),
+// and the two catalogs update at different cadences — OpenRouter
+// typically lags Anthropic by one release, so the latest Anthropic
+// flagship (Sonnet 4.6, Opus 4.7) may not be on OR yet.
+// Source: https://platform.claude.com/docs/en/docs/about-claude/models/overview
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   {
     id: "claude-haiku-4-5",
     label: "Claude Haiku 4.5",
-    hint: "Fast, cheap, strong tool use.",
+    hint: "Fastest, near-frontier, cheap.",
+  },
+  {
+    id: "claude-sonnet-4-6",
+    label: "Claude Sonnet 4.6",
+    hint: "Default. Best speed + intelligence balance.",
+  },
+  {
+    id: "claude-opus-4-7",
+    label: "Claude Opus 4.7",
+    hint: "Most capable, complex reasoning, pricier.",
+  },
+  {
+    id: "claude-opus-4-6",
+    label: "Claude Opus 4.6",
+    hint: "Legacy flagship, still supported.",
   },
   {
     id: "claude-sonnet-4-5",
     label: "Claude Sonnet 4.5",
-    hint: "Flagship, best balance.",
-  },
-  {
-    id: "claude-opus-4-1",
-    label: "Claude Opus 4.1",
-    hint: "Max reasoning, slower and pricier.",
+    hint: "Legacy Sonnet, still supported.",
   },
 ] as const;
 
@@ -133,21 +146,39 @@ export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
   },
 ] as const;
 
+// Source: https://ai.google.dev/gemini-api/docs/models
+// 2.5 line is production; 3.x are preview (marked -preview in the ID).
+// Gemini 3 Pro has no `-pro` stable yet — the preview is what's shipping.
 export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
-  {
-    id: "gemini-2.0-flash",
-    label: "Gemini 2.0 Flash",
-    hint: "Very fast, multimodal.",
-  },
   {
     id: "gemini-2.5-flash",
     label: "Gemini 2.5 Flash",
-    hint: "Fast, balanced.",
+    hint: "Default. Best price-performance.",
+  },
+  {
+    id: "gemini-2.5-flash-lite",
+    label: "Gemini 2.5 Flash-Lite",
+    hint: "Fastest, most budget-friendly.",
   },
   {
     id: "gemini-2.5-pro",
     label: "Gemini 2.5 Pro",
-    hint: "Long-context reasoning.",
+    hint: "Complex reasoning and coding.",
+  },
+  {
+    id: "gemini-3-flash-preview",
+    label: "Gemini 3 Flash (preview)",
+    hint: "Frontier-class performance at Flash cost.",
+  },
+  {
+    id: "gemini-3.1-pro-preview",
+    label: "Gemini 3.1 Pro (preview)",
+    hint: "Advanced reasoning and agentic.",
+  },
+  {
+    id: "gemini-3.1-flash-lite-preview",
+    label: "Gemini 3.1 Flash-Lite (preview)",
+    hint: "Speed and efficiency optimized.",
   },
 ] as const;
 
@@ -155,7 +186,7 @@ export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
-    defaultModelId: "claude-sonnet-4-5",
+    defaultModelId: "claude-sonnet-4-6",
     allowCustom: true,
   },
   openai: {
@@ -173,7 +204,7 @@ export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
   google: {
     provider: "google",
     models: GOOGLE_MODELS,
-    defaultModelId: "gemini-2.0-flash",
+    defaultModelId: "gemini-2.5-flash",
     allowCustom: true,
   },
   openrouter: {
