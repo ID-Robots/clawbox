@@ -198,7 +198,7 @@ describe("openclaw-config", () => {
   });
 
   describe("setTelegramToken", () => {
-    it("sets Telegram token in config", async () => {
+    it("sets Telegram token in config without overriding dmPolicy/allowFrom", async () => {
       await openclawConfig.setTelegramToken("123:abc");
 
       expect(mockFs.writeFile).toHaveBeenCalled();
@@ -207,7 +207,12 @@ describe("openclaw-config", () => {
 
       expect(writtenConfig.channels.telegram.botToken).toBe("123:abc");
       expect(writtenConfig.channels.telegram.enabled).toBe(true);
-      expect(writtenConfig.channels.telegram.dmPolicy).toBe("open");
+      // Security: do NOT override OpenClaw's default dmPolicy ("pairing"),
+      // and do NOT wildcard-allow every Telegram user. `not.toHaveProperty`
+      // (stricter than toBeUndefined) catches a future write of `undefined`
+      // which would still change the key's presence in the config object.
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("dmPolicy");
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("allowFrom");
     });
 
     it("preserves existing config", async () => {
@@ -292,13 +297,28 @@ describe("openclaw-config", () => {
       expect(writtenConfig.channels.telegram.customField).toBe("keep-me");
     });
 
-    it("sets allowFrom to wildcard", async () => {
-      await openclawConfig.setTelegramToken("123:abc");
+    it("strips insecure dmPolicy/allowFrom left over from older configs", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: {
+          telegram: {
+            enabled: true,
+            botToken: "old:token",
+            dmPolicy: "open",
+            allowFrom: ["*"],
+          },
+        },
+      }));
+
+      await openclawConfig.setTelegramToken("new:token");
 
       const writeCall = mockFs.writeFile.mock.calls[0];
       const writtenConfig = JSON.parse(writeCall[1] as string);
 
-      expect(writtenConfig.channels.telegram.allowFrom).toEqual(["*"]);
+      expect(writtenConfig.channels.telegram.botToken).toBe("new:token");
+      // Reconfiguring a token must re-secure the channel by removing the
+      // old wildcard bypass, not merely no-op on top of it.
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("dmPolicy");
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("allowFrom");
     });
 
     it("writes pretty-printed JSON", async () => {

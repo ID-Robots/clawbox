@@ -598,4 +598,30 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/ollama");
   });
+
+  it("configures openrouter provider definition in openclaw", async () => {
+    // OpenClaw has no built-in OpenRouter adapter, so without an explicit
+    // models.providers.openrouter entry the runtime short-circuits every
+    // chat turn to `usage: 0/0/0` and the UI appears dead. Regression test
+    // for that silent-failure bug.
+    const res = await configurePost(jsonRequest({
+      provider: "openrouter",
+      apiKey: "sk-or-v1-test",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((command) => command.includes("config set models.providers.openrouter"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary openrouter/moonshotai/kimi-k2-0905");
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.openrouter");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+
+    expect(providerDef.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(providerDef.api).toBe("openai-completions");
+    expect(providerDef.models?.[0]?.id).toBe("moonshotai/kimi-k2-0905");
+  });
 });

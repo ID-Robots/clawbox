@@ -371,7 +371,11 @@ try {
   const cb=JSON.parse(fs.readFileSync(process.env.CLAWBOX_CONFIG,'utf8'));
   if(cb.telegram_bot_token){
     if(!c.channels)c.channels={};
-    c.channels.telegram={...c.channels.telegram,enabled:true,botToken:cb.telegram_bot_token,dmPolicy:'open',allowFrom:['*']};
+    // dmPolicy/allowFrom intentionally NOT set — OpenClaw's "pairing"
+    // default requires owner approval before the agent responds to a new
+    // sender. See src/lib/openclaw-config.ts:setTelegramToken.
+    const {dmPolicy:_dm,allowFrom:_af,...rest}=c.channels.telegram||{};
+    c.channels.telegram={...rest,enabled:true,botToken:cb.telegram_bot_token};
     process.stderr.write('  Telegram channel registered in OpenClaw config\n');
   }
 } catch {}

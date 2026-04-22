@@ -337,6 +337,7 @@ export async function POST(request: Request) {
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
+    const isOpenRouter = provider === "openrouter";
     const isLocalScope = scope === "local";
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
@@ -576,6 +577,42 @@ export async function POST(request: Request) {
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
+    } else if (isOpenRouter) {
+      // OpenClaw has no built-in provider adapter for OpenRouter the way it
+      // does for openai / anthropic / google, so without this explicit
+      // provider definition the runtime has no baseUrl to call — the chat
+      // turn silently returns `usage: 0/0/0` and the UI appears dead.
+      // Writing this entry restores the full OpenAI-compatible path.
+      // The `models` array is used for UI enumeration only; OpenClaw
+      // routes any `openrouter/<slug>` string through the same baseUrl, so
+      // listing just the default is enough to make every OpenRouter model
+      // reachable via `agents.defaults.model.primary`.
+      const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
+      const providerDef = JSON.stringify({
+        baseUrl: "https://openrouter.ai/api/v1",
+        api: "openai-completions",
+        apiKey: "openrouter-ref",
+        models: [{
+          id: defaultModelId,
+          name: defaultModelId,
+          input: ["text"],
+          contextWindow: 131072,
+          maxTokens: 8192,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }],
+      });
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.openrouter", providerDef, "--json",
+      ]);
+      try {
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "merge",
+        ]);
+      } catch {
+        // Non-fatal: merge is the default behavior anyway
+      }
+      await ensureFallbackModel(config.defaultModel);
+      console.log(`[AI Config] Set openrouter provider in openclaw.json: default=${defaultModelId}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
