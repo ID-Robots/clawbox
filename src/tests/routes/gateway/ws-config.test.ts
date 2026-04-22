@@ -29,11 +29,13 @@ describe("/setup-api/gateway/ws-config", () => {
     GET = mod.GET;
   });
 
-  it("returns ws config with host from request", async () => {
+  it("returns same-origin ws URL so the upgrade proxy can forward it", async () => {
     const req = new NextRequest(new URL("http://clawbox.local/setup-api/gateway/ws-config"));
     const res = await GET(req);
     const body = await res.json();
-    expect(body.wsUrl).toBe("ws://clawbox.local:18789");
+    // No port: browsers connect to the same origin on :80/:443, and the
+    // production server's WebSocket upgrade proxy routes it to the gateway.
+    expect(body.wsUrl).toBe("ws://clawbox.local");
     expect(body.token).toBe("test-token");
     expect(body.model).toBe("claude-3");
   });
@@ -45,5 +47,25 @@ describe("/setup-api/gateway/ws-config", () => {
     const res = await GET(req);
     const body = await res.json();
     expect(body.wsUrl).toContain("clawbox.local");
+  });
+
+  it("upgrades the scheme to wss when the proxy signals https", async () => {
+    const req = new NextRequest(
+      new URL("http://clawbox.local/setup-api/gateway/ws-config"),
+      { headers: { "x-forwarded-proto": "https" } },
+    );
+    const res = await GET(req);
+    const body = await res.json();
+    expect(body.wsUrl).toBe("wss://clawbox.local");
+  });
+
+  it("picks wss when Cloudflare cf-visitor header reports https", async () => {
+    const req = new NextRequest(
+      new URL("http://clawbox.local/setup-api/gateway/ws-config"),
+      { headers: { "cf-visitor": '{"scheme":"https"}' } },
+    );
+    const res = await GET(req);
+    const body = await res.json();
+    expect(body.wsUrl).toBe("wss://clawbox.local");
   });
 });
