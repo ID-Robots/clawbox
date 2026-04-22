@@ -12,7 +12,27 @@ const path = require("path");
 const WebSocket = require("ws");
 
 const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
+const TERMINAL_WS_PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
 const IS_DEV = process.env.NODE_ENV === "development";
+
+// Path prefixes that the production server routes to a non-gateway upstream.
+// Keep entries in sync with any new WebSocket-only services added behind :80.
+const UPGRADE_ROUTES = [
+  { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true },
+];
+
+function resolveUpgradeTarget(reqUrl) {
+  const path = reqUrl.split("?")[0];
+  for (const r of UPGRADE_ROUTES) {
+    if (path === r.prefix || path.startsWith(r.prefix + "/")) {
+      const rewritten = r.stripPrefix
+        ? (reqUrl.slice(r.prefix.length) || "/")
+        : reqUrl;
+      return { targetPort: r.targetPort, url: rewritten };
+    }
+  }
+  return { targetPort: GATEWAY_PORT, url: reqUrl };
+}
 
 // ─── Session secret ───
 // Generate or load a persistent secret for signing session cookies.
@@ -33,13 +53,14 @@ try {
   console.warn("[production-server] Failed to set up session secret:", err.message);
 }
 
-// HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server)
+// HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server).
+// Routes by path: UPGRADE_ROUTES entries (e.g. /terminal-ws) go to their
+// configured port; everything else goes to the OpenClaw gateway.
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
-    const targetPort = GATEWAY_PORT;
+    const { targetPort, url } = resolveUpgradeTarget(req.url);
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const localhost = `127.0.0.1:${targetPort}`;
-      const url = req.url;
       let raw = `${req.method} ${url} HTTP/${req.httpVersion}\r\n`;
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
@@ -89,12 +110,12 @@ function startHttpsServer(httpServer) {
 
     httpsServer.on("upgrade", (req, socket, head) => {
       wss.handleUpgrade(req, socket, head, (clientWs) => {
-        // Connect to the gateway as a plain WS client
-        const gatewayUrl = `ws://127.0.0.1:${GATEWAY_PORT}${req.url || "/"}`;
-        const upstream = new WebSocket(gatewayUrl, {
+        const { targetPort, url } = resolveUpgradeTarget(req.url || "/");
+        const upstreamUrl = `ws://127.0.0.1:${targetPort}${url}`;
+        const upstream = new WebSocket(upstreamUrl, {
           headers: {
-            origin: `http://127.0.0.1:${GATEWAY_PORT}`,
-            host: `127.0.0.1:${GATEWAY_PORT}`,
+            origin: `http://127.0.0.1:${targetPort}`,
+            host: `127.0.0.1:${targetPort}`,
           },
         });
 

@@ -1,0 +1,65 @@
+import fs from "fs/promises";
+import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { DATA_DIR } from "./config-store";
+
+const execFileAsync = promisify(execFile);
+
+export const CLOUDFLARED_BIN = process.env.CLOUDFLARED_BIN || "/usr/local/bin/cloudflared";
+export const CLOUDFLARED_DIR = path.join(DATA_DIR, "cloudflared");
+export const TUNNEL_URL_FILE = path.join(CLOUDFLARED_DIR, "tunnel.url");
+export const TUNNEL_SERVICE = "clawbox-tunnel.service";
+
+export async function isInstalled(): Promise<boolean> {
+  try {
+    await fs.access(CLOUDFLARED_BIN, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read the currently-published *.trycloudflare.com URL, if any. */
+export async function readTunnelUrl(): Promise<string | null> {
+  try {
+    const raw = (await fs.readFile(TUNNEL_URL_FILE, "utf-8")).trim();
+    if (!raw) return null;
+    // Sanity-check the shape so we never return garbage.
+    if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i.test(raw)) return null;
+    return raw.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+export async function startTunnelService(): Promise<void> {
+  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
+}
+
+export async function stopTunnelService(): Promise<void> {
+  try {
+    await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "stop", TUNNEL_SERVICE]);
+  } catch {
+    // fine if the service wasn't running
+  }
+}
+
+export type TunnelUnitState = "active" | "inactive" | "failed" | "activating" | "unknown";
+
+export async function getTunnelServiceState(): Promise<TunnelUnitState> {
+  try {
+    const { stdout } = await execFileAsync("systemctl", ["is-active", TUNNEL_SERVICE]);
+    const state = stdout.trim();
+    if (state === "active" || state === "inactive" || state === "failed" || state === "activating") {
+      return state;
+    }
+    return "unknown";
+  } catch (err) {
+    const stdout = (err as { stdout?: string }).stdout?.trim();
+    if (stdout === "inactive" || stdout === "failed" || stdout === "activating") {
+      return stdout;
+    }
+    return "unknown";
+  }
+}
