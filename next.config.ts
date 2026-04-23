@@ -57,12 +57,23 @@ const nextConfig: NextConfig = {
     };
   },
   async headers() {
+    // Origins allowed to embed this ClawBox in an iframe. The portal
+    // (openclawhardware.dev) mounts each linked device in an iframe on its
+    // dashboard; extend via PORTAL_EMBED_ORIGINS=https://a,https://b.
+    const portalEmbed = (process.env.PORTAL_EMBED_ORIGINS
+      ?? "https://openclawhardware.dev https://*.openclawhardware.dev")
+      .split(/[\s,]+/)
+      .filter(Boolean);
+    const frameAncestors = ["'self'", ...portalEmbed].join(" ");
+
     return [
       {
         source: "/(.*)",
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          // X-Frame-Options is obsoleted by CSP frame-ancestors and only
+          // understands a single origin, which can't express "self + portal".
+          // We rely on frame-ancestors below to gate iframe embedding.
           {
             key: "Referrer-Policy",
             value: "strict-origin-when-cross-origin",
@@ -82,7 +93,7 @@ const nextConfig: NextConfig = {
               "connect-src 'self' ws: wss: http://*.local http://*.local:* https://*.local https://*.local:*",
               // Allow code-server iframe and webapp iframes (same origin)
               `frame-src 'self' blob:`,
-              "frame-ancestors 'self'",
+              `frame-ancestors ${frameAncestors}`,
             ].join("; "),
           },
         ],

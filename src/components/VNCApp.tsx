@@ -45,6 +45,8 @@ export default function VNCApp() {
       const res = await fetch("/setup-api/vnc");
       const data = await res.json();
       if (data.available) {
+        // Keep host/wsPort in the state shape for backwards compatibility but
+        // the WebSocket URL is actually built below against same-origin.
         setVncInfo({ host: window.location.hostname, wsPort: data.wsPort || 6080 });
       } else {
         setStatus("error");
@@ -113,7 +115,14 @@ export default function VNCApp() {
     const connect = async () => {
       try {
         const { default: RFB } = await import("@novnc/novnc/lib/rfb");
-        rfb = new RFB(canvasContainerRef.current!, `ws://${vncInfo.host}:${vncInfo.wsPort}`, {
+        // Same-origin WebSocket path: the production server proxies
+        // /novnc-ws upgrades to 127.0.0.1:${vncInfo.wsPort} (websockify).
+        // This keeps the flow working on the LAN, under HTTPS (no mixed
+        // content), and through the Cloudflare tunnel (only port 80/443
+        // exposed there).
+        const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+        const wsUrl = `${wsProto}://${window.location.host}/novnc-ws`;
+        rfb = new RFB(canvasContainerRef.current!, wsUrl, {
           credentials: { password: "" },
         });
 

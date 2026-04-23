@@ -811,7 +811,7 @@ step_system_config() {
 }
 
 step_systemd_services() {
-  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service)
+  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service clawbox-tunnel.service)
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"
@@ -908,7 +908,20 @@ step_start_services() {
   for svc in clawbox-ap clawbox-setup clawbox-gateway clawbox-performance; do
     systemctl restart "$svc.service"
   done
+  # clawbox-tunnel.service is started on-demand from Settings → Remote Control,
+  # not at boot — skip it here.
   echo "  Services started"
+}
+
+step_cloudflared_install() {
+  if [ ! -f "$PROJECT_DIR/scripts/setup-tunnel.sh" ]; then
+    echo "  setup-tunnel.sh missing — skipping cloudflared install"
+    return 0
+  fi
+  bash "$PROJECT_DIR/scripts/setup-tunnel.sh" || {
+    echo "  WARNING: cloudflared install failed; remote control will be unavailable until reinstalled"
+    return 0
+  }
 }
 
 # ── Update-only steps (called from dashboard System Update) ──────────────────
@@ -1355,7 +1368,7 @@ DISPATCH_STEPS=(
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
-  fix_git_perms browser_launch
+  fix_git_perms browser_launch cloudflared_install
   nm_dispatcher sysctl_linkdown post_update
 )
 
@@ -1380,7 +1393,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=19
+TOTAL_STEPS=20
 step=0
 log() {
   step=$((step + 1))
@@ -1437,6 +1450,9 @@ step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
+
+log "Installing Cloudflare Tunnel (cloudflared)..."
+step_cloudflared_install
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install

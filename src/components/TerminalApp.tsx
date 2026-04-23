@@ -27,11 +27,13 @@ function TerminalInner() {
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const connectLockRef = useRef(false);
 
-  const wsPort = typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_TERMINAL_WS_PORT || "3006")
-    : "3006";
-
-  const wsUrl = `ws://${typeof window !== "undefined" ? window.location.hostname : "localhost"}:${wsPort}`;
+  // Connect to the terminal WebSocket through the same origin that served
+  // the page — the production server proxies `/terminal-ws` upgrades to
+  // 127.0.0.1:3006. Using the same origin means it works on the LAN, through
+  // the Cloudflare tunnel, and under HTTPS (mixed-content-safe).
+  const wsUrl = typeof window !== "undefined"
+    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/terminal-ws`
+    : "ws://localhost/terminal-ws";
 
   const updateStatus = useCallback((s: typeof status) => {
     statusRef.current = s;

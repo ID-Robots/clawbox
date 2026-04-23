@@ -438,6 +438,12 @@ const PROVIDERS: Provider[] = [
     description: "Claude models by Anthropic",
     authOptions: [
       {
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your Claude Pro/Max subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-ant-api03-...",
