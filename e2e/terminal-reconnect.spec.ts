@@ -20,7 +20,7 @@ test("terminal can open and connect to the websocket backend", async ({ page }) 
       private fallback: WebSocket | null = null;
 
       constructor(url: string) {
-        if (!url.includes(":3006")) {
+        if (!url.includes("/terminal-ws") && !url.includes(":3006")) {
           this.fallback = new NativeWebSocket(url);
           this.readyState = this.fallback.readyState;
           this.fallback.onopen = (event) => {

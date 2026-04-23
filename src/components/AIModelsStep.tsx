@@ -574,7 +574,9 @@ export default function AIModelsStep({
   // currently active — so a user on Ollama who clicks "Gemma 4" sees the
   // radio flip straight back to Ollama within a second.
   const userSelectedProviderRef = useRef(false);
-  const [authMode, setAuthMode] = useState<AuthMode>("local");
+  const [authMode, setAuthMode] = useState<AuthMode>(
+    () => allowedProviders.find((provider) => provider.id === resolvedDefaultProvider)?.authOptions[0]?.mode ?? "local",
+  );
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   const [apiKey, setApiKey] = useState("");
@@ -612,39 +614,10 @@ export default function AIModelsStep({
   const clawAiWindowRef = useRef<Window | null>(null);
 
   useEffect(() => {
-    if (!allowedProviders.some((provider) => provider.id === selectedProvider)) {
-      setSelectedProvider(resolvedDefaultProvider);
-    }
-  }, [allowedProviders, resolvedDefaultProvider, selectedProvider]);
-
-  useEffect(() => {
     if (selectedProvider !== "clawai") {
       setShowClawAIOffer(false);
     }
   }, [selectedProvider]);
-
-  useEffect(() => {
-    if (!normalizedCurrentProvider) return;
-    if (!allowedProviders.some((provider) => provider.id === normalizedCurrentProvider)) return;
-
-    // Respect a user's explicit radio click — once they've picked a
-    // provider, don't yank the selection back to whatever the parent
-    // reports as currently-active. Still update the selected model slug
-    // inside the active provider's panel, because that affects which
-    // item is highlighted inside the list and isn't the same as the
-    // provider-switch.
-    if (!userSelectedProviderRef.current) {
-      setSelectedProvider(normalizedCurrentProvider);
-    }
-
-    if (typeof currentModel === "string") {
-      if (currentModel.startsWith("ollama/")) {
-        setSelectedOllamaModel(currentModel.replace(/^ollama\//, ""));
-      } else if (currentModel.startsWith("llamacpp/")) {
-        setSelectedLlamaCppModel(currentModel.replace(/^llamacpp\//, ""));
-      }
-    }
-  }, [allowedProviders, currentModel, normalizedCurrentProvider]);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -809,8 +782,86 @@ export default function AIModelsStep({
     saveLlamaCppConfig,
   } = useLlamaCppModels(llamaCppCallbacks, configureScope);
 
+  const getAvailableAuthOptionsForProvider = useCallback((providerId: string | null) => {
+    if (!providerId) return [];
+    const provider = allowedProviders.find((p) => p.id === providerId);
+    return provider?.authOptions.filter((opt) => {
+      if (opt.mode === "subscription" && availableOAuth !== null) {
+        return availableOAuth.includes(providerId);
+      }
+      return true;
+    }) ?? [];
+  }, [allowedProviders, availableOAuth]);
+
+  const syncProviderSelection = useCallback((providerId: string) => {
+    stopPolling();
+    setSelectedProvider(providerId);
+    setAuthMode(getAvailableAuthOptionsForProvider(providerId)[0]?.mode ?? "token");
+    setApiKey("");
+    setShowKey(false);
+    setStatus(null);
+    setOauthStarted(false);
+    setAuthCode("");
+    setDeviceCode(null);
+    setDeviceUrl(null);
+    setDeviceSaving(false);
+    setConfiguringState(null);
+    if (providerId === "ollama") checkOllamaStatus();
+    if (providerId === "llamacpp") checkLlamaCppStatus();
+  }, [
+    checkLlamaCppStatus,
+    checkOllamaStatus,
+    getAvailableAuthOptionsForProvider,
+    stopPolling,
+  ]);
+
   const configuringKind = configuringState?.kind;
   const configuringCompleted = configuringState?.completed ?? false;
+
+  useEffect(() => {
+    if (selectedProvider && allowedProviders.some((provider) => provider.id === selectedProvider)) {
+      return;
+    }
+    if (!resolvedDefaultProvider) return;
+    syncProviderSelection(resolvedDefaultProvider);
+  }, [allowedProviders, resolvedDefaultProvider, selectedProvider, syncProviderSelection]);
+
+  useEffect(() => {
+    const options = getAvailableAuthOptionsForProvider(selectedProvider);
+    if (!options.length) return;
+    if (!options.some((opt) => opt.mode === authMode)) {
+      setAuthMode(options[0].mode);
+    }
+  }, [authMode, getAvailableAuthOptionsForProvider, selectedProvider]);
+
+  useEffect(() => {
+    if (!normalizedCurrentProvider) return;
+    if (!allowedProviders.some((provider) => provider.id === normalizedCurrentProvider)) return;
+
+    // Respect a user's explicit radio click — once they've picked a
+    // provider, don't yank the selection back to whatever the parent
+    // reports as currently-active. Still update the selected model slug
+    // inside the active provider's panel, because that affects which
+    // item is highlighted inside the list and isn't the same as the
+    // provider-switch.
+    if (!userSelectedProviderRef.current && selectedProvider !== normalizedCurrentProvider) {
+      syncProviderSelection(normalizedCurrentProvider);
+    }
+
+    if (typeof currentModel === "string") {
+      if (currentModel.startsWith("ollama/")) {
+        setSelectedOllamaModel(currentModel.replace(/^ollama\//, ""));
+      } else if (currentModel.startsWith("llamacpp/")) {
+        setSelectedLlamaCppModel(currentModel.replace(/^llamacpp\//, ""));
+      }
+    }
+  }, [
+    allowedProviders,
+    currentModel,
+    normalizedCurrentProvider,
+    selectedProvider,
+    syncProviderSelection,
+  ]);
 
   useEffect(() => {
     if (selectedProvider === "llamacpp") checkLlamaCppStatus();
@@ -882,30 +933,9 @@ export default function AIModelsStep({
   }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving, selectedProvider]);
 
   const selectProvider = useCallback((id: string) => {
-    stopPolling();
-    const provider = allowedProviders.find((p) => p.id === id);
     userSelectedProviderRef.current = true;
-    setSelectedProvider(id);
-    // Pick the first auth mode that's actually available
-    const options = provider?.authOptions.filter((opt) => {
-      if (opt.mode === "subscription" && availableOAuth !== null) {
-        return availableOAuth.includes(id);
-      }
-      return true;
-    }) ?? [];
-    setAuthMode(options[0]?.mode ?? "token");
-    setApiKey("");
-    setShowKey(false);
-    setStatus(null);
-    setOauthStarted(false);
-    setAuthCode("");
-    setDeviceCode(null);
-    setDeviceUrl(null);
-    setDeviceSaving(false);
-    setConfiguringState(null);
-    if (id === "ollama") checkOllamaStatus();
-    if (id === "llamacpp") checkLlamaCppStatus();
-  }, [allowedProviders, availableOAuth, checkLlamaCppStatus, checkOllamaStatus, stopPolling]);
+    syncProviderSelection(id);
+  }, [syncProviderSelection]);
 
   const saveProviderConfig = useCallback(async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
@@ -1290,7 +1320,8 @@ export default function AIModelsStep({
   const activeAuth =
     effectiveAuthOptions.find((a) => a.mode === authMode) ??
     effectiveAuthOptions[0];
-  const isSubscription = authMode === "subscription";
+  const currentAuthMode = activeAuth?.mode ?? authMode;
+  const isSubscription = currentAuthMode === "subscription";
   const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
 
   const oauthLabels: Record<string, {

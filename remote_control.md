@@ -4,11 +4,13 @@
 
 Enable ClawBox devices to be controlled remotely via the portal using Cloudflare Tunnel. Users link their device in the portal, and can then access the local ClawBox UI from anywhere.
 
+**Repo note:** `install.sh` currently deploys from `PROJECT_DIR=/home/clawbox/clawbox`. The live tunnel installer in this repo is `/home/clawbox/clawbox/scripts/setup-tunnel.sh`; some other service paths below are still conceptual examples.
+
 ---
 
 ## Architecture
 
-```
+```text
 [User Browser] --> [Portal clawbox.io] --> [Cloudflare Tunnel] --> [ClawBox Device :80]
                                                                           |
                                                                     [Local Web UI]
@@ -28,9 +30,11 @@ Enable ClawBox devices to be controlled remotely via the portal using Cloudflare
 
 ### 1. cloudflared Installation Script
 
-**Location:** `/opt/clawbox/scripts/setup-tunnel.sh`
+**Location:** `/home/clawbox/clawbox/scripts/setup-tunnel.sh`
 
 **Purpose:** Install and configure Cloudflare Tunnel on the device
+
+**Current repo behavior:** The installer pins a specific `cloudflared` release and verifies the published SHA256 before moving the binary into place.
 
 **Tasks:**
 - [ ] Detect architecture (arm64/amd64)
@@ -44,6 +48,8 @@ Enable ClawBox devices to be controlled remotely via the portal using Cloudflare
 #!/bin/bash
 set -e
 
+CLOUDFLARED_VERSION=2026.3.0
+
 ARCH=$(uname -m)
 case $ARCH in
   aarch64) CF_ARCH="arm64" ;;
@@ -53,7 +59,8 @@ esac
 
 # Download cloudflared
 curl -L -o /usr/local/bin/cloudflared \
-  "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+  "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${CF_ARCH}"
+# Verify the published SHA256 before installing in the real script.
 chmod +x /usr/local/bin/cloudflared
 
 # Create config directory
@@ -244,22 +251,29 @@ def register_device(token: str, tunnel_url: str, name: str):
 **clawbox-tunnel.service:**
 ```ini
 [Unit]
-Description=ClawBox Cloudflare Tunnel
-After=network-online.target
+Description=ClawBox Cloudflare Quick Tunnel
+After=network-online.target clawbox-setup.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml run
-Restart=always
+User=clawbox
+WorkingDirectory=/home/clawbox/clawbox
+ExecStart=/home/clawbox/clawbox/scripts/run-tunnel.sh
+Restart=on-failure
 RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
+Environment=CLAWBOX_ROOT=/home/clawbox/clawbox
+Environment=LOCAL_SERVICE_URL=http://localhost:80
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+This repo currently uses a Quick Tunnel wrapper (`run-tunnel.sh`), so the on-demand `clawbox-tunnel.service` does not start `cloudflared` with `/etc/cloudflared/config.yml`.
 
 **clawbox-portal.service:**
 ```ini
@@ -340,11 +354,11 @@ WantedBy=multi-user.target
 ├── config.yml            # Tunnel config
 └── credentials.json      # Tunnel credentials (chmod 600)
 
-/opt/clawbox/
+/home/clawbox/clawbox/   # install.sh PROJECT_DIR
 ├── scripts/
 │   ├── setup-tunnel.sh   # cloudflared installation
 │   └── reset-portal.sh   # Unlink from portal
-└── services/
+└── services/             # conceptual examples in this guide
     ├── portal-link       # Portal registration service
     └── heartbeat         # Heartbeat service
 
