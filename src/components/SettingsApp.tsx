@@ -230,9 +230,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [betaSaving, setBetaSaving] = useState(false);
   const [featureFlagsOpen, setFeatureFlagsOpen] = useState(false);
   const [featureFlagsSaving, setFeatureFlagsSaving] = useState<string | null>(null);
-  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({
-    [FEATURE_FLAG_KEYS.clawkeep]: false,
-    [FEATURE_FLAG_KEYS.remoteControl]: false,
+  const [featureFlagsLoaded, setFeatureFlagsLoaded] = useState(false);
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean | undefined>>({
+    [FEATURE_FLAG_KEYS.clawkeep]: undefined,
+    [FEATURE_FLAG_KEYS.remoteControl]: undefined,
   });
   const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const updatePollControllerRef = useRef<AbortController | null>(null);
@@ -317,7 +318,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           return next;
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setFeatureFlagsLoaded(true));
   }, []);
 
 
@@ -1106,17 +1108,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
-  const remoteControlEnabled = !!featureFlags[FEATURE_FLAG_KEYS.remoteControl];
-  const visibleNavItems = NAV_ITEMS.filter(item => item.id !== "remote" || remoteControlEnabled);
+  const remoteControlEnabled = featureFlags[FEATURE_FLAG_KEYS.remoteControl] === true;
+  const visibleNavItems = NAV_ITEMS.filter(
+    item => item.id !== "remote" || !featureFlagsLoaded || remoteControlEnabled
+  );
 
   // Bounce off a hidden section if its flag is disabled after we landed on it
   // (e.g. someone toggles Remote Control off while viewing it).
   useEffect(() => {
+    if (!featureFlagsLoaded) return;
     if (activeSection === "remote" && !remoteControlEnabled) {
       setSection("appearance");
       setMobileSection(null);
     }
-  }, [activeSection, remoteControlEnabled]);
+  }, [activeSection, featureFlagsLoaded, remoteControlEnabled]);
   const resetProgressSteps = [
     {
       id: "erase",
@@ -2490,7 +2495,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Remote Control ─── */}
-        {activeSection === "remote" && remoteControlEnabled && <RemoteControlPanel />}
+        {activeSection === "remote" && (!featureFlagsLoaded || remoteControlEnabled) && <RemoteControlPanel />}
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>

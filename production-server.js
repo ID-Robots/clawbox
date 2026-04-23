@@ -30,8 +30,9 @@ function resolveUpgradeTarget(reqUrl) {
   const path = reqUrl.split("?")[0];
   for (const r of UPGRADE_ROUTES) {
     if (path === r.prefix || path.startsWith(r.prefix + "/")) {
+      const stripped = reqUrl.slice(r.prefix.length);
       const rewritten = r.stripPrefix
-        ? (reqUrl.slice(r.prefix.length) || "/")
+        ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped)
         : reqUrl;
       return { targetPort: r.targetPort, url: rewritten };
     }

@@ -39,6 +39,19 @@ export default function RemoteControlPanel() {
     }
   }, [t]);
 
+  const readErrorMessage = useCallback(async (res: Response, fallback: string) => {
+    const body = (await res.text()).trim();
+    if (!body) return fallback;
+    try {
+      const data = JSON.parse(body) as { error?: string; message?: string };
+      if (typeof data.error === "string" && data.error.trim()) return data.error;
+      if (typeof data.message === "string" && data.message.trim()) return data.message;
+    } catch {
+      if (!body.startsWith("<")) return body;
+    }
+    return fallback;
+  }, []);
+
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -64,8 +77,9 @@ export default function RemoteControlPanel() {
     setError(null);
     try {
       const res = await fetch("/setup-api/portal/start", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t("remoteControl.startFailed"));
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
+      }
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
@@ -79,8 +93,9 @@ export default function RemoteControlPanel() {
     setError(null);
     try {
       const res = await fetch("/setup-api/portal/stop", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t("remoteControl.stopFailed"));
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, t("remoteControl.stopFailed")));
+      }
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.stopFailed"));

@@ -822,14 +822,16 @@ step_systemd_services() {
     cp "$src" /etc/systemd/system/
   done
   systemctl daemon-reload
-  # Enable all services except templates and the on-demand browser unit.
+  # Enable all services except templates and the on-demand browser/tunnel units.
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     systemctl enable "$svc"
   done
-  # Clean up older installs that enabled Chromium on boot.
+  # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
+  systemctl disable clawbox-tunnel.service >/dev/null 2>&1 || true
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox

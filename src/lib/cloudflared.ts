@@ -38,11 +38,7 @@ export async function startTunnelService(): Promise<void> {
 }
 
 export async function stopTunnelService(): Promise<void> {
-  try {
-    await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "stop", TUNNEL_SERVICE]);
-  } catch {
-    // fine if the service wasn't running
-  }
+  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "stop", TUNNEL_SERVICE]);
 }
 
 export type TunnelUnitState = "active" | "inactive" | "failed" | "activating" | "unknown";
