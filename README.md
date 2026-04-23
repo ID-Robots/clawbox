@@ -197,6 +197,7 @@ cp .env.example .env
 ## 🌍 Community & Links
 
 - **🌐 Website:** [openclawhardware.dev](https://openclawhardware.dev)
+- **🧠 Product page — [ClawBox AI](https://clawboxai.dev):** specs, FAQ, and buyer guide for the ClawBox AI appliance
 - **💬 Discord:** [discord.gg/FbKmnxYnpq](https://discord.gg/FbKmnxYnpq) (78K+ members)
 - **📖 Docs:** [openclawhardware.dev/docs](https://openclawhardware.dev/docs)
 - **🛒 Buy ClawBox:** [openclawhardware.dev](https://openclawhardware.dev) — €549, free worldwide shipping
