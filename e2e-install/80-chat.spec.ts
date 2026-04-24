@@ -33,7 +33,13 @@ function loadEnvTest(): Record<string, string> {
 }
 
 const env = loadEnvTest();
-const HAS_KEY = !!(env.ANTHROPIC_API_KEY || env.OPENAI_API_KEY || env.GEMINI_API_KEY || env.OPENROUTER_API_KEY);
+const HAS_KEY = !!(
+  env.CLAWBOX_AI_API_KEY ||
+  env.ANTHROPIC_API_KEY ||
+  env.OPENAI_API_KEY ||
+  env.GEMINI_API_KEY ||
+  env.OPENROUTER_API_KEY
+);
 
 test.describe.configure({ mode: "serial" });
 
@@ -43,8 +49,11 @@ test.describe("chat round trip", () => {
   test.beforeAll(async () => {
     // Re-configure primary AI provider using the first available key. The
     // happy-path test may have configured it already, but we reassert here
-    // so this spec can run in isolation too.
-    if (env.ANTHROPIC_API_KEY) {
+    // so this spec can run in isolation too. Prefer CLAWBOX_AI_API_KEY as
+    // that's the product's bundled default.
+    if (env.CLAWBOX_AI_API_KEY) {
+      await configureAiModel("clawai", env.CLAWBOX_AI_API_KEY, "primary");
+    } else if (env.ANTHROPIC_API_KEY) {
       await configureAiModel("anthropic", env.ANTHROPIC_API_KEY, "primary");
     } else if (env.OPENAI_API_KEY) {
       await configureAiModel("openai", env.OPENAI_API_KEY, "primary");

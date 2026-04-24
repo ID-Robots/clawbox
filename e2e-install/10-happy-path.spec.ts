@@ -74,15 +74,22 @@ test.describe("fresh-install happy path", () => {
   });
 
   test("configure primary AI model", async () => {
-    test.skip(!env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY && !env.GEMINI_API_KEY,
-      "no AI keys in .env.test — skipping provider step");
+    test.skip(
+      !env.CLAWBOX_AI_API_KEY && !env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY && !env.GEMINI_API_KEY && !env.OPENROUTER_API_KEY,
+      "no AI keys in .env.test — skipping provider step",
+    );
 
-    if (env.ANTHROPIC_API_KEY) {
+    // Prefer CLAWBOX_AI_API_KEY since it's the product's bundled default.
+    if (env.CLAWBOX_AI_API_KEY) {
+      await configureAiModel("clawai", env.CLAWBOX_AI_API_KEY, "primary");
+    } else if (env.ANTHROPIC_API_KEY) {
       await configureAiModel("anthropic", env.ANTHROPIC_API_KEY, "primary");
     } else if (env.OPENAI_API_KEY) {
       await configureAiModel("openai", env.OPENAI_API_KEY, "primary");
     } else if (env.GEMINI_API_KEY) {
       await configureAiModel("google", env.GEMINI_API_KEY, "primary");
+    } else if (env.OPENROUTER_API_KEY) {
+      await configureAiModel("openrouter", env.OPENROUTER_API_KEY, "primary");
     }
 
     const status = await getStatus();
