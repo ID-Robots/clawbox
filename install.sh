@@ -25,6 +25,12 @@ REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
 PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
+
+# CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
+# llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
+# installer can run inside a CI container. See e2e-install/README.md.
+CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
+is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
@@ -114,7 +120,14 @@ ensure_llamacpp_model_cached() {
 }
 
 has_playwright_chromium() {
-  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
+  # Playwright 1.50+ ships Chrome-for-Testing at chrome-linux64/chrome on
+  # amd64 and chrome-linux-arm64/chrome on arm64; older builds used the
+  # unsuffixed chrome-linux/. Check all three so we work across versions.
+  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \
+    \( -path "*/chrome-linux/chrome" \
+       -o -path "*/chrome-linux64/chrome" \
+       -o -path "*/chrome-linux-arm64/chrome" \) \
+    -print -quit 2>/dev/null | grep -q .
 }
 
 ensure_playwright_chromium() {
@@ -285,17 +298,23 @@ step_apt_update() {
 step_network_setup() {
   # --- Detect WiFi interface ---
   local WIFI_IFACE="${NETWORK_INTERFACE:-}"
-  if [ -z "$WIFI_IFACE" ]; then
+  if [ -z "$WIFI_IFACE" ] && ! is_test_mode; then
     WIFI_IFACE=$(iw dev 2>/dev/null | awk '/Interface/{print $2}' | head -1)
   fi
   if [ -z "$WIFI_IFACE" ]; then
-    echo "Error: No WiFi interface found. Ensure a wireless adapter is available."
-    echo "You can override with: NETWORK_INTERFACE=wlan0 sudo bash install.sh"
-    exit 1
-  fi
-  if ! iw dev "$WIFI_IFACE" info >/dev/null 2>&1; then
-    echo "Error: WiFi interface '$WIFI_IFACE' not found or not wireless."
-    exit 1
+    if is_test_mode; then
+      WIFI_IFACE="eth0"
+      echo "  CLAWBOX_TEST_MODE=1, using stub interface '$WIFI_IFACE'"
+    else
+      echo "Error: No WiFi interface found. Ensure a wireless adapter is available."
+      echo "You can override with: NETWORK_INTERFACE=wlan0 sudo bash install.sh"
+      exit 1
+    fi
+  elif ! is_test_mode; then
+    if ! iw dev "$WIFI_IFACE" info >/dev/null 2>&1; then
+      echo "Error: WiFi interface '$WIFI_IFACE' not found or not wireless."
+      exit 1
+    fi
   fi
   echo "  WiFi interface: $WIFI_IFACE"
   # Persist for scripts and services
@@ -305,6 +324,12 @@ step_network_setup() {
   # Also write to root-owned path for clawbox-root-update@ service
   mkdir -p /etc/clawbox
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
+  # In test mode, propagate the flag into the root-update environment too —
+  # otherwise updater-triggered install.sh steps would try to do the real
+  # Jetson work (nvidia_jetpack, nvpmodel, etc.) and fail on non-Tegra hosts.
+  if is_test_mode; then
+    printf 'CLAWBOX_TEST_MODE=1\n' >> /etc/clawbox/network.env
+  fi
   chmod 644 /etc/clawbox/network.env
   echo "  WiFi interface saved to $IFACE_ENV and /etc/clawbox/network.env"
 
@@ -365,7 +390,16 @@ apply_hostname() {
     echo "  Invalid hostname '${1:-}', skipping"
     return 1
   fi
-  hostnamectl set-hostname "$name"
+  # hostnamectl is best-effort in test mode: Docker containers sharing the
+  # host's UTS namespace can't set the hostname and systemd-hostnamed often
+  # isn't running. Don't fail the whole install over it.
+  if ! hostnamectl set-hostname "$name" 2>/dev/null; then
+    if is_test_mode; then
+      echo "  CLAWBOX_TEST_MODE=1, hostnamectl unavailable — skipping"
+    else
+      echo "  Warning: hostnamectl set-hostname failed, continuing"
+    fi
+  fi
 
   # Install ClawBox's hardened avahi config if we have one in the repo.
   # Keep the distro default as .bak.orig the first time so operators can
@@ -468,6 +502,12 @@ sync_repo_to_update_target() {
   fi
 
   git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  # Discard local working-tree changes before switching branches. The later
+  # `reset --hard` would blow them away anyway; doing it up-front avoids
+  # `git checkout` aborting with "local changes would be overwritten" when
+  # the user (or test seeding) has uncommitted edits. This is by design —
+  # the updater's whole purpose is to align the device with upstream.
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard HEAD 2>/dev/null || true
   if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$target_branch" 2>/dev/null; then
     if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
       echo "Error: failed to checkout branch '$target_branch'" >&2
@@ -791,6 +831,12 @@ step_directories_permissions() {
     printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
+  # Propagate test mode into the project .env so clawbox-setup.service
+  # (which loads EnvironmentFile=-/home/clawbox/clawbox/.env) sees it at
+  # restart and the Next.js runtime's TEST_MODE checks fire.
+  if is_test_mode; then
+    ensure_env_setting "$ENV_FILE" "CLAWBOX_TEST_MODE" "1"
+  fi
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf"
@@ -908,6 +954,13 @@ step_polkit_rules() {
 step_start_services() {
   local svc
   for svc in clawbox-ap clawbox-setup clawbox-gateway clawbox-performance; do
+    # In test mode, the AP and performance services reference hardware that
+    # doesn't exist (WiFi radio, nvpmodel), so they would fail. Skip them —
+    # clawbox-setup + clawbox-gateway are enough to exercise the whole flow.
+    if is_test_mode && [[ "$svc" == "clawbox-ap" || "$svc" == "clawbox-performance" ]]; then
+      echo "  CLAWBOX_TEST_MODE=1, skipping $svc.service"
+      continue
+    fi
     systemctl restart "$svc.service"
   done
   # clawbox-tunnel.service is started on-demand from Settings → Remote Control,
@@ -916,6 +969,10 @@ step_start_services() {
 }
 
 step_cloudflared_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping cloudflared install"
+    return 0
+  fi
   if [ ! -f "$PROJECT_DIR/scripts/setup-tunnel.sh" ]; then
     echo "  setup-tunnel.sh missing — skipping cloudflared install"
     return 0
@@ -929,11 +986,19 @@ step_cloudflared_install() {
 # ── Update-only steps (called from dashboard System Update) ──────────────────
 
 step_nvidia_jetpack() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping nvidia-jetpack"
+    return 0
+  fi
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-jetpack
 }
 
 step_performance_mode() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
+    return 0
+  fi
   # Find the highest MAXN mode (MAXN_SUPER > MAXN); fall back to mode 0
   local MAXN_LINE MAXN_ID MAXN_NAME
   MAXN_LINE=$(grep -oP 'POWER_MODEL ID=\K\d+\s+NAME=\S+' /etc/nvpmodel.conf | grep 'NAME=MAXN' | tail -1)
@@ -958,6 +1023,10 @@ step_performance_mode() {
 }
 
 step_jtop_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping jtop install"
+    return 0
+  fi
   if command -v jtop &>/dev/null; then
     echo "  jtop already installed"
     return
@@ -968,6 +1037,10 @@ step_jtop_install() {
 }
 
 step_ollama_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Ollama install (400MB+ download, not needed for install flow tests)"
+    return 0
+  fi
   if command -v ollama &>/dev/null; then
     echo "  Ollama already installed"
   else
@@ -983,6 +1056,10 @@ step_ollama_install() {
 }
 
 step_llamacpp_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping llama.cpp native build and model download"
+    return 0
+  fi
   local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
   local ENABLE_GGML_CUDA="OFF"
 
@@ -1091,6 +1168,14 @@ step_gateway_setup() {
 }
 
 step_chromium_install() {
+  if is_test_mode; then
+    # snap doesn't work in a standard container, but the desktop browser
+    # service only needs the Playwright-cached Chromium binary — use that
+    # as the test-mode path so /setup-api/browser/* still works.
+    echo "  CLAWBOX_TEST_MODE=1, installing Playwright-managed Chromium only"
+    ensure_playwright_chromium
+    return 0
+  fi
   if snap list chromium &>/dev/null 2>&1; then
     echo "  Chromium already installed (snap)"
   else
@@ -1117,6 +1202,10 @@ step_chromium_install() {
 
 
 step_ai_tools_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
+    return 0
+  fi
   # Claude Code
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
     echo "  Claude Code already installed"
@@ -1143,6 +1232,10 @@ step_ai_tools_install() {
 }
 
 step_vnc_install() {
+  # Test mode still installs and enables VNC so browser-automation e2e can
+  # exercise the real stack — x11vnc+Xvfb+websockify all work in a
+  # --privileged container. Only the GDM-mirror path is shortcut via
+  # CLAWBOX_VNC_MODE=virtual, which start-vnc.sh already honors.
   wait_for_apt
   # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
@@ -1282,6 +1375,10 @@ VNCSVC
 }
 
 step_desktop_theme() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping GNOME desktop theme (no X session in container)"
+    return 0
+  fi
   local theme_script="$PROJECT_DIR/scripts/apply-desktop-theme.sh"
   local autostart_dir="$CLAWBOX_HOME/.config/autostart"
   local autostart_file="$autostart_dir/clawbox-desktop-theme.desktop"
@@ -1350,6 +1447,11 @@ step_rebuild_reboot() {
   step_openclaw_patch
   step_openclaw_config
   do_rebuild
+  if is_test_mode; then
+    echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
+    systemctl restart clawbox-setup.service
+    return 0
+  fi
   echo "Rebooting system..."
   reboot
 }

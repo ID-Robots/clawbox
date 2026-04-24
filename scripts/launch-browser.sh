@@ -43,7 +43,14 @@ is_snap_chromium_wrapper() {
 }
 
 find_playwright_chromium() {
-  find "$HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) 2>/dev/null | sort -V | tail -1 || true
+  # Playwright 1.50+ ships Chrome-for-Testing at chrome-linux64/chrome on
+  # amd64 and chrome-linux-arm64/chrome on arm64; older builds used
+  # chrome-linux/. Accept any of the three.
+  find "$HOME/.cache/ms-playwright" -type f \
+    \( -path "*/chrome-linux/chrome" \
+       -o -path "*/chrome-linux64/chrome" \
+       -o -path "*/chrome-linux-arm64/chrome" \) \
+    2>/dev/null | sort -V | tail -1 || true
 }
 
 if [ -f "$VNC_STATE_FILE" ]; then
@@ -94,9 +101,19 @@ fi
 
 mkdir -p "$PROFILE"
 
+# In the e2e test container Chromium's namespace sandbox can't initialize
+# because AppArmor disables unprivileged user namespaces. The sandbox is
+# fine on real Jetson — so we only pass --no-sandbox when explicitly in
+# test mode, never in production.
+SANDBOX_FLAGS=()
+if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ]; then
+  SANDBOX_FLAGS=(--no-sandbox --disable-setuid-sandbox)
+fi
+
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
+  "${SANDBOX_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins=* \
   --user-data-dir="$PROFILE" \

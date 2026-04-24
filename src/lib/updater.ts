@@ -529,6 +529,18 @@ async function checkInternet(): Promise<boolean> {
       // try next target
     }
   }
+  // ICMP is blocked on some networks (hotel WiFi, cloud runners, corporate
+  // egress). Fall back to an HTTPS probe before giving up — if the device
+  // can talk to github.com it can certainly run the updater.
+  try {
+    const res = await fetch("https://github.com/", {
+      method: "HEAD",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.ok || (res.status >= 300 && res.status < 400)) return true;
+  } catch {
+    // no HTTPS path either
+  }
   return false;
 }
 

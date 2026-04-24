@@ -6,6 +6,7 @@ import path from "path";
 const exec = promisify(execFile);
 const IFACE = process.env.NETWORK_INTERFACE || "wlP1p1s0";
 const NETWORK_TIMEOUT = Number(process.env.NETWORK_COMMAND_TIMEOUT) || 60000;
+const TEST_MODE = process.env.CLAWBOX_TEST_MODE === "1";
 const AP_RETRY_COUNT = 3;
 const AP_RETRY_DELAY = 2000;
 const AP_START_SCRIPT =
@@ -40,6 +41,17 @@ let scanInProgress = false;
 
 export type { WifiNetwork } from "./wifi-utils";
 import type { WifiNetwork } from "./wifi-utils";
+
+const TEST_NETWORKS: readonly WifiNetwork[] = Object.freeze([
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Home", signal: -42, security: "WPA2", freq: "5180" }),
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Guest", signal: -58, security: "WPA2", freq: "2437" }),
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Open", signal: -70, security: "--", freq: "2412" }),
+]);
+
+/** Return a fresh array of fresh objects so callers can't mutate shared state. */
+function cloneTestNetworks(): WifiNetwork[] {
+  return TEST_NETWORKS.map((n) => ({ ...n }));
+}
 
 /** Deduplicate networks by SSID, keeping the strongest signal for each. */
 function deduplicateNetworks(networks: WifiNetwork[]): WifiNetwork[] {
@@ -80,6 +92,7 @@ export function getCachedScan(): WifiNetwork[] {
 
 /** Scan using `iw scan` — works even in AP mode without tearing down the hotspot. */
 export async function scanWifiLive(): Promise<WifiNetwork[]> {
+  if (TEST_MODE) return cloneTestNetworks();
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
       const proc = spawn("/usr/sbin/iw", ["dev", IFACE, "scan"]);
@@ -176,6 +189,7 @@ async function bringAPUp(): Promise<void> {
 }
 
 export async function scanWifi(): Promise<WifiNetwork[]> {
+  if (TEST_MODE) return cloneTestNetworks();
   // Return cached results if fresh (avoids tearing down AP again on retry)
   if (cachedScan && (Date.now() - cachedScan.timestamp) < SCAN_CACHE_TTL) {
     return cachedScan.networks;
@@ -302,6 +316,17 @@ export async function switchToClient(
 ): Promise<{ message: string }> {
   console.log(`[WiFi] Switching to client mode, connecting to: ${ssid}`);
 
+  if (TEST_MODE) {
+    // Container has no wireless. Pretend the connect worked so the setup
+    // wizard can advance; tests control whether to simulate failure via a
+    // reserved SSID prefix.
+    if (ssid.startsWith("__fail__")) {
+      throw new Error(`TEST_MODE: simulated connect failure for '${ssid}'`);
+    }
+    void password;
+    return { message: `TEST_MODE: fake connect to '${ssid}'` };
+  }
+
   // Stop the AP
   await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
 
@@ -378,11 +403,16 @@ export async function switchToClient(
 
 export async function restartAP(): Promise<void> {
   console.log("[WiFi] Restarting access point...");
+  if (TEST_MODE) {
+    console.log("[WiFi] TEST_MODE: skipping AP restart");
+    return;
+  }
   await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
 }
 
 /** Check if any Ethernet interface has a physical link (cable plugged in). */
 export async function getEthernetStatus(): Promise<{ connected: boolean; iface: string | null }> {
+  if (TEST_MODE) return { connected: true, iface: "eth0" };
   try {
     const { stdout } = await exec("nmcli", [
       "-t", "-f", "DEVICE,TYPE,STATE",

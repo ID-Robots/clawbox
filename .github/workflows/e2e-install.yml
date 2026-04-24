@@ -1,0 +1,228 @@
+name: E2E Install
+
+# Full-install harness — boots a real systemd container, runs install.sh,
+# exercises every setup-api happy path, and verifies the in-app updater +
+# reboot flow. Much heavier than the mock-backed `E2E Tests` workflow, so
+# it only runs:
+#   - nightly (scheduled)
+#   - on-demand via `workflow_dispatch`
+#   - on PRs labeled `run-full-e2e` (opt-in — avoid paying the cost on every push)
+#
+# Runner choice:
+#   - Prefers `ubuntu-24.04-arm` for ~5-10 min runs (native arm64).
+#   - Falls back to `ubuntu-latest` + qemu-user-static for repos/plans
+#     without arm64 runners; expect ~30-40 min in that case.
+#   Set `E2E_INSTALL_ARM64_RUNNER` repo variable to `false` to force x86.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upgrade_target_branch:
+        description: "Branch to exercise the in-app updater against"
+        required: false
+        default: "beta"
+      grep_filter:
+        description: "Optional playwright --grep pattern to narrow the suite"
+        required: false
+        default: ""
+  schedule:
+    # 03:17 UTC nightly — staggered from the top of the hour to dodge
+    # runner queue spikes.
+    - cron: "17 3 * * *"
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-install:
+    # PR runs are opt-in via the `run-full-e2e` label; otherwise we skip to
+    # avoid paying the 30+ min cost on every push.
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-e2e') }}
+    # Prefer the native arm64 runner; fall back to x86 when the repo
+    # variable `E2E_INSTALL_ARM64_RUNNER` is set to the string `false`.
+    runs-on: ${{ vars.E2E_INSTALL_ARM64_RUNNER == 'false' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Budget: native arm64 finishes in 10-15 min; qemu is 30-40 min; give
+    # headroom for docker pulls on cold runners.
+    timeout-minutes: 90
+    env:
+      CLAWBOX_PORT: "8080"
+      # Default target for the in-app updater test. On PRs targeted at this
+      # harness itself (before it lands on beta/main), use the PR head ref
+      # so `git reset --hard origin/<target>` lands on the same fixes that
+      # made install.sh work under CLAWBOX_TEST_MODE. After the PR merges
+      # to beta, switch the default back to 'beta'.
+      CLAWBOX_UPGRADE_TARGET_BRANCH: >-
+        ${{ inputs.upgrade_target_branch
+            || (github.event_name == 'pull_request' && github.head_ref)
+            || 'beta' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We need the `beta` branch reachable from the working tree so the
+          # updater can `git fetch origin beta`. Fetch tags too since the
+          # version check polls `git ls-remote --tags`.
+          fetch-depth: 0
+
+      - name: Show Docker + runner info
+        run: |
+          echo "runner: ${{ runner.name }} (${{ runner.os }} / ${{ runner.arch }})"
+          docker version
+          docker compose version
+          uname -a
+
+      - name: Register qemu-user-static for arm64 (x86 runner only)
+        if: runner.arch != 'ARM64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # Real AI-provider credentials are injected via repo secrets. The test
+      # steps that need them skip gracefully when the env var is empty, so
+      # forks without secrets still get meaningful coverage. Values are
+      # passed through env vars and written via printf so a secret that
+      # happens to contain the EOF token or other heredoc-breaking bytes
+      # can't truncate the resulting .env file.
+      - name: Write .env.test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CLAWBOX_AI_API_KEY: ${{ secrets.CLAWBOX_AI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          UPGRADE_BRANCH: ${{ env.CLAWBOX_UPGRADE_TARGET_BRANCH }}
+        run: |
+          : > e2e-install/.env.test
+          for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY CLAWBOX_AI_API_KEY TELEGRAM_BOT_TOKEN; do
+            # Indirect expansion — skip empty values so unset secrets don't
+            # pollute the file. printf avoids shell-special interpretation
+            # of the value (no backslash escapes, no heredoc pitfalls).
+            value="${!key}"
+            [ -n "$value" ] && printf '%s=%s\n' "$key" "$value" >> e2e-install/.env.test
+          done
+          printf '%s=%s\n' "CLAWBOX_UPGRADE_TARGET_BRANCH" "$UPGRADE_BRANCH" >> e2e-install/.env.test
+          # Avoid echoing values back into logs; just print which ones are set.
+          awk -F= '/^[A-Z]/ {printf "  %s: set\n", $1}' e2e-install/.env.test
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      # Only install the host-side bits we need to *drive* the tests: the
+      # Playwright runner + its system libs for the chat UI spec. The
+      # container inside Docker has its own separate Playwright install.
+      - name: Install Playwright (host side)
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
+      - name: Run e2e-install suite
+        id: e2e
+        env:
+          # Never interpolate workflow_dispatch inputs directly into a
+          # shell — go through env to avoid a shell-injection pattern.
+          GREP_FILTER: ${{ inputs.grep_filter }}
+          # Let global-setup.ts handle image build + container boot +
+          # waitForInstallComplete. It already does all three with one
+          # consistent error path; running a separate "boot" step here and
+          # then SKIP_SETUP=1 would race against install.sh still running.
+          DOCKER_BUILDKIT: "1"
+          # Force the image to build fresh each CI run — caching layers
+          # across runs makes failures hard to reproduce and the runner
+          # disk is throwaway anyway.
+          CLAWBOX_E2E_REBUILD: "1"
+        run: |
+          set -o pipefail
+          args=()
+          if [ -n "$GREP_FILTER" ]; then
+            args=(--grep "$GREP_FILTER")
+          fi
+          bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
+
+      - name: Dump install log on failure
+        if: failure()
+        run: |
+          echo "── last 300 lines of /var/log/clawbox-install.log ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T clawbox \
+            tail -n 300 /var/log/clawbox-install.log 2>/dev/null || true
+          echo "── journalctl for clawbox-* services ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T --user root clawbox \
+            journalctl --no-pager --since "-30m" -u 'clawbox-*' 2>/dev/null || true
+          echo "── systemctl list-units --state=failed ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T --user root clawbox \
+            systemctl list-units --state=failed --no-pager 2>/dev/null || true
+
+      - name: Tear down container
+        if: always()
+        run: |
+          docker compose -f e2e-install/docker-compose.test.yml down -v || true
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-report
+          path: e2e-install/playwright-report/
+          retention-days: 14
+
+      - name: Upload test-results (traces, screenshots)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-test-results
+          path: e2e-install/test-results/
+          retention-days: 7
+
+  comment:
+    # Skip for fork PRs — GITHUB_TOKEN is always read-only there, so the
+    # comment would 403. Also skip on schedule/workflow_dispatch (no PR to
+    # comment on).
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always() }}
+    needs: e2e-install
+    runs-on: ubuntu-latest
+    permissions:
+      # PR comments go through the issues API, but on PR resources the
+      # `pull-requests: write` permission is sufficient. `issues: write` is
+      # only required to comment on standalone issues (not PRs), which this
+      # job never does.
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          E2E_INSTALL_RESULT: ${{ needs.e2e-install.result }}
+        with:
+          script: |
+            const marker = '<!-- clawbox-ci-summary -->';
+            const sectionStart = '<!-- clawbox-ci-e2e-install:start -->';
+            const sectionEnd = '<!-- clawbox-ci-e2e-install:end -->';
+            const result = process.env.E2E_INSTALL_RESULT;
+            const icon = result === 'success' ? '✅' : result === 'skipped' ? '⏭️' : '❌';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const section = `${sectionStart}\n## ${icon} E2E Install\n- Result: **${result}**\n- [View run](${runUrl})\n${sectionEnd}`;
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, replacement) : `${body}\n\n${replacement}`;
+            };
+
+            if (existing) {
+              const body = updateSection(existing.body ?? '', sectionStart, sectionEnd, section);
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              const body = `${marker}\n# CI Summary\n\n${section}`;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: context.issue.number, body,
+              });
+            }
