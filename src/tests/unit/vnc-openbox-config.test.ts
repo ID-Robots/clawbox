@@ -40,8 +40,10 @@ describe("VNC desktop config", () => {
       "utf8",
     );
 
-    expect(installScript).toContain("step_vnc_install() {\n  wait_for_apt");
-    expect(installScript).toContain("systemctl restart clawbox-vnc.service clawbox-websockify.service || true");
+    // Validate vnc_install still wraps the apt prerequisite + service restart.
+    // Note: a CLAWBOX_TEST_MODE guard now sits between the `{` and `wait_for_apt`
+    // so the block no longer opens with that line — match the body loosely.
+    expect(installScript).toMatch(/step_vnc_install\(\) \{[\s\S]*?wait_for_apt[\s\S]*?systemctl restart clawbox-vnc\.service clawbox-websockify\.service/);
   });
 
   it("exposes the updater bootstrap step through the root step dispatcher", () => {

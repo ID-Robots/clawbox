@@ -1,0 +1,20 @@
+# Keep the e2e-install build context small. install.sh will recreate
+# node_modules and .next inside the container, so shipping them in the image
+# would just double the disk footprint and cache mismatches.
+node_modules
+.next
+.git/lfs
+.git/logs
+test-results
+playwright-report
+local-data
+data/config.json
+data/kv.json
+data/.session-secret
+data/webapps
+data/code-projects
+e2e-install/.env.test
+e2e-install/test-results
+e2e-install/playwright-report
+**/*.log
+.DS_Store

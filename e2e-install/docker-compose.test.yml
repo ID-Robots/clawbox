@@ -1,0 +1,63 @@
+# ClawBox E2E test harness.
+#
+# Usage:
+#   cd e2e-install
+#   docker compose -f docker-compose.test.yml build
+#   docker compose -f docker-compose.test.yml up -d
+#   # ...run tests against http://localhost:${CLAWBOX_PORT:-8080}
+#   docker compose -f docker-compose.test.yml down -v    # full teardown
+#
+# Restart simulation:
+#   docker compose -f docker-compose.test.yml restart    # preserves volumes
+#
+# Note on platforms: the image builds for linux/arm64. On an x86 host, register
+# qemu first: `docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+
+services:
+  clawbox:
+    build:
+      context: ..
+      dockerfile: e2e-install/Dockerfile
+    image: clawbox-e2e:latest
+    container_name: clawbox-e2e
+    platform: linux/arm64
+    # systemd needs cgroups + a handful of capabilities. --privileged is the
+    # blunt-but-reliable option that matches what `systemd-nspawn` gets.
+    privileged: true
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+    volumes:
+      # /sys/fs/cgroup is required for systemd-in-Docker (cgroup v2).
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Named volume for /home/clawbox/clawbox so install state (data/config.json,
+      # .update-branch, .next build cache) survives container restarts — this
+      # is what lets us simulate "reboot after update" in tests.
+      - clawbox-home:/home/clawbox/clawbox
+      # Mount the real .env.test (gitignored) if present; tests decide whether
+      # to require real keys.
+      - ./.env.test:/home/clawbox/clawbox/.env.test:ro
+    environment:
+      CLAWBOX_TEST_MODE: "1"
+      NETWORK_INTERFACE: eth0
+      # Override branch target for upgrade tests. Default: install from main.
+      CLAWBOX_BRANCH: ${CLAWBOX_BRANCH:-main}
+    ports:
+      - "${CLAWBOX_PORT:-8080}:80"
+    # Health check polls the setup API so Playwright can `wait-for-healthy`
+    # instead of blind sleeping.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          curl -fsS -o /dev/null http://127.0.0.1/setup-api/setup/status \
+            && ! test -f /home/clawbox/clawbox/.needs-install
+      interval: 10s
+      timeout: 5s
+      retries: 240
+      start_period: 60s
+    stop_grace_period: 30s
+
+volumes:
+  clawbox-home:
