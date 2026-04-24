@@ -60,8 +60,21 @@ test.describe("settings actions", () => {
 
   test("system password change (rotate then restore)", async () => {
     // The credentials route rate-limits (5 in 15 min). Rotate once, then
-    // rotate back — 2 calls total, well under the cap.
-    await setSystemPassword("clawbox-e2e-rotated");
+    // rotate back — 2 calls total, well under the cap. happy-path already
+    // set an initial password, so the currentPassword field is required.
+    const rotateRes = await fetch(
+      `${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/system/credentials`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          password: "clawbox-e2e-rotated",
+          currentPassword: "clawbox-e2e-pass",
+        }),
+      },
+    );
+    expect(rotateRes.ok).toBe(true);
+    void setSystemPassword; // helper kept for first-time-set paths elsewhere
 
     // Verify chpasswd actually ran by reading /etc/shadow metadata in the
     // container. We can't read the hash (that's good), but we can stat the

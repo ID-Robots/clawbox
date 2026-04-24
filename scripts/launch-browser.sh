@@ -101,9 +101,19 @@ fi
 
 mkdir -p "$PROFILE"
 
+# In the e2e test container Chromium's namespace sandbox can't initialize
+# because AppArmor disables unprivileged user namespaces. The sandbox is
+# fine on real Jetson — so we only pass --no-sandbox when explicitly in
+# test mode, never in production.
+SANDBOX_FLAGS=()
+if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ]; then
+  SANDBOX_FLAGS=(--no-sandbox --disable-setuid-sandbox)
+fi
+
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
+  "${SANDBOX_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins=* \
   --user-data-dir="$PROFILE" \

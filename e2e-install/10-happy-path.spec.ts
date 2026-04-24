@@ -96,18 +96,30 @@ test.describe("fresh-install happy path", () => {
     expect(status.telegram_configured).toBe(true);
   });
 
-  test("complete setup + session cookie issued", async ({ page }) => {
+  // Captured by "complete setup" so "desktop shell loads" can reuse it.
+  // Playwright gives each test a fresh context by default, so a cookie
+  // added to page.context() in one test doesn't carry into the next.
+  let sessionValue = "";
+
+  test("complete setup + session cookie issued", async () => {
     const res = await fetch(`${BASE_URL}/setup-api/setup/complete`, { method: "POST" });
     expect(res.ok).toBe(true);
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toMatch(/clawbox_session=/);
 
-    // Extract the session cookie value and inject into the Playwright context
-    // so the subsequent page.goto('/') lands on the desktop, not /login.
     const match = setCookie.match(/clawbox_session=([^;]+)/);
-    const sessionValue = match?.[1] ?? "";
+    sessionValue = match?.[1] ?? "";
     expect(sessionValue).not.toEqual("");
 
+    const status = await getStatus();
+    expect(status.setup_complete).toBe(true);
+  });
+
+  test("desktop shell loads after setup", async ({ page }) => {
+    expect(sessionValue).not.toEqual("");
+    await waitForHttpReady(30_000);
+    // Set the cookie in this test's context explicitly — must happen before
+    // page.goto so /login middleware sees the authenticated session.
     await page.context().addCookies([
       {
         name: "clawbox_session",
@@ -116,14 +128,6 @@ test.describe("fresh-install happy path", () => {
         path: "/",
       },
     ]);
-
-    // Re-verify the server-side status.
-    const status = await getStatus();
-    expect(status.setup_complete).toBe(true);
-  });
-
-  test("desktop shell loads after setup", async ({ page }) => {
-    await waitForHttpReady(30_000);
     await page.goto("/");
     // Chromium app shelf is the most stable anchor across screen sizes.
     await expect(page.locator('[data-testid="shelf-launcher-button"], [data-testid="app-launcher"]'))
