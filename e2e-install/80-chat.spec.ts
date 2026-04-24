@@ -120,17 +120,19 @@ test.describe("chat round trip", () => {
 
     await page.goto("/");
 
-    // The chat popup has a stable test id in the desktop component tree.
-    const chatTrigger = page.locator(
-      '[data-testid="chat-open-button"], [data-testid="chat-panel"], button:has-text("Chat")',
-    ).first();
-    await expect(chatTrigger).toBeVisible({ timeout: 30_000 });
-    await chatTrigger.click().catch(() => {});
-
-    const input = page.locator('textarea, [contenteditable="true"]').first();
-    await expect(input).toBeVisible({ timeout: 15_000 });
+    // ChatPopup auto-opens on the desktop shell — no launcher click needed.
+    // The textbox has a stable placeholder "Type a message...". Use that
+    // as the anchor rather than a data-testid, since the chat UI relies on
+    // ARIA role + placeholder for accessibility.
+    const input = page.getByRole("textbox", { name: /Type a message/i });
+    await expect(input).toBeVisible({ timeout: 30_000 });
     await input.fill("Say the word 'pong' and nothing else.");
-    await input.press("Enter");
+
+    // Submit via the Send button — pressing Enter sometimes inserts a
+    // newline instead of submitting, depending on the textarea component.
+    const sendButton = page.getByRole("button", { name: /^Send$/ });
+    await expect(sendButton).toBeEnabled({ timeout: 5_000 });
+    await sendButton.click();
 
     // Wait for any message that contains "pong" (case-insensitive) within
     // 90s. Models may prefix with whitespace or punctuation.
