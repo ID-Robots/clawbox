@@ -139,17 +139,21 @@ test.describe("chat round trip", () => {
     await page.goto("/");
 
     // ChatPopup auto-opens on the desktop shell — no launcher click needed.
-    // The textbox has a stable placeholder "Type a message...". Use that
-    // as the anchor rather than a data-testid, since the chat UI relies on
-    // ARIA role + placeholder for accessibility.
-    const input = page.getByRole("textbox", { name: /Type a message/i });
+    // Before the gateway WS connects, the textbox shows
+    // "Waiting for the Claw to wake up…" and is disabled. Once connected,
+    // the placeholder flips to "Type a message..." and the textbox is
+    // enabled. Match either placeholder, then wait for enablement.
+    const input = page.getByRole("textbox", {
+      name: /Type a message|Waiting for the Claw/i,
+    });
     await expect(input).toBeVisible({ timeout: 30_000 });
+    await expect(input).toBeEnabled({ timeout: 60_000 });
     await input.fill("Say the word 'pong' and nothing else.");
 
     // Submit via the Send button — pressing Enter sometimes inserts a
     // newline instead of submitting, depending on the textarea component.
     const sendButton = page.getByRole("button", { name: /^Send$/ });
-    await expect(sendButton).toBeEnabled({ timeout: 5_000 });
+    await expect(sendButton).toBeEnabled({ timeout: 10_000 });
     await sendButton.click();
 
     // Wait for any message that contains "pong" (case-insensitive) within
