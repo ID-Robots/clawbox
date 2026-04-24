@@ -105,17 +105,19 @@ test.describe("chat round trip", () => {
   test("UI chat widget receives a streamed response", async ({ page }) => {
     test.setTimeout(180_000);
 
-    // Inject session cookie from the earlier setup/complete call so we
-    // land on the desktop, not the login screen.
-    const sessionRes = await fetch(`${BASE_URL}/setup-api/setup/status`);
-    const setupStatus = (await sessionRes.json()) as { setup_complete: boolean };
-    expect(setupStatus.setup_complete).toBe(true);
+    // Playwright gives each test a fresh browser context with no cookies,
+    // so the happy-path spec's session doesn't carry over. Re-POST to
+    // /setup-api/setup/complete — the handler is idempotent (setup_complete
+    // is already true) and always issues a fresh session cookie.
+    const completeRes = await fetch(`${BASE_URL}/setup-api/setup/complete`, { method: "POST" });
+    expect(completeRes.ok).toBe(true);
+    const setCookie = completeRes.headers.get("set-cookie") ?? "";
+    const match = setCookie.match(/clawbox_session=([^;]+)/);
+    expect(match).not.toBeNull();
+    await page.context().addCookies([
+      { name: "clawbox_session", value: match![1], domain: "localhost", path: "/" },
+    ]);
 
-    // The desktop auto-authenticates once setup is complete: the
-    // /login middleware reads the cookie set by /setup-api/setup/complete.
-    // happy-path.spec.ts already injected that cookie into its page
-    // context; here we need to re-authenticate by hitting /login (which
-    // auto-redirects when setup_complete is true) before navigating.
     await page.goto("/");
 
     // The chat popup has a stable test id in the desktop component tree.
