@@ -103,33 +103,28 @@ jobs:
           bun install --frozen-lockfile
           bunx playwright install --with-deps chromium
 
-      - name: Build + boot test container, wait for install.sh
-        run: |
-          # Wait for systemd + install.sh inside the container before the
-          # playwright tests start. This is what happy-path.spec.ts's
-          # global-setup.ts does anyway; pulling it out here makes the
-          # failure point explicit in the CI log.
-          docker compose -f e2e-install/docker-compose.test.yml build
-          docker compose -f e2e-install/docker-compose.test.yml up -d
-        env:
-          DOCKER_BUILDKIT: "1"
-
       - name: Run e2e-install suite
         id: e2e
         env:
           # Never interpolate workflow_dispatch inputs directly into a
           # shell — go through env to avoid a shell-injection pattern.
           GREP_FILTER: ${{ inputs.grep_filter }}
+          # Let global-setup.ts handle image build + container boot +
+          # waitForInstallComplete. It already does all three with one
+          # consistent error path; running a separate "boot" step here and
+          # then SKIP_SETUP=1 would race against install.sh still running.
+          DOCKER_BUILDKIT: "1"
+          # Force the image to build fresh each CI run — caching layers
+          # across runs makes failures hard to reproduce and the runner
+          # disk is throwaway anyway.
+          CLAWBOX_E2E_REBUILD: "1"
         run: |
           set -o pipefail
           args=()
           if [ -n "$GREP_FILTER" ]; then
             args=(--grep "$GREP_FILTER")
           fi
-          # global-setup waits for install.sh; skip re-booting the container
-          # since we already started it above.
-          CLAWBOX_E2E_SKIP_SETUP=1 \
-            bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
+          bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
 
       - name: Dump install log on failure
         if: failure()
