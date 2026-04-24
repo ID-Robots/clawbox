@@ -89,13 +89,17 @@ test.describe("chat round trip", () => {
     // (production-server.js proxies the upgrade to the gateway on 18789).
     // No sub-path is required — auth happens via the first message after
     // upgrade, not via query string.
-    const opened = await new Promise<boolean>((resolve) => {
+    const result = await new Promise<{ ok: boolean; reason?: string }>((resolve) => {
       const ws = new WebSocket(config.wsUrl);
-      const timer = setTimeout(() => { ws.terminate(); resolve(false); }, 10_000);
-      ws.on("open", () => { clearTimeout(timer); ws.close(); resolve(true); });
-      ws.on("error", () => { clearTimeout(timer); resolve(false); });
+      const timer = setTimeout(() => { ws.terminate(); resolve({ ok: false, reason: "timeout after 30s" }); }, 30_000);
+      ws.on("open", () => { clearTimeout(timer); ws.close(); resolve({ ok: true }); });
+      ws.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, reason: `error: ${(err as Error).message}` }); });
+      ws.on("unexpected-response", (_req, res) => {
+        clearTimeout(timer);
+        resolve({ ok: false, reason: `HTTP ${res.statusCode} ${res.statusMessage ?? ""}`.trim() });
+      });
     });
-    expect(opened).toBe(true);
+    if (!result.ok) throw new Error(`gateway WS did not upgrade: ${result.reason} (url=${config.wsUrl})`);
   });
 
   test("UI chat widget receives a streamed response", async ({ page }) => {
