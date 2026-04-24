@@ -1,0 +1,211 @@
+name: E2E Install
+
+# Full-install harness — boots a real systemd container, runs install.sh,
+# exercises every setup-api happy path, and verifies the in-app updater +
+# reboot flow. Much heavier than the mock-backed `E2E Tests` workflow, so
+# it only runs:
+#   - nightly (scheduled)
+#   - on-demand via `workflow_dispatch`
+#   - on PRs labeled `run-full-e2e` (opt-in — avoid paying the cost on every push)
+#
+# Runner choice:
+#   - Prefers `ubuntu-24.04-arm` for ~5-10 min runs (native arm64).
+#   - Falls back to `ubuntu-latest` + qemu-user-static for repos/plans
+#     without arm64 runners; expect ~30-40 min in that case.
+#   Set `E2E_INSTALL_ARM64_RUNNER` repo variable to `false` to force x86.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upgrade_target_branch:
+        description: "Branch to exercise the in-app updater against"
+        required: false
+        default: "beta"
+      grep_filter:
+        description: "Optional playwright --grep pattern to narrow the suite"
+        required: false
+        default: ""
+  schedule:
+    # 03:17 UTC nightly — staggered from the top of the hour to dodge
+    # runner queue spikes.
+    - cron: "17 3 * * *"
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-install:
+    # PR runs are opt-in via the `run-full-e2e` label; otherwise we skip to
+    # avoid paying the 30+ min cost on every push.
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-e2e') }}
+    # Prefer the native arm64 runner; fall back to x86 when the repo
+    # variable `E2E_INSTALL_ARM64_RUNNER` is set to the string `false`.
+    runs-on: ${{ vars.E2E_INSTALL_ARM64_RUNNER == 'false' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Budget: native arm64 finishes in 10-15 min; qemu is 30-40 min; give
+    # headroom for docker pulls on cold runners.
+    timeout-minutes: 90
+    env:
+      CLAWBOX_PORT: "8080"
+      CLAWBOX_UPGRADE_TARGET_BRANCH: ${{ inputs.upgrade_target_branch || 'beta' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We need the `beta` branch reachable from the working tree so the
+          # updater can `git fetch origin beta`. Fetch tags too since the
+          # version check polls `git ls-remote --tags`.
+          fetch-depth: 0
+
+      - name: Show Docker + runner info
+        run: |
+          echo "runner: ${{ runner.name }} (${{ runner.os }} / ${{ runner.arch }})"
+          docker version
+          docker compose version
+          uname -a
+
+      - name: Register qemu-user-static for arm64 (x86 runner only)
+        if: runner.arch != 'ARM64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # Real AI-provider credentials are injected via repo secrets. The test
+      # steps that need them skip gracefully when the env var is empty, so
+      # forks without secrets still get meaningful coverage.
+      - name: Write .env.test
+        run: |
+          cat > e2e-install/.env.test <<'EOF'
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          CLAWBOX_AI_API_KEY=${{ secrets.CLAWBOX_AI_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLAWBOX_UPGRADE_TARGET_BRANCH=${{ env.CLAWBOX_UPGRADE_TARGET_BRANCH }}
+          EOF
+          # Avoid echoing values back into logs; just print which ones are set.
+          awk -F= '/^[A-Z]/ {printf "  %s: %s\n", $1, ($2 ? "set" : "(unset)")}' e2e-install/.env.test
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      # Only install the host-side bits we need to *drive* the tests: the
+      # Playwright runner + its system libs for the chat UI spec. The
+      # container inside Docker has its own separate Playwright install.
+      - name: Install Playwright (host side)
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
+      - name: Build + boot test container, wait for install.sh
+        run: |
+          # Wait for systemd + install.sh inside the container before the
+          # playwright tests start. This is what happy-path.spec.ts's
+          # global-setup.ts does anyway; pulling it out here makes the
+          # failure point explicit in the CI log.
+          docker compose -f e2e-install/docker-compose.test.yml build
+          docker compose -f e2e-install/docker-compose.test.yml up -d
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Run e2e-install suite
+        id: e2e
+        env:
+          # Never interpolate workflow_dispatch inputs directly into a
+          # shell — go through env to avoid a shell-injection pattern.
+          GREP_FILTER: ${{ inputs.grep_filter }}
+        run: |
+          set -o pipefail
+          args=()
+          if [ -n "$GREP_FILTER" ]; then
+            args=(--grep "$GREP_FILTER")
+          fi
+          # global-setup waits for install.sh; skip re-booting the container
+          # since we already started it above.
+          CLAWBOX_E2E_SKIP_SETUP=1 \
+            bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
+
+      - name: Dump install log on failure
+        if: failure()
+        run: |
+          echo "── last 300 lines of /var/log/clawbox-install.log ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T clawbox \
+            tail -n 300 /var/log/clawbox-install.log 2>/dev/null || true
+          echo "── journalctl for clawbox-* services ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T --user root clawbox \
+            journalctl --no-pager --since "-30m" -u 'clawbox-*' 2>/dev/null || true
+          echo "── systemctl list-units --state=failed ──"
+          docker compose -f e2e-install/docker-compose.test.yml exec -T --user root clawbox \
+            systemctl list-units --state=failed --no-pager 2>/dev/null || true
+
+      - name: Tear down container
+        if: always()
+        run: |
+          docker compose -f e2e-install/docker-compose.test.yml down -v || true
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-report
+          path: e2e-install/playwright-report/
+          retention-days: 14
+
+      - name: Upload test-results (traces, screenshots)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-test-results
+          path: e2e-install/test-results/
+          retention-days: 7
+
+  comment:
+    # Skip for fork PRs — GITHUB_TOKEN is always read-only there, so the
+    # comment would 403. Also skip on schedule/workflow_dispatch (no PR to
+    # comment on).
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always() }}
+    needs: e2e-install
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          E2E_INSTALL_RESULT: ${{ needs.e2e-install.result }}
+        with:
+          script: |
+            const marker = '<!-- clawbox-ci-summary -->';
+            const sectionStart = '<!-- clawbox-ci-e2e-install:start -->';
+            const sectionEnd = '<!-- clawbox-ci-e2e-install:end -->';
+            const result = process.env.E2E_INSTALL_RESULT;
+            const icon = result === 'success' ? '✅' : result === 'skipped' ? '⏭️' : '❌';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const section = `${sectionStart}\n## ${icon} E2E Install\n- Result: **${result}**\n- [View run](${runUrl})\n${sectionEnd}`;
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, replacement) : `${body}\n\n${replacement}`;
+            };
+
+            if (existing) {
+              const body = updateSection(existing.body ?? '', sectionStart, sectionEnd, section);
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              const body = `${marker}\n# CI Summary\n\n${section}`;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: context.issue.number, body,
+              });
+            }

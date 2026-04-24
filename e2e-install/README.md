@@ -90,6 +90,35 @@ TELEGRAM_BOT_TOKEN=1234:...
 Missing keys cause the matching test cases to skip rather than fail, so you
 can iterate on one provider at a time.
 
+## CI integration
+
+The full suite runs via `.github/workflows/e2e-install.yml`:
+
+- **Nightly** at 03:17 UTC against `main`.
+- **On-demand** via `gh workflow run "E2E Install"` or the Actions tab.
+  Inputs: `upgrade_target_branch` (default `beta`) and `grep_filter` for
+  narrowing the run.
+- **Per-PR** when the PR is labeled `run-full-e2e` — default CI does not
+  pay the 30+ min cost on every push.
+
+Runner selection:
+- Default: `ubuntu-24.04-arm` (native arm64, ~10-15 min).
+- Fallback: `ubuntu-latest` + qemu-user-static (~30-40 min). Force this by
+  setting repo variable `E2E_INSTALL_ARM64_RUNNER=false` under Settings →
+  Secrets and variables → Actions → Variables.
+
+Secrets honored (all optional — matching test cases skip cleanly when
+unset):
+
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `OPENROUTER_API_KEY`, `CLAWBOX_AI_API_KEY` — exercises the configure-AI
+  + chat round-trip specs.
+- `TELEGRAM_BOT_TOKEN` — exercises the Telegram step of the happy-path
+  spec and gateway channel registration.
+
+Fork PRs don't receive secrets; those specs skip but the install/setup
+/files/terminal/webapps/power coverage still runs.
+
 ## Debugging a failed install
 
 ```bash
