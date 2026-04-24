@@ -8,7 +8,7 @@ ConditionPathExists=/home/clawbox/clawbox/.needs-install
 Type=oneshot
 EnvironmentFile=/etc/clawbox/test-mode.env
 # install.sh must run as root; it sudos to clawbox where needed.
-ExecStart=/bin/bash -c 'cd /home/clawbox/clawbox && CLAWBOX_TEST_MODE=1 bash install.sh 2>&1 | tee /var/log/clawbox-install.log && rm -f /home/clawbox/clawbox/.needs-install'
+ExecStart=/bin/bash -c 'set -o pipefail; cd /home/clawbox/clawbox && CLAWBOX_TEST_MODE=1 bash install.sh 2>&1 | tee /var/log/clawbox-install.log && rm -f /home/clawbox/clawbox/.needs-install'
 # Ample timeout: cold bun install + next build on qemu-emulated arm64 can
 # take 15-20 minutes.
 TimeoutStartSec=2400

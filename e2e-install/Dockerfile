@@ -2,15 +2,12 @@
 # to exercise install.sh + setup wizard + updater end-to-end without needing
 # physical Jetson hardware.
 #
-# Targets linux/arm64 to match production. On x86 hosts this runs under QEMU
-# user-mode emulation (register binfmt with `docker run --privileged --rm
-# tonistiigi/binfmt --install arm64` once per host). Expect 3-5x slowdown.
-#
-# Two stages:
-#   - base:   packages + systemd, designed to be long-lived / cached
-#   - runner: clones the repo into /tmp at build time only to warm caches;
-#             actual install happens inside the container via entrypoint
-FROM --platform=linux/arm64 ubuntu:22.04 AS base
+# Builds for the host architecture. Production runs on arm64 (Jetson);
+# CI uses `ubuntu-24.04-arm` to match, while dev laptops build amd64 for
+# speed. The install.sh paths we care about (bun, next build, apt packages,
+# systemd) are arch-agnostic — the Jetson-specific bits all sit behind
+# CLAWBOX_TEST_MODE=1 and get skipped anyway.
+FROM ubuntu:22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -20,7 +17,7 @@ ENV LANG=C.UTF-8
 # install nvidia-jetpack` would have already pulled in on a real JetPack image.
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus \
-      ca-certificates curl wget gnupg2 lsb-release \
+      ca-certificates curl wget gnupg2 lsb-release unzip \
       git sudo locales tzdata procps less \
       network-manager avahi-daemon iptables iw \
       python3 python3-pip python-is-python3 \
@@ -34,6 +31,12 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
+
+# node-gyp is needed when `bun install` runs — node-pty doesn't ship a
+# prebuild for every combination of arch/Node ABI, and without a global
+# node-gyp bun's build-from-source path fails with "node-gyp: command not
+# found" before install.sh's own `ensure_node_pty` fallback can kick in.
+RUN npm install -g node-gyp
 
 # systemd-in-container housekeeping: mask units that require hardware we
 # don't have (console-getty), enable the ones we do want (NM, dbus, avahi).

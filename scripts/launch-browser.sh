@@ -43,7 +43,14 @@ is_snap_chromium_wrapper() {
 }
 
 find_playwright_chromium() {
-  find "$HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) 2>/dev/null | sort -V | tail -1 || true
+  # Playwright 1.50+ ships Chrome-for-Testing at chrome-linux64/chrome on
+  # amd64 and chrome-linux-arm64/chrome on arm64; older builds used
+  # chrome-linux/. Accept any of the three.
+  find "$HOME/.cache/ms-playwright" -type f \
+    \( -path "*/chrome-linux/chrome" \
+       -o -path "*/chrome-linux64/chrome" \
+       -o -path "*/chrome-linux-arm64/chrome" \) \
+    2>/dev/null | sort -V | tail -1 || true
 }
 
 if [ -f "$VNC_STATE_FILE" ]; then

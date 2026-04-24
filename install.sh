@@ -120,7 +120,14 @@ ensure_llamacpp_model_cached() {
 }
 
 has_playwright_chromium() {
-  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
+  # Playwright 1.50+ ships Chrome-for-Testing at chrome-linux64/chrome on
+  # amd64 and chrome-linux-arm64/chrome on arm64; older builds used the
+  # unsuffixed chrome-linux/. Check all three so we work across versions.
+  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \
+    \( -path "*/chrome-linux/chrome" \
+       -o -path "*/chrome-linux64/chrome" \
+       -o -path "*/chrome-linux-arm64/chrome" \) \
+    -print -quit 2>/dev/null | grep -q .
 }
 
 ensure_playwright_chromium() {
@@ -377,7 +384,16 @@ apply_hostname() {
     echo "  Invalid hostname '${1:-}', skipping"
     return 1
   fi
-  hostnamectl set-hostname "$name"
+  # hostnamectl is best-effort in test mode: Docker containers sharing the
+  # host's UTS namespace can't set the hostname and systemd-hostnamed often
+  # isn't running. Don't fail the whole install over it.
+  if ! hostnamectl set-hostname "$name" 2>/dev/null; then
+    if is_test_mode; then
+      echo "  CLAWBOX_TEST_MODE=1, hostnamectl unavailable — skipping"
+    else
+      echo "  Warning: hostnamectl set-hostname failed, continuing"
+    fi
+  fi
 
   # Install ClawBox's hardened avahi config if we have one in the repo.
   # Keep the distro default as .bak.orig the first time so operators can
@@ -480,6 +496,12 @@ sync_repo_to_update_target() {
   fi
 
   git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  # Discard local working-tree changes before switching branches. The later
+  # `reset --hard` would blow them away anyway; doing it up-front avoids
+  # `git checkout` aborting with "local changes would be overwritten" when
+  # the user (or test seeding) has uncommitted edits. This is by design —
+  # the updater's whole purpose is to align the device with upstream.
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard HEAD 2>/dev/null || true
   if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$target_branch" 2>/dev/null; then
     if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
       echo "Error: failed to checkout branch '$target_branch'" >&2

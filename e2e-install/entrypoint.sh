@@ -9,8 +9,11 @@ set -euo pipefail
 PROJECT_DIR="/home/clawbox/clawbox"
 SRC_DIR="/opt/clawbox-src"
 
-# If the volume-backed project dir is empty, seed it from the baked image.
-if [ -z "$(ls -A "$PROJECT_DIR" 2>/dev/null || true)" ]; then
+# Seed the project tree when install.sh is missing. We can't just check
+# "is the dir empty" because the compose harness bind-mounts .env.test
+# into the project dir *before* the entrypoint runs; a plain emptiness
+# check would see that file and skip seeding.
+if [ ! -f "$PROJECT_DIR/install.sh" ]; then
   echo "[entrypoint] Seeding $PROJECT_DIR from $SRC_DIR"
   # cp -a preserves ownership/mode; SRC_DIR was chowned to clawbox at build time.
   # We skip node_modules / .next to keep the initial copy small; install.sh
@@ -24,6 +27,7 @@ if [ -z "$(ls -A "$PROJECT_DIR" 2>/dev/null || true)" ]; then
   chown -R clawbox:clawbox "$PROJECT_DIR"
   # Mark that install.sh has not yet run on this volume.
   touch "$PROJECT_DIR/.needs-install"
+  chown clawbox:clawbox "$PROJECT_DIR/.needs-install"
 fi
 
 # Ensure env file exists with test-mode flag before any service picks it up.

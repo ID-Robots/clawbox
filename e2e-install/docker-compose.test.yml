@@ -10,8 +10,9 @@
 # Restart simulation:
 #   docker compose -f docker-compose.test.yml restart    # preserves volumes
 #
-# Note on platforms: the image builds for linux/arm64. On an x86 host, register
-# qemu first: `docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+# Builds for the host architecture — no qemu needed. Production is arm64
+# (Jetson), and the CI workflow runs on `ubuntu-24.04-arm` to match; local
+# dev builds native amd64 for speed.
 
 services:
   clawbox:
@@ -20,10 +21,12 @@ services:
       dockerfile: e2e-install/Dockerfile
     image: clawbox-e2e:latest
     container_name: clawbox-e2e
-    platform: linux/arm64
     # systemd needs cgroups + a handful of capabilities. --privileged is the
     # blunt-but-reliable option that matches what `systemd-nspawn` gets.
     privileged: true
+    # cgroup v2 hosts need systemd in the container to share the host's
+    # cgroup namespace, otherwise PID 1 dies during setup (exit 255 in <1s).
+    cgroup: host
     tmpfs:
       - /run
       - /run/lock
@@ -35,9 +38,10 @@ services:
       # .update-branch, .next build cache) survives container restarts — this
       # is what lets us simulate "reboot after update" in tests.
       - clawbox-home:/home/clawbox/clawbox
-      # Mount the real .env.test (gitignored) if present; tests decide whether
-      # to require real keys.
-      - ./.env.test:/home/clawbox/clawbox/.env.test:ro
+      # .env.test is NOT mounted into the container. Tests read it from the
+      # host (see happy-path.spec.ts:loadEnvTest) and pass credentials through
+      # /setup-api/ai-models/configure, which writes them into the container's
+      # config on demand. Mounting it caused chown failures during install.
     environment:
       CLAWBOX_TEST_MODE: "1"
       NETWORK_INTERFACE: eth0

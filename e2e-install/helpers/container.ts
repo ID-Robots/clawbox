@@ -7,6 +7,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import path from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,21 +15,70 @@ export const CLAWBOX_PORT = process.env.CLAWBOX_PORT ?? "8080";
 export const BASE_URL = `http://localhost:${CLAWBOX_PORT}`;
 export const CONTAINER_NAME = "clawbox-e2e";
 export const COMPOSE_FILE = "e2e-install/docker-compose.test.yml";
-const REPO_ROOT = new URL("../../", import.meta.url).pathname;
+// Resolve via __dirname so this works under both the CJS transpiler
+// Playwright uses by default and the ESM transpiler some setups opt into.
+// Avoid `import.meta.url` — it forces ESM mode and breaks the default loader.
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
 
-async function compose(args: string[], opts: { timeoutMs?: number } = {}) {
+async function compose(args: string[], opts: { timeoutMs?: number; env?: Record<string, string> } = {}) {
   const { stdout, stderr } = await execFileAsync(
     "docker",
     ["compose", "-f", COMPOSE_FILE, ...args],
-    { cwd: REPO_ROOT, timeout: opts.timeoutMs ?? 300_000, maxBuffer: 16 * 1024 * 1024 },
+    {
+      cwd: REPO_ROOT,
+      timeout: opts.timeoutMs ?? 300_000,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, ...(opts.env ?? {}) },
+    },
   );
   return { stdout, stderr };
 }
 
+/**
+ * Build the test image via `docker build` directly (legacy builder). We
+ * bypass `docker compose build` because that path now requires buildx
+ * 0.17+ which isn't available on every host. Legacy builder + qemu is
+ * enough for a single-platform arm64 build.
+ */
+async function imageExists(tag: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      ["image", "inspect", "--format", "{{.Id}}", tag],
+      { timeout: 10_000 },
+    );
+    return !!stdout.trim();
+  } catch {
+    return false;
+  }
+}
+
+export async function buildImage(opts: { force?: boolean } = {}): Promise<void> {
+  if (!opts.force && await imageExists("clawbox-e2e:latest")) return;
+  await execFileAsync(
+    "docker",
+    [
+      "build",
+      "-f", "e2e-install/Dockerfile",
+      "-t", "clawbox-e2e:latest",
+      ".",
+    ],
+    {
+      cwd: REPO_ROOT,
+      timeout: 45 * 60_000,
+      maxBuffer: 64 * 1024 * 1024,
+      // DOCKER_BUILDKIT=0 forces the legacy builder, which builds for the
+      // host arch without needing buildx 0.17+.
+      env: { ...process.env, DOCKER_BUILDKIT: "0" },
+    },
+  );
+}
+
 export async function composeUp(opts: { build?: boolean } = {}): Promise<void> {
-  const args = ["up", "-d"];
-  if (opts.build) args.push("--build");
-  await compose(args, { timeoutMs: 30 * 60_000 });
+  // Build first (if needed) so compose can just reference the pre-built
+  // image without invoking buildx under the hood.
+  await buildImage({ force: !!opts.build });
+  await compose(["up", "-d"], { timeoutMs: 10 * 60_000 });
 }
 
 export async function composeDown(opts: { removeVolumes?: boolean } = {}): Promise<void> {

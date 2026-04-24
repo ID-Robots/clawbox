@@ -27,7 +27,10 @@ async function findPlaywrightChromium(): Promise<string | null> {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
 
-      for (const relativePath of ["chrome-linux/chrome", "chrome-linux-arm64/chrome"]) {
+      // Playwright 1.50+ ships Chrome-for-Testing under chrome-linux64/ on
+      // amd64 and chrome-linux-arm64/ on arm64; older builds used
+      // chrome-linux/. Probe all three.
+      for (const relativePath of ["chrome-linux/chrome", "chrome-linux64/chrome", "chrome-linux-arm64/chrome"]) {
         const candidate = path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name, relativePath);
         try {
           await fs.access(candidate, fsConstants.X_OK);

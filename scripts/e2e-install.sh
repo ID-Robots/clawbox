@@ -27,10 +27,4 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "${CLAWBOX_E2E_REGISTER_QEMU:-auto}" = "1" ] || ( [ "${CLAWBOX_E2E_REGISTER_QEMU:-auto}" = "auto" ] && [ "$(uname -m)" != "aarch64" ] ); then
-  if ! docker run --rm --privileged tonistiigi/binfmt --install arm64 >/dev/null 2>&1; then
-    echo "[e2e-install] warning: qemu arm64 binfmt register failed — the container may not boot on this host" >&2
-  fi
-fi
-
 bunx playwright test --config e2e-install/playwright.config.ts "$@"
