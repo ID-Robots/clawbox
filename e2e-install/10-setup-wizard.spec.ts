@@ -112,20 +112,31 @@ test.describe("fresh-install setup wizard (UI)", () => {
     await page.getByRole("button", { name: /^Connect$/ }).click();
 
     // ── Step 4: Primary AI Models ────────────────────────────────
-    await expect(page.getByTestId("setup-step-ai-models")).toBeVisible({ timeout: 30_000 });
+    // Credentials step Connects by posting to
+    // /setup-api/system/credentials (which spawns the chpasswd systemd
+    // unit; cold start is slow) + /setup-api/system/hotspot. 60s covers
+    // both on a container whose chpasswd service hasn't been hit before.
+    await expect(page.getByTestId("setup-step-ai-models")).toBeVisible({ timeout: 90_000 });
     // Pick "OpenAI GPT" with a placeholder key: the configure route saves
-    // the profile without validating the key. We overwrite with a real
-    // provider in 80-chat's beforeAll if CLAWBOX_AI_API_KEY is set, so
-    // this placeholder only has to flip ai_model_configured for the
-    // wizard to advance. The ClawBox AI tile opens an owner-portal modal
-    // rather than accepting a raw token, so it's not suitable as the
-    // wizard-driven default.
+    // the profile without validating the key. 80-chat's beforeAll swaps
+    // in the real CLAWBOX_AI_API_KEY later, so this placeholder only has
+    // to flip ai_model_configured for the wizard to advance. The ClawBox
+    // AI tile opens an owner-portal modal rather than accepting a raw
+    // token, so it's not usable for fully-automated wizard flow.
     await page.getByText("OpenAI GPT").click();
+    // OpenAI defaults to the "Subscription" tab (ChatGPT Plus / Pro OAuth).
+    // We need the "API Key" tab for the plain-token path.
+    await page.getByRole("button", { name: /^API Key$/ }).click();
+    await expect(page.locator("#ai-api-key")).toBeVisible({ timeout: 5_000 });
     await page.locator("#ai-api-key").fill("sk-e2e-placeholder-key");
     await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 
     // ── Step 5: Local AI ─────────────────────────────────────────
-    await expect(page.getByTestId("setup-step-local-ai")).toBeVisible({ timeout: 30_000 });
+    // AIModelsStep shows a multi-phase "Setting up OpenAI GPT" overlay
+    // between step 4 submission and step 5 render (phases animate at
+    // 0/2/5/12/22s + a readiness poll on the gateway). Budget 2min so
+    // the overlay has plenty of time to complete even on a slow runner.
+    await expect(page.getByTestId("setup-step-local-ai")).toBeVisible({ timeout: 120_000 });
     // llama-server / ollama aren't installed in test mode, so clicking
     // "Enable Gemma 4" would fail. Skip to the next step — local AI is
     // optional in production too.
@@ -135,8 +146,7 @@ test.describe("fresh-install setup wizard (UI)", () => {
     const telegramStep = page.getByTestId("setup-step-telegram");
     await expect(telegramStep).toBeVisible({ timeout: 30_000 });
     if (env.TELEGRAM_BOT_TOKEN) {
-      await page.locator('input[placeholder*="bot token" i], input[name*="token" i]')
-        .first()
+      await page.getByRole("textbox", { name: /Bot Token/i })
         .fill(env.TELEGRAM_BOT_TOKEN);
       await page.getByRole("button", { name: /Connect|Save/i }).click();
     } else {
@@ -144,19 +154,11 @@ test.describe("fresh-install setup wizard (UI)", () => {
     }
 
     // ── Step 7: Completion overlay → desktop ─────────────────────
-    // The completion overlay does a gateway health poll + redirects to
-    // `/` once OpenClaw is reachable. The overlay may be skipped entirely
-    // on fast paths, so we tolerate either: overlay visible, OR direct
-    // navigation to the desktop.
-    await page.waitForURL((url) => url.pathname === "/" || url.pathname === "/setup", {
-      timeout: 2 * 60_000,
-    });
-    // If the wizard lingered on /setup, wait for the completion overlay
-    // to clear. Otherwise we're already home.
-    if (new URL(page.url()).pathname === "/setup") {
-      await expect(page.getByTestId("setup-completion-overlay")).toBeVisible({ timeout: 10_000 });
-      await page.waitForURL("/", { timeout: 60_000 });
-    }
+    // The wizard's final step posts to /setup-api/setup/complete which
+    // sets the session cookie + redirects to `/`. The completion overlay
+    // is a transient intermediate state — may flash by too quickly to
+    // assert on — so we just wait for the URL to land on `/`.
+    await page.waitForURL("/", { timeout: 2 * 60_000 });
 
     // Confirm the shelf launcher renders on the desktop. ChromeShelf
     // includes a mobile-only + desktop-only variant with tailwind

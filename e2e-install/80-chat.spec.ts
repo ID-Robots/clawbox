@@ -127,6 +127,15 @@ test.describe("chat round trip", () => {
       { name: "clawbox_session", value: match![1], domain: "localhost", path: "/" },
     ]);
 
+    // The desktop opens the chat panel based on the ui_chat_open pref.
+    // Fresh-setup state leaves it closed; force it open so we don't have
+    // to hunt for the mascot-click sequence that toggles it.
+    await fetch(`${BASE_URL}/setup-api/preferences`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ui_chat_open: 1, ui_mascot_hidden: 1 }),
+    });
+
     await page.goto("/");
 
     // ChatPopup auto-opens on the desktop shell — no launcher click needed.
