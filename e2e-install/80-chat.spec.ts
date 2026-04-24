@@ -83,15 +83,14 @@ test.describe("chat round trip", () => {
     expect(config.model).toBeTruthy();
   });
 
-  test("WebSocket upgrade to /api/agent handshakes", async () => {
+  test("WebSocket upgrade to gateway handshakes", async () => {
     const config = await getChatWsConfig();
-    // The gateway exposes its chat WS under /api/agent (proxied through
-    // production-server.js). We just want to confirm the WS upgrade
-    // completes — full chat-protocol round-trip is covered by the UI test.
-    const url = `${config.wsUrl}/api/agent?token=${encodeURIComponent(config.token)}`;
-
+    // ChatApp/ChatPopup open the gateway WS at the wsUrl root itself
+    // (production-server.js proxies the upgrade to the gateway on 18789).
+    // No sub-path is required — auth happens via the first message after
+    // upgrade, not via query string.
     const opened = await new Promise<boolean>((resolve) => {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(config.wsUrl);
       const timer = setTimeout(() => { ws.terminate(); resolve(false); }, 10_000);
       ws.on("open", () => { clearTimeout(timer); ws.close(); resolve(true); });
       ws.on("error", () => { clearTimeout(timer); resolve(false); });

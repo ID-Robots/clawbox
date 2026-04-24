@@ -137,10 +137,13 @@ test.describe("fresh-install happy path", () => {
     ]);
     await page.goto("/");
     // ChromeShelf renders two launcher buttons (a mobile-visible one and a
-    // desktop-visible one, toggled via tailwind responsive classes). Either
-    // being visible is enough — use .first() to dodge strict-mode violation.
-    await expect(page.locator('[data-testid="shelf-launcher-button"]').first())
-      .toBeVisible({ timeout: 30_000 });
+    // desktop-visible one, toggled via tailwind responsive classes — one
+    // always has `display: none`). Filter to only the visible copy so the
+    // assertion matches the button for the current viewport, not the
+    // hidden sibling.
+    await expect(
+      page.locator('[data-testid="shelf-launcher-button"]').filter({ visible: true }),
+    ).toBeVisible({ timeout: 30_000 });
   });
 });
 
