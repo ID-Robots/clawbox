@@ -129,8 +129,10 @@ test.describe("fresh-install happy path", () => {
       },
     ]);
     await page.goto("/");
-    // Chromium app shelf is the most stable anchor across screen sizes.
-    await expect(page.locator('[data-testid="shelf-launcher-button"], [data-testid="app-launcher"]'))
+    // ChromeShelf renders two launcher buttons (a mobile-visible one and a
+    // desktop-visible one, toggled via tailwind responsive classes). Either
+    // being visible is enough — use .first() to dodge strict-mode violation.
+    await expect(page.locator('[data-testid="shelf-launcher-button"]').first())
       .toBeVisible({ timeout: 30_000 });
   });
 });

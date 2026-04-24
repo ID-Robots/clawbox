@@ -58,7 +58,10 @@ test.describe("browser + VNC happy path", () => {
 
   test("open-browser starts Chromium CDP", async () => {
     test.setTimeout(180_000);
-    const state = await browserManage("open-browser");
+    // The `open-browser` POST returns a flat shape ({ ok, cdpReady, browser }).
+    // Re-query via GET for the nested {chromium, browser, enabled} state.
+    await browserManage("open-browser");
+    const state = await getBrowserManage();
     expect(state.browser.running).toBe(true);
     expect(state.browser.cdpReady).toBe(true);
   });
