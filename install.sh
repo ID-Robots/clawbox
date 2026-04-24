@@ -1135,7 +1135,11 @@ step_gateway_setup() {
 
 step_chromium_install() {
   if is_test_mode; then
-    echo "  CLAWBOX_TEST_MODE=1, skipping snap Chromium install"
+    # snap doesn't work in a standard container, but the desktop browser
+    # service only needs the Playwright-cached Chromium binary — use that
+    # as the test-mode path so /setup-api/browser/* still works.
+    echo "  CLAWBOX_TEST_MODE=1, installing Playwright-managed Chromium only"
+    ensure_playwright_chromium
     return 0
   fi
   if snap list chromium &>/dev/null 2>&1; then
@@ -1194,10 +1198,10 @@ step_ai_tools_install() {
 }
 
 step_vnc_install() {
-  if is_test_mode; then
-    echo "  CLAWBOX_TEST_MODE=1, skipping VNC stack (x11vnc, Xvfb, websockify)"
-    return 0
-  fi
+  # Test mode still installs and enables VNC so browser-automation e2e can
+  # exercise the real stack — x11vnc+Xvfb+websockify all work in a
+  # --privileged container. Only the GDM-mirror path is shortcut via
+  # CLAWBOX_VNC_MODE=virtual, which start-vnc.sh already honors.
   wait_for_apt
   # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
@@ -1277,10 +1281,6 @@ FIRSTBOOTVNC
 }
 
 step_vnc_refresh() {
-  if is_test_mode; then
-    echo "  CLAWBOX_TEST_MODE=1, skipping VNC refresh"
-    return 0
-  fi
   # Idempotent subset of step_vnc_install, safe to run on every update path.
   # Picks up changes to the clawbox-vnc.service unit (e.g. the CLAWBOX_VNC_MODE
   # env var added when we moved VNC off display :0) and installs packages

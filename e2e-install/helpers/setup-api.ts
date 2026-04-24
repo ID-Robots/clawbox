@@ -95,6 +95,166 @@ export interface UpdateState {
 
 export const getUpdateStatus = () => request<UpdateState>("/setup-api/update/status");
 
+// ── System ────────────────────────────────────────────────────────────────
+
+export const getSystemStats = () =>
+  request<{ cpu: unknown; memory: unknown; temperature: unknown }>("/setup-api/system/stats");
+
+export const getSystemInfo = () =>
+  request<{ hostname: string; os: string; uptime: string }>("/setup-api/system/info");
+
+export const systemPower = (action: "restart" | "shutdown") =>
+  request<{ success: boolean }>("/setup-api/system/power", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+
+// ── Preferences / KV ──────────────────────────────────────────────────────
+
+export const getPreferences = () =>
+  request<Record<string, unknown>>("/setup-api/preferences?all=1");
+
+export const setPreferences = (patch: Record<string, unknown>) =>
+  request<{ success: boolean }>("/setup-api/preferences", {
+    method: "POST",
+    body: JSON.stringify(patch),
+  });
+
+// ── Files ─────────────────────────────────────────────────────────────────
+
+export const listFiles = (dir = "") =>
+  request<{ files: Array<{ name: string; type: string; size: number | null }> }>(
+    `/setup-api/files?dir=${encodeURIComponent(dir)}`,
+  );
+
+export const mkdir = (dir: string, name: string) =>
+  request<{ success: boolean }>(
+    `/setup-api/files?dir=${encodeURIComponent(dir)}`,
+    { method: "POST", body: JSON.stringify({ action: "mkdir", name }) },
+  );
+
+export async function uploadFile(dir: string, name: string, contents: string | Uint8Array): Promise<void> {
+  const body: BodyInit = typeof contents === "string"
+    ? contents
+    : new Blob([contents as unknown as ArrayBuffer]);
+  const res = await fetch(`${BASE_URL}/setup-api/files?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body,
+  });
+  if (!res.ok) throw new Error(`upload ${name} → ${res.status}: ${await res.text()}`);
+}
+
+export async function readFileRaw(fullPath: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/setup-api/files/${fullPath.split("/").map(encodeURIComponent).join("/")}`);
+  if (!res.ok) throw new Error(`read ${fullPath} → ${res.status}`);
+  return res.text();
+}
+
+export async function deleteFile(fullPath: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/setup-api/files/${fullPath.split("/").map(encodeURIComponent).join("/")}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`delete ${fullPath} → ${res.status}`);
+}
+
+// ── Browser ───────────────────────────────────────────────────────────────
+
+export const browserManage = (action: "install-chromium" | "enable" | "disable" | "open-browser" | "close-browser") =>
+  request<{ chromium: { installed: boolean }; browser: { running: boolean; cdpReady: boolean }; enabled: boolean }>(
+    "/setup-api/browser/manage",
+    { method: "POST", body: JSON.stringify({ action }) },
+  );
+
+export const getBrowserManage = () =>
+  request<{ chromium: { installed: boolean }; browser: { running: boolean; cdpReady: boolean }; enabled: boolean }>(
+    "/setup-api/browser/manage",
+  );
+
+export const browserLaunch = (url: string) =>
+  request<{ sessionId: string; url: string; title: string; screenshot: string | null }>(
+    "/setup-api/browser",
+    { method: "POST", body: JSON.stringify({ action: "launch", url }) },
+  );
+
+export const browserNavigate = (sessionId: string, url: string) =>
+  request<{ url: string; title: string; screenshot: string | null }>(
+    "/setup-api/browser",
+    { method: "POST", body: JSON.stringify({ action: "navigate", sessionId, url }) },
+  );
+
+export const browserScreenshot = (sessionId: string) =>
+  request<{ screenshot: string | null }>(
+    "/setup-api/browser",
+    { method: "POST", body: JSON.stringify({ action: "screenshot", sessionId }) },
+  );
+
+export const browserClose = (sessionId: string) =>
+  request<{ closed: boolean }>(
+    "/setup-api/browser",
+    { method: "POST", body: JSON.stringify({ action: "close", sessionId }) },
+  );
+
+// ── App store ─────────────────────────────────────────────────────────────
+
+export const searchApps = (query = "") =>
+  request<{ total: number; apps: Array<{ slug: string; name: string; category: string }> }>(
+    `/setup-api/apps/store?q=${encodeURIComponent(query)}`,
+  );
+
+export const installApp = (appId: string) =>
+  request<{ clawhub?: { success: boolean; error?: string }; reload?: string }>(
+    "/setup-api/apps/install",
+    { method: "POST", body: JSON.stringify({ appId }) },
+  );
+
+export const uninstallApp = (appId: string) =>
+  request<{ success: boolean }>(
+    "/setup-api/apps/uninstall",
+    { method: "POST", body: JSON.stringify({ appId }) },
+  );
+
+// ── Code assistant / webapps ──────────────────────────────────────────────
+
+export const codeProjectInit = (projectId: string, name: string) =>
+  request<{ success: boolean; project: { id: string; name: string } }>(
+    "/setup-api/code",
+    { method: "POST", body: JSON.stringify({ action: "init", projectId, name }) },
+  );
+
+export const codeFileWrite = (projectId: string, filePath: string, content: string) =>
+  request<{ success: boolean }>(
+    "/setup-api/code",
+    { method: "POST", body: JSON.stringify({ action: "file-write", projectId, filePath, content }) },
+  );
+
+export const codeProjectBuild = (projectId: string) =>
+  request<{ success: boolean; url?: string; filesInlined?: number }>(
+    "/setup-api/code",
+    { method: "POST", body: JSON.stringify({ action: "build", projectId }) },
+  );
+
+export const codeProjectList = () =>
+  request<{ projects: Array<{ id: string; name: string }> }>(
+    "/setup-api/code",
+    { method: "POST", body: JSON.stringify({ action: "list-projects" }) },
+  );
+
+export const codeProjectDelete = (projectId: string) =>
+  request<{ success: boolean }>(
+    "/setup-api/code",
+    { method: "POST", body: JSON.stringify({ action: "delete-project", projectId }) },
+  );
+
+// ── Gateway / chat ────────────────────────────────────────────────────────
+
+export const getChatWsConfig = () =>
+  request<{ token: string; wsUrl: string; model: string | null }>(
+    "/setup-api/gateway/ws-config",
+  );
+
+export const getGatewayHealth = () =>
+  request<{ available: boolean; port: number }>("/setup-api/gateway/health");
+
 /**
  * Poll update status until phase is `completed` or `failed`, or until the
  * request itself starts failing (which happens during the real restart step —

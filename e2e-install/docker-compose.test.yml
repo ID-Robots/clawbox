@@ -45,6 +45,10 @@ services:
       CLAWBOX_BRANCH: ${CLAWBOX_BRANCH:-main}
     ports:
       - "${CLAWBOX_PORT:-8080}:80"
+      # Expose noVNC websockify so developers can view the Xvfb desktop
+      # during browser/VNC tests. CLAWBOX_VNC_PORT defaults to 6080 — the
+      # same port a real device exposes.
+      - "${CLAWBOX_VNC_PORT:-6080}:6080"
     # Health check polls the setup API so Playwright can `wait-for-healthy`
     # instead of blind sleeping.
     healthcheck:

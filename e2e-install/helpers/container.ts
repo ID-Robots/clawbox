@@ -41,6 +41,33 @@ export async function composeRestart(): Promise<void> {
   await compose(["restart"], { timeoutMs: 120_000 });
 }
 
+/**
+ * Wait until `docker inspect` reports the container is stopped (exit
+ * status). Used by the power/reboot test to confirm an in-container
+ * `systemctl reboot` actually propagated out to the docker runtime.
+ */
+export async function waitForContainerStopped(timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execFileAsync("docker", [
+        "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME,
+      ], { timeout: 10_000 });
+      if (stdout.trim() === "false") return;
+    } catch {
+      // container may have been removed — count that as stopped
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  throw new Error(`container ${CONTAINER_NAME} did not stop within ${timeoutMs}ms`);
+}
+
+/** Restart a stopped container without reseeding the volume. */
+export async function dockerStart(): Promise<void> {
+  await execFileAsync("docker", ["start", CONTAINER_NAME], { timeout: 60_000 });
+}
+
 export async function dockerExec(cmd: string[], opts: { user?: string; timeoutMs?: number } = {}): Promise<string> {
   const args = ["exec"];
   if (opts.user) args.push("--user", opts.user);

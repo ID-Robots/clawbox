@@ -6,14 +6,21 @@ without a Jetson Orin Nano Super board in the loop.
 
 ## What it covers
 
-- **Fresh install** (`happy-path.spec.ts`): boots a clean Ubuntu 22.04 arm64
-  container, runs `install.sh`, walks through every step of the setup wizard
-  via the real `/setup-api/*` routes, and verifies the desktop loads after
-  `setup/complete`.
-- **In-app upgrade** (`upgrade-main-to-beta.spec.ts`): pins `.update-branch`
-  to `beta`, triggers the updater, waits for the service restart that
-  replaces the Jetson `reboot`, and verifies git HEAD advanced and prior
-  setup state was preserved.
+Spec files are numerically prefixed to enforce execution order — later
+specs depend on state set up by earlier ones:
+
+| Spec | Covers |
+| ---- | ------ |
+| `10-happy-path.spec.ts`       | `install.sh` → setup wizard end to end → desktop loads |
+| `20-settings.spec.ts`         | System info/stats, preferences, hotspot, password rotate, update-branch |
+| `30-files.spec.ts`            | mkdir, upload, list, read, delete — verified both via API and on-disk |
+| `40-terminal.spec.ts`         | `/terminal-ws` PTY round-trip (`uname -a`) |
+| `50-webapps.spec.ts`          | Code-assistant init → file write → build → `/setup-api/webapps` serves |
+| `60-app-store.spec.ts`        | Live search against `openclawhardware.dev`, install + uninstall one skill |
+| `70-browser.spec.ts`          | Real Chromium on Xvfb :99 via CDP; navigate to youtube.com, screenshot |
+| `80-chat.spec.ts`             | Gateway health + ws-config + real chat round-trip (needs AI key) |
+| `90-upgrade-main-to-beta.spec.ts` | In-app updater: pin `beta`, run, wait through restart, verify HEAD |
+| `99-power.spec.ts`            | `/setup-api/system/power restart` — container exits, comes back with state |
 
 ## What it *doesn't* cover (and why)
 
@@ -25,13 +32,18 @@ Paths guarded by `CLAWBOX_TEST_MODE=1` because they need real hardware:
 | `performance_mode`       | `nvpmodel` / `jetson_clocks` need Tegra |
 | `jtop_install`           | Jetson-stats probes Tegra sysfs |
 | `llamacpp_install`       | 20-30 min CUDA compile; no GPU in container |
-| `chromium_install`       | `snap` won't run inside a standard container |
-| `vnc_install`            | x11vnc needs a DRM device |
+| `chromium_install` (snap)| snap falls back to the Playwright-managed Chromium in test mode |
 | `ai_tools_install`       | Claude/Codex/Gemini CLIs pull huge binaries |
 | `cloudflared_install`    | tunneling needs real DNS |
+| `ollama_install`         | 400 MB+ download; no GPU for local inference anyway |
 | WiFi AP start/stop       | needs wireless radio |
 | WiFi scan (`iw scan`)    | stubbed to a fixture network list |
 | `nmcli` connect          | stubbed to always succeed |
+
+VNC (`x11vnc` + `Xvfb` + `websockify`) **is** installed in test mode — it
+runs fine in a `--privileged` container and is needed for browser automation
+tests. Point a VNC/noVNC client at `localhost:6080` while tests run to watch
+the container's virtual desktop.
 
 Everything else runs for real: apt packages, git clone, bun install, next
 build, OpenClaw npm install + patches, systemd service install, polkit, the
