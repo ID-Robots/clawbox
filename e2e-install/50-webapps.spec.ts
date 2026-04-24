@@ -40,10 +40,10 @@ test.describe("code assistant → webapp build", () => {
   test("init scaffolds a project on disk", async () => {
     const result = await codeProjectInit(PROJECT_ID, "E2E Webapp");
     expect(result.success).toBe(true);
-    expect(result.project.id ?? (result.project as unknown as { projectId?: string }).projectId).toBe(PROJECT_ID);
+    expect(result.project.projectId).toBe(PROJECT_ID);
 
     const listed = await codeProjectList();
-    expect(listed.projects.some((p) => (p.id ?? (p as unknown as { projectId?: string }).projectId) === PROJECT_ID)).toBe(true);
+    expect(listed.projects.some((p) => p.projectId === PROJECT_ID)).toBe(true);
 
     // Verify directory + scaffold files exist.
     const diskListing = await dockerExec(

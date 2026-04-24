@@ -42,11 +42,16 @@ let scanInProgress = false;
 export type { WifiNetwork } from "./wifi-utils";
 import type { WifiNetwork } from "./wifi-utils";
 
-const TEST_NETWORKS: WifiNetwork[] = [
-  { ssid: "TestNet-Home", signal: -42, security: "WPA2", freq: "5180" },
-  { ssid: "TestNet-Guest", signal: -58, security: "WPA2", freq: "2437" },
-  { ssid: "TestNet-Open", signal: -70, security: "--", freq: "2412" },
-];
+const TEST_NETWORKS: readonly WifiNetwork[] = Object.freeze([
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Home", signal: -42, security: "WPA2", freq: "5180" }),
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Guest", signal: -58, security: "WPA2", freq: "2437" }),
+  Object.freeze<WifiNetwork>({ ssid: "TestNet-Open", signal: -70, security: "--", freq: "2412" }),
+]);
+
+/** Return a fresh array of fresh objects so callers can't mutate shared state. */
+function cloneTestNetworks(): WifiNetwork[] {
+  return TEST_NETWORKS.map((n) => ({ ...n }));
+}
 
 /** Deduplicate networks by SSID, keeping the strongest signal for each. */
 function deduplicateNetworks(networks: WifiNetwork[]): WifiNetwork[] {
@@ -87,7 +92,7 @@ export function getCachedScan(): WifiNetwork[] {
 
 /** Scan using `iw scan` — works even in AP mode without tearing down the hotspot. */
 export async function scanWifiLive(): Promise<WifiNetwork[]> {
-  if (TEST_MODE) return TEST_NETWORKS;
+  if (TEST_MODE) return cloneTestNetworks();
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
       const proc = spawn("/usr/sbin/iw", ["dev", IFACE, "scan"]);
@@ -184,7 +189,7 @@ async function bringAPUp(): Promise<void> {
 }
 
 export async function scanWifi(): Promise<WifiNetwork[]> {
-  if (TEST_MODE) return TEST_NETWORKS;
+  if (TEST_MODE) return cloneTestNetworks();
   // Return cached results if fresh (avoids tearing down AP again on retry)
   if (cachedScan && (Date.now() - cachedScan.timestamp) < SCAN_CACHE_TTL) {
     return cachedScan.networks;

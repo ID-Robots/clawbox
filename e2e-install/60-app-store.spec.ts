@@ -77,18 +77,25 @@ test.describe("app store happy path", () => {
   test("icon cached on disk", async () => {
     test.skip(!INSTALL_OK, "previous install returned failure; skip icon check");
     expect(TEST_APP_ID).toBeTruthy();
-    // icons land in data/icons/<appId>.png. This would be skipped if the
-    // download failed (network hiccup against the store CDN), so we look
-    // for either the icon OR the meta-only fallback.
-    const out = await dockerExec(
-      ["bash", "-c",
-        `ls /home/clawbox/clawbox/data/icons/${TEST_APP_ID}.png 2>/dev/null || ` +
-        `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/clawbox/clawbox/data/config.json","utf8"));` +
-        `const m=(c.installed_meta||{})["${TEST_APP_ID}"];process.stdout.write(m?"meta-ok":"missing");'`,
-      ],
+    const iconPath = `/home/clawbox/clawbox/data/icons/${TEST_APP_ID}.png`;
+
+    // Step 1: happy path — the store CDN served the icon and we saved a
+    // PNG to disk.
+    const iconExists = await dockerExec(["test", "-f", iconPath], { user: "clawbox" })
+      .then(() => true)
+      .catch(() => false);
+    if (iconExists) return;
+
+    // Step 2: the download failed (CDN miss, rate limit, etc.), but the
+    // route should still have registered installed_meta so the UI has a
+    // fallback. Parse config.json directly — the install routine puts the
+    // meta there regardless of icon outcome.
+    const raw = await dockerExec(
+      ["cat", "/home/clawbox/clawbox/data/config.json"],
       { user: "clawbox" },
     );
-    expect(out.trim()).toMatch(/\.png$|^meta-ok$/);
+    const config = JSON.parse(raw) as { installed_meta?: Record<string, unknown> };
+    expect(config.installed_meta?.[TEST_APP_ID]).toBeDefined();
   });
 
   test("uninstall selected app", async () => {

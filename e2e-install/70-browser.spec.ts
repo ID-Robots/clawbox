@@ -35,12 +35,19 @@ test.describe("browser + VNC happy path", () => {
   });
 
   test("VNC services are active", async () => {
-    const statusOut = await dockerExec(
-      ["bash", "-c", "systemctl is-active clawbox-vnc.service clawbox-websockify.service"],
+    // Check each service independently so a failure message identifies
+    // which one is down instead of reporting "one of them isn't active".
+    const vncStatus = await dockerExec(
+      ["systemctl", "is-active", "clawbox-vnc.service"],
       { user: "root" },
     );
-    // Both lines should be "active".
-    expect(statusOut.trim().split("\n").every((l) => l === "active")).toBe(true);
+    expect(vncStatus.trim()).toBe("active");
+
+    const wsStatus = await dockerExec(
+      ["systemctl", "is-active", "clawbox-websockify.service"],
+      { user: "root" },
+    );
+    expect(wsStatus.trim()).toBe("active");
   });
 
   test("Xvfb :99 has actually started", async () => {
@@ -83,10 +90,13 @@ test.describe("browser + VNC happy path", () => {
     test.setTimeout(120_000);
     expect(sessionId).not.toBeNull();
     const result = await browserNavigate(sessionId!, "https://www.youtube.com/");
-    // YouTube may redirect to a consent page, a cookie page, or even a
-    // regional variant (youtube.com/consent, m.youtube.com). We just check
-    // the host matches rather than the exact URL.
-    expect(result.url).toMatch(/youtube\.com/);
+    // YouTube may redirect to a consent page, a cookie page, or a regional
+    // variant (www, m, or cc.youtube.com, plus /consent paths). Parse the
+    // URL and check the hostname ends with youtube.com — that's the real
+    // invariant, not a loose substring match that could collide with
+    // anti-bot interstitials hosted on arbitrary domains.
+    const host = new URL(result.url).hostname;
+    expect(host === "youtube.com" || host.endsWith(".youtube.com")).toBe(true);
     expect(result.screenshot).toBeTruthy();
   });
 

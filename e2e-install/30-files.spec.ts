@@ -58,7 +58,9 @@ test.describe("files app happy path", () => {
     const file = entries.files.find((f) => f.name === TEST_FILE);
     expect(file).toBeDefined();
     expect(file?.type).toBe("file");
-    expect(file?.size).toBe(TEST_CONTENTS.length);
+    // Byte length — not char length — since the server stores encoded bytes
+    // and the list API reports st_size. For multibyte content the two differ.
+    expect(file?.size).toBe(Buffer.byteLength(TEST_CONTENTS));
   });
 
   test("delete removes the file", async () => {

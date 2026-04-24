@@ -61,10 +61,14 @@ services:
         - |
           curl -fsS -o /dev/null http://127.0.0.1/setup-api/setup/status \
             && ! test -f /home/clawbox/clawbox/.needs-install
-      interval: 10s
+      # Budget: ubuntu-24.04-arm finishes install in ~10-15 min; qemu on
+      # ubuntu-latest in ~30-40 min. 20s × 360 = 120 min ceiling, well over
+      # either — we prefer a forgiving healthcheck over a tight one since
+      # the tests themselves still apply their own timeouts.
+      interval: 20s
       timeout: 5s
-      retries: 240
-      start_period: 60s
+      retries: 360
+      start_period: 120s
     stop_grace_period: 30s
 
 volumes:

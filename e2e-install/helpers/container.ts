@@ -197,15 +197,3 @@ export async function readGitBranch(): Promise<string> {
   return stdout.trim();
 }
 
-export async function readConfigValue(key: string): Promise<string | null> {
-  try {
-    const stdout = await dockerExec([
-      "bash",
-      "-c",
-      `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/clawbox/clawbox/data/config.json","utf8"));process.stdout.write(c.${key} === undefined ? "" : String(c.${key}));'`,
-    ], { user: "clawbox" });
-    return stdout.length ? stdout : null;
-  } catch {
-    return null;
-  }
-}

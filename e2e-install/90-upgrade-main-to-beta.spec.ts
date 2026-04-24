@@ -14,6 +14,7 @@
  */
 import { test, expect } from "@playwright/test";
 import {
+  BASE_URL,
   dockerExec,
   readGitBranch,
   setUpdateBranch,
@@ -80,7 +81,8 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
 
   test("setup state preserved across upgrade", async () => {
     // The upgrade must not wipe prior setup flags (wifi/password/ai).
-    const statusJson = await (await fetch(`${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/setup/status`)).json();
+    const res = await fetch(`${BASE_URL}/setup-api/setup/status`);
+    const statusJson = await res.json();
     expect(statusJson.setup_complete).toBe(true);
     expect(statusJson.wifi_configured).toBe(true);
     expect(statusJson.password_configured).toBe(true);

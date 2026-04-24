@@ -22,6 +22,13 @@ cleanup() {
     echo "[e2e-install] KEEP=1, leaving container + volume up"
     return
   fi
+  # CLAWBOX_E2E_SKIP_SETUP means the test run is reusing an externally-
+  # managed container/volume — tearing it down would wipe state a caller
+  # still needs. Skip teardown in that mode; the caller owns lifecycle.
+  if [ "${CLAWBOX_E2E_SKIP_SETUP:-0}" = "1" ]; then
+    echo "[e2e-install] CLAWBOX_E2E_SKIP_SETUP=1, leaving container + volume up for caller"
+    return
+  fi
   echo "[e2e-install] tearing down..."
   $COMPOSE down -v || true
 }

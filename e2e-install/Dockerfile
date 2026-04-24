@@ -27,7 +27,11 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 — matches what install.sh installs at runtime.
+# Node.js 22 — matches what install.sh installs at runtime. pipefail is
+# required so a silent `curl` failure doesn't leave `bash -` reading nothing
+# and exiting 0 (which would produce an image missing the nodesource apt
+# list and then failing later in confusing ways).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*

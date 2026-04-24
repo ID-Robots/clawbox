@@ -215,8 +215,17 @@ export const uninstallApp = (appId: string) =>
 
 // ── Code assistant / webapps ──────────────────────────────────────────────
 
+export interface CodeProject {
+  projectId: string;
+  name: string;
+  color?: string;
+  description?: string;
+  created?: string;
+  updated?: string;
+}
+
 export const codeProjectInit = (projectId: string, name: string) =>
-  request<{ success: boolean; project: { id: string; name: string } }>(
+  request<{ success: boolean; project: CodeProject }>(
     "/setup-api/code",
     { method: "POST", body: JSON.stringify({ action: "init", projectId, name }) },
   );
@@ -234,7 +243,7 @@ export const codeProjectBuild = (projectId: string) =>
   );
 
 export const codeProjectList = () =>
-  request<{ projects: Array<{ id: string; name: string }> }>(
+  request<{ projects: CodeProject[] }>(
     "/setup-api/code",
     { method: "POST", body: JSON.stringify({ action: "list-projects" }) },
   );

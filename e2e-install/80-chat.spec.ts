@@ -66,12 +66,21 @@ test.describe("chat round trip", () => {
 
   test("gateway health reports available", async () => {
     // The gateway takes a beat to restart after configureAiModel; give it
-    // up to 30s to come back.
+    // up to ~30s to come back. Exponential backoff (500 → 1000 → 2000 →
+    // 4000ms cap) reduces the polling load while still giving a tight
+    // recovery signal when the gateway comes back in the first few seconds.
     let available = false;
-    for (let i = 0; i < 30 && !available; i++) {
+    let delay = 500;
+    const maxDelay = 4000;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && !available) {
       const result = await getGatewayHealth().catch(() => null);
-      if (result?.available) available = true;
-      else await new Promise((r) => setTimeout(r, 1_000));
+      if (result?.available) {
+        available = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelay);
     }
     expect(available).toBe(true);
   });

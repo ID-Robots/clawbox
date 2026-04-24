@@ -84,20 +84,31 @@ jobs:
 
       # Real AI-provider credentials are injected via repo secrets. The test
       # steps that need them skip gracefully when the env var is empty, so
-      # forks without secrets still get meaningful coverage.
+      # forks without secrets still get meaningful coverage. Values are
+      # passed through env vars and written via printf so a secret that
+      # happens to contain the EOF token or other heredoc-breaking bytes
+      # can't truncate the resulting .env file.
       - name: Write .env.test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CLAWBOX_AI_API_KEY: ${{ secrets.CLAWBOX_AI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          UPGRADE_BRANCH: ${{ env.CLAWBOX_UPGRADE_TARGET_BRANCH }}
         run: |
-          cat > e2e-install/.env.test <<'EOF'
-          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
-          CLAWBOX_AI_API_KEY=${{ secrets.CLAWBOX_AI_API_KEY }}
-          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CLAWBOX_UPGRADE_TARGET_BRANCH=${{ env.CLAWBOX_UPGRADE_TARGET_BRANCH }}
-          EOF
+          : > e2e-install/.env.test
+          for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY CLAWBOX_AI_API_KEY TELEGRAM_BOT_TOKEN; do
+            # Indirect expansion — skip empty values so unset secrets don't
+            # pollute the file. printf avoids shell-special interpretation
+            # of the value (no backslash escapes, no heredoc pitfalls).
+            value="${!key}"
+            [ -n "$value" ] && printf '%s=%s\n' "$key" "$value" >> e2e-install/.env.test
+          done
+          printf '%s=%s\n' "CLAWBOX_UPGRADE_TARGET_BRANCH" "$UPGRADE_BRANCH" >> e2e-install/.env.test
           # Avoid echoing values back into logs; just print which ones are set.
-          awk -F= '/^[A-Z]/ {printf "  %s: %s\n", $1, ($2 ? "set" : "(unset)")}' e2e-install/.env.test
+          awk -F= '/^[A-Z]/ {printf "  %s: set\n", $1}' e2e-install/.env.test
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -176,8 +187,11 @@ jobs:
     needs: e2e-install
     runs-on: ubuntu-latest
     permissions:
+      # PR comments go through the issues API, but on PR resources the
+      # `pull-requests: write` permission is sufficient. `issues: write` is
+      # only required to comment on standalone issues (not PRs), which this
+      # job never does.
       pull-requests: write
-      issues: write
     steps:
       - uses: actions/github-script@v7
         env:

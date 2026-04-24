@@ -9,14 +9,13 @@
  * state on a real install.
  */
 import { test, expect } from "@playwright/test";
-import { dockerExec } from "./helpers/container";
+import { BASE_URL, dockerExec } from "./helpers/container";
 import {
   getPreferences,
   getSystemInfo,
   getSystemStats,
   setHotspot,
   setPreferences,
-  setSystemPassword,
 } from "./helpers/setup-api";
 
 test.describe.configure({ mode: "serial" });
@@ -51,7 +50,7 @@ test.describe("settings actions", () => {
   test("hotspot SSID rename persists", async () => {
     await setHotspot("ClawBox-Renamed", "hotspot-e2e-pass", true);
     // The POST result doesn't return the new state — hit the GET and verify.
-    const res = await fetch(`${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/system/hotspot`);
+    const res = await fetch(`${BASE_URL}/setup-api/system/hotspot`);
     const data = await res.json();
     expect(data.ssid).toBe("ClawBox-Renamed");
     // Restore original name for other tests.
@@ -62,19 +61,15 @@ test.describe("settings actions", () => {
     // The credentials route rate-limits (5 in 15 min). Rotate once, then
     // rotate back — 2 calls total, well under the cap. happy-path already
     // set an initial password, so the currentPassword field is required.
-    const rotateRes = await fetch(
-      `${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/system/credentials`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          password: "clawbox-e2e-rotated",
-          currentPassword: "clawbox-e2e-pass",
-        }),
-      },
-    );
+    const rotateRes = await fetch(`${BASE_URL}/setup-api/system/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        password: "clawbox-e2e-rotated",
+        currentPassword: "clawbox-e2e-pass",
+      }),
+    });
     expect(rotateRes.ok).toBe(true);
-    void setSystemPassword; // helper kept for first-time-set paths elsewhere
 
     // Verify chpasswd actually ran by reading /etc/shadow metadata in the
     // container. We can't read the hash (that's good), but we can stat the
@@ -89,23 +84,20 @@ test.describe("settings actions", () => {
     // Restore so other tests that might use the password still work. Note:
     // the current-password check only kicks in AFTER password_configured is
     // set — happy-path.spec.ts set it once, so we need currentPassword now.
-    const restoreRes = await fetch(
-      `${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/system/credentials`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          password: "clawbox-e2e-pass",
-          currentPassword: "clawbox-e2e-rotated",
-        }),
-      },
-    );
+    const restoreRes = await fetch(`${BASE_URL}/setup-api/system/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        password: "clawbox-e2e-pass",
+        currentPassword: "clawbox-e2e-rotated",
+      }),
+    });
     expect(restoreRes.ok).toBe(true);
   });
 
   test("update-branch is set (upgrade spec depends on this)", async () => {
     // Not really a settings action, but Settings → System Update surfaces it.
-    const res = await fetch(`${process.env.BASE_URL ?? "http://localhost:" + (process.env.CLAWBOX_PORT ?? "8080")}/setup-api/system/update-branch`);
+    const res = await fetch(`${BASE_URL}/setup-api/system/update-branch`);
     expect(res.ok).toBe(true);
   });
 });
