@@ -30,7 +30,10 @@ if [ ! -f "$PROJECT_DIR/install.sh" ]; then
   chown clawbox:clawbox "$PROJECT_DIR/.needs-install"
 fi
 
-# Ensure env file exists with test-mode flag before any service picks it up.
+# Seed a small marker file so install.sh knows it's in test mode even before
+# it has had a chance to write its own .env. install.sh itself handles
+# propagation into clawbox-setup.service's environment (via .env) and the
+# root-update service's environment (via /etc/clawbox/network.env).
 mkdir -p /etc/clawbox
 cat > /etc/clawbox/test-mode.env <<EOF
 CLAWBOX_TEST_MODE=1

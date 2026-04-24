@@ -324,6 +324,12 @@ step_network_setup() {
   # Also write to root-owned path for clawbox-root-update@ service
   mkdir -p /etc/clawbox
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
+  # In test mode, propagate the flag into the root-update environment too —
+  # otherwise updater-triggered install.sh steps would try to do the real
+  # Jetson work (nvidia_jetpack, nvpmodel, etc.) and fail on non-Tegra hosts.
+  if is_test_mode; then
+    printf 'CLAWBOX_TEST_MODE=1\n' >> /etc/clawbox/network.env
+  fi
   chmod 644 /etc/clawbox/network.env
   echo "  WiFi interface saved to $IFACE_ENV and /etc/clawbox/network.env"
 
@@ -824,6 +830,12 @@ step_directories_permissions() {
   if [ -n "${CLAWBOX_AI_API_KEY:-}" ] && ! grep -q '^CLAWBOX_AI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
     printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
+  fi
+  # Propagate test mode into the project .env so clawbox-setup.service
+  # (which loads EnvironmentFile=-/home/clawbox/clawbox/.env) sees it at
+  # restart and the Next.js runtime's TEST_MODE checks fire.
+  if is_test_mode; then
+    ensure_env_setting "$ENV_FILE" "CLAWBOX_TEST_MODE" "1"
   fi
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"

@@ -38,6 +38,20 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # found" before install.sh's own `ensure_node_pty` fallback can kick in.
 RUN npm install -g node-gyp
 
+# System libraries Chrome-for-Testing (Playwright-managed Chromium) needs
+# at runtime. The `playwright install chromium` step only downloads the
+# binary; deps would normally be pulled in by `playwright install-deps`
+# which needs root. We install them up-front so the browser/VNC tests can
+# launch Chromium without a second privileged step.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+      libnss3 libnspr4 libdbus-1-3 \
+      libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
+      libcups2 libxkbcommon0 libxcomposite1 libxdamage1 \
+      libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
+      libasound2 libx11-xcb1 libxcb-dri3-0 libxshmfence1 \
+      fonts-liberation xdg-utils \
+ && rm -rf /var/lib/apt/lists/*
+
 # systemd-in-container housekeeping: mask units that require hardware we
 # don't have (console-getty), enable the ones we do want (NM, dbus, avahi).
 RUN systemctl mask \
