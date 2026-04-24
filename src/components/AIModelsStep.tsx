@@ -371,6 +371,23 @@ function ClawAIOfferModal({
 
 const PRIMARY_PROVIDER_IDS = new Set(["anthropic", "openai", "google", "clawai"]);
 
+const CLAWAI_MODELS: Array<{
+  id: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "deepseek/deepseek-v4-pro",
+    label: "V4 Pro",
+    description: "Flagship quality — best for complex tasks",
+  },
+  {
+    id: "deepseek/deepseek-v4-flash",
+    label: "V4 Flash",
+    description: "Faster, lighter — best for quick replies",
+  },
+];
+
 const PROVIDERS: Provider[] = [
   {
     id: "llamacpp",
@@ -589,6 +606,7 @@ export default function AIModelsStep({
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
+  const [selectedClawaiModel, setSelectedClawaiModel] = useState<string>(CLAWAI_MODELS[0].id);
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
   const [showClawAIOffer, setShowClawAIOffer] = useState(false);
 
@@ -853,6 +871,8 @@ export default function AIModelsStep({
         setSelectedOllamaModel(currentModel.replace(/^ollama\//, ""));
       } else if (currentModel.startsWith("llamacpp/")) {
         setSelectedLlamaCppModel(currentModel.replace(/^llamacpp\//, ""));
+      } else if (CLAWAI_MODELS.some((option) => option.id === currentModel)) {
+        setSelectedClawaiModel(currentModel);
       }
     }
   }, [
@@ -978,8 +998,12 @@ export default function AIModelsStep({
 
   const saveClawAI = useCallback(async () => {
     setSelectedProvider("clawai");
-    await saveProviderConfig({ provider: "clawai", apiKey: apiKey.trim() });
-  }, [apiKey, saveProviderConfig]);
+    await saveProviderConfig({
+      provider: "clawai",
+      apiKey: apiKey.trim(),
+      model: selectedClawaiModel,
+    });
+  }, [apiKey, saveProviderConfig, selectedClawaiModel]);
 
   const pollClawAiStatus = useCallback(async () => {
     try {
@@ -1023,7 +1047,7 @@ export default function AIModelsStep({
       const response = await fetch("/setup-api/ai-models/clawai/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: configureScope }),
+        body: JSON.stringify({ scope: configureScope, model: selectedClawaiModel }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -1053,7 +1077,7 @@ export default function AIModelsStep({
       setShowClawAIOffer(true);
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, pollClawAiStatus, showError, stopClawAiPolling]);
+  }, [configureScope, extractError, pollClawAiStatus, selectedClawaiModel, showError, stopClawAiPolling]);
 
   const lastHandledOfferRef = useRef(0);
   useEffect(() => {
@@ -1757,7 +1781,36 @@ export default function AIModelsStep({
             <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
               ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.
             </p>
-            <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
+            <div className="mt-4" role="radiogroup" aria-label="DeepSeek V4 model">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                DeepSeek V4 model
+              </p>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {CLAWAI_MODELS.map((option) => {
+                  const isActive = selectedClawaiModel === option.id;
+                  return (
+                    <button
+                      type="button"
+                      key={option.id}
+                      role="radio"
+                      aria-checked={isActive}
+                      onClick={() => setSelectedClawaiModel(option.id)}
+                      className={`flex flex-col items-start gap-1 rounded-lg border px-3 py-2 text-left transition ${
+                        isActive
+                          ? "border-orange-400/50 bg-orange-500/10 text-white"
+                          : "border-[var(--border-subtle)] bg-transparent text-[var(--text-secondary)] hover:border-orange-400/30 hover:bg-orange-500/5"
+                      }`}
+                    >
+                      <span className="text-sm font-semibold">{option.label}</span>
+                      <span className="text-[11px] leading-snug text-[var(--text-muted)]">
+                        {option.description}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <p className="mt-4 text-xs leading-relaxed text-[var(--text-muted)]">
               Connect now to open the ClawBox portal and request your token. If that handoff does not work, you can still paste the token manually.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-orange-200/90">

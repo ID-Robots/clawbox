@@ -275,6 +275,7 @@ describe("AIModelsStep variants", () => {
             scope: "primary",
             provider: "clawai",
             apiKey: "portal-token-123",
+            model: "deepseek/deepseek-v4-pro",
           }),
           signal: expect.any(AbortSignal),
         }),

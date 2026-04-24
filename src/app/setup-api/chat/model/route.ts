@@ -41,8 +41,8 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  clawai: "deepseek/deepseek-chat",
-  deepseek: "deepseek/deepseek-chat",
+  clawai: "deepseek/deepseek-v4-pro",
+  deepseek: "deepseek/deepseek-v4-pro",
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5.4",
   "openai-codex": "openai-codex/gpt-5.4",

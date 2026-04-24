@@ -143,6 +143,7 @@ export async function GET(request: NextRequest) {
         scope: session.scope,
         provider: "clawai",
         apiKey: tokenData.access_token.trim(),
+        ...(session.model ? { model: session.model } : {}),
       }),
     }));
 

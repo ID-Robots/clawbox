@@ -79,7 +79,7 @@ describe("/setup-api/ai-models/status", () => {
         },
       },
       agents: {
-        defaults: { model: { primary: "deepseek/deepseek-chat" } },
+        defaults: { model: { primary: "deepseek/deepseek-v4-pro" } },
       },
     } as never);
     const res = await GET();
@@ -87,7 +87,7 @@ describe("/setup-api/ai-models/status", () => {
     expect(body.provider).toBe("clawai");
     expect(body.providerLabel).toBe("ClawBox AI");
     expect(body.mode).toBe("api_key");
-    expect(body.model).toBe("deepseek/deepseek-chat");
+    expect(body.model).toBe("deepseek/deepseek-v4-pro");
   });
 
   it("reports the llama.cpp provider label", async () => {

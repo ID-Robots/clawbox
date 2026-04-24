@@ -68,7 +68,7 @@ describe("/setup-api/chat/model", () => {
       agents: {
         defaults: {
           model: {
-            primary: "deepseek/deepseek-chat",
+            primary: "deepseek/deepseek-v4-pro",
           },
         },
       },
@@ -88,14 +88,14 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.activeOptionId).toBe("deepseek/deepseek-chat");
+    expect(body.activeOptionId).toBe("deepseek/deepseek-v4-pro");
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
     expect(body.options).toEqual([
       {
-        id: "deepseek/deepseek-chat",
+        id: "deepseek/deepseek-v4-pro",
         label: "ClawBox AI",
-        model: "deepseek/deepseek-chat",
+        model: "deepseek/deepseek-v4-pro",
         provider: "clawai",
         available: true,
         settingsSection: "ai",
@@ -114,14 +114,14 @@ describe("/setup-api/chat/model", () => {
     expect(body.primary).toEqual({
       available: true,
       label: "ClawBox AI",
-      model: "deepseek/deepseek-chat",
+      model: "deepseek/deepseek-v4-pro",
     });
     expect(body.local).toEqual({
       available: true,
       label: "Gemma 4 Local",
       model: "llamacpp/gemma4-e2b-it-q4_0",
     });
-    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-chat");
+    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-pro");
   });
 
   it("lists every configured cloud provider alongside Local AI", async () => {
@@ -136,7 +136,7 @@ describe("/setup-api/chat/model", () => {
       agents: {
         defaults: {
           model: {
-            primary: "deepseek/deepseek-chat",
+            primary: "deepseek/deepseek-v4-pro",
           },
         },
       },
@@ -153,7 +153,7 @@ describe("/setup-api/chat/model", () => {
       "Gemma 4 Local",
     ]);
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
-      "deepseek/deepseek-chat",
+      "deepseek/deepseek-v4-pro",
       "openai/gpt-5.4",
       "anthropic/claude-sonnet-4-6",
       "llamacpp/gemma4-e2b-it-q4_0",
@@ -171,7 +171,7 @@ describe("/setup-api/chat/model", () => {
         agents: {
           defaults: {
             model: {
-              primary: "deepseek/deepseek-chat",
+              primary: "deepseek/deepseek-v4-pro",
             },
           },
         },
@@ -192,7 +192,7 @@ describe("/setup-api/chat/model", () => {
       } as never);
     vi.mocked(sqliteGet)
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce("deepseek/deepseek-chat");
+      .mockResolvedValueOnce("deepseek/deepseek-v4-pro");
 
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
@@ -241,26 +241,26 @@ describe("/setup-api/chat/model", () => {
         agents: {
           defaults: {
             model: {
-              primary: "deepseek/deepseek-chat",
+              primary: "deepseek/deepseek-v4-pro",
             },
           },
         },
       } as never);
     vi.mocked(sqliteGet)
-      .mockResolvedValueOnce("deepseek/deepseek-chat")
-      .mockResolvedValueOnce("deepseek/deepseek-chat");
+      .mockResolvedValueOnce("deepseek/deepseek-v4-pro")
+      .mockResolvedValueOnce("deepseek/deepseek-v4-pro");
 
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "deepseek/deepseek-chat" }),
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro" }),
     }));
     const body = await response.json();
 
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "deepseek/deepseek-chat",
+      "deepseek/deepseek-v4-pro",
     ]);
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");

@@ -32,7 +32,16 @@ const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https:
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
-const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
+const CLAWBOX_AI_MODEL_PRO = "deepseek/deepseek-v4-pro";
+const CLAWBOX_AI_MODEL_FLASH = "deepseek/deepseek-v4-flash";
+const CLAWBOX_AI_DEFAULT_MODEL = CLAWBOX_AI_MODEL_PRO;
+const CLAWBOX_AI_VALID_MODELS = new Set([CLAWBOX_AI_MODEL_PRO, CLAWBOX_AI_MODEL_FLASH]);
+
+function resolveClawboxAiModel(requested?: string | null): string {
+  if (typeof requested !== "string") return CLAWBOX_AI_DEFAULT_MODEL;
+  const trimmed = requested.trim();
+  return CLAWBOX_AI_VALID_MODELS.has(trimmed) ? trimmed : CLAWBOX_AI_DEFAULT_MODEL;
+}
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB, exceeding the Jetson's 8 GB RAM.
@@ -56,7 +65,7 @@ type ConfigureScope = "primary" | "local";
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   clawai: {
-    defaultModel: CLAWBOX_AI_MODEL,
+    defaultModel: CLAWBOX_AI_DEFAULT_MODEL,
     profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
@@ -201,19 +210,30 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
     baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey,
-    models: [{
-      id: "deepseek-chat",
-      name: "ClawBox AI",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
-      maxTokens: CLAWBOX_AI_MAX_TOKENS,
-    }],
+    models: [
+      {
+        id: "deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
+      },
+      {
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
+      },
+    ],
   });
 }
 
-async function configureClawboxAi(setFallback: boolean, preferredToken?: string) {
+async function configureClawboxAi(setFallback: boolean, preferredToken?: string, fallbackModel?: string) {
   const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
   if (!clawboxAiToken) {
     return false;
@@ -247,7 +267,7 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
       "config",
       "set",
       "agents.defaults.model.fallbacks",
-      JSON.stringify([CLAWBOX_AI_MODEL]),
+      JSON.stringify([resolveClawboxAiModel(fallbackModel)]),
       "--json",
     ]);
   }
@@ -291,6 +311,7 @@ async function ensureFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,
   preferredClawboxAiToken?: string,
+  preferredClawboxAiModel?: string,
 ) {
   const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
     .filter((model): model is string => !!model && model !== primaryModel);
@@ -302,7 +323,7 @@ async function ensureFallbackModel(
   }
 
   try {
-    const fallbackConfigured = await configureClawboxAi(true, preferredClawboxAiToken);
+    const fallbackConfigured = await configureClawboxAi(true, preferredClawboxAiToken, preferredClawboxAiModel);
     if (fallbackConfigured) {
       console.log("[AI Config] Configured ClawBox AI as fallback model");
       return;
@@ -325,6 +346,7 @@ export async function POST(request: Request) {
       expiresIn?: number;
       projectId?: string;
       scope?: ConfigureScope;
+      model?: string;
     };
     try {
       body = await request.json();
@@ -332,7 +354,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary" } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: requestedModel } = body;
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
@@ -378,6 +400,7 @@ export async function POST(request: Request) {
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
     const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
+    const clawboxAiModel = isClawAI ? resolveClawboxAiModel(requestedModel) : null;
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -386,6 +409,8 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
+    } else if (isClawAI && clawboxAiModel) {
+      config.defaultModel = clawboxAiModel;
     }
 
     // 1. Write token to auth-profiles.json
@@ -516,12 +541,12 @@ export async function POST(request: Request) {
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
-      await configureClawboxAi(false, clawboxAiToken);
+      await configureClawboxAi(false, clawboxAiToken, clawboxAiModel ?? undefined);
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.mode", "merge",
       ]);
-      await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
-      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
+      await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken, clawboxAiModel ?? undefined);
+      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (model=${config.defaultModel}, context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({

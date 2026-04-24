@@ -56,6 +56,19 @@ describe("ClawBox AI connect routes", () => {
     }));
   });
 
+  it("persists the DeepSeek V4 model selection on the connect session", async () => {
+    const mod = await import("@/app/setup-api/ai-models/clawai/start/route");
+    await mod.POST(new NextRequest("http://clawbox.local/setup-api/ai-models/clawai/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "primary", model: "deepseek/deepseek-v4-flash" }),
+    }));
+
+    expect(mockWriteClawAiSession).toHaveBeenCalledWith(expect.objectContaining({
+      model: "deepseek/deepseek-v4-flash",
+    }));
+  });
+
   it("reports the current local connect status", async () => {
     mockReadClawAiSession.mockResolvedValueOnce({
       state: "state-123",
@@ -122,6 +135,37 @@ describe("ClawBox AI connect routes", () => {
       status: "complete",
       error: null,
     }));
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards the persisted DeepSeek V4 model to the configure route", async () => {
+    mockReadClawAiSession.mockResolvedValueOnce({
+      state: "state-123",
+      createdAt: Date.now(),
+      status: "pending",
+      provider: "clawai",
+      scope: "primary",
+      redirectUri: "http://clawbox.local/setup-api/ai-models/clawai/callback",
+      deviceName: "ClawBox Test",
+      model: "deepseek/deepseek-v4-flash",
+      error: null,
+    });
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ access_token: "portal-token-123" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const mod = await import("@/app/setup-api/ai-models/clawai/callback/route");
+    await mod.GET(new NextRequest("http://clawbox.local/setup-api/ai-models/clawai/callback?code=abc123&state=state-123"));
+
+    expect(mockConfigurePost).toHaveBeenCalledTimes(1);
+    const configureRequest = mockConfigurePost.mock.calls[0][0];
+    expect(await configureRequest.json()).toEqual({
+      scope: "primary",
+      provider: "clawai",
+      apiKey: "portal-token-123",
+      model: "deepseek/deepseek-v4-flash",
+    });
     vi.unstubAllGlobals();
   });
 });

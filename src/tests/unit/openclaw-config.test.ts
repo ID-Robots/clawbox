@@ -621,7 +621,7 @@ describe("openclaw-config", () => {
         agents: {
           defaults: {
             model: {
-              primary: "deepseek/deepseek-chat",
+              primary: "deepseek/deepseek-v4-pro",
               fallbacks: ["llamacpp/gemma4-e2b-it-q4_0"],
             },
           },
@@ -639,8 +639,8 @@ describe("openclaw-config", () => {
         agents: {
           defaults: {
             model: {
-              primary: "deepseek/deepseek-chat",
-              fallbacks: ["deepseek/deepseek-chat"],
+              primary: "deepseek/deepseek-v4-pro",
+              fallbacks: ["deepseek/deepseek-v4-pro"],
             },
           },
         },

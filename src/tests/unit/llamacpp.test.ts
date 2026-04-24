@@ -87,8 +87,8 @@ describe("llamacpp config helpers", () => {
       agents: {
         defaults: {
           model: {
-            primary: "deepseek/deepseek-chat",
-            fallbacks: ["deepseek/deepseek-chat"],
+            primary: "deepseek/deepseek-v4-pro",
+            fallbacks: ["deepseek/deepseek-v4-pro"],
           },
         },
       },

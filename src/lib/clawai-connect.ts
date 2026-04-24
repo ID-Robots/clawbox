@@ -13,6 +13,7 @@ export interface ClawAiConnectSession {
   scope: "primary" | "local";
   redirectUri?: string;
   deviceName?: string;
+  model?: string;
   error?: string | null;
   completedAt?: number;
 }

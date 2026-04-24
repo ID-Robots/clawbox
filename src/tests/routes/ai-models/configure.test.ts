@@ -275,12 +275,49 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
     expect(providerDef.apiKey).toBe("portal-token-123");
+    expect(providerDef.models.map((m: { id: string }) => m.id)).toEqual([
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+    ]);
 
     expect(mockSetMany).toHaveBeenCalledWith(
       expect.objectContaining({
         clawai_token: "portal-token-123",
       }),
     );
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary deepseek/deepseek-v4-pro");
+  });
+
+  it("honors the DeepSeek V4 Flash model selection for ClawBox AI", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "portal-token-123",
+      model: "deepseek/deepseek-v4-flash",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary deepseek/deepseek-v4-flash");
+  });
+
+  it("ignores an unknown ClawBox AI model and falls back to the default", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "portal-token-123",
+      model: "deepseek/does-not-exist",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary deepseek/deepseek-v4-pro");
   });
 
   it("configures ollama without apiKey", async () => {
@@ -477,7 +514,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-chat"] --json');
+    expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-v4-pro"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
     const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);

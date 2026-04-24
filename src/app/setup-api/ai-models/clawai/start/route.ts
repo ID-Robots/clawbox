@@ -15,7 +15,7 @@ function resolveOrigin(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  let body: { scope?: "primary" | "local"; deviceName?: string } = {};
+  let body: { scope?: "primary" | "local"; deviceName?: string; model?: string } = {};
   try {
     body = await request.json();
   } catch {
@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
   const origin = resolveOrigin(request);
   const redirectUri = `${origin}/setup-api/ai-models/clawai/callback`;
   const deviceName = body.deviceName?.trim() || os.hostname() || "ClawBox";
+  const requestedModel = typeof body.model === "string" ? body.model.trim() : "";
   await writeClawAiSession({
     state,
     createdAt: Date.now(),
@@ -35,6 +36,7 @@ export async function POST(request: NextRequest) {
     scope,
     redirectUri,
     deviceName,
+    ...(requestedModel ? { model: requestedModel } : {}),
     error: null,
   });
 
