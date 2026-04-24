@@ -52,7 +52,15 @@ jobs:
     timeout-minutes: 90
     env:
       CLAWBOX_PORT: "8080"
-      CLAWBOX_UPGRADE_TARGET_BRANCH: ${{ inputs.upgrade_target_branch || 'beta' }}
+      # Default target for the in-app updater test. On PRs targeted at this
+      # harness itself (before it lands on beta/main), use the PR head ref
+      # so `git reset --hard origin/<target>` lands on the same fixes that
+      # made install.sh work under CLAWBOX_TEST_MODE. After the PR merges
+      # to beta, switch the default back to 'beta'.
+      CLAWBOX_UPGRADE_TARGET_BRANCH: >-
+        ${{ inputs.upgrade_target_branch
+            || (github.event_name == 'pull_request' && github.head_ref)
+            || 'beta' }}
     steps:
       - uses: actions/checkout@v4
         with:
