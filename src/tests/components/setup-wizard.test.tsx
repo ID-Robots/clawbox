@@ -84,11 +84,14 @@ describe("SetupWizard", () => {
         return jsonResponse({
           setup_complete: false,
           wifi_configured: true,
-          update_completed: false,
-          password_configured: false,
-          ai_model_configured: false,
+          update_completed: true,
+          password_configured: true,
+          ai_model_configured: true,
           local_ai_configured: false,
           telegram_configured: false,
+          // Pre-removal persistence had Local AI as step 5 and Telegram as
+          // 6. The wizard now collapses to 5 steps total, so this stale
+          // value should land on the new final step (Telegram = 5).
           setup_progress_step: 5,
         });
       }
@@ -98,7 +101,7 @@ describe("SetupWizard", () => {
 
     render(<SetupWizard />);
 
-    expect(await screen.findByTestId("mock-local-ai")).toBeInTheDocument();
+    expect(await screen.findByText("telegram-next")).toBeInTheDocument();
     expect(screen.getByTestId("progress-step")).toHaveTextContent("5");
   });
 
@@ -156,11 +159,11 @@ describe("SetupWizard", () => {
           ai_model_configured: true,
           local_ai_configured: true,
           telegram_configured: false,
-          setup_progress_step: 6,
+          setup_progress_step: 5,
         });
       }
       if (url === "/setup-api/setup/progress") {
-        return jsonResponse({ success: true, step: 6 });
+        return jsonResponse({ success: true, step: 5 });
       }
       if (url === "/setup-api/setup/complete") {
         return jsonResponse({ success: true });

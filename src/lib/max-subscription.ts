@@ -18,6 +18,7 @@ export const PRO_PLAN_FEATURES = [
 export const MAX_PLAN_FEATURES = [
   "Maximum usage",
   "Powered by DeepSeek",
+  "1M token context window",
   "Highest priority",
   "Full support from real humans via call/meeting",
 ] as const;

@@ -146,7 +146,7 @@ describe("SettingsApp factory reset overlay", () => {
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
   });
 
-  it("opens the ClawBox AI offer when the desktop deep-link event is fired", async () => {
+  it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
     const pendingWindow = window as Window & {
       __clawboxPendingSettingsSection?: string;
       __clawboxPendingClawAiOffer?: boolean;
@@ -156,8 +156,16 @@ describe("SettingsApp factory reset overlay", () => {
 
     render(<SettingsApp ui={defaultUi} />);
 
-    expect(await screen.findByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
-    expect(screen.getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/setup-api/ai-models/clawai/start",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    // The legacy "Paste your token here" dialog has been retired in
+    // favour of the device-code flow; assert it stays gone so a
+    // regression that re-mounts it would fail loudly here.
+    expect(screen.queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
   });
 
   it("selects ClawBox AI when the desktop provider deep-link is fired", async () => {
