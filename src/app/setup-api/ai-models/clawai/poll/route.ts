@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configure/route";
 import {
+  type ClawAiConnectSession,
   clearClawAiSession,
   isClawAiSessionExpired,
   readClawAiSession,
@@ -40,22 +41,70 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+// Run the configure pipeline server-side AFTER acknowledging the poll
+// request. Holding the poll's HTTP response open for the full ~50 s
+// gateway restart left the embedded Chromium dropping the connection
+// mid-flight, which stranded the UI on the device-code page even
+// though provisioning had completed. The session-status state machine
+// (pending → configuring → complete) lets a subsequent quick poll see
+// that finalisation finished and trigger the success overlay.
+async function runConfigureInBackground(session: ClawAiConnectSession, accessToken: string) {
+  try {
+    const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope: session.scope,
+        provider: "clawai",
+        apiKey: accessToken,
+        authMode: "subscription",
+        clawaiTier: session.tier ?? "flash",
+      }),
+    }));
+
+    if (!configureResponse.ok) {
+      const configureBody = await configureResponse.text().catch(() => "");
+      const userFacing = formatUserFacingError(configureBody || "Failed to save ClawBox AI token.");
+      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.slice(0, 200));
+      await writeClawAiSession({ ...session, status: "error", error: userFacing });
+      return;
+    }
+
+    await writeClawAiSession({
+      ...session,
+      status: "complete",
+      error: null,
+      completedAt: Date.now(),
+    });
+  } catch (err) {
+    const userFacing = formatUserFacingError(err instanceof Error ? err.message : "Failed to save ClawBox AI token.");
+    console.error("[clawai/poll] Background configure threw", err);
+    await writeClawAiSession({ ...session, status: "error", error: userFacing });
+  }
+}
+
 export async function POST() {
   const session = await readClawAiSession();
   if (!session) {
     return NextResponse.json({ status: "error", error: "No pending ClawBox AI session." }, { status: 400 });
   }
 
-  if (isClawAiSessionExpired(session)) {
-    await clearClawAiSession();
-    return NextResponse.json({ status: "error", error: "ClawBox AI code expired. Please request a new code." }, { status: 410 });
-  }
-
+  // Terminal states first — return without re-querying upstream so the
+  // UI sees the resolved state on its very next poll tick after a long
+  // outage / browser sleep / disconnected fetch.
   if (session.status === "complete") {
     return NextResponse.json({ status: "complete" });
   }
+  if (session.status === "configuring") {
+    return NextResponse.json({ status: "configuring" });
+  }
   if (session.status === "error" && session.error) {
     return NextResponse.json({ status: "error", error: session.error });
+  }
+
+  if (isClawAiSessionExpired(session)) {
+    await clearClawAiSession();
+    return NextResponse.json({ status: "error", error: "ClawBox AI code expired. Please request a new code." }, { status: 410 });
   }
 
   let upstreamRes: Response;
@@ -112,36 +161,15 @@ export async function POST() {
     return NextResponse.json({ status: "pending" });
   }
 
-  // Authorised — drive the configure pipeline server-side so the gateway
-  // restart happens before we report success to the UI. Without this
-  // round-trip the chat would briefly point at the old (no-token)
-  // provider until the next configure call.
-  const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      scope: session.scope,
-      provider: "clawai",
-      apiKey: accessToken,
-      authMode: "subscription",
-      clawaiTier: session.tier ?? "flash",
-    }),
-  }));
+  // Upstream issued a token. Mark the session as `configuring` first so
+  // a concurrent poll (which can happen if the client is on a fast
+  // interval) doesn't fire a second background configure. Then kick
+  // off the configure off the request lifecycle and acknowledge the
+  // poll quickly. The next poll tick — typically within `interval`
+  // seconds — sees `configuring` or `complete` and the UI advances.
+  const configuringSession: ClawAiConnectSession = { ...session, status: "configuring", error: null };
+  await writeClawAiSession(configuringSession);
+  void runConfigureInBackground(configuringSession, accessToken);
 
-  if (!configureResponse.ok) {
-    const configureBody = await configureResponse.text().catch(() => "");
-    const userFacing = formatUserFacingError(configureBody || "Failed to save ClawBox AI token.");
-    console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.slice(0, 200));
-    await writeClawAiSession({ ...session, status: "error", error: userFacing });
-    return NextResponse.json({ status: "error", error: userFacing });
-  }
-
-  await writeClawAiSession({
-    ...session,
-    status: "complete",
-    error: null,
-    completedAt: Date.now(),
-  });
-
-  return NextResponse.json({ status: "complete" });
+  return NextResponse.json({ status: "configuring" });
 }

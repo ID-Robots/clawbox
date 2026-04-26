@@ -3,7 +3,13 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
 
-export type ClawAiConnectStatus = "pending" | "complete" | "error";
+// `configuring` is the intermediate state held while the device-side
+// configure pipeline is restarting the gateway after upstream issued a
+// token. Without it the poll route would have to hold the HTTP request
+// open for the full ~50 s gateway restart, which the embedded Chromium
+// often drops mid-flight — leaving the UI stuck on the device-code
+// page even though the server already finished.
+export type ClawAiConnectStatus = "pending" | "configuring" | "complete" | "error";
 export type ClawAiTier = "flash" | "pro";
 
 // Device-authorization session: a code the user types on the portal,

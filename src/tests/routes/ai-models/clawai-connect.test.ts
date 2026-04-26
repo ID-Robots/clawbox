@@ -127,7 +127,7 @@ describe("ClawBox AI device-auth routes", () => {
     vi.unstubAllGlobals();
   });
 
-  it("forwards the issued token to the configure route on a complete poll", async () => {
+  it("acknowledges the poll with `configuring` and runs configure off the request lifecycle", async () => {
     mockReadClawAiSession.mockResolvedValueOnce({
       device_id: "device-id-xyz",
       user_code: "ABCD-1234",
@@ -150,13 +150,22 @@ describe("ClawBox AI device-auth routes", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
+    // Make configure resolve immediately so the background task settles
+    // within the test's await window — production goes through the real
+    // configure pipeline which is what makes the request take ~50 s and
+    // is exactly why we now run it off the poll's request lifecycle.
+    mockConfigurePost.mockResolvedValueOnce(new Response(null, { status: 200 }));
 
     const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
     const response = await mod.POST();
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ status: "complete" });
+    expect(body).toEqual({ status: "configuring" });
+    // Background configure runs as a fire-and-forget; flush microtasks so
+    // the test sees its writes before the assertions below.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
     expect(mockConfigurePost).toHaveBeenCalledTimes(1);
     const configureRequest = mockConfigurePost.mock.calls[0][0];
     expect(await configureRequest.json()).toEqual({
@@ -166,6 +175,11 @@ describe("ClawBox AI device-auth routes", () => {
       authMode: "subscription",
       clawaiTier: "pro",
     });
+    // The session goes through `configuring` first (synchronously, before
+    // we acknowledge the poll) and then `complete` once the background
+    // configure resolves.
+    const writes = mockWriteClawAiSession.mock.calls.map(([arg]) => arg.status);
+    expect(writes).toEqual(["configuring", "complete"]);
     expect(mockWriteClawAiSession).toHaveBeenLastCalledWith(expect.objectContaining({
       status: "complete",
       error: null,

@@ -501,6 +501,13 @@ export default function AIModelsStep({
   const clawAiStartControllerRef = useRef<AbortController | null>(null);
   const clawAiPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clawAiPollControllerRef = useRef<AbortController | null>(null);
+  // Tracks whether we've already surfaced the configuring overlay for
+  // the current device-auth attempt. The poll route returns
+  // `configuring` for every tick while the background gateway restart
+  // is in flight, so without this latch the overlay would reset to
+  // phase 0 every interval and look like the progress bar is looping
+  // back to the start.
+  const clawAiConfiguringShownRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -520,6 +527,7 @@ export default function AIModelsStep({
     clawAiPollControllerRef.current = null;
     clawAiStartControllerRef.current?.abort();
     clawAiStartControllerRef.current = null;
+    clawAiConfiguringShownRef.current = false;
     setClawaiDevicePolling(false);
   }, []);
 
@@ -855,7 +863,11 @@ export default function AIModelsStep({
   };
 
   // Single tick of the upstream-issuance poll. Schedules itself again
-  // every `interval` seconds while the session stays in `pending`.
+  // every `interval` seconds while the session stays in `pending` or
+  // `configuring`. The server-side route returns `configuring` as soon
+  // as the upstream issues a token and runs the gateway-restart in the
+  // background; we keep polling at that point so the UI advances when
+  // the configure pipeline writes `complete`.
   const pollClawAiDeviceAuth = useCallback(async (interval: number) => {
     clawAiPollControllerRef.current?.abort();
     const controller = new AbortController();
@@ -872,6 +884,28 @@ export default function AIModelsStep({
         stopClawAiPolling();
         setSaving(false);
         showSuccessAndContinue();
+        return;
+      }
+      if (data.status === "configuring") {
+        // Token landed; the device is now restarting the gateway.
+        // Surface the configuring overlay (drops the device-code page)
+        // and keep polling on the `pending` cadence so we pick up
+        // `complete` as soon as the background configure finishes.
+        // Latch via clawAiConfiguringShownRef so subsequent ticks (the
+        // server returns `configuring` for every tick while the gateway
+        // restart is in flight) don't reset the overlay back to phase
+        // 0 and make the progress bar look like it's looping.
+        if (!clawAiConfiguringShownRef.current) {
+          clawAiConfiguringShownRef.current = true;
+          setClawaiDeviceCode(null);
+          setClawaiVerificationUrl(null);
+          setClawaiDevicePolling(false);
+          setSaving(false);
+          showConfiguring("generic");
+        }
+        clawAiPollRef.current = setTimeout(() => {
+          void pollClawAiDeviceAuth(interval);
+        }, Math.max(interval, 1) * 1000);
         return;
       }
       if (data.status === "error" || (!response.ok && response.status === 410)) {
@@ -893,7 +927,7 @@ export default function AIModelsStep({
         void pollClawAiDeviceAuth(interval);
       }, Math.max(interval, 1) * 1000);
     }
-  }, [showError, showSuccessAndContinue, stopClawAiPolling]);
+  }, [showConfiguring, showError, showSuccessAndContinue, stopClawAiPolling]);
 
   // Kicks off the device-authorisation handshake: asks the server for a
   // user_code + verification_url, shows them in the Subscription tab,
