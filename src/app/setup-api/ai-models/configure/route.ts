@@ -34,8 +34,15 @@ const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 const CLAWBOX_AI_PROVIDER = "deepseek";
 type ClawboxAiTier = "flash" | "pro";
-const CLAWBOX_AI_FLASH_MODEL_ID = process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-chat";
-const CLAWBOX_AI_PRO_MODEL_ID = process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-reasoner";
+// Per the April 24 2026 DeepSeek refresh, the legacy `deepseek-chat`
+// and `deepseek-reasoner` aliases both resolve to the V4 *Flash*
+// (284B / 13B active) model on the upstream proxy and retire on
+// July 24 2026. The Pro tier needs the new explicit `deepseek-v4-pro`
+// (1.6T / 49B active) slug to actually route to the premium-reasoning
+// weights. Both names remain env-overridable so a staging proxy with a
+// different alias map can point them elsewhere without code changes.
+const CLAWBOX_AI_FLASH_MODEL_ID = process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-v4-flash";
+const CLAWBOX_AI_PRO_MODEL_ID = process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-v4-pro";
 const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
   flash: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_FLASH_MODEL_ID}`,
   pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
