@@ -227,7 +227,7 @@ function ConfiguringOverlay({
   );
 }
 
-const PRIMARY_PROVIDER_IDS = new Set(["clawai"]);
+const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic"]);
 
 const PROVIDERS: Provider[] = [
   {
@@ -303,12 +303,6 @@ const PROVIDERS: Provider[] = [
     name: "Anthropic Claude",
     description: "Claude models by Anthropic",
     authOptions: [
-      {
-        mode: "subscription",
-        label: "Subscription",
-        placeholder: "",
-        hint: "Connect your Claude Pro/Max subscription via OAuth.",
-      },
       {
         mode: "token",
         label: "API Key",
@@ -1667,11 +1661,17 @@ export default function AIModelsStep({
                 {(["flash", "pro"] as const).map((tier) => {
                   const tierLabel = tier === "flash" ? "Flash" : "Pro";
                   const isActive = clawaiTier === tier;
+                  // The visible label is just "Flash" or "Pro" with the
+                  // "Trial" badge rendered as decorative text; screen readers
+                  // skip the badge (aria-hidden) so the radio's accessible
+                  // name needs to carry the tier-and-badge context itself.
+                  const ariaLabel = tier === "pro" ? `${tierLabel} tier, Trial` : `${tierLabel} tier`;
                   return (
                     <button
                       type="button"
                       role="radio"
                       aria-checked={isActive}
+                      aria-label={ariaLabel}
                       key={tier}
                       onClick={() => persistClawaiTier(tier)}
                       className={`relative px-3 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
@@ -1898,16 +1898,23 @@ export default function AIModelsStep({
             {/* API Key tab — direct token paste, same UX as other providers. */}
             {currentAuthMode === "token" && (
               <div className="mt-4">
-                <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
+                <label htmlFor="clawai-portal-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
                   Portal token
                 </label>
                 <div className="relative">
                   <input
+                    id="clawai-portal-token"
                     type={showKey ? "text" : "password"}
                     value={apiKey}
                     onChange={(e) => {
                       setApiKey(e.target.value);
                       if (status?.type === "error") setStatus(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        saveModel();
+                      }
                     }}
                     placeholder="Paste your portal token"
                     spellCheck={false}

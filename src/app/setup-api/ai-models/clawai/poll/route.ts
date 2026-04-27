@@ -119,7 +119,14 @@ export async function POST() {
       signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
-    console.warn("[clawai/poll] Upstream unreachable", err instanceof Error ? err.message : err);
+    // Include the upstream URL and device_id so a single log line is enough
+    // to correlate a transient failure to the affected device pairing flow.
+    // user_code is *not* logged — it's the secret the user types on the
+    // portal to claim this session.
+    console.warn(
+      `[clawai/poll] Upstream unreachable url=${CLAWBOX_AI_DEVICE_POLL_URL} device_id=${session.device_id}:`,
+      err instanceof Error ? err.message : err,
+    );
     // Treat transient failures as pending so the UI keeps polling — the
     // user may simply be on a flaky uplink; turning every blip into a
     // hard error would drop them back to the start of the flow.

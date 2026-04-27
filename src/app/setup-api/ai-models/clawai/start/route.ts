@@ -28,16 +28,41 @@ interface UpstreamDeviceStartResponse {
 }
 
 export async function POST(request: NextRequest) {
-  let body: { scope?: "primary" | "local"; deviceName?: string; tier?: "flash" | "pro" } = {};
+  let body: { scope?: unknown; deviceName?: unknown; tier?: unknown } = {};
   try {
     body = await request.json();
   } catch {
     // Empty body is fine — defaults applied below.
   }
 
-  const scope = body.scope === "local" ? "local" : "primary";
-  const tier = body.tier === "pro" ? "pro" : "flash";
-  const deviceName = body.deviceName?.trim() || os.hostname() || "ClawBox";
+  // Defaults apply only when the field is omitted entirely. A *present-but-
+  // wrong* value used to be silently coerced to the default, which made
+  // typos like {"tier":"PRO"} (capitalised) succeed against the wrong tier;
+  // surface that as a 400 instead so the caller learns about it.
+  let tier: "flash" | "pro" = "flash";
+  if (body.tier !== undefined) {
+    if (body.tier !== "flash" && body.tier !== "pro") {
+      return NextResponse.json(
+        { error: "tier must be 'flash' or 'pro' when provided" },
+        { status: 400 },
+      );
+    }
+    tier = body.tier;
+  }
+
+  let scope: "primary" | "local" = "primary";
+  if (body.scope !== undefined) {
+    if (body.scope !== "primary" && body.scope !== "local") {
+      return NextResponse.json(
+        { error: "scope must be 'primary' or 'local' when provided" },
+        { status: 400 },
+      );
+    }
+    scope = body.scope;
+  }
+
+  const deviceNameRaw = typeof body.deviceName === "string" ? body.deviceName : "";
+  const deviceName = deviceNameRaw.trim() || os.hostname() || "ClawBox";
 
   // Try the upstream device-start endpoint first. The portal owns the
   // user_code <-> device_id mapping in production so codes survive a

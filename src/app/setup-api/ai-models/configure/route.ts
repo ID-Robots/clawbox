@@ -22,6 +22,15 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import {
+  CLAWBOX_AI_PROVIDER,
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_DEFAULT_TIER,
+  normalizeClawboxAiTier,
+  type ClawboxAiTier,
+} from "@/lib/clawbox-ai-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
@@ -32,29 +41,7 @@ const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https:
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
-const CLAWBOX_AI_PROVIDER = "deepseek";
-type ClawboxAiTier = "flash" | "pro";
-// Per the April 24 2026 DeepSeek refresh, the legacy `deepseek-chat`
-// and `deepseek-reasoner` aliases both resolve to the V4 *Flash*
-// (284B / 13B active) model on the upstream proxy and retire on
-// July 24 2026. The Pro tier needs the new explicit `deepseek-v4-pro`
-// (1.6T / 49B active) slug to actually route to the premium-reasoning
-// weights. Both names remain env-overridable so a staging proxy with a
-// different alias map can point them elsewhere without code changes.
-const CLAWBOX_AI_FLASH_MODEL_ID = process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-v4-flash";
-const CLAWBOX_AI_PRO_MODEL_ID = process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-v4-pro";
-const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
-  flash: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_FLASH_MODEL_ID}`,
-  pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
-};
-const CLAWBOX_AI_DEFAULT_TIER: ClawboxAiTier = "flash";
 const CLAWBOX_AI_MODEL = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
-
-function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "flash" || normalized === "pro" ? normalized : null;
-}
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB, exceeding the Jetson's 8 GB RAM.

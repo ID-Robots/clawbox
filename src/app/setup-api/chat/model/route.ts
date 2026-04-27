@@ -10,6 +10,10 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import {
+  CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_DEFAULT_TIER,
+} from "@/lib/clawbox-ai-models";
 
 export const dynamic = "force-dynamic";
 
@@ -40,12 +44,13 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+// Imported from `@/lib/clawbox-ai-models` so this fallback can't drift away
+// from the configure route's tier→model mapping. Used only when a legacy
+// install has no explicit `models.providers.deepseek.models` entry; new
+// installs surface every tier directly via the provider definition.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  // Match the configure route's CLAWBOX_AI_FLASH_MODEL_ID — used only
-  // when no explicit `models.providers.deepseek.models` entry exists
-  // (legacy installs that were configured before the V4 alias swap).
-  clawai: "deepseek/deepseek-v4-flash",
-  deepseek: "deepseek/deepseek-v4-flash",
+  clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
+  deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5.4",
   "openai-codex": "openai-codex/gpt-5.4",
