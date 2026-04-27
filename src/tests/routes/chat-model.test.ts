@@ -154,7 +154,7 @@ describe("/setup-api/chat/model", () => {
     ]);
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-chat",
-      "openai/gpt-5.4",
+      "openai/gpt-5",
       "anthropic/claude-sonnet-4-6",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
@@ -172,6 +172,20 @@ describe("/setup-api/chat/model", () => {
           defaults: {
             model: {
               primary: "deepseek/deepseek-chat",
+            },
+          },
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "llamacpp/gemma4-e2b-it-q4_0",
             },
           },
         },
@@ -275,5 +289,82 @@ describe("/setup-api/chat/model", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "Invalid chat model source" });
+  });
+
+  it("accepts an arbitrary openrouter/<slug> when the openrouter profile exists", async () => {
+    // The wizard curates ~12 models but OpenRouter exposes 340+. Users can
+    // enter a custom slug in the wizard or hot-swap to a non-curated model
+    // in the chat header — either way the slug reaches this route without
+    // being in state.options. We accept it as long as openrouter is
+    // configured (auth profile present). Without this escape hatch the
+    // custom-input path is dead weight.
+    vi.mocked(readConfig)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "openrouter:default": { provider: "openrouter", mode: "token" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/anthropic/claude-haiku-4-5",
+            },
+          },
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "openrouter:default": { provider: "openrouter", mode: "token" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/mistralai/mistral-large",
+            },
+          },
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "openrouter:default": { provider: "openrouter", mode: "token" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/mistralai/mistral-large",
+            },
+          },
+        },
+      } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openrouter/mistralai/mistral-large" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "openrouter/mistralai/mistral-large",
+    ]);
+    expect(body.activeModel).toBe("openrouter/mistralai/mistral-large");
+  });
+
+  it("rejects a non-openrouter model that is not in state.options", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-nonexistent" }),
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
   });
 });

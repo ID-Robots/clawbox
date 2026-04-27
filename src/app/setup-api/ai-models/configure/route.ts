@@ -22,6 +22,8 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { isValidModelId } from "@/lib/provider-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const AUTH_PROFILES_PATH =
@@ -64,7 +66,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "anthropic:default",
   },
   openai: {
-    defaultModel: "openai/gpt-5.4",
+    defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
       defaultModel: "openai-codex/gpt-5.4",
@@ -72,11 +74,15 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     },
   },
   google: {
-    defaultModel: "google/gemini-2.0-flash",
+    defaultModel: "google/gemini-2.5-flash",
     profileKey: "google:default",
   },
   openrouter: {
-    defaultModel: "openrouter/moonshotai/kimi-k2-0905",
+    // Default pre-selection when user reaches the OpenRouter screen. The
+    // user can override via `model` in the request body — see the picker
+    // in AIModelsStep. Single source of truth: OPENROUTER_DEFAULT_MODEL_ID
+    // in src/lib/openrouter-models.ts.
+    defaultModel: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
     profileKey: "openrouter:default",
   },
   ollama: {
@@ -325,6 +331,7 @@ export async function POST(request: Request) {
       expiresIn?: number;
       projectId?: string;
       scope?: ConfigureScope;
+      model?: string;
     };
     try {
       body = await request.json();
@@ -332,7 +339,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary" } = body;
+    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
@@ -386,6 +393,40 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
+    } else if (typeof bodyModel === "string" && bodyModel.trim()) {
+      // User picked a specific model in the wizard (curated list or
+      // custom ID). Validate shape to stop empty strings / obvious typos
+      // from silently saving a broken primary. We don't check against
+      // the curated list — users can type newer model IDs we haven't
+      // added yet.
+      //
+      // Provider namespace differs between auth modes:
+      //   openai + token        → openai/<id>       (api.openai.com)
+      //   openai + subscription → openai-codex/<id> (chatgpt.com backend)
+      // The two catalogs are NOT the same — `gpt-5.4` only exists on
+      // openai-codex; `gpt-5` only exists on openai direct. The
+      // `config.defaultModel` was already set to the correct namespace
+      // above by applying subscriptionOverride, so we derive the
+      // target provider from the existing default instead of `provider`.
+      const requestedModel = bodyModel.trim();
+      const targetProvider = config.defaultModel.split("/", 1)[0];
+      const supportedProviders = new Set([
+        "openrouter",
+        "anthropic",
+        "openai",
+        "openai-codex",
+        "google",
+      ]);
+      if (supportedProviders.has(targetProvider)) {
+        if (!isValidModelId(targetProvider, requestedModel)) {
+          const providerLabel = targetProvider === "openrouter" ? "OpenRouter" : targetProvider;
+          return NextResponse.json(
+            { error: `Invalid ${providerLabel} model ID: ${requestedModel}` },
+            { status: 400 },
+          );
+        }
+        config.defaultModel = `${targetProvider}/${requestedModel}`;
+      }
     }
 
     // 1. Write token to auth-profiles.json
@@ -583,23 +624,32 @@ export async function POST(request: Request) {
       // provider definition the runtime has no baseUrl to call — the chat
       // turn silently returns `usage: 0/0/0` and the UI appears dead.
       // Writing this entry restores the full OpenAI-compatible path.
-      // The `models` array is used for UI enumeration only; OpenClaw
-      // routes any `openrouter/<slug>` string through the same baseUrl, so
-      // listing just the default is enough to make every OpenRouter model
-      // reachable via `agents.defaults.model.primary`.
+      //
+      // The `models` array drives model resolution: OpenClaw looks up
+      // `agents.defaults.model.primary` (or a per-session override) in
+      // this list to pick up contextWindow/maxTokens. Listing only the
+      // initial default would pin the user to that one model — any
+      // mid-conversation switch (curated or custom) would fail silently
+      // because the runtime can't resolve the new slug. Seeding the full
+      // curated list here (plus the user-picked id, even if off-list)
+      // makes every in-UI option immediately routeable without a re-save.
       const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
+      const modelIds = new Set<string>([
+        defaultModelId,
+        ...OPENROUTER_CURATED_MODELS.map((option) => option.id),
+      ]);
       const providerDef = JSON.stringify({
         baseUrl: "https://openrouter.ai/api/v1",
         api: "openai-completions",
         apiKey: "openrouter-ref",
-        models: [{
-          id: defaultModelId,
-          name: defaultModelId,
+        models: Array.from(modelIds).map((id) => ({
+          id,
+          name: id,
           input: ["text"],
           contextWindow: 131072,
           maxTokens: 8192,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        }],
+        })),
       });
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.providers.openrouter", providerDef, "--json",
