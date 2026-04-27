@@ -182,7 +182,7 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   },
 ] as const;
 
-export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
+export const PROVIDER_CATALOGS = Object.freeze({
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
@@ -213,11 +213,15 @@ export const PROVIDER_CATALOGS: Record<string, ProviderCatalog> = {
     defaultModelId: OPENROUTER_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
-};
+} satisfies Record<string, ProviderCatalog>);
+
+type ProviderCatalogKey = keyof typeof PROVIDER_CATALOGS;
 
 export function getProviderCatalog(provider: string | null | undefined): ProviderCatalog | null {
   if (!provider) return null;
-  return PROVIDER_CATALOGS[provider] ?? null;
+  return Object.prototype.hasOwnProperty.call(PROVIDER_CATALOGS, provider)
+    ? PROVIDER_CATALOGS[provider as ProviderCatalogKey]
+    : null;
 }
 
 /**

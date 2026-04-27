@@ -615,14 +615,17 @@ export default function AIModelsStep({
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [customModelId, setCustomModelId] = useState<string>("");
   const [useCustomModel, setUseCustomModel] = useState<boolean>(false);
+  const [modelTouched, setModelTouched] = useState(false);
 
   useEffect(() => {
     if (!activeCatalog || !selectedProvider) {
       setSelectedModelId("");
       setCustomModelId("");
       setUseCustomModel(false);
+      setModelTouched(false);
       return;
     }
+    if (modelTouched) return;
     // Extract modelId under the catalog's namespace, NOT the selected
     // provider's name — for openai+subscription these differ
     // (openai-codex vs openai).
@@ -643,7 +646,7 @@ export default function AIModelsStep({
       setCustomModelId(currentModelId);
       setUseCustomModel(true);
     }
-  }, [activeCatalog, currentModel, selectedProvider]);
+  }, [activeCatalog, currentModel, modelTouched, selectedProvider]);
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
   const [showClawAIOffer, setShowClawAIOffer] = useState(false);
 
@@ -852,6 +855,7 @@ export default function AIModelsStep({
     stopPolling();
     setSelectedProvider(providerId);
     setAuthMode(getAvailableAuthOptionsForProvider(providerId)[0]?.mode ?? "token");
+    setModelTouched(false);
     setApiKey("");
     setShowKey(false);
     setStatus(null);
@@ -885,6 +889,7 @@ export default function AIModelsStep({
     const options = getAvailableAuthOptionsForProvider(selectedProvider);
     if (!options.length) return;
     if (!options.some((opt) => opt.mode === authMode)) {
+      setModelTouched(false);
       setAuthMode(options[0].mode);
     }
   }, [authMode, getAvailableAuthOptionsForProvider, selectedProvider]);
@@ -1023,6 +1028,12 @@ export default function AIModelsStep({
     }
   }, [configureScope, extractError, showConfiguring, showError, showSuccessAndContinue]);
 
+  const getRequestedCatalogModelId = useCallback((fallbackToDefault = false) => {
+    if (!activeCatalog) return "";
+    const requestedId = useCustomModel ? customModelId.trim() : selectedModelId.trim();
+    return requestedId || (fallbackToDefault ? activeCatalog.defaultModelId : "");
+  }, [activeCatalog, customModelId, selectedModelId, useCustomModel]);
+
   const saveModel = async () => {
     if (!selectedProvider) return showError(t("ai.selectProvider"));
     if (!apiKey.trim()) return showError(t("ai.enterKey"));
@@ -1039,7 +1050,7 @@ export default function AIModelsStep({
     // validation passes against the correct namespace — the backend
     // writes the fully-qualified default using the same namespace.
     if (activeCatalog) {
-      const requestedId = useCustomModel ? customModelId.trim() : selectedModelId;
+      const requestedId = getRequestedCatalogModelId();
       if (!requestedId) {
         return showError(`Please choose a model for ${selectedProvider}`);
       }
@@ -1183,9 +1194,7 @@ export default function AIModelsStep({
       // instead of the PROVIDERS subscriptionOverride default. Without
       // this, picking a model in the wizard would silently be ignored
       // for OAuth providers.
-      const subscriptionModel = activeCatalog
-        ? (useCustomModel ? customModelId.trim() : selectedModelId)
-        : "";
+      const subscriptionModel = getRequestedCatalogModelId(true);
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1214,7 +1223,7 @@ export default function AIModelsStep({
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [activeCatalog, configureScope, customModelId, extractError, selectedModelId, selectedProvider, showConfiguring, showError, showSuccessAndContinue, useCustomModel]);
+  }, [configureScope, extractError, getRequestedCatalogModelId, selectedProvider, showConfiguring, showError, showSuccessAndContinue]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
@@ -1446,6 +1455,74 @@ export default function AIModelsStep({
   const selectedConnectLabel = getConnectButtonLabel(selected?.name);
 
   // --- Render helpers ---
+
+  const renderProviderModelPicker = () => {
+    if (!activeCatalog || !selected) return null;
+    return (
+      <div className="mt-4">
+        <label
+          htmlFor="ai-provider-model"
+          className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+        >
+          Model
+        </label>
+        {!useCustomModel ? (
+          <select
+            id="ai-provider-model"
+            value={selectedModelId}
+            onChange={(e) => {
+              setModelTouched(true);
+              setSelectedModelId(e.target.value);
+            }}
+            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors"
+          >
+            {activeCatalog.models.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label} — {option.hint}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            id="ai-provider-model"
+            type="text"
+            value={customModelId}
+            onChange={(e) => {
+              setModelTouched(true);
+              setCustomModelId(e.target.value);
+            }}
+            placeholder={
+              selected.id === "openrouter"
+                ? "org/model-id (e.g. mistralai/mistral-large)"
+                : `model-id (e.g. ${activeCatalog.defaultModelId})`
+            }
+            spellCheck={false}
+            autoComplete="off"
+            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+          />
+        )}
+        {activeCatalog.allowCustom && (
+          <button
+            type="button"
+            onClick={() => {
+              setModelTouched(true);
+              setUseCustomModel((value) => !value);
+            }}
+            className="mt-1.5 bg-transparent p-0 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
+          >
+            {useCustomModel
+              ? "Pick from curated list"
+              : "Enter a custom model ID…"}
+          </button>
+        )}
+        <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+          {selected.id === "openrouter"
+            ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
+            : "You can switch between the curated models from the chat window anytime."}
+        </p>
+      </div>
+    );
+  };
 
   const renderDeviceAuth = () => (
     <div>
@@ -1764,6 +1841,7 @@ export default function AIModelsStep({
                     onClick={() => {
                       stopPolling();
                       setAuthMode(opt.mode);
+                      setModelTouched(false);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
@@ -1831,63 +1909,9 @@ export default function AIModelsStep({
                   </button>
                 </div>
                 <p className="mt-1.5 text-xs text-[var(--text-muted)]">{activeAuth.hint}</p>
-                {activeCatalog && (
-                  <div className="mt-4">
-                    <label
-                      htmlFor="ai-provider-model"
-                      className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
-                    >
-                      Model
-                    </label>
-                    {!useCustomModel ? (
-                      <select
-                        id="ai-provider-model"
-                        value={selectedModelId}
-                        onChange={(e) => setSelectedModelId(e.target.value)}
-                        className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors"
-                      >
-                        {activeCatalog.models.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label} — {option.hint}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        id="ai-provider-model"
-                        type="text"
-                        value={customModelId}
-                        onChange={(e) => setCustomModelId(e.target.value)}
-                        placeholder={
-                          selected.id === "openrouter"
-                            ? "org/model-id (e.g. mistralai/mistral-large)"
-                            : `model-id (e.g. ${activeCatalog.defaultModelId})`
-                        }
-                        spellCheck={false}
-                        autoComplete="off"
-                        className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
-                      />
-                    )}
-                    {activeCatalog.allowCustom && (
-                      <button
-                        type="button"
-                        onClick={() => setUseCustomModel((v) => !v)}
-                        className="mt-1.5 bg-transparent p-0 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
-                      >
-                        {useCustomModel
-                          ? "Pick from curated list"
-                          : "Enter a custom model ID…"}
-                      </button>
-                    )}
-                    <p className="mt-1.5 text-xs text-[var(--text-muted)]">
-                      {selected.id === "openrouter"
-                        ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
-                        : "You can switch between the curated models from the chat window anytime."}
-                    </p>
-                  </div>
-                )}
               </div>
             )}
+            {renderProviderModelPicker()}
           </div>
         )}
 

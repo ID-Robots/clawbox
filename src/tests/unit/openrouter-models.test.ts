@@ -44,6 +44,8 @@ describe("openrouter-models", () => {
       "/claude",
       "anthropic/",
       "anthropic//claude",
+      "anthropic/claude/",
+      "org/model//variant",
     ])("rejects invalid slug %s", (slug) => {
       expect(isValidOpenRouterModelId(slug)).toBe(false);
     });

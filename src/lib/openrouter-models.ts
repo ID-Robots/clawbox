@@ -105,7 +105,8 @@ export const OPENROUTER_DEFAULT_MODEL_ID = "anthropic/claude-haiku-4.5";
  * custom model ID — stops empty strings, whitespace, and obvious typos
  * without getting in the way of legitimate rare slugs.
  */
-const OPENROUTER_SLUG_RE = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/-]*$/i;
+const OPENROUTER_SLUG_RE =
+  /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+$/i;
 
 export function isValidOpenRouterModelId(id: string): boolean {
   return OPENROUTER_SLUG_RE.test(id.trim());
