@@ -1915,7 +1915,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               requestedProviderId={requestedAiProviderId}
               providerSelectionRequest={providerSelectionRequest}
               title="Connect AI Provider"
-              description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
+              description="Choose the primary AI service your assistant should use day to day"
               onConfigured={() => {
                 fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
                 notifyChatModelStateChanged();
