@@ -66,7 +66,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "anthropic:default",
   },
   openai: {
-    defaultModel: "openai/gpt-5.4",
+    defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
       defaultModel: "openai-codex/gpt-5.4",
