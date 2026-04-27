@@ -133,7 +133,7 @@ describe("gateway-proxy", () => {
       expect(html).toContain("my-secret-token");
     });
 
-    it("redirects to setup when gateway returns error", async () => {
+    it("returns 503 'starting' page when gateway returns error", async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
@@ -145,12 +145,14 @@ describe("gateway-proxy", () => {
       });
 
       const response = await gatewayProxy.serveGatewayHTML(request);
+      const html = await response.text();
 
-      expect(response.status).toBe(302);
-      expect(response.headers.get("location")).toContain("/setup");
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(html).toContain("OpenClaw is starting");
     });
 
-    it("redirects to setup when fetch throws", async () => {
+    it("returns 503 'starting' page when fetch throws", async () => {
       const mockFetch = vi.fn().mockRejectedValue(new Error("Connection refused"));
       vi.stubGlobal("fetch", mockFetch);
 
@@ -160,7 +162,7 @@ describe("gateway-proxy", () => {
 
       const response = await gatewayProxy.serveGatewayHTML(request);
 
-      expect(response.status).toBe(302);
+      expect(response.status).toBe(503);
     });
 
     it("handles missing token gracefully", async () => {

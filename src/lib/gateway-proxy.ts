@@ -51,6 +51,12 @@ export async function getGatewayToken(): Promise<string> {
 /**
  * Fetches the gateway SPA HTML and injects the ClawBox bar + auth token.
  * Used by both the root route and the catch-all gateway route.
+ *
+ * Timeout is 20s (was 3s): on Jetson the gateway can take 10–30s to
+ * render its SPA root the first time after a restart while channels
+ * and sidecars are warming up. The previous 3s was firing during
+ * routine restarts and bouncing every gateway-backed app to /setup
+ * even though setup was complete.
  */
 export async function serveGatewayHTML(
   request: NextRequest
@@ -59,12 +65,12 @@ export async function serveGatewayHTML(
     const [res, gatewayToken] = await Promise.all([
       fetch(`http://127.0.0.1:${GATEWAY_PORT}/`, {
         cache: "no-store",
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(20000),
       }),
       getGatewayToken(),
     ]);
     if (!res.ok) {
-      return redirectToSetup(request);
+      return gatewayUnavailable();
     }
     let html = await res.text();
 
@@ -113,6 +119,24 @@ export async function serveGatewayHTML(
       },
     });
   } catch {
-    return redirectToSetup(request);
+    return gatewayUnavailable();
   }
+}
+
+/**
+ * Returned when setup is complete but the gateway HTTP isn't responding
+ * (still warming up after restart, briefly overloaded, etc.). Shows an
+ * inline "starting" page that auto-retries instead of redirecting to
+ * /setup, which would mislead the user into thinking setup itself broke.
+ */
+function gatewayUnavailable(): NextResponse {
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>OpenClaw is starting…</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#0b0e14;color:#e5e7eb;font-family:system-ui,-apple-system,sans-serif}.wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px;text-align:center}.spin{width:42px;height:42px;border:3px solid rgba(249,115,22,0.18);border-top-color:#f97316;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}h1{margin:0;font-size:18px;font-weight:600;color:#f3f4f6}p{margin:0;color:#9ca3af;font-size:14px;max-width:420px;line-height:1.5}.note{font-size:12px;color:#6b7280;margin-top:12px}</style></head><body><div class="wrap"><div class="spin"></div><h1>OpenClaw is starting…</h1><p>The gateway is warming up. This usually takes 10–30 seconds after a restart on Jetson hardware.</p><p class="note">This page auto-refreshes every 5 seconds.</p></div><script>setTimeout(function(){location.reload()},5000)</script></body></html>`;
+  return new NextResponse(html, {
+    status: 503,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Retry-After": "5",
+    },
+  });
 }
