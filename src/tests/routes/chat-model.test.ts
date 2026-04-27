@@ -154,7 +154,7 @@ describe("/setup-api/chat/model", () => {
     ]);
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-chat",
-      "openai/gpt-5.4",
+      "openai/gpt-5",
       "anthropic/claude-sonnet-4-6",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
@@ -172,6 +172,20 @@ describe("/setup-api/chat/model", () => {
           defaults: {
             model: {
               primary: "deepseek/deepseek-chat",
+            },
+          },
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "llamacpp/gemma4-e2b-it-q4_0",
             },
           },
         },
@@ -295,6 +309,20 @@ describe("/setup-api/chat/model", () => {
           defaults: {
             model: {
               primary: "openrouter/anthropic/claude-haiku-4-5",
+            },
+          },
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        auth: {
+          profiles: {
+            "openrouter:default": { provider: "openrouter", mode: "token" },
+          },
+        },
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/mistralai/mistral-large",
             },
           },
         },

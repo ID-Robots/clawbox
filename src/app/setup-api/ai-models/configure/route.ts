@@ -419,8 +419,9 @@ export async function POST(request: Request) {
       ]);
       if (supportedProviders.has(targetProvider)) {
         if (!isValidModelId(targetProvider, requestedModel)) {
+          const providerLabel = targetProvider === "openrouter" ? "OpenRouter" : targetProvider;
           return NextResponse.json(
-            { error: `Invalid model ID for ${targetProvider}: ${requestedModel}` },
+            { error: `Invalid ${providerLabel} model ID: ${requestedModel}` },
             { status: 400 },
           );
         }
