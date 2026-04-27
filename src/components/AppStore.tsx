@@ -480,9 +480,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                     <StoreAppIcon appId={app.id} name={app.name} color={app.color} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
-                        <div>
+                        <div className="min-w-0 flex-1">
                           <h3 className="font-medium text-sm truncate">{app.name}</h3>
-                          <span className="text-xs text-white/40">{categories.find(c => c.id === app.category)?.name || app.category}</span>
+                          <span className="block text-xs text-white/40 truncate">{categories.find(c => c.id === app.category)?.name || app.category}</span>
                         </div>
                         <div className="flex items-center gap-0.5 text-yellow-400 text-xs shrink-0">
                           <span>★</span>
