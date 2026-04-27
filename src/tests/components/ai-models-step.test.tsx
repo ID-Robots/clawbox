@@ -154,7 +154,7 @@ describe("AIModelsStep variants", () => {
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
-    const { getByRole, getByText, queryByRole, queryByText } = render(
+    const { getByText, queryByRole, queryByText } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -170,8 +170,6 @@ describe("AIModelsStep variants", () => {
 
     expect(getByText("Connect AI Provider")).toBeInTheDocument();
     expect(getByText("ClawBox AI")).toBeInTheDocument();
-    expect(queryByText("OpenAI GPT")).not.toBeInTheDocument();
-    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("Recommended ClawBox AI service with simple token setup and owner benefits")).toBeInTheDocument();
@@ -271,7 +269,7 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("radio", { name: /^Pro$/ }));
+    fireEvent.click(getByRole("radio", { name: /^Pro tier/ }));
     fireEvent.click(getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {
