@@ -19,3 +19,4 @@ code-source-code/
 playwright-report/
 test-results/
 scripts/nm-dispatcher-failover.sh
+.claude/

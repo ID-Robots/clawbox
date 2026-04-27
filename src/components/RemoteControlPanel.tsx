@@ -22,7 +22,7 @@ export default function RemoteControlPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [action, setAction] = useState<"idle" | "starting" | "stopping">("idle");
+  const [action, setAction] = useState<"idle" | "starting" | "stopping" | "regenerating">("idle");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -75,6 +75,28 @@ export default function RemoteControlPanel() {
   const handleStart = async () => {
     setAction("starting");
     setError(null);
+    try {
+      const res = await fetch("/setup-api/portal/start", { method: "POST" });
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
+      }
+      await fetchStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
+    } finally {
+      setAction("idle");
+    }
+  };
+
+  // Restart cloudflared so it negotiates a fresh *.trycloudflare.com host. The
+  // device-side heartbeat hook then auto-pushes the new URL to the portal on
+  // the next status poll, so the user never has to copy/paste again.
+  const handleRegenerate = async () => {
+    setAction("regenerating");
+    setError(null);
+    // Optimistically clear the URL so the UI flips to the "negotiating" state
+    // without waiting for the next poll to observe it.
+    setStatus(prev => prev ? { ...prev, tunnel: { ...prev.tunnel, url: null } } : prev);
     try {
       const res = await fetch("/setup-api/portal/start", { method: "POST" });
       if (!res.ok) {
@@ -245,15 +267,32 @@ export default function RemoteControlPanel() {
               </button>
             </div>
 
-            <a
-              href={status?.portalAddDeviceUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"
-            >
-              {t("remoteControl.addToPortal")}
-              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">open_in_new</span>
-            </a>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <a
+                href={`${status?.portalWeb ?? "https://openclawhardware.dev"}/portal/devices`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">devices</span>
+                {t("remoteControl.checkDevices")}
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+              </a>
+              <button
+                onClick={handleRegenerate}
+                disabled={busy}
+                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] disabled:bg-white/[0.02] disabled:text-[var(--text-muted)] disabled:cursor-not-allowed border border-white/[0.08] rounded-lg text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+              >
+                <span
+                  className={`material-symbols-rounded ${action === "regenerating" ? "animate-spin" : ""}`}
+                  style={{ fontSize: 16 }}
+                  aria-hidden="true"
+                >
+                  refresh
+                </span>
+                {action === "regenerating" ? t("remoteControl.regenerating") : t("remoteControl.regenerate")}
+              </button>
+            </div>
           </div>
 
           <button

@@ -22,6 +22,15 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import {
+  CLAWBOX_AI_PROVIDER,
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_DEFAULT_TIER,
+  normalizeClawboxAiTier,
+  type ClawboxAiTier,
+} from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId } from "@/lib/provider-models";
 
@@ -32,9 +41,9 @@ const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
-const CLAWBOX_AI_PROVIDER = "deepseek";
-const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
+const CLAWBOX_AI_MODEL = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB, exceeding the Jetson's 8 GB RAM.
@@ -43,9 +52,6 @@ const CLAWBOX_AI_MODEL = "deepseek/deepseek-chat";
 // gateway generates models.json with the correct value on every restart.
 const OLLAMA_CONTEXT_WINDOW = 32768;
 const OLLAMA_MAX_TOKENS = 8192;
-
-const CLAWBOX_AI_CONTEXT_WINDOW = 65536;
-const CLAWBOX_AI_MAX_TOKENS = 8192;
 
 interface ProviderConfig {
   defaultModel: string;
@@ -203,19 +209,32 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
 }
 
 function buildClawboxAiProviderDefinition(apiKey: string) {
+  // Only emit fields that override defaults: the proxy URL, our auth, and
+  // per-tier identity/branding/reasoning. contextWindow, maxTokens, and
+  // input modalities are intentionally omitted — OpenClaw's bundled
+  // provider catalog (2026.4.24+) already knows the canonical V4 specs
+  // (1M context, 384K output, text-in/text-out), so duplicating them
+  // here just creates drift the next time DeepSeek bumps a number.
+  // `cost` stays zero to mark these as included-in-subscription so the
+  // gateway doesn't surface DeepSeek's real per-token prices in the UI.
   return JSON.stringify({
     baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey,
-    models: [{
-      id: "deepseek-chat",
-      name: "ClawBox AI",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
-      maxTokens: CLAWBOX_AI_MAX_TOKENS,
-    }],
+    models: [
+      {
+        id: CLAWBOX_AI_FLASH_MODEL_ID,
+        name: "ClawBox AI Flash",
+        reasoning: false,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+      {
+        id: CLAWBOX_AI_PRO_MODEL_ID,
+        name: "ClawBox AI Pro",
+        reasoning: true,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
   });
 }
 
@@ -331,6 +350,7 @@ export async function POST(request: Request) {
       expiresIn?: number;
       projectId?: string;
       scope?: ConfigureScope;
+      clawaiTier?: string;
       model?: string;
     };
     try {
@@ -340,6 +360,7 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
@@ -385,6 +406,16 @@ export async function POST(request: Request) {
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
     const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
+    // Resolve the ClawBox AI tier once and reuse it for both the primary
+    // model selection (below) and the config-store write (further down).
+    // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
+    // places previously let the two sites drift on a half-applied edit;
+    // a single source of truth keeps them in lockstep.
+    const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
+      ? (requestedClawboxAiTier
+          ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])
+          ?? CLAWBOX_AI_DEFAULT_TIER)
+      : null;
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -393,6 +424,8 @@ export async function POST(request: Request) {
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
+    } else if (isClawAI && resolvedClawboxTier) {
+      config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
     } else if (typeof bodyModel === "string" && bodyModel.trim()) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
@@ -536,7 +569,10 @@ export async function POST(request: Request) {
         .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
     );
 
-    // 6. Persist to ClawBox config store
+    // 6. Persist to ClawBox config store. Re-uses `resolvedClawboxTier`
+    // computed earlier so the value stored alongside the token always
+    // matches the tier that drove `agents.defaults.model.primary` above.
+    const clawboxAiTierForStore = resolvedClawboxTier;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
@@ -544,6 +580,7 @@ export async function POST(request: Request) {
         local_ai_model: config.defaultModel,
         local_ai_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
+        ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
     } else {
       await setMany({
@@ -551,6 +588,7 @@ export async function POST(request: Request) {
         ai_model_provider: ocProvider,
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
+        ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
     }
 
@@ -562,7 +600,7 @@ export async function POST(request: Request) {
         "config", "set", "models.mode", "merge",
       ]);
       await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
-      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL} (context=${CLAWBOX_AI_CONTEXT_WINDOW})`);
+      console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL}`);
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
@@ -625,14 +663,20 @@ export async function POST(request: Request) {
       // turn silently returns `usage: 0/0/0` and the UI appears dead.
       // Writing this entry restores the full OpenAI-compatible path.
       //
-      // The `models` array drives model resolution: OpenClaw looks up
-      // `agents.defaults.model.primary` (or a per-session override) in
-      // this list to pick up contextWindow/maxTokens. Listing only the
-      // initial default would pin the user to that one model — any
-      // mid-conversation switch (curated or custom) would fail silently
-      // because the runtime can't resolve the new slug. Seeding the full
-      // curated list here (plus the user-picked id, even if off-list)
-      // makes every in-UI option immediately routeable without a re-save.
+      // The `models` array drives model resolution: OpenClaw needs every
+      // selectable id present here, otherwise mid-conversation switches
+      // (curated or custom) fail silently because the runtime can't
+      // resolve the new slug. Seeding the full curated list here (plus
+      // the user-picked id, even if off-list) makes every in-UI option
+      // immediately routeable without a re-save.
+      //
+      // We intentionally emit only `id` + `name`. contextWindow,
+      // maxTokens, input modalities and cost are looked up from
+      // OpenClaw's bundled provider catalog per model id — the previous
+      // uniform 131K/8K caps lied for every model whose real spec
+      // differed (Kimi K2 256K, GPT-5 400K, Claude Haiku 200K, etc.),
+      // triggering compaction far too early and silently truncating
+      // long outputs on capable models.
       const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
       const modelIds = new Set<string>([
         defaultModelId,
@@ -642,14 +686,7 @@ export async function POST(request: Request) {
         baseUrl: "https://openrouter.ai/api/v1",
         api: "openai-completions",
         apiKey: "openrouter-ref",
-        models: Array.from(modelIds).map((id) => ({
-          id,
-          name: id,
-          input: ["text"],
-          contextWindow: 131072,
-          maxTokens: 8192,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        })),
+        models: Array.from(modelIds).map((id) => ({ id, name: id })),
       });
       await runCommand(OPENCLAW_BIN, [
         "config", "set", "models.providers.openrouter", providerDef, "--json",

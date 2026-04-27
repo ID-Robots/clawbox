@@ -16,6 +16,12 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-tunnel.service
+# enable/disable so Settings → Remote Control's Start/Stop buttons can
+# persist the user's intent across reboots, not just toggle the running
+# unit. Without these, a "Stop" via the UI would silently come back on
+# the next reboot once the unit is enabled by default.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable clawbox-tunnel.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get update *
 clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get install *
 clawbox ALL=(root) NOPASSWD: /usr/bin/snap install chromium

@@ -35,10 +35,22 @@ export async function readTunnelUrl(): Promise<string | null> {
 
 export async function startTunnelService(): Promise<void> {
   await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
+  // Persist the user's intent across reboots — without `enable`, the next
+  // power cycle would leave the box unreachable until they SSH in again,
+  // which defeats the whole point of Remote Access. Best-effort: a failure
+  // here is non-fatal because the tunnel itself just got started above.
+  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", TUNNEL_SERVICE]).catch((err) => {
+    console.warn("[cloudflared] enable failed (non-fatal):", err instanceof Error ? err.message : err);
+  });
 }
 
 export async function stopTunnelService(): Promise<void> {
   await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "stop", TUNNEL_SERVICE]);
+  // Mirror image of startTunnelService — without `disable` the unit comes
+  // back on the next reboot, silently overriding the user's stop intent.
+  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "disable", TUNNEL_SERVICE]).catch((err) => {
+    console.warn("[cloudflared] disable failed (non-fatal):", err instanceof Error ? err.message : err);
+  });
 }
 
 export type TunnelUnitState = "active" | "inactive" | "failed" | "activating" | "unknown";

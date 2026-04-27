@@ -8,7 +8,11 @@ Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox/clawbox
 ExecStart=/home/clawbox/clawbox/scripts/run-tunnel.sh
-Restart=on-failure
+# `always` (not `on-failure`) so the tunnel comes back even if cloudflared
+# exits cleanly — Cloudflare occasionally rotates Quick Tunnel hosts and
+# returns a non-error exit, and we want a fresh URL pushed automatically
+# rather than the user noticing remote access is silently down.
+Restart=always
 RestartSec=5
 TimeoutStartSec=30
 TimeoutStopSec=15

@@ -10,6 +10,10 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import {
+  CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_DEFAULT_TIER,
+} from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 
@@ -42,9 +46,13 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+// Imported from `@/lib/clawbox-ai-models` so this fallback can't drift away
+// from the configure route's tier→model mapping. Used only when a legacy
+// install has no explicit `models.providers.deepseek.models` entry; new
+// installs surface every tier directly via the provider definition.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  clawai: "deepseek/deepseek-chat",
-  deepseek: "deepseek/deepseek-chat",
+  clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
+  deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5",
   "openai-codex": "openai-codex/gpt-5.4",
@@ -128,15 +136,33 @@ async function loadChatModelState() {
   }
 
   const primaryProvider = normalizeProvider(configStore.ai_model_provider);
+  // Keyed by *model id* (e.g. "deepseek/deepseek-v4-pro") rather than
+  // by provider so a single provider can surface multiple options —
+  // e.g. ClawBox AI Flash vs Pro both belong to the `deepseek`
+  // provider but are independent rows in the chat dropdown.
   const configuredPrimaryOptions = new Map<string, ChatModelOption>();
-  const rememberPrimaryOption = (model: string | null | undefined, providerHint?: string | null) => {
+  const rememberPrimaryOption = (
+    model: string | null | undefined,
+    providerHint?: string | null,
+    labelOverride?: string | null,
+  ) => {
     const trimmedModel = typeof model === "string" ? model.trim() : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
     const provider = normalizeProvider(providerHint ?? normalizeProviderFromModel(trimmedModel));
-    if (!provider || configuredPrimaryOptions.has(provider)) return;
-    configuredPrimaryOptions.set(provider, {
+    if (!provider) return;
+    const trimmedLabelOverride = labelOverride?.trim();
+    const existing = configuredPrimaryOptions.get(trimmedModel);
+    // Allow callers that know the canonical model name (provider
+    // definition rows) to upgrade a placeholder option that an earlier
+    // pass had to fall back on labelForProvider for. Without this the
+    // first entry from `activeModel`/`primaryModel` would lock the
+    // dropdown row to the bare "ClawBox AI" label even after the
+    // provider definition told us it's actually "ClawBox AI Pro".
+    if (existing && !trimmedLabelOverride) return;
+    const label = trimmedLabelOverride || labelForProvider(provider, "AI Provider");
+    configuredPrimaryOptions.set(trimmedModel, {
       id: trimmedModel,
-      label: labelForProvider(provider, "AI Provider"),
+      label,
       model: trimmedModel,
       provider,
       available: true,
@@ -149,40 +175,36 @@ async function loadChatModelState() {
   rememberPrimaryOption(primaryModel);
 
   const authProfiles = openclawConfig.auth?.profiles ?? {};
+  const providerDefinitions = openclawConfig.models?.providers ?? {};
   for (const [profileKey, entry] of Object.entries(authProfiles)) {
     const rawProvider = typeof entry?.provider === "string" ? entry.provider : profileKey.split(":")[0];
     const provider = normalizeProvider(rawProvider);
-    if (!provider || provider === "ollama" || provider === "llamacpp" || configuredPrimaryOptions.has(provider)) {
+    if (!provider || provider === "ollama" || provider === "llamacpp") continue;
+
+    // Prefer enumerating every model registered under this provider's
+    // `models.providers.<provider>.models` block so multi-model
+    // providers (ClawBox AI Flash + Pro, future tier expansions, etc.)
+    // surface every variant in the chat dropdown. Fall back to the
+    // single hard-coded default when the provider definition has no
+    // explicit models list.
+    const providerDef = providerDefinitions[rawProvider];
+    const definedModels = (providerDef?.models ?? []).filter((m): m is { id: string; name?: string } => typeof m?.id === "string" && m.id.trim().length > 0);
+
+    if (definedModels.length > 0) {
+      for (const def of definedModels) {
+        const fullyQualified = `${rawProvider}/${def.id}`;
+        rememberPrimaryOption(fullyQualified, rawProvider, def.name);
+      }
       continue;
     }
 
     const model = defaultModelForProvider(rawProvider);
-    if (!model) continue;
-
-    configuredPrimaryOptions.set(provider, {
-      id: model,
-      label: labelForProvider(provider, "AI Provider"),
-      model,
-      provider,
-      available: true,
-      settingsSection: "ai",
-      isLocal: false,
-    });
+    if (model) rememberPrimaryOption(model, rawProvider);
   }
 
-  if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp" && !configuredPrimaryOptions.has(primaryProvider)) {
+  if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp") {
     const model = defaultModelForProvider(configStore.ai_model_provider as string);
-    if (model) {
-      configuredPrimaryOptions.set(primaryProvider, {
-        id: model,
-        label: labelForProvider(primaryProvider, "AI Provider"),
-        model,
-        provider: primaryProvider,
-        available: true,
-        settingsSection: "ai",
-        isLocal: false,
-      });
-    }
+    if (model) rememberPrimaryOption(model, primaryProvider);
   }
 
   // When Local-only mode is on, the cloud providers are intentionally
@@ -279,7 +301,6 @@ export async function POST(request: Request) {
     }
 
     const state = await loadChatModelState();
-    const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
     let targetModel: string | null = null;
 
     if (typeof body.model === "string" && body.model.trim()) {
@@ -312,6 +333,7 @@ export async function POST(request: Request) {
         // (Other providers like anthropic/openai/google have built-in
         // model catalogs in OpenClaw so we don't need this guard for them.)
         if (parsed.provider === "openrouter") {
+          const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
           const providerDef = openclawConfig.models?.providers?.openrouter;
           const configuredIds = providerDef?.models?.map((m: { id?: string }) => m?.id).filter(Boolean) ?? [];
           if (configuredIds.length > 0 && !configuredIds.includes(parsed.modelId)) {

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
+import { get as getConfigValue } from "@/lib/config-store";
+import { normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +14,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   llamacpp: "llama.cpp Local",
 };
+
+const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 
 function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
@@ -57,12 +61,17 @@ export async function GET() {
     }
     const normalizedProvider = normalizeProvider(provider);
 
+    const clawaiTier = normalizedProvider === "clawai"
+      ? normalizeClawboxAiTier(await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null))
+      : null;
+
     return NextResponse.json({
       connected: !!normalizedProvider,
       provider: normalizedProvider,
       providerLabel: normalizedProvider ? (PROVIDER_LABELS[normalizedProvider] ?? normalizedProvider) : null,
       mode,
       model,
+      clawaiTier,
     }, {
       headers: {
         "Cache-Control": "no-store",
@@ -70,7 +79,7 @@ export async function GET() {
     });
   } catch {
     return NextResponse.json(
-      { connected: false, provider: null, providerLabel: null, mode: null, model: null },
+      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null },
       {
         headers: {
           "Cache-Control": "no-store",

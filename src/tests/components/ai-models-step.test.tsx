@@ -154,7 +154,7 @@ describe("AIModelsStep variants", () => {
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
-    const { getByLabelText, getByRole, getByText, queryByRole, queryByText } = render(
+    const { getByText, queryByRole, queryByText } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -175,22 +175,36 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Recommended ClawBox AI service with simple token setup and owner benefits")).toBeInTheDocument();
     expect(getByText("ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.")).toBeInTheDocument();
     expect(getByText("ClawBox owners also get extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
+    // The legacy "Paste token manually" dialog has been removed — connection
+    // is handled exclusively through the portal handoff. Verify nothing in
+    // the surface tries to mount a token-paste dialog.
     expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
-
-    fireEvent.click(getByRole("button", { name: /Paste token manually instead/i }));
-
-    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
-    expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
-    expect(getByRole("link", { name: /Open portal/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal");
-    expect(getByLabelText(/Paste your portal token/i, { selector: "input" })).toBeInTheDocument();
-    expect(getByRole("button", { name: /Connect to ClawBox AI/i })).toBeInTheDocument();
-    expect(getByText("ClawBox owners keep access to extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
+    expect(queryByText(/Paste token manually instead/i)).not.toBeInTheDocument();
     expect(queryByText("llama.cpp Local")).not.toBeInTheDocument();
     expect(queryByText("Ollama Local")).not.toBeInTheDocument();
   });
 
-  it("opens the ClawBox AI popup when requested externally", async () => {
-    const { getByRole, getByText } = render(
+  it("kicks off the device-auth flow when an external offer is requested", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/clawai/start")) {
+        return {
+          ok: true,
+          json: async () => ({
+            user_code: "ABCD-1234",
+            verification_url: "https://openclawhardware.dev/portal/connect",
+            interval: 5,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    const { findByText, getByRole } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -205,47 +219,43 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
-    expect(getByText("Unlock the recommended ClawBox AI experience")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/setup-api/ai-models/clawai/start",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    // The Subscription tab now renders the user_code on the device — the
+    // user copies it and types it on the portal — instead of opening a
+    // popup that navigates to a state-stamped URL.
+    expect(await findByText("ABCD-1234")).toBeInTheDocument();
+    expect(getByRole("link", { name: /Open authorization page/i })).toHaveAttribute(
+      "href",
+      "https://openclawhardware.dev/portal/connect",
+    );
   });
 
-  it("closes the ClawBox AI popup when the provider becomes connected", async () => {
-    const { getByRole, queryByRole, rerender } = render(
-      <AIModelsStep
-        embedded
-        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
-        defaultProviderId="openai"
-        openClawAIOfferRequest={1}
-        title="Connect AI Provider"
-        description="Primary provider"
-      />,
-    );
-
-    await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+  it("forwards the selected ClawBox AI tier to the start endpoint", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/clawai/start")) {
+        return {
+          ok: true,
+          json: async () => ({
+            user_code: "ABCD-1234",
+            verification_url: "https://openclawhardware.dev/portal/connect",
+            interval: 5,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
     });
 
-    expect(getByRole("dialog", { name: /ClawBox AI token setup/i })).toBeInTheDocument();
-
-    rerender(
-      <AIModelsStep
-        embedded
-        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
-        defaultProviderId="openai"
-        openClawAIOfferRequest={1}
-        currentProviderId="clawai"
-        title="Connect AI Provider"
-        description="Primary provider"
-      />,
-    );
-
-    await waitFor(() => {
-      expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
-    });
-  });
-
-  it("submits the pasted ClawBox AI token to the configure route", async () => {
-    const { getByLabelText, getByRole } = render(
+    const { getByRole } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -259,24 +269,15 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("button", { name: /Paste token manually instead/i }));
-    fireEvent.change(getByLabelText(/Paste your portal token/i, { selector: "input" }), {
-      target: { value: "portal-token-123" },
-    });
-    fireEvent.click(getByRole("button", { name: /Connect to ClawBox AI/i }));
+    fireEvent.click(getByRole("radio", { name: /^Pro tier/ }));
+    fireEvent.click(getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith(
-        "/setup-api/ai-models/configure",
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/setup-api/ai-models/clawai/start",
         expect.objectContaining({
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scope: "primary",
-            provider: "clawai",
-            apiKey: "portal-token-123",
-          }),
-          signal: expect.any(AbortSignal),
+          body: JSON.stringify({ scope: "primary", tier: "pro" }),
         }),
       );
     });
@@ -318,8 +319,10 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    expect(getByRole("button", { name: "Connect to ClawBox AI" })).toBeInTheDocument();
-
+    // ClawBox AI's Subscription tab drives its own "Get device code"
+    // button instead of the generic per-provider Connect label, so we
+    // jump straight to the other providers via Show-more.
+    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
     fireEvent.click(getByRole("radio", { name: /OpenAI GPT/i }));
     expect(getByRole("button", { name: "Connect to OpenAI GPT" })).toBeInTheDocument();
 
@@ -350,6 +353,7 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
+    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
     fireEvent.click(getByRole("radio", { name: /OpenAI GPT/i }));
     expect(queryByRole("dialog", { name: /ClawBox AI token setup/i })).not.toBeInTheDocument();
 
@@ -362,10 +366,8 @@ describe("AIModelsStep variants", () => {
     ).toBe(false);
   });
 
-  it("starts the ClawBox AI portal flow and polls the local callback status", async () => {
+  it("renders the device code and completes once /clawai/poll reports success", async () => {
     const onConfigured = vi.fn();
-    const openMock = vi.fn(() => ({ focus: vi.fn(), close: vi.fn(), closed: false }));
-    vi.stubGlobal("open", openMock);
     let pollCount = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
@@ -375,10 +377,15 @@ describe("AIModelsStep variants", () => {
       if (url === "/setup-api/ai-models/clawai/start") {
         return {
           ok: true,
-          json: async () => ({ url: "https://openclawhardware.dev/portal/connect?state=abc" }),
+          json: async () => ({
+            user_code: "ABCD-1234",
+            verification_url: "https://openclawhardware.dev/portal/connect",
+            // Sub-second poll interval keeps the test fast on real timers.
+            interval: 0.05,
+          }),
         };
       }
-      if (url === "/setup-api/ai-models/clawai/status") {
+      if (url === "/setup-api/ai-models/clawai/poll") {
         pollCount += 1;
         return {
           ok: true,
@@ -388,7 +395,7 @@ describe("AIModelsStep variants", () => {
       return { ok: true, json: async () => ({}) };
     }));
 
-    const { getByRole } = render(
+    const { findByText, getByRole } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -401,21 +408,21 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("button", { name: /^Connect$/i }));
+    fireEvent.click(getByRole("button", { name: /Get device code/i }));
+
+    expect(await findByText("ABCD-1234")).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/clawai/start", expect.objectContaining({
-        method: "POST",
-      }));
+      expect(fetch).toHaveBeenCalledWith(
+        "/setup-api/ai-models/clawai/poll",
+        expect.objectContaining({ method: "POST" }),
+      );
     });
-    expect(openMock).toHaveBeenCalledWith("https://openclawhardware.dev/portal/connect?state=abc", "_blank", "noopener,noreferrer");
 
-    await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/clawai/status", { cache: "no-store" });
-    });
     await waitFor(() => {
       expect(onConfigured).toHaveBeenCalledTimes(1);
-    }, { timeout: 3000 });
+    }, { timeout: 4000 });
+
     vi.unstubAllGlobals();
   });
 });

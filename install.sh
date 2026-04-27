@@ -868,16 +868,19 @@ step_systemd_services() {
     cp "$src" /etc/systemd/system/
   done
   systemctl daemon-reload
-  # Enable all services except templates and the on-demand browser/tunnel units.
+  # Enable all services except templates and the on-demand browser unit.
+  # clawbox-tunnel was previously kept on-demand here, but Remote Access has
+  # to survive reboots once the user has paired ClawBox AI — otherwise the
+  # device is unreachable until they SSH in or open the portal again. The
+  # heartbeat hook only pushes URLs when a `claw_*` portal token is present,
+  # so an unpaired box still won't leak a public URL into anyone's portal.
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
-    [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     systemctl enable "$svc"
   done
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
-  systemctl disable clawbox-tunnel.service >/dev/null 2>&1 || true
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
