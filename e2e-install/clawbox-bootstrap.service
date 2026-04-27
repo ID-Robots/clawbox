@@ -1,0 +1,20 @@
+[Unit]
+Description=ClawBox first-boot installer (test harness)
+After=network-online.target dbus.service NetworkManager.service
+Wants=network-online.target
+ConditionPathExists=/home/clawbox/clawbox/.needs-install
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/clawbox/test-mode.env
+# install.sh must run as root; it sudos to clawbox where needed.
+ExecStart=/bin/bash -c 'set -o pipefail; cd /home/clawbox/clawbox && CLAWBOX_TEST_MODE=1 bash install.sh 2>&1 | tee /var/log/clawbox-install.log && rm -f /home/clawbox/clawbox/.needs-install'
+# Ample timeout: cold bun install + next build on qemu-emulated arm64 can
+# take 15-20 minutes.
+TimeoutStartSec=2400
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

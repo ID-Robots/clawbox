@@ -74,17 +74,23 @@ export async function serveGatewayHTML(
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : "";
-    // Script to set WebSocket URL + token so the OpenClaw UI auto-connects to the gateway.
-    // The SPA stores settings in localStorage (field "gatewayUrl") and tokens in
-    // sessionStorage under per-URL key "openclaw.control.token.v1:<normalized_ws_url>".
-    // Use the gateway port directly (not port 80) — the port-80 WS upgrade proxy is
-    // unreliable under bun, but the gateway is always reachable at its own port.
+    // Script to set WebSocket URL + token so the OpenClaw UI auto-connects
+    // to the gateway. The SPA stores settings in localStorage (field
+    // "gatewayUrl") and tokens in sessionStorage under per-URL key
+    // "openclaw.control.token.v1:<normalized_ws_url>".
+    //
+    // Use the SAME origin as the page (no port). The production server's
+    // WebSocket upgrade proxy forwards ws[s]://<host>/ to the gateway on
+    // port ${GATEWAY_PORT}, which works on the LAN, through HTTPS, and
+    // through the Cloudflare tunnel (which only exposes port 80/443).
+    // Stale gatewayUrl with ":${GATEWAY_PORT}" baked in is overwritten so
+    // older sessions migrate automatically.
     const wsScript = `<script>
 (function(){
   var SK="openclaw.control.settings.v1";
   var TP="openclaw.control.token.v1:";
   try{
-    var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.hostname+":${GATEWAY_PORT}";
+    var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host;
     var s=JSON.parse(localStorage.getItem(SK)||"{}");
     if(s.gatewayUrl!==wsUrl){s.gatewayUrl=wsUrl;localStorage.setItem(SK,JSON.stringify(s))}
     ${safeToken ? `var t=${safeToken};var tk=TP+wsUrl;if(sessionStorage.getItem(tk)!==t){sessionStorage.setItem(tk,t)}` : ""}

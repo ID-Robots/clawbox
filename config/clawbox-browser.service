@@ -13,6 +13,10 @@ Environment=CDP_PORT=18800
 Environment=HOME=/home/clawbox
 Environment=XDG_CONFIG_HOME=/home/clawbox/.config
 Environment=XDG_CACHE_HOME=/home/clawbox/.cache
+# Loaded when present so CLAWBOX_TEST_MODE reaches launch-browser.sh in
+# container-based test rigs. Silently ignored on real Jetson where the
+# file doesn't exist.
+EnvironmentFile=-/home/clawbox/clawbox/.env
 ExecStart=/home/clawbox/clawbox/scripts/launch-browser.sh
 Restart=no
 TimeoutStartSec=45

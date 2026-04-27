@@ -1,0 +1,38 @@
+[Unit]
+Description=ClawBox Cloudflare Quick Tunnel
+After=network-online.target clawbox-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawbox
+WorkingDirectory=/home/clawbox/clawbox
+ExecStart=/home/clawbox/clawbox/scripts/run-tunnel.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+Environment=CLAWBOX_ROOT=/home/clawbox/clawbox
+Environment=LOCAL_SERVICE_URL=http://localhost:80
+
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+# Light-touch hardening that works with the bash-wrapped cloudflared process.
+# Heavier restrictions (ProtectSystem=strict, namespacing) conflict with the
+# shell pipeline setup on this Jetson kernel.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# ── Resource caps ──────────────────────────────────────────────────────────
+CPUAccounting=yes
+MemoryAccounting=yes
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

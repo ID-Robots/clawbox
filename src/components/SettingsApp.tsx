@@ -10,6 +10,7 @@ import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
+import RemoteControlPanel from "./RemoteControlPanel";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
@@ -57,7 +58,7 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "remote", "system", "about"] as const;
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -72,6 +73,7 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
   { id: "localAi", icon: "memory", label: "Local AI" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
+  { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
@@ -228,8 +230,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [betaSaving, setBetaSaving] = useState(false);
   const [featureFlagsOpen, setFeatureFlagsOpen] = useState(false);
   const [featureFlagsSaving, setFeatureFlagsSaving] = useState<string | null>(null);
-  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({
-    [FEATURE_FLAG_KEYS.clawkeep]: false,
+  const [featureFlagsLoaded, setFeatureFlagsLoaded] = useState(false);
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean | undefined>>({
+    [FEATURE_FLAG_KEYS.clawkeep]: undefined,
+    [FEATURE_FLAG_KEYS.remoteControl]: undefined,
   });
   const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const updatePollControllerRef = useRef<AbortController | null>(null);
@@ -314,7 +318,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           return next;
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setFeatureFlagsLoaded(true));
   }, []);
 
 
@@ -1103,6 +1108,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+  const remoteControlEnabled = featureFlags[FEATURE_FLAG_KEYS.remoteControl] === true;
+  const visibleNavItems = NAV_ITEMS.filter(
+    item => item.id !== "remote" || !featureFlagsLoaded || remoteControlEnabled
+  );
+
+  // Bounce off a hidden section if its flag is disabled after we landed on it
+  // (e.g. someone toggles Remote Control off while viewing it).
+  useEffect(() => {
+    if (!featureFlagsLoaded) return;
+    if (activeSection === "remote" && !remoteControlEnabled) {
+      setSection("appearance");
+      setMobileSection(null);
+    }
+  }, [activeSection, featureFlagsLoaded, remoteControlEnabled]);
   const resetProgressSteps = [
     {
       id: "erase",
@@ -2475,6 +2494,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Remote Control ─── */}
+        {activeSection === "remote" && (!featureFlagsLoaded || remoteControlEnabled) && <RemoteControlPanel />}
+
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
           <div className="max-w-xl space-y-6">
@@ -2538,6 +2560,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
+            {betaEnabled && (
             <div className="bg-white/5 rounded-xl px-4 py-3 space-y-3">
               <button
                 type="button"
@@ -2585,6 +2608,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+            )}
 
             {/* Beta toggle */}
             <div className="bg-white/5 rounded-xl px-4 py-3">
@@ -2722,6 +2746,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured", dot: null };
         return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected"), dot: "ok" };
       }
+      case "remote":
+        return { subtitle: null, dot: null };
       case "system":
         return { subtitle: hostname ? `${hostname}.local` : null, dot: null };
       case "about":
@@ -2740,7 +2766,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
             <h2 className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</h2>
             <nav className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
-              {NAV_ITEMS.map(item => {
+              {visibleNavItems.map(item => {
                 const { subtitle } = sectionStatus(item.id);
                 return (
                   <button
@@ -2937,7 +2963,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     <div className="flex h-full bg-[var(--bg-deep)]">
       {/* Sidebar */}
       <nav className="w-60 shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
-        {NAV_ITEMS.map(item => {
+        {visibleNavItems.map(item => {
           const active = activeSection === item.id;
           const status = sectionStatus(item.id);
           return (

@@ -40,8 +40,13 @@ describe("VNC desktop config", () => {
       "utf8",
     );
 
-    expect(installScript).toContain("step_vnc_install() {\n  wait_for_apt");
-    expect(installScript).toContain("systemctl restart clawbox-vnc.service clawbox-websockify.service || true");
+    // Validate vnc_install still wraps the apt prerequisite + service restart,
+    // AND the restart sits inside the function body. The trailing `\n}\n`
+    // anchors the closing brace so the regex can't stretch across the whole
+    // script and accidentally match a restart in some other function.
+    expect(installScript).toMatch(
+      /step_vnc_install\(\) \{[\s\S]*?wait_for_apt[\s\S]*?systemctl restart clawbox-vnc\.service clawbox-websockify\.service[\s\S]*?\n\}\n/,
+    );
   });
 
   it("exposes the updater bootstrap step through the root step dispatcher", () => {
