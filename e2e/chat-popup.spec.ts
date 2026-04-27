@@ -194,7 +194,7 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await expect(sourceSelect).toBeFocused();
   await page.keyboard.press("Escape");
 
-  await sourceSelect.selectOption({ label: "llamacpp/gemma4-e2b-it-q4_0" });
+  await sourceSelect.selectOption("llamacpp/gemma4-e2b-it-q4_0");
   await expect(sourceSelect).toHaveValue("llamacpp/gemma4-e2b-it-q4_0");
   await expect(page.getByText("Switched chat to llamacpp/gemma4-e2b-it-q4_0.")).toBeVisible();
 });

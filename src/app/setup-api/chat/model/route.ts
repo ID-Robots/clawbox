@@ -14,6 +14,8 @@ import {
   CLAWBOX_AI_MODEL_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
+import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 
 export const dynamic = "force-dynamic";
 
@@ -52,10 +54,10 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
-  openai: "openai/gpt-5.4",
+  openai: "openai/gpt-5",
   "openai-codex": "openai-codex/gpt-5.4",
-  google: "google/gemini-2.0-flash",
-  openrouter: "openrouter/moonshotai/kimi-k2-0905",
+  google: "google/gemini-2.5-flash",
+  openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
 function isLocalModel(model: string | null | undefined): boolean {
@@ -304,10 +306,47 @@ export async function POST(request: Request) {
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
       const targetOption = state.options.find((option) => option.model === requestedModel);
-      if (!targetOption?.available || !targetOption.model) {
-        return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
+      if (targetOption?.available && targetOption.model) {
+        targetModel = targetOption.model;
+      } else {
+        // Power-user path: accept any valid <provider>/<modelId> as long
+        // as that provider has a configured auth profile. This backs
+        // both the chat popup's inline model switcher and custom
+        // model IDs entered in the wizard/Settings. Without this escape
+        // hatch the curated-list dropdown would be the only reachable
+        // surface and newer/region-specific models would be unavailable.
+        const parsed = parseModelSlug(requestedModel);
+        if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
+          return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
+        }
+        const providerConfigured = state.options.some(
+          (option) => option.provider === parsed.provider && option.available,
+        );
+        if (!providerConfigured) {
+          return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
+        }
+        // Fail-fast check: for OpenRouter specifically, OpenClaw needs
+        // the model to be listed in `models.providers.openrouter.models`
+        // or the gateway silently falls back to local with no error
+        // message the user can see. If it's not in the configured list,
+        // reject here so the chat popup shows a real error instead.
+        // (Other providers like anthropic/openai/google have built-in
+        // model catalogs in OpenClaw so we don't need this guard for them.)
+        if (parsed.provider === "openrouter") {
+          const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
+          const providerDef = openclawConfig.models?.providers?.openrouter;
+          const configuredIds = providerDef?.models?.map((m: { id?: string }) => m?.id).filter(Boolean) ?? [];
+          if (configuredIds.length > 0 && !configuredIds.includes(parsed.modelId)) {
+            return NextResponse.json(
+              {
+                error: `Model ${requestedModel} is not in the configured OpenRouter catalog. Re-save OpenRouter in Settings to refresh the model list.`,
+              },
+              { status: 400 },
+            );
+          }
+        }
+        targetModel = requestedModel;
       }
-      targetModel = targetOption.model;
     } else {
       if (body.source !== "primary" && body.source !== "local") {
         return NextResponse.json({ error: "Invalid chat model source" }, { status: 400 });

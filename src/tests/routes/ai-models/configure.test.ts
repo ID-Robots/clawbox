@@ -241,6 +241,9 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
   });
 
   it("returns 400 for ClawBox AI when no token is provided or stored", async () => {
@@ -376,6 +379,9 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary openai-codex/gpt-5.4");
   });
 
   it("includes projectId for google oauth", async () => {
@@ -615,13 +621,43 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands.some((command) => command.includes("config set models.providers.openrouter"))).toBe(true);
-    expect(commands).toContain("config set agents.defaults.model.primary openrouter/moonshotai/kimi-k2-0905");
+    expect(commands).toContain("config set agents.defaults.model.primary openrouter/anthropic/claude-haiku-4.5");
 
     const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.openrouter");
     const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(providerDef.api).toBe("openai-completions");
-    expect(providerDef.models?.[0]?.id).toBe("moonshotai/kimi-k2-0905");
+    // Every curated model must be listed so mid-conversation switches
+    // (in the chat popup secondary dropdown) are routable.
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("anthropic/claude-haiku-4.5");
+    expect(modelIds).toContain("google/gemini-2.0-flash-001");
+    expect(modelIds.length).toBeGreaterThan(10);
+  });
+
+  it("honors an openrouter model picked by the user", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "openrouter",
+      apiKey: "sk-or-v1-test",
+      model: "mistralai/mistral-large",
+    }));
+
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary openrouter/mistralai/mistral-large");
+  });
+
+  it("rejects an invalid openrouter model slug", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "openrouter",
+      apiKey: "sk-or-v1-test",
+      model: "not-a-valid-slug",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toMatch(/Invalid OpenRouter model ID/);
   });
 });
