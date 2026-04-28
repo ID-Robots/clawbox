@@ -2,11 +2,13 @@ name: E2E Install
 
 # Full-install harness — boots a real systemd container, runs install.sh,
 # exercises every setup-api happy path, and verifies the in-app updater +
-# reboot flow. Much heavier than the mock-backed `E2E Tests` workflow, so
-# it only runs:
+# reboot flow. Much heavier than the mock-backed `E2E Tests` workflow.
+# Triggers:
 #   - nightly (scheduled)
 #   - on-demand via `workflow_dispatch`
-#   - on PRs labeled `run-full-e2e` (opt-in — avoid paying the cost on every push)
+#   - every PR (open / synchronize / reopen) — the previous opt-in
+#     `run-full-e2e` label gate was removed so PRs targeting beta/main
+#     get full install + updater coverage before they merge.
 #
 # Runner choice:
 #   - Prefers `ubuntu-24.04-arm` for ~5-10 min runs (native arm64).
@@ -30,7 +32,7 @@ on:
     # runner queue spikes.
     - cron: "17 3 * * *"
   pull_request:
-    types: [labeled, synchronize]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -41,9 +43,6 @@ concurrency:
 
 jobs:
   e2e-install:
-    # PR runs are opt-in via the `run-full-e2e` label; otherwise we skip to
-    # avoid paying the 30+ min cost on every push.
-    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-e2e') }}
     # Prefer the native arm64 runner; fall back to x86 when the repo
     # variable `E2E_INSTALL_ARM64_RUNNER` is set to the string `false`.
     runs-on: ${{ vars.E2E_INSTALL_ARM64_RUNNER == 'false' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
