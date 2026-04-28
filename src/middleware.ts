@@ -148,13 +148,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 3a. Trusted-test-environment escape hatch. The e2e-install harness
-  // (and any other CI runner that boots install.sh under CLAWBOX_TEST_MODE)
-  // hits /setup-api/* directly via fetch without managing session cookies.
-  // Mirrors the same flag src/lib/network.ts already uses to skip the
-  // hardware-only nmcli paths — both are gated on the trusted-environment
-  // convention written by install.sh.
-  if (process.env.CLAWBOX_TEST_MODE === "1") {
+  // 3a. Trusted-test-environment escape hatch for the e2e-install harness.
+  // Scoped to /setup-api/* only — page requests still go through the
+  // normal /login redirect so the login-round-trip spec can verify it.
+  // Mirrors the convention src/lib/network.ts uses to skip hardware-only
+  // nmcli paths; both are gated on the flag install.sh writes when it
+  // boots under CLAWBOX_TEST_MODE.
+  if (process.env.CLAWBOX_TEST_MODE === "1" && pathname.startsWith("/setup-api/")) {
     return NextResponse.next();
   }
 

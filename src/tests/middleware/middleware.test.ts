@@ -253,7 +253,7 @@ describe("middleware", () => {
       expect(response.headers.get("Location")).toContain("/login");
     });
 
-    it("skips auth when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
+    it("skips auth on /setup-api/* when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
       process.env.SESSION_SECRET = "test-secret";
       process.env.CLAWBOX_TEST_MODE = "1";
       vi.resetModules();
@@ -264,6 +264,20 @@ describe("middleware", () => {
       // Pass-through, not a 307 redirect — the trusted test environment
       // exercises every /setup-api endpoint directly via fetch().
       expect(response.status).toBe(200);
+    });
+
+    it("still redirects page requests to /login under CLAWBOX_TEST_MODE", async () => {
+      // The login-round-trip e2e spec depends on this — clearing cookies
+      // and visiting `/` must still bounce to /login even in test mode.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
     });
 
     it("rejects invalid session cookie", async () => {
