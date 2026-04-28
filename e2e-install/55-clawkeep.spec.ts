@@ -1,22 +1,15 @@
 /**
- * ClawKeep — the local + cloud file-backup app. Each "source path" is
- * tracked independently with its own clawkeep config + git history,
- * so the spec works against an isolated tmp tree to avoid colliding
- * with files-app (30) state.
+ * ClawKeep — was a per-source git-tracked workspace; the b4dc258 restic
+ * rewrite collapsed it to a single device-paired daemon. The init /
+ * configure / snap / sourcePath-status endpoints this spec exercises no
+ * longer exist (the route now only exports GET, with sub-actions split
+ * across /pair/*, /backup, /config, /unpair).
  *
- * Note: clawkeep paths are RELATIVE to FILES_ROOT (= /home/clawbox in
- * the container), and the configure step requires a password (≥8 chars).
- *
- * Happy path:
- *   1. Mkdir source + local-backup folders (absolute paths via dockerExec)
- *   2. POST /clawkeep init       — initializes the source as a clawkeep repo
- *   3. POST /clawkeep configure  — points at the local backup target with password
- *   4. POST /clawkeep snap       — takes a snapshot
- *   5. GET  /clawkeep?...        — verifies state reflects init + target
- *
- * Cloud-backup config is intentionally skipped — local happy path only.
- *
- * Runs at NN=55 between webapps (50) and app-store (60).
+ * Skipped pending a rewrite against the new pair → backup flow. The
+ * device-side code is already covered by src/tests/components/clawkeep-app.test.tsx
+ * and the unit suites under src/tests/unit/clawkeep* and
+ * src/tests/routes/ai-models/clawai-connect.test.ts (which the new
+ * daemon mirrors).
  */
 import { test, expect } from "@playwright/test";
 import { dockerExec } from "./helpers/container";
@@ -41,7 +34,7 @@ const TARGET_ABS = `/home/clawbox/${TARGET_REL}`;
 
 test.describe.configure({ mode: "serial" });
 
-test.describe("clawkeep happy path", () => {
+test.describe.skip("clawkeep happy path (legacy workspace API — needs rewrite for daemon flow)", () => {
   test.beforeAll(async () => {
     // Reset any prior run + seed a couple of files. Use root because the
     // source dir might have been created by previous runs as a clawbox-
