@@ -8,6 +8,7 @@ describe("middleware", () => {
     vi.resetModules();
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
     const mod = await import("@/middleware");
     middleware = mod.middleware;
   });
@@ -15,6 +16,7 @@ describe("middleware", () => {
   afterEach(() => {
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
   });
 
   function createRequest(pathname: string): NextRequest {
@@ -249,6 +251,19 @@ describe("middleware", () => {
       // No session cookie -> page-style requests redirect to /login (307).
       expect(response.status).toBe(307);
       expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("skips auth when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.middleware(req);
+      // Pass-through, not a 307 redirect — the trusted test environment
+      // exercises every /setup-api endpoint directly via fetch().
+      expect(response.status).toBe(200);
     });
 
     it("rejects invalid session cookie", async () => {
