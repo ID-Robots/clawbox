@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly check for idle heartbeat
+Documentation=https://github.com/ID-Robots/clawkeep-device
+
+[Timer]
+# Hourly tick that sends an `idle` heartbeat only if the last one is older
+# than `heartbeat.idle_interval_hours` in config.toml. Keeps the portal's
+# "last seen" indicator fresh on devices that don't run a backup today.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

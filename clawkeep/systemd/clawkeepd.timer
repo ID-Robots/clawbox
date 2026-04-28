@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily ClawKeep backup
+Documentation=https://github.com/ID-Robots/clawkeep-device
+
+[Timer]
+# Random jitter so a fleet of devices doesn't stampede the portal at 03:00.
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

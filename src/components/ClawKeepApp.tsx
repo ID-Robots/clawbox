@@ -1,405 +1,597 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import ClawKeepPathPicker from "@/components/ClawKeepPathPicker";
-
-interface ClawKeepLogEntry {
-  hash: string;
-  date: string;
-  message: string;
-}
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface ClawKeepStatus {
-  initialized: boolean;
-  sourcePath: string;
-  sourceAbsolutePath: string;
-  sourceExists: boolean;
-  backup: {
-    mode: "local" | "cloud" | "both" | null;
-    passwordSet: boolean;
-    workspaceId: string | null;
-    chunkCount: number;
-    lastSync: string | null;
-    lastSyncCommit: string | null;
-    local: {
-      enabled: boolean;
-      path: string | null;
-      lastSync: string | null;
-      ready: boolean;
-    };
-    cloud: {
-      enabled: boolean;
-      connected: boolean;
-      available: boolean;
-      providerLabel: string;
-      endpoint: string | null;
-      lastSync: string | null;
-    };
-  };
-  headCommit: string | null;
-  trackedFiles: number;
-  totalSnaps: number;
-  dirtyFiles: number;
-  clean: boolean;
-  recent: ClawKeepLogEntry[];
+  paired: boolean;
+  configured: boolean;
+  configPath: string;
+  server: string;
+  paths: string[];
+  exclude: string[];
+  schedule: string;
+  lastBackupAtMs: number;
+  lastHeartbeatAtMs: number;
+  lastHeartbeatStatus: string;
+  cloudBytes: number;
+  snapshotCount: number;
+  resticInstalled: boolean;
+  daemonInstalled: boolean;
 }
 
-interface ClawKeepAppProps {
-  onOpenAiProviderSettings?: () => void;
+interface PairStartResponse {
+  user_code: string;
+  verification_url: string;
+  interval: number;
+  code_length: number;
 }
 
-const HOME_PREFIX = "/home/clawbox";
-
-function describePath(relativePath: string | null | undefined) {
-  return relativePath ? `${HOME_PREFIX}/${relativePath.replace(/^\/+/, "")}` : HOME_PREFIX;
+interface PairPollResponse {
+  status: "pending" | "configuring" | "complete" | "error";
+  error?: string;
 }
 
-function timeAgo(date: string) {
-  const diff = Date.now() - new Date(date).getTime();
-  const minutes = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
+interface BackupResponse {
+  ok: boolean;
+  exitCode: number;
+  stdoutTail: string;
+  stderrTail: string;
+}
+
+const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
+
+function timeAgo(ms: number): string {
+  if (!ms) return "never";
+  const diff = Date.now() - ms;
+  if (diff < 0) return "in the future";
+  const minutes = Math.floor(diff / 60_000);
+  const hours = Math.floor(diff / 3_600_000);
+  const days = Math.floor(diff / 86_400_000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   if (hours < 24) return `${hours}h ago`;
   return `${days}d ago`;
 }
 
-async function extractErrorMessage(response: Response, fallback: string) {
-  const bodyText = await response.text().catch(() => "");
-  if (!bodyText) return `${fallback} (${response.status})`;
-  try {
-    const parsed = JSON.parse(bodyText) as { error?: string };
-    if (parsed.error) return parsed.error;
-  } catch {
-    // Fall through to the raw body text below.
+function formatBytes(n: number): string {
+  if (!n || n < 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
   }
-  return `${fallback} (${response.status}): ${bodyText}`;
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-function normalizeBackupLocalPath(backupPath: string | null | undefined) {
-  return backupPath?.replace(/^\/home\/clawbox\/?/, "") ?? "";
-}
-
-function hasBackupConfigChanged(
-  status: ClawKeepStatus | null,
-  localEnabled: boolean,
-  cloudEnabled: boolean,
-  localPath: string,
-) {
-  return (
-    !status?.backup.passwordSet ||
-    localEnabled !== !!status?.backup.local.enabled ||
-    cloudEnabled !== !!status?.backup.cloud.enabled ||
-    (localEnabled && localPath !== (status?.backup.local.path?.replace(/^\/home\/clawbox\/?/, "") ?? ""))
-  );
-}
-
-export default function ClawKeepApp({ onOpenAiProviderSettings }: ClawKeepAppProps) {
-  const [sourcePath, setSourcePath] = useState("Documents");
-  const [localPath, setLocalPath] = useState("Backups/clawkeep");
-  const [password, setPassword] = useState("");
-  const [localEnabled, setLocalEnabled] = useState(true);
-  const [cloudEnabled, setCloudEnabled] = useState(false);
-  const [status, setStatus] = useState<ClawKeepStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [picker, setPicker] = useState<"source" | "local" | null>(null);
-
-  const loadStatus = useCallback(async (nextSourcePath: string) => {
-    setError(null);
+async function jsonOrError<T>(resp: Response): Promise<T> {
+  if (!resp.ok) {
+    let detail = resp.statusText;
     try {
-      const response = await fetch(`/setup-api/clawkeep?sourcePath=${encodeURIComponent(nextSourcePath)}`, { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(await extractErrorMessage(response, `Failed to load ClawKeep for ${nextSourcePath}`));
-      }
-      const data = await response.json() as ClawKeepStatus;
-      setStatus(data);
-      setLocalEnabled(data.backup.local.enabled || !data.backup.mode);
-      setCloudEnabled(data.backup.cloud.enabled);
-      if (data.backup.local.path) {
-        setLocalPath(normalizeBackupLocalPath(data.backup.local.path));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load ClawKeep");
+      const body = (await resp.json()) as { error?: string };
+      if (body.error) detail = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `HTTP ${resp.status}`);
+  }
+  return (await resp.json()) as T;
+}
+
+export default function ClawKeepApp() {
+  const [status, setStatus] = useState<ClawKeepStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "save">("");
+  const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
+  const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
+  const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
+  const pollIntervalRef = useRef<number | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await jsonOrError<ClawKeepStatus>(
+        await fetch("/setup-api/clawkeep", { cache: "no-store" }),
+      );
+      setStatus(next);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
     }
   }, []);
 
   useEffect(() => {
-    void loadStatus(sourcePath);
-  }, [loadStatus, sourcePath]);
+    refresh();
+  }, [refresh]);
 
-  const runAction = useCallback(async (body: Record<string, unknown>) => {
-    setBusy(true);
+  // RFC 8628 device-code poll loop. While pairing is active we hit
+  // /pair/poll every `interval` seconds (the upstream's recommended
+  // value). Phases: pending → configuring → complete.
+  useEffect(() => {
+    if (!pairChallenge) return;
+    if (pairPhase !== "pending" && pairPhase !== "configuring") return;
+
+    const tick = async () => {
+      try {
+        const ps = await jsonOrError<PairPollResponse>(
+          await fetch("/setup-api/clawkeep/pair/poll", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }),
+        );
+        if (ps.status === "complete") {
+          stopPolling();
+          setPairChallenge(null);
+          setPairPhase("");
+          await refresh();
+          return;
+        }
+        if (ps.status === "configuring") {
+          setPairPhase("configuring");
+          return;
+        }
+        if (ps.status === "error") {
+          stopPolling();
+          setPairChallenge(null);
+          setPairPhase("");
+          setError(ps.error || "Pair failed");
+          return;
+        }
+        // "pending" — keep polling
+      } catch {
+        // swallow — next tick retries
+      }
+    };
+
+    const stopPolling = () => {
+      if (pollIntervalRef.current !== null) {
+        window.clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+
+    const intervalMs = Math.max(2, pairChallenge.interval) * 1000;
+    pollIntervalRef.current = window.setInterval(tick, intervalMs);
+    void tick();
+    return stopPolling;
+  }, [pairChallenge, pairPhase, refresh]);
+
+  const onPair = useCallback(async () => {
+    setBusy("pair");
     setError(null);
-    setNotice(null);
     try {
-      const response = await fetch("/setup-api/clawkeep", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourcePath, ...body }),
-      });
-      if (!response.ok) {
-        throw new Error(await extractErrorMessage(response, "ClawKeep request failed"));
-      }
-      const data = await response.json();
-      if ("status" in data && data.status) {
-        setStatus(data.status as ClawKeepStatus);
-      } else if ("initialized" in data) {
-        setStatus(data as ClawKeepStatus);
-      }
-      if (typeof data.message === "string") {
-        setNotice(data.message);
-      }
-      return data;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "ClawKeep request failed";
-      setError(message);
-      throw err;
+      const start = await jsonOrError<PairStartResponse>(
+        await fetch("/setup-api/clawkeep/pair/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      );
+      setPairChallenge(start);
+      setPairPhase("pending");
+      window.open(start.verification_url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      setError((e as Error).message);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
-  }, [sourcePath]);
+  }, []);
 
-  const handleSavePlan = useCallback(async () => {
-    const trimmedPassword = password.trim();
-    if (trimmedPassword.length < 8 && !status?.backup.passwordSet) {
-      setError("Choose a password with at least 8 characters.");
-      return;
-    }
-    await runAction({
-      action: "configure",
-      localPath: localEnabled ? localPath : "",
-      cloudEnabled,
-      password: trimmedPassword.length >= 8 ? trimmedPassword : password,
-    });
-    if (trimmedPassword.length >= 8) setPassword("");
-  }, [cloudEnabled, localEnabled, localPath, password, runAction, status?.backup.passwordSet]);
+  const onCancelPair = useCallback(() => {
+    setPairChallenge(null);
+    setPairPhase("");
+    setError(null);
+  }, []);
 
-  const handleBackupNow = useCallback(async () => {
-    const trimmedPassword = password.trim();
-    const needsConfigUpdate = hasBackupConfigChanged(status, localEnabled, cloudEnabled, localPath);
-    if (needsConfigUpdate && trimmedPassword.length < 8 && !status?.backup.passwordSet) {
-      setError("Choose a password with at least 8 characters before turning on backup.");
-      return;
+  const onUnpair = useCallback(async () => {
+    if (!confirm("Unpair this device?")) return;
+    setBusy("unpair");
+    setError(null);
+    try {
+      await jsonOrError<{ ok: true }>(
+        await fetch("/setup-api/clawkeep/unpair", { method: "POST" }),
+      );
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
     }
-    if (!status?.initialized) {
-      await runAction({ action: "init" });
-    }
-    if (needsConfigUpdate) {
-      await runAction({
-        action: "configure",
-        localPath: localEnabled ? localPath : "",
-        cloudEnabled,
-        password: trimmedPassword.length >= 8 ? trimmedPassword : password,
-      });
-      if (trimmedPassword.length >= 8) setPassword("");
-    }
-    await runAction({ action: "snap", message: `backup ${new Date().toISOString()}` });
-    await runAction({ action: "sync" });
-  }, [cloudEnabled, localEnabled, localPath, password, runAction, status]);
+  }, [refresh]);
 
-  const canBackup = localEnabled || cloudEnabled;
-  const cloudNeedsConnection = cloudEnabled && !status?.backup.cloud.connected;
-  const destinationLabel = localEnabled && cloudEnabled
-    ? "This device + Cloud"
-    : localEnabled
-      ? "This device"
-      : cloudEnabled
-        ? "Cloud"
-        : "Choose a destination";
-  const primaryActionLabel = status?.initialized ? "Back up now" : "Turn on backup";
+  const onBackup = useCallback(async () => {
+    setBusy("backup");
+    setError(null);
+    setBackupResult(null);
+    try {
+      const result = await jsonOrError<BackupResponse>(
+        await fetch("/setup-api/clawkeep/backup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      );
+      setBackupResult(result);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [refresh]);
+
+  if (!status && !error) {
+    return (
+      <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)]">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!status) {
+    return (
+      <div className="h-full w-full flex items-center justify-center p-6">
+        <div className={`${CARD} max-w-md text-sm`}>
+          <p className="text-red-300">⚠️ Load failed</p>
+          {error && <p className="mt-2 text-xs text-[var(--text-muted)]">{error}</p>}
+          <button
+            type="button"
+            onClick={refresh}
+            className="mt-3 px-3 py-1.5 rounded-md bg-orange-500 text-white text-xs font-semibold"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div data-testid="clawkeep-app" className="h-full overflow-y-auto bg-[linear-gradient(180deg,#0f1726_0%,#101826_45%,#0b1320_100%)]">
-      <ClawKeepPathPicker
-        open={picker === "source"}
-        title="Choose the folder you want to protect"
-        onClose={() => setPicker(null)}
-        onSelect={(path) => {
-          setSourcePath(path);
-          setPicker(null);
-          void loadStatus(path);
-        }}
-      />
-      <ClawKeepPathPicker
-        open={picker === "local"}
-        title="Choose where local backup copies should live"
-        onClose={() => setPicker(null)}
-        onSelect={(path) => {
-          setLocalPath(path);
-          setPicker(null);
-        }}
-      />
-
-      <div className="mx-auto flex max-w-4xl flex-col gap-5 p-5 sm:p-6">
-        {error && <div className="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
-        {notice && <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-50">{notice}</div>}
-
-        <section className="rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(19,27,42,0.98),rgba(15,22,36,0.98))] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.28)] sm:p-6">
-          <div className="mx-auto max-w-2xl space-y-5">
-            <div className="space-y-2">
-              <div className="inline-flex w-fit items-center gap-2 rounded-full border border-orange-400/20 bg-orange-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-orange-100">
-                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>shield_lock</span>
-                Simple backup
-              </div>
-              <h1 className="text-3xl font-bold text-white">Back up one folder</h1>
-              <p className="max-w-xl text-sm leading-relaxed text-white/70">
-                Choose what to protect, where copies should go, and press one button.
-              </p>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Folder</div>
-                <div className="mt-2 text-sm font-semibold text-white">{sourcePath || "Not chosen"}</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Destination</div>
-                <div className="mt-2 text-sm font-semibold text-white">{destinationLabel}</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-                <div className="text-[11px] uppercase tracking-[0.16em] text-white/45">Last backup</div>
-                <div className="mt-2 text-sm font-semibold text-white">{status?.backup.lastSync ? timeAgo(status.backup.lastSync) : "Never"}</div>
-              </div>
-            </div>
-
-            <div className="space-y-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-5">
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Folder</label>
-                <div className="flex gap-2">
-                  <input
-                    value={sourcePath}
-                    onChange={(event) => setSourcePath(event.target.value.replace(/^\/+/, ""))}
-                    className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-orange-400/40"
-                    placeholder="Documents"
-                  />
-                  <button type="button" onClick={() => setPicker("source")} className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]">
-                    Browse
-                  </button>
-                </div>
-                <div className="mt-2 text-xs text-white/45">{describePath(sourcePath)}</div>
-              </div>
-
-              <div>
-                <div className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Where to copy it</div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  {[
-                    { id: "local", label: "This device", active: localEnabled && !cloudEnabled, onClick: () => { setLocalEnabled(true); setCloudEnabled(false); } },
-                    { id: "cloud", label: "Cloud", active: !localEnabled && cloudEnabled, onClick: () => { setLocalEnabled(false); setCloudEnabled(true); } },
-                    { id: "both", label: "Both", active: localEnabled && cloudEnabled, onClick: () => { setLocalEnabled(true); setCloudEnabled(true); } },
-                  ].map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      data-testid={option.id === "cloud" ? "cloud-toggle" : undefined}
-                      aria-pressed={option.active}
-                      onClick={option.onClick}
-                      className={`rounded-2xl border px-4 py-3 text-left text-sm font-medium transition ${
-                        option.active
-                          ? "border-emerald-400/30 bg-emerald-500/12 text-white"
-                          : "border-white/10 bg-white/[0.03] text-white/75 hover:bg-white/[0.06]"
-                      }`}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {localEnabled && (
-                <div>
-                  <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Local folder</label>
-                  <div className="flex gap-2">
-                    <input
-                      value={localPath}
-                      onChange={(event) => setLocalPath(event.target.value.replace(/^\/+/, ""))}
-                      className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/40"
-                      placeholder="Backups/clawkeep"
-                    />
-                    <button type="button" onClick={() => setPicker("local")} className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08]">
-                      Browse
-                    </button>
-                  </div>
-                  <div className="mt-2 text-xs text-white/45">{describePath(localPath)}</div>
-                </div>
-              )}
-
-              {cloudEnabled && (
-                <div className="rounded-2xl border border-emerald-400/15 bg-emerald-500/8 p-4">
-                  <div className="text-sm font-semibold text-white">{status?.backup.cloud.providerLabel ?? "ClawBox AI"}</div>
-                  <div className="mt-1 text-xs text-white/65">
-                    {status?.backup.cloud.connected
-                      ? "Cloud backup is ready."
-                      : "Connect ClawBox AI first."}
-                  </div>
-                  {!status?.backup.cloud.connected && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenAiProviderSettings?.()}
-                      className="mt-3 rounded-xl border border-emerald-300/20 bg-emerald-500/15 px-3 py-2 text-sm font-medium text-emerald-50 transition hover:bg-emerald-500/20"
-                    >
-                      Connect ClawBox AI
-                    </button>
-                  )}
-                </div>
-              )}
-
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/40"
-                  placeholder={status?.backup.passwordSet ? "Leave blank to keep your current password" : "At least 8 characters"}
-                />
-                <div className="mt-2 text-xs text-white/45">One password protects every copy.</div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => void handleBackupNow()}
-                  disabled={busy || !canBackup || cloudNeedsConnection}
-                  className="rounded-2xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
-                >
-                  {primaryActionLabel}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleSavePlan()}
-                  disabled={busy || !canBackup || cloudNeedsConnection}
-                  className="rounded-2xl border border-white/10 bg-white/[0.04] px-5 py-3 text-sm font-medium text-white/80 transition hover:bg-white/[0.08] disabled:opacity-50"
-                >
-                  Save settings
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void loadStatus(sourcePath)}
-                  disabled={busy}
-                  className="text-sm font-medium text-white/60 transition hover:text-white disabled:opacity-50"
-                >
-                  Refresh
-                </button>
-              </div>
-
-              <div className="rounded-2xl border border-white/8 bg-black/15 px-4 py-3 text-sm text-white/72">
-                {status?.initialized
-                  ? `${sourcePath || "This folder"} is protected. ${status?.backup.chunkCount ? `${status.backup.chunkCount} encrypted chunk${status.backup.chunkCount === 1 ? "" : "s"} stored.` : "Run backup any time."}`
-                  : "Your first backup will set everything up automatically."}
-              </div>
-
-              {status?.recent[0] && (
-                <div className="text-xs text-white/45">
-                  Latest snap: {status.recent[0].message} · {timeAgo(status.recent[0].date)}
-                </div>
-              )}
-            </div>
+    <div className="h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200 p-6">
+      <div className="max-w-3xl mx-auto space-y-4">
+        <header className="flex items-baseline justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold font-display">ClawKeep</h1>
+            <p className="text-sm text-[var(--text-muted)]">
+              Off-device backups to {status.server.replace(/^https?:\/\//, "")} via restic.
+            </p>
           </div>
-        </section>
+          {status.paired && (
+            <button
+              type="button"
+              disabled={busy === "unpair"}
+              onClick={onUnpair}
+              className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
+            >
+              {busy === "unpair" ? "🔌 Unpairing…" : "Unpair"}
+            </button>
+          )}
+        </header>
+
+        {error && (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+            ⚠️ {error}
+          </div>
+        )}
+
+        {pairChallenge ? (
+          <PairChallengeCard
+            challenge={pairChallenge}
+            phase={pairPhase}
+            onCancel={onCancelPair}
+          />
+        ) : status.paired ? (
+          <DashboardCard status={status} onBackup={onBackup} busy={busy === "backup"} />
+        ) : (
+          <PairCard onPair={onPair} busy={busy === "pair"} />
+        )}
+
+        {(!status.resticInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+
+        <ConfigCard
+          status={status}
+          onSaved={refresh}
+          onError={setError}
+          onBusyChange={(v) => setBusy(v ? "save" : "")}
+        />
+
+        {backupResult && <BackupResultCard result={backupResult} />}
       </div>
+    </div>
+  );
+}
+
+function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
+  return (
+    <div className={`${CARD} space-y-3`}>
+      <h2 className="font-semibold">Pair this device</h2>
+      <p className="text-sm text-[var(--text-muted)]">
+        Connect to your portal account so this device can mint short-lived R2 credentials and back up to your ClawKeep storage.
+      </p>
+      <button
+        type="button"
+        onClick={onPair}
+        disabled={busy}
+        className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
+      >
+        {busy ? "🔗 Connecting…" : "Pair with portal"}
+      </button>
+    </div>
+  );
+}
+
+function PairChallengeCard({
+  challenge,
+  phase,
+  onCancel,
+}: {
+  challenge: PairStartResponse;
+  phase: "" | "pending" | "configuring";
+  onCancel: () => void;
+}) {
+  const codeChunks = challenge.user_code.split("-");
+  return (
+    <div className={`${CARD} space-y-4`}>
+      <h2 className="font-semibold">
+        {phase === "configuring" ? "🔄 Configuring…" : "👉 Enter this code"}
+      </h2>
+      <div className="flex items-center justify-center gap-2 py-2">
+        {codeChunks.map((chunk, i) => (
+          <span
+            key={`code-${i}-${chunk}`}
+            className="px-3 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
+          >
+            {chunk}
+          </span>
+        ))}
+      </div>
+      <p className="text-sm text-[var(--text-muted)] text-center">
+        On the portal page that opened, type the code and approve.
+      </p>
+      <div className="flex justify-center gap-2">
+        <a
+          href={challenge.verification_url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-orange-300 hover:text-orange-200 underline"
+        >
+          Re-open portal page
+        </a>
+        <span className="text-xs text-[var(--text-muted)]">·</span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-xs text-[var(--text-muted)] hover:text-gray-200"
+        >
+          Cancel
+        </button>
+      </div>
+      <p className="text-xs text-[var(--text-muted)] text-center">
+        {phase === "configuring" ? "⏳ Saving token…" : "🕒 Waiting for approval…"}
+      </p>
+    </div>
+  );
+}
+
+function DashboardCard({
+  status,
+  onBackup,
+  busy,
+}: {
+  status: ClawKeepStatus;
+  onBackup: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div className={`${CARD} space-y-3`}>
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="font-semibold">Backup status</h2>
+        <span
+          className={`text-xs ${
+            status.lastHeartbeatStatus === "ok" ? "text-emerald-400" : "text-[var(--text-muted)]"
+          }`}
+        >
+          {status.lastHeartbeatStatus || "no runs yet"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <Stat label="Last backup" value={timeAgo(status.lastBackupAtMs)} />
+        <Stat label="Cloud usage" value={formatBytes(status.cloudBytes)} />
+        <Stat label="Snapshots" value={status.snapshotCount.toString()} />
+      </div>
+
+      <button
+        type="button"
+        onClick={onBackup}
+        disabled={busy || !status.daemonInstalled || !status.resticInstalled}
+        className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
+      >
+        {busy ? "💾 Backing up…" : "Back up now"}
+      </button>
+      {busy && (
+        <p className="text-xs text-[var(--text-muted)]">⏳ Running restic. Keep this tab open.</p>
+      )}
+    </div>
+  );
+}
+
+function SystemCard({ status }: { status: ClawKeepStatus }) {
+  return (
+    <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
+      <h2 className="font-semibold text-amber-200">⚙️ Setup needed</h2>
+      <ul className="text-sm text-amber-100 space-y-1">
+        {!status.resticInstalled && (
+          <li>
+            <code className="bg-black/30 px-1 rounded">restic</code> is not on $PATH. Install with{" "}
+            <code className="bg-black/30 px-1 rounded">apt install restic</code>.
+          </li>
+        )}
+        {!status.daemonInstalled && (
+          <li>
+            <code className="bg-black/30 px-1 rounded">clawkeepd</code> is not on $PATH. From{" "}
+            <code className="bg-black/30 px-1 rounded">clawbox/clawkeep</code> run{" "}
+            <code className="bg-black/30 px-1 rounded">pip install --user .</code>.
+          </li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg bg-white/[0.03] p-3">
+      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
+      <div className="mt-1 text-base font-semibold text-gray-100">{value}</div>
+    </div>
+  );
+}
+
+function ConfigCard({
+  status,
+  onSaved,
+  onError,
+  onBusyChange,
+}: {
+  status: ClawKeepStatus;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const startEdit = useCallback(async () => {
+    try {
+      const resp = await fetch("/setup-api/clawkeep/config", { cache: "no-store" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setDraft(await resp.text());
+      setEditing(true);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  }, [onError]);
+
+  const cancel = useCallback(() => {
+    setEditing(false);
+    setDraft("");
+  }, []);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    onBusyChange(true);
+    try {
+      const resp = await fetch("/setup-api/clawkeep/config", {
+        method: "PUT",
+        headers: { "Content-Type": "text/plain" },
+        body: draft,
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${resp.status}`);
+      }
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSaving(false);
+      onBusyChange(false);
+    }
+  }, [draft, onBusyChange, onError, onSaved]);
+
+  return (
+    <div className={`${CARD} space-y-3`}>
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="font-semibold">What gets backed up</h2>
+        {!editing && (
+          <button
+            type="button"
+            onClick={startEdit}
+            className="text-xs text-orange-300 hover:text-orange-200"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+
+      {!editing ? (
+        <div className="space-y-2 text-sm">
+          <PathList label="Include" items={status.paths} fallback="(no paths configured — click Edit)" />
+          {status.exclude.length > 0 && <PathList label="Exclude" items={status.exclude} />}
+          <p className="text-xs text-[var(--text-muted)]">
+            Schedule: {status.schedule}. Config file:{" "}
+            <code className="bg-black/30 px-1 rounded">{status.configPath}</code>
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            aria-label="ClawKeep config TOML"
+            className="w-full h-72 rounded-md bg-black/40 border border-white/10 p-3 text-xs font-mono text-gray-100 focus:outline-none focus:border-orange-400"
+            spellCheck={false}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-xs font-semibold"
+            >
+              {saving ? "💾 Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={cancel}
+              disabled={saving}
+              className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PathList({ label, items, fallback }: { label: string; items: string[]; fallback?: string }) {
+  if (!items.length) {
+    return <div className="text-xs text-[var(--text-muted)]">{fallback ?? `${label}: (none)`}</div>;
+  }
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
+      <ul className="mt-1 space-y-0.5">
+        {items.map((p, idx) => (
+          <li key={`${idx}-${p}`} className="text-xs font-mono text-gray-200">
+            {p}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function BackupResultCard({ result }: { result: BackupResponse }) {
+  const tail = result.stderrTail || result.stdoutTail || "(no output)";
+  return (
+    <div
+      className={`${CARD} ${
+        result.ok ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"
+      }`}
+    >
+      <h2 className="font-semibold">
+        {result.ok ? "✅ Backup ok" : `❌ Failed (exit ${result.exitCode})`}
+      </h2>
+      <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
+        {tail}
+      </pre>
     </div>
   );
 }

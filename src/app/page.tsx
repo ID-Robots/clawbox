@@ -1297,7 +1297,7 @@ function ChromeDesktopInner() {
       case "files":
         return <FilesApp />;
       case "clawkeep":
-        return <ClawKeepApp onOpenAiProviderSettings={openClawAiProviderSettings} />;
+        return <ClawKeepApp />;
       case "browser":
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":

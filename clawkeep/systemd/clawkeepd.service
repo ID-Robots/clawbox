@@ -1,0 +1,34 @@
+[Unit]
+Description=ClawKeep backup run
+Documentation=https://github.com/ID-Robots/clawkeep-device
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=clawkeep
+Group=clawkeep
+# Pin data/log paths via env so the daemon never falls back to a $HOME
+# location it can't write to (ProtectHome=read-only blocks that anyway,
+# but explicit is safer than implicit).
+Environment=CLAWKEEP_DATA_DIR=/var/lib/clawkeep
+Environment=CLAWKEEP_CONFIG_PATH=/etc/clawkeep/config.toml
+ExecStart=/usr/bin/clawkeepd
+TimeoutStartSec=4h
+# Security hardening — restrict the daemon to its own state dirs.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/clawkeep /var/log/clawkeep
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+# Networking is required (portal + R2).
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

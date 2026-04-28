@@ -1,0 +1,34 @@
+# /etc/clawkeep/config.toml
+#
+# Copy this to /etc/clawkeep/config.toml and edit. Fields are documented
+# in section 7 of the design doc (clawkeep-plan.md).
+
+# Portal endpoint. Change once the canonical domain migrates.
+server = "https://openclawhardware.dev"
+
+# What to back up. Globs are passed straight through to restic.
+paths = [
+    "/home",
+    "/etc/clawbox",
+]
+
+# What to skip. Common large/regenerable trees.
+exclude = [
+    "**/node_modules",
+    "**/.cache",
+    "**/.venv",
+    "**/__pycache__",
+    "*.tmp",
+    "*.log",
+]
+
+# How often the systemd timer fires. Keep in sync with the timer unit.
+schedule = "daily"  # daily | weekly | manual
+
+[restic]
+binary = "/usr/bin/restic"
+compression = "auto"   # auto | off | max
+read_concurrency = 2
+
+[heartbeat]
+idle_interval_hours = 24
