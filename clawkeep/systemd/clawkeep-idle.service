@@ -1,0 +1,20 @@
+[Unit]
+Description=ClawKeep idle heartbeat
+Documentation=https://github.com/ID-Robots/clawkeep-device
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=clawkeep
+Group=clawkeep
+ExecStart=/usr/bin/clawkeepd --idle
+TimeoutStartSec=60s
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/clawkeep /var/log/clawkeep
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
