@@ -929,7 +929,13 @@ export async function configureClawKeepLocalTarget(relativeSourcePath: string, r
 export async function snapClawKeep(relativeSourcePath: string, message?: string) {
   const sourceDir = resolveManagedPath(relativeSourcePath);
   syncIgnore(sourceDir);
-  await runGit(sourceDir, ["add", "-A", "--", ".", ":(exclude).clawkeep/config.json"]);
+  // `git add -A` (with no pathspec) walks the tree and silently honors
+  // .gitignore. The previous explicit `-- . :(exclude).clawkeep/config.json`
+  // form errors out on the freshly-init'd repo because syncIgnore writes
+  // the .clawkeep internals into .gitignore — git then refuses the
+  // explicitly-named-but-ignored path. The `:(exclude)` was redundant
+  // anyway: those paths are already in the ignore file.
+  await runGit(sourceDir, ["add", "-A"]);
   const status = await runGit(sourceDir, ["status", "--porcelain"]);
   if (!status.trim()) {
     return {
