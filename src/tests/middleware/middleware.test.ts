@@ -130,7 +130,9 @@ describe("middleware", () => {
       expect(response.status).toBe(200);
     });
 
-    it("passes through API paths", async () => {
+    it("passes through API paths when auth is not yet active", async () => {
+      // No SESSION_SECRET = pre-setup state. /setup-api/* must work for the
+      // wizard to bootstrap.
       const request = createRequest("/setup-api/wifi/scan");
       const response = await middleware(request);
 
@@ -227,7 +229,7 @@ describe("middleware", () => {
       expect(response.status).toBe(401);
     });
 
-    it.each(["/login", "/setup", "/setup-api/test", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
+    it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
       const mod = await import("@/middleware");
@@ -235,6 +237,18 @@ describe("middleware", () => {
       const req = createRequest(p);
       const response = await mod.middleware(req);
       expect(response.status).toBe(200);
+    });
+
+    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once auth is active", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest(p);
+      const response = await mod.middleware(req);
+      // No session cookie -> page-style requests redirect to /login (307).
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
     });
 
     it("rejects invalid session cookie", async () => {

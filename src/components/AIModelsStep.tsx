@@ -16,6 +16,7 @@ import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
+import { copyToClipboard } from "@/lib/clipboard";
 import {
   extractProviderModelId,
   getProviderCatalog,
@@ -1283,7 +1284,7 @@ export default function AIModelsStep({
   };
 
   const providerDesc: Record<string, string> = {
-    clawai: "Recommended ClawBox AI service with simple token setup and owner benefits",
+    clawai: "All-in cloud AI for ClawBox — backups, remote desktop, full support",
     anthropic: t("ai.claudeModels"),
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
@@ -1801,10 +1802,10 @@ export default function AIModelsStep({
         {selected?.id === "clawai" && (
           <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
             <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
-              ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.
+              The fastest way to unlock everything your ClawBox can do — one tap, no API keys.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-orange-200/90">
-              ClawBox owners also get extended warranty benefits when using ClawBox services.
+              Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
             </p>
             <div className="mt-4 flex items-center justify-between gap-3">
               <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
@@ -1812,9 +1813,9 @@ export default function AIModelsStep({
               </span>
               <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-0.5">
                 {(["flash", "pro"] as const).map((tier) => {
-                  const tierLabel = tier === "flash" ? "Flash" : "Pro";
+                  const tierLabel = tier === "flash" ? "Pro" : "Max";
                   const isActive = clawaiTier === tier;
-                  // The visible label is just "Flash" or "Pro" with the
+                  // The visible label is just "Pro" or "Max" with the
                   // "Trial" badge rendered as decorative text; screen readers
                   // skip the badge (aria-hidden) so the radio's accessible
                   // name needs to carry the tier-and-badge context itself.
@@ -1885,17 +1886,17 @@ export default function AIModelsStep({
               <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
                 {(clawaiTier === "pro"
                   ? [
-                      "Maximum usage",
-                      "DeepSeek V4 Pro (frontier)",
+                      "Maximum usage on frontier DeepSeek V4 Pro",
                       "1M token context window",
-                      "Highest priority",
-                      "Full support — real humans via call/meeting",
+                      "ClawKeep cloud backups",
+                      "Remote Desktop access",
+                      "Highest priority + full human support",
                     ]
                   : [
-                      "5× more usage than Free",
-                      "DeepSeek V4 Flash",
-                      "Priority processing",
-                      "Email support",
+                      "5× more usage than Free, on DeepSeek V4 Flash",
+                      "ClawKeep cloud backups",
+                      "Remote Desktop access",
+                      "Priority processing + email support",
                     ]
                 ).map((feature) => (
                   <li key={feature} className="flex items-start gap-1.5">
@@ -1982,41 +1983,12 @@ export default function AIModelsStep({
                           onClick={async () => {
                             const code = clawaiDeviceCode;
                             if (!code) return;
-                            const flashCopiedLabel = () => {
-                              const btn = document.getElementById("clawai-copy-code-btn");
-                              if (!btn) return;
-                              btn.textContent = t("copied");
-                              setTimeout(() => { btn.textContent = t("copy"); }, 1500);
-                            };
-                            // Modern path: navigator.clipboard.writeText is
-                            // the preferred API and works on every
-                            // up-to-date browser this OS supports. Fall
-                            // back to the legacy textarea+execCommand dance
-                            // only when the modern API is missing or the
-                            // permission/transient-activation check throws
-                            // (e.g. some embedded WebView contexts).
-                            if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-                              try {
-                                await navigator.clipboard.writeText(code);
-                                flashCopiedLabel();
-                                return;
-                              } catch (err) {
-                                console.warn("[AIModelsStep] clipboard.writeText failed, falling back to execCommand", err);
-                              }
-                            }
-                            try {
-                              const ta = document.createElement("textarea");
-                              ta.value = code;
-                              ta.style.position = "fixed";
-                              ta.style.opacity = "0";
-                              document.body.appendChild(ta);
-                              ta.select();
-                              document.execCommand("copy");
-                              document.body.removeChild(ta);
-                              flashCopiedLabel();
-                            } catch (err) {
-                              console.warn("[AIModelsStep] copy fallback failed", err);
-                            }
+                            const ok = await copyToClipboard(code);
+                            if (!ok) return;
+                            const btn = document.getElementById("clawai-copy-code-btn");
+                            if (!btn) return;
+                            btn.textContent = t("copied");
+                            setTimeout(() => { btn.textContent = t("copy"); }, 1500);
                           }}
                           id="clawai-copy-code-btn"
                           className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"

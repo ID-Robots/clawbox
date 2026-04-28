@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
   set: vi.fn(),
+  DATA_DIR: "/tmp/clawbox-test-data",
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -11,14 +12,26 @@ vi.mock("@/lib/auth", () => ({
   getSessionSigningSecret: vi.fn().mockResolvedValue("secret"),
 }));
 
+vi.mock("@/lib/login-rate-limit", () => ({
+  checkLockout: vi.fn(),
+  recordFailure: vi.fn(),
+  recordSuccess: vi.fn(),
+  // No-op so tests don't sleep 300 ms each.
+  padResponseTime: vi.fn().mockResolvedValue(undefined),
+}));
+
 import * as config from "@/lib/config-store";
 import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
+import { checkLockout, recordFailure, recordSuccess } from "@/lib/login-rate-limit";
 
 const mockGet = vi.mocked(config.get);
 const mockSet = vi.mocked(config.set);
 const mockVerifyPassword = vi.mocked(verifyPassword);
 const mockCreateSessionCookie = vi.mocked(createSessionCookie);
 const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
+const mockCheckLockout = vi.mocked(checkLockout);
+const mockRecordFailure = vi.mocked(recordFailure);
+const mockRecordSuccess = vi.mocked(recordSuccess);
 
 describe("/login-api", () => {
   let POST: (req: Request) => Promise<Response>;
@@ -30,6 +43,9 @@ describe("/login-api", () => {
     mockVerifyPassword.mockResolvedValue(false);
     mockCreateSessionCookie.mockReturnValue("session.cookie");
     mockGetSessionSigningSecret.mockResolvedValue("secret");
+    mockCheckLockout.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
+    mockRecordFailure.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
+    mockRecordSuccess.mockResolvedValue(undefined);
     const mod = await import("@/app/login-api/route");
     POST = mod.POST;
   });
@@ -38,50 +54,95 @@ describe("/login-api", () => {
     mockVerifyPassword.mockResolvedValue(true);
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.4" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.4" },
       body: JSON.stringify({ password: "correct", duration: 43200 }),
     });
     const res = await POST(req);
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(res.headers.get("set-cookie")).toContain("clawbox_session");
+    expect(mockRecordSuccess).toHaveBeenCalledWith("cf:1.2.3.4");
   });
 
-  it("rejects incorrect password", async () => {
+  it("rejects incorrect password and records a failure", async () => {
     mockVerifyPassword.mockResolvedValue(false);
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.5" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.5" },
       body: JSON.stringify({ password: "wrong", duration: 43200 }),
     });
     const res = await POST(req);
     expect(res.status).toBe(401);
+    expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5");
+  });
+
+  it("returns 429 with Retry-After when already locked out", async () => {
+    mockCheckLockout.mockResolvedValue({ locked: true, retryAfterSeconds: 300 });
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "9.9.9.9" },
+      body: JSON.stringify({ password: "anything", duration: 43200 }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    // Must not even attempt PAM verification once locked.
+    expect(mockVerifyPassword).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 when this failure tipped into a lockout", async () => {
+    mockVerifyPassword.mockResolvedValue(false);
+    mockRecordFailure.mockResolvedValue({ locked: true, retryAfterSeconds: 600 });
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.6" },
+      body: JSON.stringify({ password: "wrong", duration: 43200 }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("600");
+  });
+
+  it("buckets requests with no proxy header into a global counter", async () => {
+    mockVerifyPassword.mockResolvedValue(false);
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "wrong", duration: 43200 }),
+    });
+    await POST(req);
+    expect(mockRecordFailure).toHaveBeenCalledWith("global");
   });
 
   it("rejects missing password", async () => {
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.6" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.6" },
       body: JSON.stringify({ duration: 43200 }),
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    // Validation rejections aren't credential failures and must not advance
+    // the lockout counter — that would let "password missing" spam lock out
+    // the real owner.
+    expect(mockRecordFailure).not.toHaveBeenCalled();
   });
 
   it("rejects invalid duration", async () => {
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.7" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.7" },
       body: JSON.stringify({ password: "test", duration: 999 }),
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    expect(mockRecordFailure).not.toHaveBeenCalled();
   });
 
   it("handles invalid JSON", async () => {
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.8" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.8" },
       body: "not json",
     });
     const res = await POST(req);
@@ -92,7 +153,7 @@ describe("/login-api", () => {
     mockGet.mockResolvedValue(null as never);
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.9" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.9" },
       body: JSON.stringify({ password: "test", duration: 43200 }),
     });
     const res = await POST(req);
@@ -106,7 +167,7 @@ describe("/login-api", () => {
     mockVerifyPassword.mockResolvedValue(true);
     const req = new Request("http://localhost/login-api", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.10" },
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.10" },
       body: JSON.stringify({ password: "correct", duration: 43200 }),
     });
     const res = await POST(req);

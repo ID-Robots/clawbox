@@ -21,6 +21,7 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
+  clawkeepStale?: boolean;
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -39,6 +40,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
+  clawkeepStale = false,
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -105,7 +107,12 @@ export default function ChromeShelf({
   const shieldTitle = clawAiAuthenticated
     ? t("shelf.openClawKeep")
     : t("shelf.connectClawBoxAI");
-  const shieldClasses = clawAiAuthenticated
+  // Two reasons to flag the shield red: AI not connected (needs setup) or
+  // ClawKeep is paired/configured but hasn't run a backup in >24 h. The
+  // first is the original behaviour; the second is the new stale-backup
+  // signal so a user notices their off-device backups stopped before they
+  // need to restore.
+  const shieldClasses = clawAiAuthenticated && !clawkeepStale
     ? "text-emerald-300"
     : "text-red-700";
   const shieldInteractive = typeof onClawKeepShieldClick === "function";

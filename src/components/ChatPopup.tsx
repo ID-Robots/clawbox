@@ -157,6 +157,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
+  const [thinkingLevel, setThinkingLevel] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'high'
+    return window.localStorage?.getItem('clawbox:chat:thinkingLevel') || 'high'
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
@@ -311,6 +315,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
       }, 30000)
     })
+  }, [])
+
+  // Push the latest thinkingLevel to the gateway whenever it changes or the
+  // WS reconnects. chat.send resolves thinking from the session entry, so
+  // patching the entry keeps every subsequent send aligned with the picker.
+  useEffect(() => {
+    if (status !== 'connected') return
+    const key = sessionKeyRef.current
+    if (!key) return
+    void wsRequest('sessions.patch', { key, thinkingLevel }).catch(() => {})
+  }, [status, thinkingLevel, wsRequest])
+
+  const handleThinkingLevelChange = useCallback((next: string) => {
+    setThinkingLevel(next)
+    try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', next) } catch {}
   }, [])
 
   // Connect to gateway
@@ -1108,6 +1127,55 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               </div>
             )
           })()}
+          <div
+            onPointerDown={stopHeaderDrag}
+            style={{
+              position: 'relative',
+              display: 'inline-flex',
+              alignItems: 'center',
+              maxWidth: 120,
+              marginLeft: 6,
+            }}
+          >
+            <select
+              aria-label="Reasoning effort"
+              value={thinkingLevel}
+              onChange={(e) => handleThinkingLevelChange(e.target.value)}
+              onPointerDown={stopHeaderDrag}
+              style={{
+                appearance: 'none',
+                WebkitAppearance: 'none',
+                MozAppearance: 'none',
+                width: '100%',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                color: '#fff',
+                borderRadius: 10,
+                padding: '6px 28px 6px 10px',
+                fontSize: 11,
+                fontWeight: 600,
+                outline: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              <option value="low" style={{ background: '#111827', color: '#fff' }}>Effort: low</option>
+              <option value="medium" style={{ background: '#111827', color: '#fff' }}>Effort: medium</option>
+              <option value="high" style={{ background: '#111827', color: '#fff' }}>Effort: high</option>
+            </select>
+            <span
+              className="material-symbols-rounded"
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                right: 8,
+                fontSize: 16,
+                color: 'rgba(255,255,255,0.35)',
+                pointerEvents: 'none',
+              }}
+            >
+              unfold_more
+            </span>
+          </div>
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (

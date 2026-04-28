@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { copyToClipboard } from "@/lib/clipboard";
 
 interface ClawKeepStatus {
   paired: boolean;
@@ -86,6 +87,7 @@ export default function ClawKeepApp() {
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
   const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
   const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -289,14 +291,34 @@ export default function ClawKeepApp() {
 
         {(!status.resticInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
 
-        <ConfigCard
-          status={status}
-          onSaved={refresh}
-          onError={setError}
-          onBusyChange={(v) => setBusy(v ? "save" : "")}
-        />
-
         {backupResult && <BackupResultCard result={backupResult} />}
+
+        {/* Path-list/schedule TOML editor is power-user territory — hide
+            by default so the dashboard stays scannable. */}
+        {status.paired && (
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="text-xs text-[var(--text-muted)] hover:text-gray-200 inline-flex items-center gap-1.5 cursor-pointer bg-transparent border-none p-0"
+              aria-expanded={showAdvanced}
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>
+                {showAdvanced ? "expand_less" : "expand_more"}
+              </span>
+              {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
+            </button>
+          </div>
+        )}
+
+        {status.paired && showAdvanced && (
+          <ConfigCard
+            status={status}
+            onSaved={refresh}
+            onError={setError}
+            onBusyChange={(v) => setBusy(v ? "save" : "")}
+          />
+        )}
       </div>
     </div>
   );
@@ -330,21 +352,53 @@ function PairChallengeCard({
   phase: "" | "pending" | "configuring";
   onCancel: () => void;
 }) {
-  const codeChunks = challenge.user_code.split("-");
+  const code = challenge.user_code;
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+
+  const flashCopied = useCallback(() => {
+    setCopied(true);
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
+  }, []);
+
+  // Auto-copy when a fresh code lands. Mirrors what the user just told the
+  // portal to expect — they can paste straight into the portal field
+  // without re-typing. Re-runs only when the code itself changes so a
+  // re-render (e.g. phase transition) doesn't keep stomping the clipboard.
+  useEffect(() => {
+    if (!code) return;
+    void copyToClipboard(code).then((ok) => { if (ok) flashCopied(); });
+    return () => {
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    };
+  }, [code, flashCopied]);
+
+  const onCopyClick = useCallback(async () => {
+    const ok = await copyToClipboard(code);
+    if (ok) flashCopied();
+  }, [code, flashCopied]);
+
   return (
     <div className={`${CARD} space-y-4`}>
       <h2 className="font-semibold">
         {phase === "configuring" ? "🔄 Configuring…" : "👉 Enter this code"}
       </h2>
       <div className="flex items-center justify-center gap-2 py-2">
-        {codeChunks.map((chunk, i) => (
-          <span
-            key={`code-${i}-${chunk}`}
-            className="px-3 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
-          >
-            {chunk}
-          </span>
-        ))}
+        <span
+          className="select-all cursor-text px-4 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
+          aria-label="Pairing code"
+        >
+          {code}
+        </span>
+        <button
+          type="button"
+          onClick={onCopyClick}
+          aria-label={copied ? "Code copied" : "Copy code"}
+          className="px-2.5 py-2 rounded-md text-xs font-medium text-orange-300 bg-black/30 border border-white/10 hover:bg-black/50 cursor-pointer transition-colors"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
       </div>
       <p className="text-sm text-[var(--text-muted)] text-center">
         On the portal page that opened, type the code and approve.
@@ -374,6 +428,58 @@ function PairChallengeCard({
   );
 }
 
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function BackupProgressPanel() {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  return (
+    <div className="rounded-xl border border-orange-400/30 bg-gradient-to-br from-orange-500/10 via-orange-500/5 to-transparent p-6">
+      <div className="flex items-center gap-4">
+        <div
+          aria-hidden="true"
+          className="shrink-0 w-12 h-12 rounded-full border-4 border-orange-400/30 border-t-orange-400 animate-spin"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="text-base font-semibold text-orange-100">
+            Backing up to ClawBox cloud…
+          </div>
+          <div className="text-xs text-[var(--text-muted)] mt-0.5">
+            Restic is scanning files and uploading changes. This can take a few minutes.
+          </div>
+        </div>
+        <div
+          className="shrink-0 text-2xl font-mono font-semibold text-orange-100 tabular-nums"
+          aria-label="Elapsed time"
+        >
+          {formatElapsed(elapsed)}
+        </div>
+      </div>
+      <div
+        className="mt-4 h-1.5 rounded-full bg-orange-500/15 overflow-hidden"
+        role="progressbar"
+        aria-label="Backup in progress"
+      >
+        <div
+          className="h-full rounded-full bg-orange-400"
+          style={{ animation: "indeterminate 1.6s ease-in-out infinite" }}
+        />
+      </div>
+      <p className="mt-3 text-xs text-[var(--text-muted)]">
+        Keep this app open. You can leave the device on and check back later.
+      </p>
+    </div>
+  );
+}
+
 function DashboardCard({
   status,
   onBackup,
@@ -383,6 +489,10 @@ function DashboardCard({
   onBackup: () => void;
   busy: boolean;
 }) {
+  if (busy) {
+    return <BackupProgressPanel />;
+  }
+
   return (
     <div className={`${CARD} space-y-3`}>
       <div className="flex items-baseline justify-between gap-3">
@@ -405,14 +515,11 @@ function DashboardCard({
       <button
         type="button"
         onClick={onBackup}
-        disabled={busy || !status.daemonInstalled || !status.resticInstalled}
+        disabled={!status.daemonInstalled || !status.resticInstalled}
         className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
       >
-        {busy ? "💾 Backing up…" : "Back up now"}
+        Back up now
       </button>
-      {busy && (
-        <p className="text-xs text-[var(--text-muted)]">⏳ Running restic. Keep this tab open.</p>
-      )}
     </div>
   );
 }

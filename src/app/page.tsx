@@ -339,6 +339,38 @@ function ChromeDesktopInner() {
     setShowClawAiOfferNotification(false);
   }, [featureFlags]);
 
+  const [clawkeepStale, setClawkeepStale] = useState(false);
+  useEffect(() => {
+    if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
+      setClawkeepStale(false);
+      return;
+    }
+    let aborted = false;
+    const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+    const check = async () => {
+      try {
+        const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json() as { paired?: boolean; lastBackupAtMs?: number };
+        if (aborted) return;
+        const stale =
+          !data.paired
+          || !data.lastBackupAtMs
+          || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS;
+        setClawkeepStale(stale);
+      } catch {
+        // Leave last-known state alone on transient failures so the shield
+        // doesn't flicker on a brief network blip.
+      }
+    };
+    void check();
+    const id = window.setInterval(() => { void check(); }, 5 * 60 * 1000);
+    return () => {
+      aborted = true;
+      window.clearInterval(id);
+    };
+  }, [featureFlags]);
+
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : wpFit === "fit"
@@ -2011,6 +2043,7 @@ function ChromeDesktopInner() {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
         onClawKeepShieldClick={featureFlags[FEATURE_FLAG_KEYS.clawkeep] ? openClawKeepOrAiProvider : undefined}
+        clawkeepStale={clawkeepStale}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
