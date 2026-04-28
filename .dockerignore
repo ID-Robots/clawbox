@@ -18,3 +18,14 @@ e2e-install/test-results
 e2e-install/playwright-report
 **/*.log
 .DS_Store
+
+# Host .env files leak host-specific paths (CLAWBOX_HOME=/home/nexus0,
+# FILES_ROOT=/home/nexus0, etc.) and credentials into the container, where
+# systemd loads them via EnvironmentFile and Next.js then tries to mkdir
+# under non-existent host paths. Always rebuild .env from .env.example
+# inside the container.
+.env
+.env.local
+.env.development
+.env.production
+.env.test
