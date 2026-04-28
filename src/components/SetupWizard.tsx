@@ -34,9 +34,11 @@ function applyStatusData(
   if (data.update_completed) resumeStep = Math.max(resumeStep, 3);
   if (data.password_configured) resumeStep = Math.max(resumeStep, 4);
   if (data.ai_model_configured) resumeStep = Math.max(resumeStep, 5);
-  if (data.local_ai_configured) resumeStep = Math.max(resumeStep, 6);
   if (Number.isFinite(persistedProgressStep)) {
-    resumeStep = Math.max(resumeStep, Math.min(6, Math.max(1, Math.floor(persistedProgressStep))));
+    // Clamp to the new 5-step wizard. A persisted step of 6 from before
+    // the Local-AI-step removal collapses to step 5 (Telegram) — the
+    // closest equivalent in the new flow.
+    resumeStep = Math.max(resumeStep, Math.min(5, Math.max(1, Math.floor(persistedProgressStep))));
   }
 
   if (data.setup_complete) {
@@ -163,10 +165,6 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
       body: t("wizard.help4Body"),
     },
     5: {
-      title: "Local AI Setup",
-      body: "Install a local model first so ClawBox always has an on-device backup. Gemma 4 on llama.cpp is the recommended default for 8GB devices, and Ollama stays available if you prefer it.",
-    },
-    6: {
       title: t("wizard.help5Title"),
       body: t("wizard.help5Body"),
     },
@@ -512,7 +510,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
           <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
         ) : (
           <>
-            {completionError && currentStep === 6 && (
+            {completionError && currentStep === 5 && (
               <div className="w-full max-w-[520px] mb-4">
                 <StatusMessage type="error" message={completionError} />
               </div>
@@ -535,18 +533,11 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 onNext={() => goToStep(5)}
               />
             )}
+            {/* Local AI step removed from initial setup — owners now reach
+                it via Settings → Local AI on demand. The wizard ships a
+                ClawBox-AI-first happy path; a local fallback is no longer
+                a precondition for finishing setup. */}
             {currentStep === 5 && (
-              <AIModelsStep
-                providerIds={["llamacpp", "ollama"]}
-                defaultProviderId="llamacpp"
-                title="Set Up Local AI"
-                description="Install a local model so OpenClaw always has a private on-device fallback. Gemma 4 on llama.cpp is recommended by default, with Ollama available if you prefer it."
-                configureScope="local"
-                testId="setup-step-local-ai"
-                onNext={() => goToStep(6)}
-              />
-            )}
-            {currentStep === 6 && (
               <TelegramStep onNext={startCompletion} />
             )}
           </>

@@ -107,7 +107,7 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
   );
 }
 
-type SectionStatus = { subtitle: string | null; dot: "ok" | "warn" | null };
+type SectionStatus = { subtitle: string | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
@@ -843,7 +843,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
   useEffect(() => {
     if (section !== "ai" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
@@ -1838,23 +1838,60 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
               ) : aiProvider.connected ? (
-                <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
-                  <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
-                    <AIProviderIcon provider={aiProvider.provider} size={24} />
-                    <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
-                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium">{aiProvider.providerLabel}</div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400/80">
-                        {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+                (() => {
+                  const isClawai = aiProvider.provider === "clawai";
+                  const cardClass = `flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5${
+                    isClawai ? " hover:bg-green-500/[0.1] hover:border-green-500/25 transition-colors cursor-pointer no-underline group" : ""
+                  }`;
+                  const inner = (
+                    <>
+                      <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
+                        <AIProviderIcon provider={aiProvider.provider} size={24} />
+                        <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
+                          <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
+                        </span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
+                          {isClawai && aiProvider.clawaiTier && (
+                            <span
+                              className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
+                                aiProvider.clawaiTier === "pro"
+                                  ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
+                                  : "bg-orange-500/15 border-orange-400/30 text-orange-200"
+                              }`}
+                            >
+                              {aiProvider.clawaiTier === "pro" ? "Max" : "Pro"}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          <span className="text-xs text-green-400/80">
+                            {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
+                          </span>
+                        </div>
+                      </div>
+                      {isClawai && (
+                        <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:text-green-400 transition-all shrink-0" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
+                      )}
+                    </>
+                  );
+                  return isClawai ? (
+                    <a
+                      href="https://openclawhardware.dev/portal/dashboard"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={cardClass}
+                      aria-label="Open ClawBox AI portal dashboard"
+                    >
+                      {inner}
+                    </a>
+                  ) : (
+                    <div className={cardClass}>{inner}</div>
+                  );
+                })()
               ) : (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
                   <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
@@ -1878,7 +1915,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               requestedProviderId={requestedAiProviderId}
               providerSelectionRequest={providerSelectionRequest}
               title="Connect AI Provider"
-              description="Choose the primary AI service your assistant should use day to day. Your Local AI setup stays available as a private on-device fallback."
+              description="Choose the primary AI service your assistant should use day to day"
               onConfigured={() => {
                 fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
                 notifyChatModelStateChanged();
@@ -2717,7 +2754,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     </>
   );
 
-  // ─── Section status (subtitle + indicator dot) shared by mobile list + desktop sidebar ───
+  // ─── Section status (subtitle) shared by mobile list + desktop sidebar ───
   // SectionStatus type is declared at module scope (above component)
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
@@ -2725,35 +2762,35 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         const sub = ui.wallpaperId.startsWith("custom-")
           ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
           : ui.wallpaperId;
-        return { subtitle: sub, dot: null };
+        return { subtitle: sub };
       }
       case "wifi":
-        if (connectedSSID) return { subtitle: connectedSSID, dot: "ok" };
-        if (ethernet.connected) return { subtitle: ethernet.iface ? `Ethernet (${ethernet.iface})` : "Ethernet", dot: "ok" };
-        return { subtitle: t("settings.notConnected") || "Not connected", dot: "warn" };
+        if (connectedSSID) return { subtitle: connectedSSID };
+        if (ethernet.connected) return { subtitle: ethernet.iface ? `Ethernet (${ethernet.iface})` : "Ethernet" };
+        return { subtitle: t("settings.notConnected") || "Not connected" };
       case "ai": {
-        if (aiProvider === null) return { subtitle: null, dot: null };
-        if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured", dot: "warn" };
-        return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null), dot: "ok" };
+        if (aiProvider === null) return { subtitle: null };
+        if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null) };
       }
       case "localAi": {
-        if (localAiStatus === null) return { subtitle: null, dot: null };
-        if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured", dot: null };
-        return { subtitle: localAiStatus.model || localAiStatus.provider, dot: localAiStatus.running ? "ok" : "warn" };
+        if (localAiStatus === null) return { subtitle: null };
+        if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: localAiStatus.model || localAiStatus.provider };
       }
       case "telegram": {
-        if (tgConfigured === null) return { subtitle: null, dot: null };
-        if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured", dot: null };
-        return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected"), dot: "ok" };
+        if (tgConfigured === null) return { subtitle: null };
+        if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected") };
       }
       case "remote":
-        return { subtitle: null, dot: null };
+        return { subtitle: null };
       case "system":
-        return { subtitle: hostname ? `${hostname}.local` : null, dot: null };
+        return { subtitle: hostname ? `${hostname}.local` : null };
       case "about":
-        return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null, dot: null };
+        return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null };
       default:
-        return { subtitle: null, dot: null };
+        return { subtitle: null };
     }
   };
 
@@ -2981,15 +3018,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </span>
               <span className="flex-1 min-w-0 truncate font-medium">{navLabel(item)}</span>
               {status.subtitle && <span className="sr-only">{status.subtitle}</span>}
-              {status.dot && (
-                <span
-                  aria-hidden="true"
-                  className={`w-2 h-2 rounded-full shrink-0 ${
-                    status.dot === "ok" ? "bg-emerald-400" : status.dot === "warn" ? "bg-amber-400" : "bg-white/20"
-                  }`}
-                  title={status.subtitle ?? undefined}
-                />
-              )}
             </button>
           );
         })}

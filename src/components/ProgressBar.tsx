@@ -23,7 +23,6 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
     t("progress.update"),
     t("progress.security"),
     t("settings.aiProvider"),
-    "Local AI",
     t("progress.telegram"),
   ];
 

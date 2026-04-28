@@ -4,6 +4,7 @@ import {
   isInstalled,
   readTunnelUrl,
 } from "@/lib/cloudflared";
+import { pushHeartbeatIfChanged } from "@/lib/portal-heartbeat";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,11 @@ export async function GET() {
       getTunnelServiceState(),
       readTunnelUrl(),
     ]);
+
+    // Fire-and-forget: push the new URL to the portal so the user's Devices
+    // list stays in sync across cloudflared restarts. No-ops when there's no
+    // ClawAI token paired or when the URL hasn't changed since the last push.
+    pushHeartbeatIfChanged(url);
 
     return NextResponse.json({
       tunnel: {

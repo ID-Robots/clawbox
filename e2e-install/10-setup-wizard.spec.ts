@@ -131,20 +131,13 @@ test.describe("fresh-install setup wizard (UI)", () => {
     await page.locator("#ai-api-key").fill("sk-e2e-placeholder-key");
     await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 
-    // ── Step 5: Local AI ─────────────────────────────────────────
-    // AIModelsStep shows a multi-phase "Setting up OpenAI GPT" overlay
-    // between step 4 submission and step 5 render (phases animate at
-    // 0/2/5/12/22s + a readiness poll on the gateway). Budget 2min so
-    // the overlay has plenty of time to complete even on a slow runner.
-    await expect(page.getByTestId("setup-step-local-ai")).toBeVisible({ timeout: 120_000 });
-    // llama-server / ollama aren't installed in test mode, so clicking
-    // "Enable Gemma 4" would fail. Skip to the next step — local AI is
-    // optional in production too.
-    await page.getByRole("button", { name: /^Skip$/ }).click();
-
-    // ── Step 6: Telegram ─────────────────────────────────────────
+    // ── Step 5: (Local AI removed — owners reach it via Settings → Local AI
+    //   on demand. AIModelsStep still shows a multi-phase "Setting up OpenAI
+    //   GPT" overlay before the wizard advances to Telegram, animating at
+    //   0/2/5/12/22s + a gateway readiness poll. Budget 2 min for the
+    //   overlay even on slow runners.) ───────────────────────────────
     const telegramStep = page.getByTestId("setup-step-telegram");
-    await expect(telegramStep).toBeVisible({ timeout: 30_000 });
+    await expect(telegramStep).toBeVisible({ timeout: 120_000 });
     if (env.TELEGRAM_BOT_TOKEN) {
       await page.getByRole("textbox", { name: /Bot Token/i })
         .fill(env.TELEGRAM_BOT_TOKEN);

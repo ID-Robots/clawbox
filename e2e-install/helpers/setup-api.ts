@@ -298,3 +298,88 @@ export async function waitForUpdate(
   }
   throw new Error(`update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`);
 }
+
+// ── Tunnel (Cloudflare quick-tunnel) ─────────────────────────────────
+
+export interface TunnelStatusResponse {
+  enabled: boolean;
+  running: boolean;
+  tunnelUrl: string | null;
+  error: string | null;
+  cloudflaredInstalled: boolean;
+}
+
+export const getTunnelStatus = () =>
+  request<TunnelStatusResponse>("/setup-api/tunnel/status");
+
+export const enableTunnel = () =>
+  request<{ success: boolean; tunnelUrl?: string; error?: string }>(
+    "/setup-api/tunnel/enable",
+    { method: "POST" },
+  );
+
+export const disableTunnel = () =>
+  request<{ success: boolean; error?: string }>("/setup-api/tunnel/disable", {
+    method: "POST",
+  });
+
+// ── VNC ──────────────────────────────────────────────────────────────
+
+export const getVncStatus = () =>
+  request<{ available: boolean; vncPort?: number; wsPort?: number }>(
+    "/setup-api/vnc",
+  );
+
+// ── Ollama ───────────────────────────────────────────────────────────
+
+export interface OllamaStatus {
+  running: boolean;
+  models: Array<{ name: string; size?: number; modified_at?: string }>;
+  standbyEnabled?: boolean;
+  idleTimeoutMs?: number;
+  proxyBaseUrl?: string;
+}
+
+export const getOllamaStatus = () =>
+  request<OllamaStatus>("/setup-api/ollama/status");
+
+export const searchOllama = (query: string) =>
+  request<{ results: Array<{ name: string; description?: string }> }>(
+    `/setup-api/ollama/search?q=${encodeURIComponent(query)}`,
+  );
+
+// ── ClawKeep ─────────────────────────────────────────────────────────
+
+export interface ClawKeepStatus {
+  initialized: boolean;
+  configured: boolean;
+  hasLocalTarget?: boolean;
+  hasCloudTarget?: boolean;
+  lastSnap?: string | null;
+}
+
+export const getClawkeepStatus = (sourcePath: string) =>
+  request<ClawKeepStatus>(
+    `/setup-api/clawkeep?sourcePath=${encodeURIComponent(sourcePath)}`,
+  );
+
+export const clawkeepInit = (sourcePath: string) =>
+  request<ClawKeepStatus>("/setup-api/clawkeep", {
+    method: "POST",
+    body: JSON.stringify({ action: "init", sourcePath }),
+  });
+
+export const clawkeepConfigure = (
+  sourcePath: string,
+  opts: { localPath?: string; cloudEnabled?: boolean; password?: string },
+) =>
+  request<ClawKeepStatus>("/setup-api/clawkeep", {
+    method: "POST",
+    body: JSON.stringify({ action: "configure", sourcePath, ...opts }),
+  });
+
+export const clawkeepSnap = (sourcePath: string, message?: string) =>
+  request<{ success?: boolean }>("/setup-api/clawkeep", {
+    method: "POST",
+    body: JSON.stringify({ action: "snap", sourcePath, message }),
+  });
