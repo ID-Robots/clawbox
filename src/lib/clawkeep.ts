@@ -281,29 +281,40 @@ function which(bin: string): Promise<boolean> {
 }
 
 // systemd's secure_path doesn't include ~/.local/bin, so a pip --user install
-// of clawkeepd isn't on PATH for the Next.js process. Probe that fallback once
-// per process — the answer doesn't change at runtime.
-let resticInstalledP: Promise<boolean> | null = null;
-let daemonBinP: Promise<string | null> | null = null;
+// of clawkeepd isn't on PATH for the Next.js process. Cache *successful*
+// lookups for the process lifetime — a positive answer doesn't change without
+// a restart. Failures aren't cached so a freshly-installed `apt install
+// restic` or `pip install --user .` flips the status panel from "Setup
+// needed" to "Ready" on the next poll without restarting clawbox-setup.
+let resticInstalledCache: boolean | null = null;
+let daemonBinCache: string | null = null;
 
-function getResticInstalled(): Promise<boolean> {
-  if (!resticInstalledP) resticInstalledP = which("restic");
-  return resticInstalledP;
+async function getResticInstalled(): Promise<boolean> {
+  if (resticInstalledCache === true) return true;
+  const ok = await which("restic");
+  if (ok) resticInstalledCache = true;
+  return ok;
 }
 
-function getDaemonBin(): Promise<string | null> {
-  if (daemonBinP) return daemonBinP;
-  daemonBinP = (async () => {
-    const override = process.env.CLAWKEEP_BIN?.trim();
-    if (override) return override;
-    if (await which(DEFAULT_BIN_NAME)) return DEFAULT_BIN_NAME;
-    const fallback = path.join(os.homedir(), ".local", "bin", DEFAULT_BIN_NAME);
-    return fs.access(fallback).then(
-      () => fallback,
-      () => null,
-    );
-  })();
-  return daemonBinP;
+async function getDaemonBin(): Promise<string | null> {
+  if (daemonBinCache) return daemonBinCache;
+  const override = process.env.CLAWKEEP_BIN?.trim();
+  if (override) {
+    daemonBinCache = override;
+    return override;
+  }
+  if (await which(DEFAULT_BIN_NAME)) {
+    daemonBinCache = DEFAULT_BIN_NAME;
+    return DEFAULT_BIN_NAME;
+  }
+  const fallback = path.join(os.homedir(), ".local", "bin", DEFAULT_BIN_NAME);
+  try {
+    await fs.access(fallback);
+    daemonBinCache = fallback;
+    return fallback;
+  } catch {
+    return null;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -349,6 +360,18 @@ export interface BackupResult {
   stderr: string;
 }
 
+// Cap stdout/stderr capture so a 4-hour restic run on a chatty TTY can't
+// OOM the Next.js process. We only show a 2 KB tail in the UI anyway, so
+// keeping a generous tail buffer (64 KB) leaves plenty of room for the
+// final summary line + any stderr trace while staying bounded.
+const MAX_OUTPUT_BYTES = 64 * 1024;
+
+function appendCapped(prev: string, chunk: string): string {
+  const next = prev + chunk;
+  if (next.length <= MAX_OUTPUT_BYTES) return next;
+  return next.slice(next.length - MAX_OUTPUT_BYTES);
+}
+
 export async function runBackup(opts: { idle?: boolean } = {}): Promise<BackupResult> {
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   return new Promise((resolve) => {
@@ -359,14 +382,14 @@ export async function runBackup(opts: { idle?: boolean } = {}): Promise<BackupRe
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (b: Buffer) => {
-      stdout += b.toString("utf8");
+      stdout = appendCapped(stdout, b.toString("utf8"));
     });
     child.stderr.on("data", (b: Buffer) => {
-      stderr += b.toString("utf8");
+      stderr = appendCapped(stderr, b.toString("utf8"));
     });
     child.on("error", (e) => {
       // ENOENT etc. — synthesize a non-zero exit so callers can surface it.
-      resolve({ exitCode: 127, stdout, stderr: stderr + e.message });
+      resolve({ exitCode: 127, stdout, stderr: appendCapped(stderr, e.message) });
     });
     child.on("close", (code) => {
       resolve({ exitCode: code ?? -1, stdout, stderr });

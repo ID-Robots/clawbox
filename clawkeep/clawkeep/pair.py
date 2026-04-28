@@ -13,6 +13,7 @@ import secrets
 import socket
 import socketserver
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -45,6 +46,9 @@ class _PairHandler(BaseHTTPRequestHandler):
         query = dict(urllib.parse.parse_qsl(parsed.query))
         if query.get("state") != _PairHandler.expected_state:
             self._respond(400, "State mismatch — possible CSRF, abort.")
+            # Record a terminal failure so run_pair() doesn't keep waiting
+            # for a "good" callback that will never come.
+            _PairHandler.received = {"error": "state mismatch"}
             return
 
         if "error" in query:
@@ -55,6 +59,7 @@ class _PairHandler(BaseHTTPRequestHandler):
         code = query.get("code")
         if not code:
             self._respond(400, "Missing code in redirect")
+            _PairHandler.received = {"error": "missing code"}
             return
 
         _PairHandler.received = {"code": code, "state": query["state"]}
@@ -156,8 +161,19 @@ def run_pair(
 
     try:
         with _OneShotServer((PAIR_BIND, port), _PairHandler) as srv:
-            srv.timeout = PAIR_TIMEOUT_SEC
-            srv.handle_request()
+            # Loop on handle_request rather than calling it once: a stray
+            # GET (favicon, captive-portal probe, port-scanner, etc.) would
+            # otherwise consume the single allowed request and the real
+            # redirect would arrive after we've already exited. We also
+            # need to keep waiting if the handler stored a tentative
+            # `received` that isn't terminal — but currently every set of
+            # `received` is terminal so a single check after each request
+            # is enough. The wall-clock deadline protects against forever
+            # waits when the user closes the browser tab.
+            srv.timeout = 1.0  # short tick so the deadline check runs often
+            deadline = time.monotonic() + PAIR_TIMEOUT_SEC
+            while _PairHandler.received is None and time.monotonic() < deadline:
+                srv.handle_request()
     except OSError as e:
         raise SystemExit(f"Could not bind {PAIR_BIND}:{port}: {e}") from e
 

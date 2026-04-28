@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -67,10 +68,23 @@ def load(path: Path | str | None = None) -> State:
 def save(state: State, path: Path | str | None = None) -> None:
     p = Path(path if path is not None else default_state_path())
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
+    # Per-process unique tmp suffix so concurrent writers (e.g. an idle-
+    # heartbeat tick + a backup run finishing at the same moment) don't
+    # truncate each other's tmp file before the rename. The fixed
+    # ".json.tmp" form was a race waiting to happen.
+    suffix = f".{os.getpid()}.{secrets.token_hex(4)}.json.tmp"
+    tmp = p.with_name(p.name + suffix)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(asdict(state)).encode("utf-8"))
     finally:
         os.close(fd)
-    os.replace(tmp, p)
+    try:
+        os.replace(tmp, p)
+    except OSError:
+        # Best-effort cleanup of the tmp; re-raise so the caller knows.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

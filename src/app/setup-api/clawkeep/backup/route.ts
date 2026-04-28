@@ -13,8 +13,30 @@ export const dynamic = "force-dynamic";
 // (or an explicit one matching the systemd unit's TimeoutStartSec=4h).
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json().catch(() => ({}))) as { idle?: boolean };
-    const result = await runBackup({ idle: !!body.idle });
+    let body: unknown = {};
+    try {
+      body = await request.json();
+    } catch {
+      // Empty body is fine — defaults to a non-idle backup.
+    }
+    if (body !== null && typeof body !== "object") {
+      return NextResponse.json(
+        { error: "request body must be an object" },
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    const obj = (body ?? {}) as Record<string, unknown>;
+    let idle = false;
+    if (obj.idle !== undefined) {
+      if (typeof obj.idle !== "boolean") {
+        return NextResponse.json(
+          { error: "'idle' must be a boolean when provided" },
+          { status: 400, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+      idle = obj.idle;
+    }
+    const result = await runBackup({ idle });
     return NextResponse.json(
       {
         exitCode: result.exitCode,

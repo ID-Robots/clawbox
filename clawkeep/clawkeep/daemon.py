@@ -76,7 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.idle:
         return runner.run_idle(cfg, bearer)
 
-    repo_pass = token.read_or_create_repo_password(Path(args.repo_pass_path))
+    try:
+        repo_pass = token.read_or_create_repo_password(Path(args.repo_pass_path))
+    except (OSError, token.TokenError) as e:
+        log.error("repo-password error at %s: %s", args.repo_pass_path, e)
+        return 73  # EX_CANTCREAT — file system issue creating/reading the secret
     return runner.run_once(cfg, bearer, repo_pass)
 
 

@@ -29,6 +29,10 @@ def test_refuses_non_claw_token(tmp_path: Path) -> None:
 def test_read_rejects_garbage(tmp_path: Path) -> None:
     p = tmp_path / "token"
     p.write_text("garbage")
+    # read_token calls assert_perms before the content check, so the
+    # file has to be 0600 first; otherwise the perm check would fire
+    # and mask the real test (the format rejection).
+    os.chmod(p, 0o600)
     with pytest.raises(token.TokenError, match="not a valid"):
         token.read_token(p)
 

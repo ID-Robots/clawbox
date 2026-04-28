@@ -69,8 +69,17 @@ class ConfigError(Exception):
     pass
 
 
-def load(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
-    p = Path(path)
+def _safe_int(value: object, *, key: str, default: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"'{key}' must be an integer, got {value!r}") from e
+
+
+def load(path: Path | str | None = None) -> Config:
+    # Resolve the default at call time, not at import, so $CLAWKEEP_*
+    # env vars set after import still take effect.
+    p = Path(path if path is not None else default_config_path())
     if not p.exists():
         raise ConfigError(f"Config file not found: {p}")
     try:
@@ -96,15 +105,25 @@ def load(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
         raise ConfigError(f"'schedule' must be daily|weekly|manual, got {schedule!r}")
 
     restic_raw = raw.get("restic", {}) or {}
+    if not isinstance(restic_raw, dict):
+        raise ConfigError(f"'restic' must be a table, got {type(restic_raw).__name__}")
     restic = ResticConfig(
-        binary=restic_raw.get("binary", "/usr/bin/restic"),
-        compression=restic_raw.get("compression", "auto"),
-        read_concurrency=int(restic_raw.get("read_concurrency", 2)),
+        binary=str(restic_raw.get("binary", "/usr/bin/restic")),
+        compression=str(restic_raw.get("compression", "auto")),
+        read_concurrency=_safe_int(
+            restic_raw.get("read_concurrency", 2), key="restic.read_concurrency", default=2,
+        ),
     )
 
     heartbeat_raw = raw.get("heartbeat", {}) or {}
+    if not isinstance(heartbeat_raw, dict):
+        raise ConfigError(f"'heartbeat' must be a table, got {type(heartbeat_raw).__name__}")
     heartbeat = HeartbeatConfig(
-        idle_interval_hours=int(heartbeat_raw.get("idle_interval_hours", 24)),
+        idle_interval_hours=_safe_int(
+            heartbeat_raw.get("idle_interval_hours", 24),
+            key="heartbeat.idle_interval_hours",
+            default=24,
+        ),
     )
 
     return Config(

@@ -20,13 +20,15 @@ interface ClawKeepStatus {
 }
 
 interface PairStartResponse {
-  url: string;
-  state: string;
+  user_code: string;
+  verification_url: string;
+  interval: number;
+  code_length: number;
 }
 
-interface PairStatusResponse {
-  status: "idle" | "pending" | "complete" | "error";
-  error: string | null;
+interface PairPollResponse {
+  status: "pending" | "configuring" | "complete" | "error";
+  error?: string;
 }
 
 interface BackupResponse {
@@ -82,11 +84,9 @@ export default function ClawKeepApp() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "save">("");
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
-  const [pairAuthUrl, setPairAuthUrl] = useState<string | null>(null);
-  // Tracks whether we're waiting on the portal handoff. Drives the
-  // /pair/status poll while the popup is open.
-  const [pairWaiting, setPairWaiting] = useState(false);
-  const popupRef = useRef<Window | null>(null);
+  const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
+  const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
+  const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -104,58 +104,58 @@ export default function ClawKeepApp() {
     refresh();
   }, [refresh]);
 
-  // Listen for the postMessage the /pair/callback page sends to
-  // window.opener. Mirrors AIModelsStep.tsx's "clawbox-clawai-auth" handler.
+  // RFC 8628 device-code poll loop. While pairing is active we hit
+  // /pair/poll every `interval` seconds (the upstream's recommended
+  // value). Phases: pending → configuring → complete.
   useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      if (!event.data || typeof event.data !== "object") return;
-      if ((event.data as { type?: string }).type !== "clawbox-clawkeep-auth") return;
-      const data = event.data as { status?: "complete" | "error"; message?: string };
-      setPairWaiting(false);
-      setPairAuthUrl(null);
-      if (data.status === "complete") {
-        setError(null);
-        void refresh();
-      } else {
-        setError(data.message || "ClawKeep pairing failed");
+    if (!pairChallenge) return;
+    if (pairPhase !== "pending" && pairPhase !== "configuring") return;
+
+    const tick = async () => {
+      try {
+        const ps = await jsonOrError<PairPollResponse>(
+          await fetch("/setup-api/clawkeep/pair/poll", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }),
+        );
+        if (ps.status === "complete") {
+          stopPolling();
+          setPairChallenge(null);
+          setPairPhase("");
+          await refresh();
+          return;
+        }
+        if (ps.status === "configuring") {
+          setPairPhase("configuring");
+          return;
+        }
+        if (ps.status === "error") {
+          stopPolling();
+          setPairChallenge(null);
+          setPairPhase("");
+          setError(ps.error || "Pair failed");
+          return;
+        }
+        // "pending" — keep polling
+      } catch {
+        // swallow — next tick retries
       }
     };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [refresh]);
 
-  // Fallback poll: postMessage can fail to reach us if the popup was
-  // blocked or the user closed it before the redirect landed. Walk the
-  // server-side session state every 2s while we think pairing is active.
-  useEffect(() => {
-    if (!pairWaiting) return;
-    const id = window.setInterval(() => {
-      void (async () => {
-        try {
-          const ps = await jsonOrError<PairStatusResponse>(
-            await fetch("/setup-api/clawkeep/pair/status", { cache: "no-store" }),
-          );
-          if (ps.status === "complete") {
-            setPairWaiting(false);
-            setPairAuthUrl(null);
-            await refresh();
-          } else if (ps.status === "error") {
-            setPairWaiting(false);
-            setPairAuthUrl(null);
-            setError(ps.error || "ClawKeep pairing failed");
-          } else if (ps.status === "idle") {
-            // Session was cleared server-side (expired). Treat as cancellation.
-            setPairWaiting(false);
-            setPairAuthUrl(null);
-          }
-        } catch {
-          /* swallow — next tick retries */
-        }
-      })();
-    }, 2000);
-    return () => window.clearInterval(id);
-  }, [pairWaiting, refresh]);
+    const stopPolling = () => {
+      if (pollIntervalRef.current !== null) {
+        window.clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+
+    const intervalMs = Math.max(2, pairChallenge.interval) * 1000;
+    pollIntervalRef.current = window.setInterval(tick, intervalMs);
+    void tick();
+    return stopPolling;
+  }, [pairChallenge, pairPhase, refresh]);
 
   const onPair = useCallback(async () => {
     setBusy("pair");
@@ -168,11 +168,9 @@ export default function ClawKeepApp() {
           body: "{}",
         }),
       );
-      setPairAuthUrl(start.url);
-      popupRef.current = window.open(start.url, "clawkeep-pair", "noopener,noreferrer");
-      // Even if popup-blocked, we keep the URL on screen so the user can
-      // open it manually and pairing still completes via the same callback.
-      setPairWaiting(true);
+      setPairChallenge(start);
+      setPairPhase("pending");
+      window.open(start.verification_url, "_blank", "noopener,noreferrer");
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -180,8 +178,14 @@ export default function ClawKeepApp() {
     }
   }, []);
 
+  const onCancelPair = useCallback(() => {
+    setPairChallenge(null);
+    setPairPhase("");
+    setError(null);
+  }, []);
+
   const onUnpair = useCallback(async () => {
-    if (!confirm("Unpair this device from the portal? Local backup history is kept.")) return;
+    if (!confirm("Unpair this device?")) return;
     setBusy("unpair");
     setError(null);
     try {
@@ -229,7 +233,7 @@ export default function ClawKeepApp() {
     return (
       <div className="h-full w-full flex items-center justify-center p-6">
         <div className={`${CARD} max-w-md text-sm`}>
-          <p className="text-red-300">Couldn&apos;t load ClawKeep status.</p>
+          <p className="text-red-300">⚠️ Load failed</p>
           {error && <p className="mt-2 text-xs text-[var(--text-muted)]">{error}</p>}
           <button
             type="button"
@@ -260,26 +264,27 @@ export default function ClawKeepApp() {
               onClick={onUnpair}
               className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
             >
-              {busy === "unpair" ? "Unpairing…" : "Unpair"}
+              {busy === "unpair" ? "🔌 Unpairing…" : "Unpair"}
             </button>
           )}
         </header>
 
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-            {error}
+            ⚠️ {error}
           </div>
         )}
 
-        {status.paired ? (
+        {pairChallenge ? (
+          <PairChallengeCard
+            challenge={pairChallenge}
+            phase={pairPhase}
+            onCancel={onCancelPair}
+          />
+        ) : status.paired ? (
           <DashboardCard status={status} onBackup={onBackup} busy={busy === "backup"} />
         ) : (
-          <PairCard
-            onPair={onPair}
-            busy={busy === "pair"}
-            waiting={pairWaiting}
-            authUrl={pairAuthUrl}
-          />
+          <PairCard onPair={onPair} busy={busy === "pair"} />
         )}
 
         {(!status.resticInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
@@ -297,17 +302,7 @@ export default function ClawKeepApp() {
   );
 }
 
-function PairCard({
-  onPair,
-  busy,
-  waiting,
-  authUrl,
-}: {
-  onPair: () => void;
-  busy: boolean;
-  waiting: boolean;
-  authUrl: string | null;
-}) {
+function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   return (
     <div className={`${CARD} space-y-3`}>
       <h2 className="font-semibold">Pair this device</h2>
@@ -317,20 +312,64 @@ function PairCard({
       <button
         type="button"
         onClick={onPair}
-        disabled={busy || waiting}
+        disabled={busy}
         className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
       >
-        {busy ? "Opening portal…" : waiting ? "Waiting for approval…" : "Pair with portal"}
+        {busy ? "🔗 Connecting…" : "Pair with portal"}
       </button>
-      {waiting && authUrl && (
-        <p className="text-xs text-[var(--text-muted)]">
-          Approve in the portal tab. If it didn&apos;t open,{" "}
-          <a href={authUrl} target="_blank" rel="noreferrer" className="underline text-orange-300">
-            click here
-          </a>
-          .
-        </p>
-      )}
+    </div>
+  );
+}
+
+function PairChallengeCard({
+  challenge,
+  phase,
+  onCancel,
+}: {
+  challenge: PairStartResponse;
+  phase: "" | "pending" | "configuring";
+  onCancel: () => void;
+}) {
+  const codeChunks = challenge.user_code.split("-");
+  return (
+    <div className={`${CARD} space-y-4`}>
+      <h2 className="font-semibold">
+        {phase === "configuring" ? "🔄 Configuring…" : "👉 Enter this code"}
+      </h2>
+      <div className="flex items-center justify-center gap-2 py-2">
+        {codeChunks.map((chunk, i) => (
+          <span
+            key={`code-${i}-${chunk}`}
+            className="px-3 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
+          >
+            {chunk}
+          </span>
+        ))}
+      </div>
+      <p className="text-sm text-[var(--text-muted)] text-center">
+        On the portal page that opened, type the code and approve.
+      </p>
+      <div className="flex justify-center gap-2">
+        <a
+          href={challenge.verification_url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-orange-300 hover:text-orange-200 underline"
+        >
+          Re-open portal page
+        </a>
+        <span className="text-xs text-[var(--text-muted)]">·</span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-xs text-[var(--text-muted)] hover:text-gray-200"
+        >
+          Cancel
+        </button>
+      </div>
+      <p className="text-xs text-[var(--text-muted)] text-center">
+        {phase === "configuring" ? "⏳ Saving token…" : "🕒 Waiting for approval…"}
+      </p>
     </div>
   );
 }
@@ -369,12 +408,10 @@ function DashboardCard({
         disabled={busy || !status.daemonInstalled || !status.resticInstalled}
         className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
       >
-        {busy ? "Backing up…" : "Back up now"}
+        {busy ? "💾 Backing up…" : "Back up now"}
       </button>
       {busy && (
-        <p className="text-xs text-[var(--text-muted)]">
-          Running restic. This can take minutes on a fresh repo — keep this tab open.
-        </p>
+        <p className="text-xs text-[var(--text-muted)]">⏳ Running restic. Keep this tab open.</p>
       )}
     </div>
   );
@@ -383,7 +420,7 @@ function DashboardCard({
 function SystemCard({ status }: { status: ClawKeepStatus }) {
   return (
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
-      <h2 className="font-semibold text-amber-200">Setup needed</h2>
+      <h2 className="font-semibold text-amber-200">⚙️ Setup needed</h2>
       <ul className="text-sm text-amber-100 space-y-1">
         {!status.resticInstalled && (
           <li>
@@ -506,7 +543,7 @@ function ConfigCard({
               disabled={saving}
               className="px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-xs font-semibold"
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? "💾 Saving…" : "Save"}
             </button>
             <button
               type="button"
@@ -516,9 +553,6 @@ function ConfigCard({
             >
               Cancel
             </button>
-            <span className="text-[10px] text-[var(--text-muted)]">
-              Edit as TOML — schema documented in clawkeep-plan.md §7.
-            </span>
           </div>
         </div>
       )}
@@ -553,7 +587,7 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
       }`}
     >
       <h2 className="font-semibold">
-        {result.ok ? "Backup ok" : `Backup failed (exit ${result.exitCode})`}
+        {result.ok ? "✅ Backup ok" : `❌ Failed (exit ${result.exitCode})`}
       </h2>
       <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
         {tail}

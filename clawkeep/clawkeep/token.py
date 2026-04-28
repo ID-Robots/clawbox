@@ -56,6 +56,11 @@ def read_token(path: Path | str | None = None) -> str:
     p = Path(path if path is not None else default_token_path())
     if not p.exists():
         raise TokenError(f"No token at {p}; run 'clawkeep pair' first")
+    # Refuse to read the bearer token if the file is group/world-readable —
+    # something widened the perms post-write (a backup tool, a misconfigured
+    # systemd hardening change, etc.) and the token may have leaked. Better
+    # to fail loudly than to use a potentially-compromised credential.
+    assert_perms(p)
     token = p.read_text(encoding="utf-8").strip()
     if not token.startswith("claw_"):
         raise TokenError(f"Token at {p} is not a valid claw_* token")
@@ -95,6 +100,9 @@ def read_or_create_repo_password(path: Path | str | None = None) -> str:
     """
     p = Path(path if path is not None else default_repo_pass_path())
     if p.exists():
+        # Same rationale as read_token: refuse to use a repo-pass that
+        # has been widened to group/world-readable perms.
+        assert_perms(p)
         pw = p.read_text(encoding="utf-8").strip()
         if pw:
             return pw

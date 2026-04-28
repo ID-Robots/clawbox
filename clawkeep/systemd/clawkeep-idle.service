@@ -8,6 +8,8 @@ Wants=network-online.target
 Type=oneshot
 User=clawkeep
 Group=clawkeep
+Environment=CLAWKEEP_DATA_DIR=/var/lib/clawkeep
+Environment=CLAWKEEP_CONFIG_PATH=/etc/clawkeep/config.toml
 ExecStart=/usr/bin/clawkeepd --idle
 TimeoutStartSec=60s
 PrivateTmp=true

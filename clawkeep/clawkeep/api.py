@@ -56,8 +56,12 @@ class ApiError(Exception):
         self.status = status
 
 
-def _classify(resp: requests.Response, body: dict | None) -> ApiError:
-    msg = (body or {}).get("error") or resp.reason or "request failed"
+def _classify(resp: requests.Response, body: object | None) -> ApiError:
+    msg: str = resp.reason or "request failed"
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, str) and err:
+            msg = err
     if resp.status_code == 401:
         return ApiError("auth", msg, resp.status_code)
     if resp.status_code == 402:
@@ -85,7 +89,7 @@ def _post(server: str, path: str, token: str, json_body: dict | None = None) -> 
     except requests.RequestException as e:
         raise ApiError("network", str(e)) from e
 
-    body: dict | None = None
+    body: object | None = None
     if resp.content:
         try:
             body = resp.json()
@@ -95,7 +99,11 @@ def _post(server: str, path: str, token: str, json_body: dict | None = None) -> 
     if not resp.ok:
         raise _classify(resp, body)
 
-    return body or {}
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise ApiError("other", f"expected JSON object, got {type(body).__name__}")
+    return body
 
 
 def mint_credentials(server: str, token: str) -> Credentials:

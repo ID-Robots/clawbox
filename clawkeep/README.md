@@ -24,7 +24,8 @@ sudo apt install -y python3 python3-pip restic
 pip install --user .          # or: sudo pip install .
 
 # Configure:
-sudo install -d -m 0755 /etc/clawkeep /var/lib/clawkeep /var/log/clawkeep
+sudo install -d -m 0755 /etc/clawkeep
+sudo install -d -m 0750 -o clawkeep -g clawkeep /var/lib/clawkeep /var/log/clawkeep
 sudo cp config.toml.example /etc/clawkeep/config.toml
 sudo $EDITOR /etc/clawkeep/config.toml
 
@@ -72,23 +73,28 @@ SSH to the device's listener.
 
 ## Restoring a backup
 
-v1 doesn't ship a restore CLI. Until v2 lands:
+v1 doesn't ship a restore CLI. Until v2 lands, mint creds and pipe them
+straight into env vars — never write the response to a world-readable
+path like `/tmp/creds.json`:
 
 ```bash
-# Mint creds against the portal:
-TOKEN=$(cat /var/lib/clawkeep/token)
+TOKEN=$(sudo cat /var/lib/clawkeep/token)
+CREDS_FILE=$(mktemp)
+chmod 600 "$CREDS_FILE"
+trap 'shred -u "$CREDS_FILE" 2>/dev/null || rm -f "$CREDS_FILE"' EXIT
+
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
-     https://openclawhardware.dev/api/clawkeep/credentials > /tmp/creds.json
+     https://openclawhardware.dev/api/clawkeep/credentials > "$CREDS_FILE"
 
-# Plug them into restic:
-export AWS_ACCESS_KEY_ID=$(jq -r .accessKeyId /tmp/creds.json)
-export AWS_SECRET_ACCESS_KEY=$(jq -r .secretAccessKey /tmp/creds.json)
-export AWS_SESSION_TOKEN=$(jq -r .sessionToken /tmp/creds.json)
-export RESTIC_PASSWORD=$(cat /var/lib/clawkeep/repo-pass)
+export AWS_ACCESS_KEY_ID=$(jq -r .accessKeyId "$CREDS_FILE")
+export AWS_SECRET_ACCESS_KEY=$(jq -r .secretAccessKey "$CREDS_FILE")
+export AWS_SESSION_TOKEN=$(jq -r .sessionToken "$CREDS_FILE")
+export RESTIC_PASSWORD=$(sudo cat /var/lib/clawkeep/repo-pass)
 
-REPO="s3:$(jq -r .endpoint /tmp/creds.json)/$(jq -r .bucket /tmp/creds.json)/$(jq -r .prefix /tmp/creds.json)"
+REPO="s3:$(jq -r .endpoint "$CREDS_FILE")/$(jq -r .bucket "$CREDS_FILE")/$(jq -r .prefix "$CREDS_FILE")"
 restic -r "$REPO" snapshots
 restic -r "$REPO" restore <snapshot-id> --target /tmp/restore
+# trap shreds the temp creds file when the shell exits.
 ```
 
 ## Development

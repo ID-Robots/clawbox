@@ -65,6 +65,16 @@ def _retry_credentials(server: str, token: str, attempts: int = 3) -> api.Creden
     raise last
 
 
+def _stamp_heartbeat(
+    st: state.State, ok: bool, status: str, *, now_override: int | None = None,
+) -> None:
+    """Centralise the last_heartbeat_* bookkeeping so every error branch
+    persists the same shape — a missing save here would let the idle timer
+    re-fire on top of an in-flight backup."""
+    st.last_heartbeat_at_ms = now_override if now_override is not None else api.now_ms()
+    st.last_heartbeat_status = status if ok else "error"
+
+
 def run_once(cfg: Config, token: str, repo_password: str) -> int:
     """One full backup cycle. Returns a process exit code."""
     st = state.load()
@@ -76,26 +86,25 @@ def run_once(cfg: Config, token: str, repo_password: str) -> int:
         if e.kind == "auth":
             log.error("auth failed: %s — token may be revoked, run 'clawkeep pair' again", e)
             # Don't heartbeat — we have no valid auth to send it with.
+            # Also don't stamp local state (no portal exchange happened).
             return EXIT_AUTH_REVOKED
+        msg_prefix = {"quota_full": "quota full", "tier": "tier", "server": "server"}.get(e.kind)
+        prefixed = f"{msg_prefix}: {e}" if msg_prefix else str(e)
+        log.error("%s: %s", e.kind, e)
+        ok = _heartbeat_safe(cfg.server, token, status="error", error=prefixed)
+        _stamp_heartbeat(st, ok, "error")
+        state.save(st)
         if e.kind == "quota_full":
-            log.error("quota full: %s", e)
-            _heartbeat_safe(cfg.server, token, status="error", error=f"quota full: {e}")
             return EXIT_QUOTA_FULL
         if e.kind == "tier":
-            log.error("tier error: %s", e)
-            _heartbeat_safe(cfg.server, token, status="error", error=f"tier: {e}")
             return EXIT_TIER
         if e.kind == "server":
-            log.error("server error: %s", e)
-            _heartbeat_safe(cfg.server, token, status="error", error=f"server: {e}")
             return EXIT_SERVER
-        # network or other
-        log.error("credentials failed (%s): %s", e.kind, e)
-        _heartbeat_safe(cfg.server, token, status="error", error=str(e))
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
     # 2. Tell server we're starting.
-    _heartbeat_safe(cfg.server, token, status="running")
+    running_ok = _heartbeat_safe(cfg.server, token, status="running")
+    _stamp_heartbeat(st, running_ok, "running")
 
     repo = restic.repo_url(creds)
     env = restic.restic_env(creds, repo_password)
@@ -105,10 +114,15 @@ def run_once(cfg: Config, token: str, repo_password: str) -> int:
         restic.init(cfg.restic.binary, repo, env)
     except restic.ResticError as e:
         log.error("restic init failed: %s", e)
-        _heartbeat_safe(cfg.server, token, status="error", error=f"restic init: {e}")
+        ok = _heartbeat_safe(cfg.server, token, status="error", error=f"restic init: {e}")
+        _stamp_heartbeat(st, ok, "error")
+        state.save(st)
         return EXIT_RESTIC
 
-    # 4. Backup.
+    # 4. Backup. _run already converts plumbing failures (TimeoutExpired,
+    # ENOENT) into a failed BackupResult, so we don't need to catch
+    # ResticError here — but keep the OSError fallback in case the
+    # restic module ever bubbles one up directly.
     try:
         result = restic.backup(
             cfg.restic.binary,
@@ -121,25 +135,26 @@ def run_once(cfg: Config, token: str, repo_password: str) -> int:
         )
     except (restic.ResticError, OSError) as e:
         log.error("restic backup raised: %s", e)
-        _heartbeat_safe(cfg.server, token, status="error", error=f"restic backup: {e}")
-        return EXIT_RESTIC
-    except Exception as e:  # subprocess.TimeoutExpired and friends
-        log.error("restic backup unexpected error: %s", e)
-        _heartbeat_safe(cfg.server, token, status="error", error=str(e)[:500])
+        ok = _heartbeat_safe(cfg.server, token, status="error", error=f"restic backup: {e}")
+        _stamp_heartbeat(st, ok, "error")
+        state.save(st)
         return EXIT_RESTIC
 
     if not result.ok:
         log.error("restic backup failed: %s", result.last_line)
-        _heartbeat_safe(cfg.server, token, status="error", error=result.last_line)
+        ok = _heartbeat_safe(cfg.server, token, status="error", error=result.last_line)
+        _stamp_heartbeat(st, ok, "error")
+        state.save(st)
         return EXIT_BACKUP_FAILED
 
-    # 5. Stats.
+    # 5. Stats. If unavailable, leave the stats fields *unsent* — sending
+    #    zero would clobber the portal's last-known cloudBytes/snapshotCount.
+    stats: restic.Stats | None
     try:
         stats = restic.stats(cfg.restic.binary, repo, env)
     except restic.ResticError as e:
-        # Don't fail the run — we did back up. But heartbeat without stats.
         log.warning("restic stats failed (continuing): %s", e)
-        stats = restic.Stats(total_size=0, snapshot_count=0)
+        stats = None
 
     now = api.now_ms()
 
@@ -148,31 +163,30 @@ def run_once(cfg: Config, token: str, repo_password: str) -> int:
         cfg.server,
         token,
         status="ok",
-        cloud_bytes=stats.total_size,
-        snapshot_count=stats.snapshot_count,
+        cloud_bytes=stats.total_size if stats is not None else None,
+        snapshot_count=stats.snapshot_count if stats is not None else None,
         last_backup_at=now,
     )
 
     # 7. Persist state. The backup itself succeeded locally regardless of
-    #    the heartbeat outcome, so we always record last_backup_at_ms / cloud
-    #    bytes / snapshot count. But last_heartbeat_status reflects whether
-    #    the portal actually heard about it; an "ok" stamp here would lie to
-    #    the idle timer (and the UI) on a heartbeat-network failure.
-    st.last_heartbeat_at_ms = now
-    st.last_heartbeat_status = "ok" if heartbeat_ok else "error"
+    #    the heartbeat outcome, so we always record last_backup_at_ms.
+    #    cloudBytes/snapshotCount only update when stats are real — a
+    #    failed restic.stats shouldn't show "0 B" in the desktop UI.
+    _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
     st.last_backup_at_ms = now
-    st.last_cloud_bytes = stats.total_size
-    st.last_snapshot_count = stats.snapshot_count
+    if stats is not None:
+        st.last_cloud_bytes = stats.total_size
+        st.last_snapshot_count = stats.snapshot_count
     state.save(st)
 
     log.info(
-        "backup ok: %d bytes added, %d files new, %d files changed; cloud=%d/%d, snapshots=%d",
+        "backup ok: %d bytes added, %d files new, %d files changed; cloud=%s/%d, snapshots=%s",
         result.bytes_added,
         result.files_new,
         result.files_changed,
-        stats.total_size,
+        stats.total_size if stats is not None else "?",
         creds.quotaBytes,
-        stats.snapshot_count,
+        stats.snapshot_count if stats is not None else "?",
     )
     return EXIT_OK
 

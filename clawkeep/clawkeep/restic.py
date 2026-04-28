@@ -53,6 +53,13 @@ def repo_url(creds: Credentials) -> str:
     return f"s3:{creds.endpoint}/{creds.bucket}/{creds.prefix}"
 
 
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _run(
     binary: str,
     args: list[str],
@@ -60,14 +67,26 @@ def _run(
     *,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [binary, *args],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    """Run restic and convert subprocess plumbing failures into ResticError.
+
+    Without this, a TimeoutExpired or OSError (e.g. binary missing) would
+    escape to the runner as an uncaught exception. Callers either catch
+    ResticError directly (init, stats) or convert it to a failed
+    BackupResult (backup).
+    """
+    try:
+        return subprocess.run(
+            [binary, *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ResticError(f"restic timed out after {timeout}s: {e}") from e
+    except OSError as e:
+        raise ResticError(f"could not exec {binary}: {e}") from e
 
 
 def init(binary: str, repo: str, env: dict[str, str]) -> None:
@@ -103,7 +122,13 @@ def backup(
         args.extend(["--exclude", ex])
     args.extend(paths)
 
-    cp = _run(binary, args, env, timeout=timeout)
+    try:
+        cp = _run(binary, args, env, timeout=timeout)
+    except ResticError as e:
+        # Surface plumbing failures (timeout, ENOENT, etc.) as a failed
+        # BackupResult so the caller can heartbeat the error rather than
+        # crashing the daemon.
+        return BackupResult(False, str(e)[:500], 0, 0, 0)
     last = ((cp.stderr or "") + (cp.stdout or "")).strip().splitlines()
     last_line = last[-1] if last else ""
     if cp.returncode != 0:
@@ -117,9 +142,9 @@ def backup(
         except (ValueError, json.JSONDecodeError):
             continue
         if obj.get("message_type") == "summary":
-            files_new = int(obj.get("files_new", 0))
-            files_changed = int(obj.get("files_changed", 0))
-            bytes_added = int(obj.get("data_added", 0))
+            files_new = _safe_int(obj.get("files_new", 0))
+            files_changed = _safe_int(obj.get("files_changed", 0))
+            bytes_added = _safe_int(obj.get("data_added", 0))
             break
 
     return BackupResult(True, last_line[:500], files_new, files_changed, bytes_added)
@@ -135,7 +160,7 @@ def stats(binary: str, repo: str, env: dict[str, str]) -> Stats:
         s = json.loads(cp.stdout)
     except (ValueError, json.JSONDecodeError) as e:
         raise ResticError(f"restic stats: malformed JSON: {e}") from e
-    total_size = int(s.get("total_size", 0))
+    total_size = _safe_int(s.get("total_size", 0)) if isinstance(s, dict) else 0
 
     cp2 = _run(binary, ["-r", repo, "snapshots", "--json"], env, timeout=120)
     snapshot_count = 0
