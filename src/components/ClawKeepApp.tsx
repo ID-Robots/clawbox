@@ -368,8 +368,12 @@ function PairChallengeCard({
   // re-render (e.g. phase transition) doesn't keep stomping the clipboard.
   useEffect(() => {
     if (!code) return;
-    void copyToClipboard(code).then((ok) => { if (ok) flashCopied(); });
+    let cancelled = false;
+    void copyToClipboard(code).then((ok) => {
+      if (!cancelled && ok) flashCopied();
+    });
     return () => {
+      cancelled = true;
       if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
     };
   }, [code, flashCopied]);

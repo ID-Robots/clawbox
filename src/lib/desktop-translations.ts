@@ -20,6 +20,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "shelf.systemSettings": "System Settings",
     "shelf.chat": "Chat",
     "shelf.openClawKeep": "Open ClawKeep",
+    "shelf.clawkeepStale": "ClawKeep backup overdue — open to back up now",
     "shelf.connectClawBoxAI": "Connect ClawBox AI",
     "shelf.exitFullscreen": "Exit Fullscreen",
     "shelf.fullscreen": "Fullscreen",

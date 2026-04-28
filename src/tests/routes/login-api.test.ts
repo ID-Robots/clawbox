@@ -22,7 +22,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 
 import * as config from "@/lib/config-store";
 import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
-import { checkLockout, recordFailure, recordSuccess } from "@/lib/login-rate-limit";
+import { checkLockout, recordFailure, recordSuccess, padResponseTime } from "@/lib/login-rate-limit";
 
 const mockGet = vi.mocked(config.get);
 const mockSet = vi.mocked(config.set);
@@ -32,6 +32,7 @@ const mockGetSessionSigningSecret = vi.mocked(getSessionSigningSecret);
 const mockCheckLockout = vi.mocked(checkLockout);
 const mockRecordFailure = vi.mocked(recordFailure);
 const mockRecordSuccess = vi.mocked(recordSuccess);
+const mockPadResponseTime = vi.mocked(padResponseTime);
 
 describe("/login-api", () => {
   let POST: (req: Request) => Promise<Response>;
@@ -62,6 +63,9 @@ describe("/login-api", () => {
     expect(body.success).toBe(true);
     expect(res.headers.get("set-cookie")).toContain("clawbox_session");
     expect(mockRecordSuccess).toHaveBeenCalledWith("cf:1.2.3.4");
+    // Timing pad must run on the success path too — otherwise valid logins
+    // return faster than failures, leaking signal to a probing attacker.
+    expect(mockPadResponseTime).toHaveBeenCalled();
   });
 
   it("rejects incorrect password and records a failure", async () => {
@@ -74,6 +78,7 @@ describe("/login-api", () => {
     const res = await POST(req);
     expect(res.status).toBe(401);
     expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5");
+    expect(mockPadResponseTime).toHaveBeenCalled();
   });
 
   it("returns 429 with Retry-After when already locked out", async () => {
@@ -88,6 +93,7 @@ describe("/login-api", () => {
     expect(res.headers.get("Retry-After")).toBe("300");
     // Must not even attempt PAM verification once locked.
     expect(mockVerifyPassword).not.toHaveBeenCalled();
+    expect(mockPadResponseTime).toHaveBeenCalled();
   });
 
   it("returns 429 when this failure tipped into a lockout", async () => {
@@ -126,6 +132,9 @@ describe("/login-api", () => {
     // the lockout counter — that would let "password missing" spam lock out
     // the real owner.
     expect(mockRecordFailure).not.toHaveBeenCalled();
+    // …but the timing pad still has to run, otherwise the validation path
+    // is fast-fail relative to PAM and an attacker can probe by latency.
+    expect(mockPadResponseTime).toHaveBeenCalled();
   });
 
   it("rejects invalid duration", async () => {

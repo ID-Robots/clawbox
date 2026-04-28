@@ -143,6 +143,15 @@ function uuid(): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
+// Constrained set the gateway maps to DeepSeek's reasoning_effort field.
+// Anything outside this set is silently coerced to "high" so a stale or
+// hand-edited localStorage value can't reach the gateway.
+type ThinkingLevel = 'low' | 'medium' | 'high'
+const THINKING_LEVELS: readonly ThinkingLevel[] = ['low', 'medium', 'high']
+function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel {
+  return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'high'
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -157,9 +166,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
-  const [thinkingLevel, setThinkingLevel] = useState<string>(() => {
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
     if (typeof window === 'undefined') return 'high'
-    return window.localStorage?.getItem('clawbox:chat:thinkingLevel') || 'high'
+    return normalizeThinkingLevel(window.localStorage?.getItem('clawbox:chat:thinkingLevel'))
   })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
@@ -320,16 +329,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Push the latest thinkingLevel to the gateway whenever it changes or the
   // WS reconnects. chat.send resolves thinking from the session entry, so
   // patching the entry keeps every subsequent send aligned with the picker.
+  // Failures are surfaced to the dev console — full retry/rollback would
+  // be overkill for a UI knob whose worst case is one chat reverting to
+  // the gateway's last-known level until the user toggles again.
   useEffect(() => {
     if (status !== 'connected') return
     const key = sessionKeyRef.current
     if (!key) return
-    void wsRequest('sessions.patch', { key, thinkingLevel }).catch(() => {})
+    void wsRequest('sessions.patch', { key, thinkingLevel }).catch((err) => {
+      console.warn('[ChatPopup] sessions.patch(thinkingLevel) failed', err)
+    })
   }, [status, thinkingLevel, wsRequest])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
-    setThinkingLevel(next)
-    try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', next) } catch {}
+    const normalized = normalizeThinkingLevel(next)
+    setThinkingLevel(normalized)
+    try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', normalized) } catch {}
   }, [])
 
   // Connect to gateway

@@ -89,4 +89,33 @@ describe("login-rate-limit", () => {
     await lib.padResponseTime(fakeStart, 50);
     expect(Date.now() - before).toBeLessThan(20);
   });
+
+  it("refuses admission instead of evicting active lockouts when at cap", async () => {
+    // Seed the table at the hard cap with active records — every entry
+    // is locked far in the future so none are evictable. Real
+    // recordFailure() loops through writeChain serially and would burn
+    // 5+ seconds of disk writes just to set up; _seedForTest mutates
+    // the in-memory cache in one tick.
+    const cap = lib._MAX_TRACKED_KEYS_FOR_TEST;
+    const now = Date.now();
+    const lockedFar = now + 24 * 60 * 60 * 1000;
+    const seeded: Record<string, import("@/lib/login-rate-limit").AttemptRecord> = {};
+    seeded["victim"] = { failures: 5, firstFailureAtMs: now, lockedUntilMs: lockedFar };
+    for (let i = 0; i < cap - 1; i++) {
+      seeded[`flood-${i}`] = { failures: 5, firstFailureAtMs: now, lockedUntilMs: lockedFar };
+    }
+    lib._seedForTest(seeded);
+
+    // Victim's active lockout is still observable.
+    expect((await lib.checkLockout("victim")).locked).toBe(true);
+
+    // A brand-new key arriving past the cap is refused admission, not
+    // admitted at the cost of evicting an active record.
+    const r = await lib.recordFailure("new-attacker");
+    expect(r.locked).toBe(true);
+    expect(r.retryAfterSeconds).toBeGreaterThan(0);
+
+    // And the victim's lockout survived.
+    expect((await lib.checkLockout("victim")).locked).toBe(true);
+  });
 });

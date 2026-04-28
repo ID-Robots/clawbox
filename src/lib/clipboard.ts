@@ -17,17 +17,20 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     }
   }
   if (typeof document === "undefined") return false;
+  // Always remove the textarea via finally — execCommand can throw or
+  // return false, and either path used to leave the off-screen node in
+  // the DOM forever.
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
   try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
     document.body.appendChild(ta);
     ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
+    return document.execCommand("copy");
   } catch {
     return false;
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
   }
 }

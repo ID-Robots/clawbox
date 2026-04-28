@@ -6,9 +6,11 @@ const STATE_PATH = path.join(DATA_DIR, ".login-attempts.json");
 
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const MIN_RESPONSE_MS = 300;
-// Hard cap on tracked keys. Past this we evict the oldest record so an
-// attacker rotating cf-connecting-ip can't grow the on-disk state file
-// without bound.
+// Hard cap on tracked keys. When the cap is reached we shed expired
+// entries; if every entry is still active (locked or in-window) we
+// refuse admission for new keys instead of evicting active lockouts —
+// otherwise an IP-rotating attacker could shed someone else's 24h
+// lockout.
 const MAX_TRACKED_KEYS = 5000;
 
 // Escalating lockout schedule. Each tier is `failureCount → lock duration`:
@@ -21,7 +23,7 @@ const LOCKOUT_TIERS: Array<{ failures: number; lockMs: number }> = [
   { failures: 20, lockMs: 24 * 60 * 60 * 1000 },
 ];
 
-interface AttemptRecord {
+export interface AttemptRecord {
   failures: number;
   // First failure timestamp in the current window (ms since epoch). Used
   // to drop the counter back to zero after RATE_LIMIT_WINDOW_MS of quiet.
@@ -67,25 +69,32 @@ async function persist(state: State): Promise<void> {
   return writeChain;
 }
 
+function isExpired(rec: AttemptRecord, nowMs: number): boolean {
+  return rec.lockedUntilMs <= nowMs && nowMs - rec.firstFailureAtMs > RATE_LIMIT_WINDOW_MS;
+}
+
 function pruneExpired(state: State, nowMs: number): void {
   for (const [key, rec] of Object.entries(state.byKey)) {
-    const idleFor = nowMs - rec.firstFailureAtMs;
-    if (rec.lockedUntilMs <= nowMs && idleFor > RATE_LIMIT_WINDOW_MS) {
+    if (isExpired(rec, nowMs)) {
       delete state.byKey[key];
     }
   }
-  // Defensive cap: even after expiry-pruning, an attacker could keep
-  // every record "fresh" by rotating IPs faster than the window. Drop
-  // the oldest-by-firstFailure entries until we're under the hard cap.
-  const keys = Object.keys(state.byKey);
-  if (keys.length > MAX_TRACKED_KEYS) {
-    const sorted = keys
-      .map((k) => [k, state.byKey[k].firstFailureAtMs] as const)
-      .sort((a, b) => a[1] - b[1]);
-    for (let i = 0; i < sorted.length - MAX_TRACKED_KEYS; i++) {
-      delete state.byKey[sorted[i][0]];
-    }
+}
+
+/**
+ * True when admitting a new key would exceed the hard cap and there are no
+ * more expired entries to shed. Active (still-locked or in-window) entries
+ * are never evicted — that would let an IP-rotating attacker shed someone
+ * else's 24h lockout. When this returns true the caller treats the new
+ * key as already-locked instead of inserting a fresh record.
+ */
+function isOverCapForNewKey(state: State, nowMs: number, key: string): boolean {
+  if (state.byKey[key]) return false;
+  if (Object.keys(state.byKey).length < MAX_TRACKED_KEYS) return false;
+  for (const rec of Object.values(state.byKey)) {
+    if (isExpired(rec, nowMs)) return false;
   }
+  return true;
 }
 
 export interface LockoutCheck {
@@ -121,6 +130,15 @@ export async function recordFailure(key: string): Promise<LockoutCheck> {
   const state = await loadState();
   const now = Date.now();
   pruneExpired(state, now);
+
+  // If we'd have to evict an active lockout to admit this new key, refuse
+  // admission instead. Treat the new key as locked for the highest-tier
+  // duration so the IP-rotating attacker who's filling the table can't
+  // also keep retrying past the cap.
+  if (isOverCapForNewKey(state, now, key)) {
+    const lockMs = LOCKOUT_TIERS[LOCKOUT_TIERS.length - 1].lockMs;
+    return { locked: true, retryAfterSeconds: Math.ceil(lockMs / 1000) };
+  }
 
   let rec = state.byKey[key];
   if (!rec || (now - rec.firstFailureAtMs > RATE_LIMIT_WINDOW_MS && rec.lockedUntilMs <= now)) {
@@ -178,3 +196,14 @@ export function _resetForTest(): void {
   cached = null;
   writeChain = Promise.resolve();
 }
+
+/**
+ * Test-only: seed the cached state directly without paying the
+ * per-record persist cost. Used to fill the table to the cap in a
+ * single tick when a real recordFailure loop would time out.
+ */
+export function _seedForTest(records: Record<string, AttemptRecord>): void {
+  cached = { byKey: { ...records } };
+}
+
+export const _MAX_TRACKED_KEYS_FOR_TEST = MAX_TRACKED_KEYS;

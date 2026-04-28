@@ -104,14 +104,16 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && a.id !== "settings")
     : apps.filter(a => a.isPinned === false);
-  const shieldTitle = clawAiAuthenticated
-    ? t("shelf.openClawKeep")
-    : t("shelf.connectClawBoxAI");
   // Two reasons to flag the shield red: AI not connected (needs setup) or
   // ClawKeep is paired/configured but hasn't run a backup in >24 h. The
-  // first is the original behaviour; the second is the new stale-backup
-  // signal so a user notices their off-device backups stopped before they
-  // need to restore.
+  // title surfaces *which* one so screen-reader / hover users can tell why
+  // it's red; both fall back to a localized base label.
+  const stale = clawAiAuthenticated && clawkeepStale;
+  const shieldTitle = !clawAiAuthenticated
+    ? t("shelf.connectClawBoxAI")
+    : stale
+    ? t("shelf.clawkeepStale")
+    : t("shelf.openClawKeep");
   const shieldClasses = clawAiAuthenticated && !clawkeepStale
     ? "text-emerald-300"
     : "text-red-700";

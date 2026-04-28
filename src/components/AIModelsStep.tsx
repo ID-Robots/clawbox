@@ -531,6 +531,13 @@ export default function AIModelsStep({
   // the ClawBox portal. We poll the local /clawai/poll endpoint, which
   // in turn polls the upstream service for token issuance.
   const [clawaiDeviceCode, setClawaiDeviceCode] = useState<string | null>(null);
+  const [clawaiCodeCopied, setClawaiCodeCopied] = useState(false);
+  const clawaiCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cancel any in-flight "Copied" flash on unmount so the timer doesn't
+  // call setState on an unmounted component.
+  useEffect(() => () => {
+    if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
+  }, []);
   const [clawaiVerificationUrl, setClawaiVerificationUrl] = useState<string | null>(null);
   const [clawaiDevicePolling, setClawaiDevicePolling] = useState(false);
 
@@ -1985,15 +1992,13 @@ export default function AIModelsStep({
                             if (!code) return;
                             const ok = await copyToClipboard(code);
                             if (!ok) return;
-                            const btn = document.getElementById("clawai-copy-code-btn");
-                            if (!btn) return;
-                            btn.textContent = t("copied");
-                            setTimeout(() => { btn.textContent = t("copy"); }, 1500);
+                            setClawaiCodeCopied(true);
+                            if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
+                            clawaiCopyTimerRef.current = setTimeout(() => setClawaiCodeCopied(false), 1500);
                           }}
-                          id="clawai-copy-code-btn"
                           className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
                         >
-                          {t("copy")}
+                          {clawaiCodeCopied ? t("copied") : t("copy")}
                         </button>
                       </div>
                       <p className="mt-2 text-xs text-[var(--text-muted)]">
