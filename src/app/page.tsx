@@ -11,6 +11,7 @@ import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
@@ -31,7 +32,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -45,6 +46,7 @@ const apps: AppDef[] = [
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
+  { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -99,6 +101,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     terminal: "terminal",
     files: "folder",
     clawkeep: "shield_lock",
+    system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
@@ -1350,6 +1353,8 @@ function ChromeDesktopInner() {
         return <FilesApp />;
       case "clawkeep":
         return <ClawKeepApp />;
+      case "system_update":
+        return <SystemUpdateApp />;
       case "browser":
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":

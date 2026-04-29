@@ -11,6 +11,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.terminal": "Terminal",
     "app.files": "Files",
     "app.store": "Store",
+    "app.systemUpdate": "System Update",
     "app.browser": "Browser",
     "app.remoteDesktop": "Remote Desktop",
     "app.chat": "Chat",
