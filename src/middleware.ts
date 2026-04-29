@@ -1,5 +1,40 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import fs from "fs";
+import path from "path";
+
+// ─── Setup completion ────────────────────────────────────────────────────────
+//
+// While the wizard is still running there is no session cookie yet, so every
+// /setup-api/* call would be 307'd to /login. We mirror config-store's
+// CONFIG_ROOT resolution and treat "config.json missing" or "setup_complete
+// not yet true" as the bootstrap window where /setup-api/* must pass through.
+// Cached by mtime so the per-request hit is one stat() in the steady state.
+
+const CONFIG_ROOT = process.env.CLAWBOX_ROOT
+  || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
+
+let setupCompleteCache: { mtimeMs: number; value: boolean } | null = null;
+
+function isSetupComplete(): boolean {
+  try {
+    const stat = fs.statSync(CONFIG_PATH);
+    if (setupCompleteCache && setupCompleteCache.mtimeMs === stat.mtimeMs) {
+      return setupCompleteCache.value;
+    }
+    const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as { setup_complete?: unknown };
+    const value = parsed.setup_complete === true;
+    setupCompleteCache = { mtimeMs: stat.mtimeMs, value };
+    return value;
+  } catch {
+    // Missing/unreadable config = pre-setup. Cache the negative answer so we
+    // don't statSync on every request before config.json is first written.
+    setupCompleteCache = { mtimeMs: -1, value: false };
+    return false;
+  }
+}
 
 // ─── Captive Portal ──────────────────────────────────────────────────────────
 
@@ -83,7 +118,7 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Verify HMAC-SHA256 session cookie using Web Crypto API (Edge Runtime compatible) */
+/** Verify HMAC-SHA256 session cookie using Web Crypto API (available in Node 22+). */
 async function verifySessionCookie(cookie: string): Promise<boolean> {
   const secret = process.env.SESSION_SECRET;
   if (!secret) return false;
@@ -148,7 +183,17 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 3a. Trusted-test-environment escape hatch for the e2e-install harness.
+  // 3a. Setup wizard bootstrap — production-server.js always provisions
+  // SESSION_SECRET so the env-var short-circuit above never fires in real
+  // deployments. While setup_complete is not yet true the wizard runs without
+  // a session cookie; let it reach its API surface so it can configure WiFi,
+  // run the updater, set the password, etc. Once setup completes the gate
+  // closes and every /setup-api/* request requires a valid session.
+  if (pathname.startsWith("/setup-api/") && !isSetupComplete()) {
+    return NextResponse.next();
+  }
+
+  // 3b. Trusted-test-environment escape hatch for the e2e-install harness.
   // Scoped to /setup-api/* only — page requests still go through the
   // normal /login redirect so the login-round-trip spec can verify it.
   // Mirrors the convention src/lib/network.ts uses to skip hardware-only
@@ -176,6 +221,9 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
+  // Node runtime: middleware reads data/config.json to detect whether the
+  // setup wizard has finished, which the Edge runtime can't do (no fs).
+  runtime: "nodejs",
   matcher: [
     // Match all paths except static assets
     "/((?!_next/static|_next/image|fonts/|images/).*)",

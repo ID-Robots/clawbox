@@ -1,11 +1,31 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 describe("middleware", () => {
   let middleware: typeof import("@/middleware").middleware;
+  let tmpRoot: string;
+
+  /**
+   * Mark the wizard as finished by writing data/config.json under the
+   * temp CLAWBOX_ROOT — the auth gate skips /setup-api/* until this flag
+   * flips, so most authenticated tests need to call this first.
+   */
+  function markSetupComplete() {
+    const dataDir = path.join(tmpRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, "config.json"),
+      JSON.stringify({ setup_complete: true }),
+    );
+  }
 
   beforeEach(async () => {
     vi.resetModules();
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mw-"));
+    process.env.CLAWBOX_ROOT = tmpRoot;
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
     delete process.env.CLAWBOX_TEST_MODE;
@@ -17,6 +37,8 @@ describe("middleware", () => {
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
     delete process.env.CLAWBOX_TEST_MODE;
+    delete process.env.CLAWBOX_ROOT;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
   function createRequest(pathname: string): NextRequest {
@@ -241,8 +263,9 @@ describe("middleware", () => {
       expect(response.status).toBe(200);
     });
 
-    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once auth is active", async (p) => {
+    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once setup is complete and auth is active", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
       vi.resetModules();
       const mod = await import("@/middleware");
 
@@ -251,6 +274,34 @@ describe("middleware", () => {
       // No session cookie -> page-style requests redirect to /login (307).
       expect(response.status).toBe(307);
       expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it.each(["/setup-api/wifi/scan", "/setup-api/update/status", "/setup-api/update/run", "/setup-api/system/credentials", "/setup-api/ai-models/configure", "/setup-api/telegram/configure"])("allows %s during setup wizard bootstrap", async (p) => {
+      // production-server.js auto-creates SESSION_SECRET so the env-var
+      // short-circuit never fires; the wizard must still reach its API
+      // surface before setup_complete is written. Regression for the
+      // "Failed to check update status" wizard breakage.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest(p);
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("re-locks /setup-api/* after config.json flips setup_complete", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const open = await mod.middleware(createRequest("/setup-api/wifi/scan"));
+      expect(open.status).toBe(200);
+
+      markSetupComplete();
+      const locked = await mod.middleware(createRequest("/setup-api/wifi/scan"));
+      expect(locked.status).toBe(307);
+      expect(locked.headers.get("Location")).toContain("/login");
     });
 
     it("skips auth on /setup-api/* when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
@@ -272,6 +323,7 @@ describe("middleware", () => {
       // var was set casually by something else.
       process.env.SESSION_SECRET = "test-secret";
       process.env.CLAWBOX_TEST_MODE = "true";
+      markSetupComplete();
       vi.resetModules();
       const mod = await import("@/middleware");
 
