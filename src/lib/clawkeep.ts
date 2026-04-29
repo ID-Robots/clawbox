@@ -11,9 +11,8 @@
  *
  * Data layout (under $CLAWKEEP_DATA_DIR, default `~/.clawkeep`):
  *   token        — `claw_*` portal token, mode 0600
- *   repo-pass    — restic repo password, mode 0600
  *   state.json   — last-run summary surfaced to the UI
- *   config.toml  — paths/excludes/schedule (user-editable from UI)
+ *   config.toml  — schedule + openclaw flags (user-editable from UI)
  *   pair-state.json — in-flight pairing session, written by clawkeep-connect
  */
 
@@ -22,6 +21,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { findOpenclawBin } from "@/lib/openclaw-config";
+
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
 export const CLAWKEEP_CONFIG_PATH =
@@ -29,6 +30,12 @@ export const CLAWKEEP_CONFIG_PATH =
 
 const TOKEN_PATH = path.join(CLAWKEEP_DATA_DIR, "token");
 const STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "state.json");
+// Marker that a restore is in flight. The restore handler creates it
+// before invoking the Python CLI and removes it when done so the shelf
+// shield can pulse orange while it runs. Stamped with the start time so
+// crashes don't leave the shield pulsing forever.
+const RESTORING_FLAG_PATH = path.join(CLAWKEEP_DATA_DIR, "restoring.flag");
+const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "schedule.json");
 
 export const DEFAULT_PORTAL_SERVER =
   process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://openclawhardware.dev";
@@ -40,45 +47,67 @@ const DEFAULT_CONFIG_TOML = `# /home/clawbox/.clawkeep/config.toml
 
 server = "${DEFAULT_PORTAL_SERVER}"
 
-paths = [
-    "/home/clawbox/clawbox/data",
-]
-
-exclude = [
-    "**/node_modules",
-    "**/.cache",
-    "**/.venv",
-    "**/__pycache__",
-    "*.tmp",
-    "*.log",
-]
-
 schedule = "daily"
 
-[restic]
-binary = "/usr/bin/restic"
-compression = "auto"
-read_concurrency = 2
+# clawkeep delegates "what to back up" to \`openclaw backup create\` —
+# it captures OpenClaw state, config, credentials, sessions, and
+# (optionally) workspaces. See https://docs.openclaw.ai/cli/backup.
+[openclaw]
+binary = "openclaw"
+include_workspace = true
+only_config = false
+verify = true
+output_dir = ""
 
 [heartbeat]
 idle_interval_hours = 24
 `;
 
+// Daemon heartbeat status values, mirrored from clawkeep/clawkeep/state.py.
+// Typed so callers reading `lastHeartbeatStatus` get an enum-like surface
+// without us having to ship a runtime constant into the client bundle
+// (clawkeep.ts uses node:fs and isn't safe to import from a client file).
+export type HeartbeatStatus = "" | "running" | "ok" | "error" | "idle";
+
+export type ScheduleFrequency = "daily" | "weekly";
+
+export interface ClawKeepSchedule {
+  enabled: boolean;
+  frequency: ScheduleFrequency;
+  /** "HH:MM" 24-hour, device-local time. */
+  timeOfDay: string;
+  /** 0=Sunday … 6=Saturday. Only used when frequency === "weekly". */
+  weekday: number;
+}
+
+export const DEFAULT_SCHEDULE: ClawKeepSchedule = {
+  enabled: false,
+  frequency: "daily",
+  timeOfDay: "02:00",
+  weekday: 0,
+};
+
 export interface ClawKeepStatus {
   paired: boolean;
   configured: boolean;
-  configPath: string;
   server: string;
-  paths: string[];
-  exclude: string[];
-  schedule: string;
   lastBackupAtMs: number;
   lastHeartbeatAtMs: number;
-  lastHeartbeatStatus: string;
+  lastHeartbeatStatus: HeartbeatStatus;
+  /** Sub-phase during an in-flight backup; empty when nothing is running. */
+  currentStep: string;
+  /** When the daemon entered its current step (unix ms). */
+  currentStepAtMs: number;
   cloudBytes: number;
   snapshotCount: number;
-  resticInstalled: boolean;
+  openclawInstalled: boolean;
   daemonInstalled: boolean;
+  /** True while a restore is mid-flight (download → verify → swap). */
+  restoring: boolean;
+  /** Schedule for unattended backups. `enabled=false` disarms the in-process scheduler. */
+  schedule: ClawKeepSchedule;
+  /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
+  nextRunAtMs: number;
 }
 
 export class ClawKeepError extends Error {
@@ -97,6 +126,106 @@ export class ClawKeepError extends Error {
 
 async function ensureDataDir(): Promise<void> {
   await fs.mkdir(CLAWKEEP_DATA_DIR, { recursive: true, mode: 0o700 });
+}
+
+// Stale-flag window: if the restoring marker is older than the restore
+// timeout it almost certainly means the Next.js process crashed mid-run
+// and never cleaned up. Treat as not-restoring so the shield stops glowing.
+const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+
+function sanitiseSchedule(input: unknown): ClawKeepSchedule {
+  // Coerce-and-default: tolerate a missing/partial schedule file rather than
+  // crash the daemon. Only the four well-known fields are honoured; anything
+  // else is silently dropped so future schema changes can't poison the file.
+  const r = (input ?? {}) as Record<string, unknown>;
+  const frequency: ScheduleFrequency =
+    r.frequency === "weekly" ? "weekly" : "daily";
+  const time = typeof r.timeOfDay === "string" && /^\d{2}:\d{2}$/.test(r.timeOfDay)
+    ? r.timeOfDay
+    : DEFAULT_SCHEDULE.timeOfDay;
+  const weekdayRaw = Number(r.weekday);
+  const weekday = Number.isInteger(weekdayRaw) && weekdayRaw >= 0 && weekdayRaw <= 6
+    ? weekdayRaw
+    : DEFAULT_SCHEDULE.weekday;
+  return {
+    enabled: r.enabled === true,
+    frequency,
+    timeOfDay: time,
+    weekday,
+  };
+}
+
+export async function readSchedule(): Promise<ClawKeepSchedule> {
+  try {
+    const raw = await fs.readFile(SCHEDULE_PATH, "utf8");
+    return sanitiseSchedule(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_SCHEDULE };
+  }
+}
+
+export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
+  await ensureDataDir();
+  const sanitised = sanitiseSchedule(next);
+  const tmp = `${SCHEDULE_PATH}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(sanitised, null, 2), { mode: 0o600 });
+  await fs.rename(tmp, SCHEDULE_PATH);
+  return sanitised;
+}
+
+/** Compute the next wall-clock ms a backup should fire, given a schedule
+ * and a "now" reference. Pure function — exported for unit tests. */
+export function computeNextRunMs(schedule: ClawKeepSchedule, now: Date): number {
+  if (!schedule.enabled) return 0;
+  const [h, m] = schedule.timeOfDay.split(":").map((s) => Number(s));
+  if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return 0;
+  }
+  const candidate = new Date(now);
+  candidate.setHours(h, m, 0, 0);
+  if (schedule.frequency === "daily") {
+    if (candidate.getTime() <= now.getTime()) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return candidate.getTime();
+  }
+  // Weekly — advance until the candidate is in the future AND lands on the target weekday.
+  if (!Number.isInteger(schedule.weekday)) return 0;
+  const target = ((schedule.weekday % 7) + 7) % 7;
+  // At most 8 day-advances are needed (today + 7 days), so a guard of 9
+  // hops trips only on a clock/DST anomaly we'd rather skip than spin on.
+  for (let hops = 0; hops < 9; hops++) {
+    if (candidate.getDay() === target && candidate.getTime() > now.getTime()) {
+      return candidate.getTime();
+    }
+    candidate.setDate(candidate.getDate() + 1);
+  }
+  return 0;
+}
+
+async function setRestoring(active: boolean): Promise<void> {
+  await ensureDataDir();
+  if (active) {
+    await fs.writeFile(RESTORING_FLAG_PATH, "", { mode: 0o600 });
+  } else {
+    await fs.rm(RESTORING_FLAG_PATH, { force: true });
+  }
+}
+
+async function isRestoring(): Promise<boolean> {
+  let stat;
+  try {
+    stat = await fs.stat(RESTORING_FLAG_PATH);
+  } catch {
+    return false;
+  }
+  // Use mtime as the age signal — saves an open+read on the hot path
+  // (5 s polls) where the file usually doesn't exist anyway.
+  if (Date.now() - stat.mtimeMs > RESTORING_FLAG_MAX_AGE_MS) {
+    await fs.rm(RESTORING_FLAG_PATH, { force: true });
+    return false;
+  }
+  return true;
 }
 
 async function writeSecret(p: string, contents: string): Promise<void> {
@@ -165,99 +294,30 @@ export async function readConfigToml(): Promise<string> {
   return fs.readFile(CLAWKEEP_CONFIG_PATH, "utf8");
 }
 
-export async function writeConfigToml(toml: string): Promise<void> {
-  await ensureDataDir();
-  await fs.writeFile(CLAWKEEP_CONFIG_PATH, toml, { mode: 0o644 });
-}
-
 interface StateFile {
   last_heartbeat_at_ms?: number;
   last_heartbeat_status?: string;
+  last_step?: string;
+  last_step_at_ms?: number;
   last_backup_at_ms?: number;
   last_cloud_bytes?: number;
   last_snapshot_count?: number;
 }
 
-interface ParsedConfigBits {
-  server: string;
-  paths: string[];
-  exclude: string[];
-  schedule: string;
-}
-
-/** Tiny TOML reader covering only the four scalars/arrays the status
- * panel needs. The daemon does the strict parse; pulling in a full TOML
- * dep just to display paths in a sidebar is overkill. */
-export function parseConfigBits(toml: string): ParsedConfigBits {
-  const out: ParsedConfigBits = {
-    server: DEFAULT_PORTAL_SERVER,
-    paths: [],
-    exclude: [],
-    schedule: "daily",
-  };
-  const lines = toml.split(/\r?\n/);
-  let inSection = "";
-  let pendingArray: { bucket: "paths" | "exclude" } | null = null;
-  let pendingItems: string[] = [];
-
-  for (const raw of lines) {
+/** Pull just the `server` value out of a config.toml. The Python daemon does
+ * the full strict parse; we only need this scalar for the dashboard tagline. */
+function readServer(toml: string): string {
+  for (const raw of toml.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-
-    if (line.startsWith("[")) {
-      if (pendingArray) {
-        out[pendingArray.bucket] = pendingItems;
-        pendingArray = null;
-        pendingItems = [];
-      }
-      inSection = line.replace(/^\[+|\]+$/g, "");
-      continue;
-    }
-
-    if (pendingArray) {
-      const items = line.match(/"([^"]*)"/g) || [];
-      for (const it of items) pendingItems.push(it.slice(1, -1));
-      if (line.includes("]")) {
-        out[pendingArray.bucket] = pendingItems;
-        pendingArray = null;
-        pendingItems = [];
-      }
-      continue;
-    }
-
-    if (inSection !== "") continue;
-
+    if (line.startsWith("[")) break; // server lives in the top-level section
     const eq = line.indexOf("=");
     if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    const value = line.slice(eq + 1).trim();
-
-    if (key === "server") {
-      const m = value.match(/^"([^"]*)"/);
-      if (m) out.server = m[1];
-    } else if (key === "schedule") {
-      const m = value.match(/^"([^"]*)"/);
-      if (m) out.schedule = m[1];
-    } else if (key === "paths" || key === "exclude") {
-      const inline = value.match(/^\[(.*)\]$/);
-      if (inline) {
-        const items = inline[1].match(/"([^"]*)"/g) || [];
-        out[key] = items.map((s) => s.slice(1, -1));
-      } else if (value.startsWith("[")) {
-        pendingArray = { bucket: key };
-        pendingItems = [];
-        const tail = value.slice(1);
-        const items = tail.match(/"([^"]*)"/g) || [];
-        for (const it of items) pendingItems.push(it.slice(1, -1));
-        if (tail.includes("]")) {
-          out[pendingArray.bucket] = pendingItems;
-          pendingArray = null;
-          pendingItems = [];
-        }
-      }
-    }
+    if (line.slice(0, eq).trim() !== "server") continue;
+    const m = line.slice(eq + 1).trim().match(/^"([^"]*)"/);
+    if (m) return m[1];
   }
-  return out;
+  return DEFAULT_PORTAL_SERVER;
 }
 
 async function readStateFile(): Promise<StateFile> {
@@ -280,20 +340,21 @@ function which(bin: string): Promise<boolean> {
   });
 }
 
-// systemd's secure_path doesn't include ~/.local/bin, so a pip --user install
-// of clawkeepd isn't on PATH for the Next.js process. Cache *successful*
-// lookups for the process lifetime — a positive answer doesn't change without
-// a restart. Failures aren't cached so a freshly-installed `apt install
-// restic` or `pip install --user .` flips the status panel from "Setup
-// needed" to "Ready" on the next poll without restarting clawbox-setup.
-let resticInstalledCache: boolean | null = null;
+// systemd's secure_path doesn't include ~/.local/bin or ~/.npm-global/bin,
+// so a pip --user install of clawkeepd and an `npm install -g openclaw`
+// both miss PATH for the Next.js process. We probe the canonical
+// install locations as fallbacks. Cache *successful* lookups for the
+// process lifetime — a positive answer doesn't change without a
+// restart.
 let daemonBinCache: string | null = null;
 
-async function getResticInstalled(): Promise<boolean> {
-  if (resticInstalledCache === true) return true;
-  const ok = await which("restic");
-  if (ok) resticInstalledCache = true;
-  return ok;
+async function getOpenclawInstalled(): Promise<boolean> {
+  // findOpenclawBin() returns the literal "openclaw" when none of its
+  // absolute candidates exist; in that case fall back to a $PATH probe so
+  // a system install (apt/yum) still counts as "installed".
+  const resolved = findOpenclawBin();
+  if (resolved !== "openclaw") return true;
+  return await which("openclaw");
 }
 
 async function getDaemonBin(): Promise<string | null> {
@@ -317,36 +378,59 @@ async function getDaemonBin(): Promise<string | null> {
   }
 }
 
+/** Build the env for spawning the Python daemon/CLI. Augments PATH with the
+ *  resolved openclaw bin's directory + the user-local bin dirs so the daemon's
+ *  own `subprocess.run(["openclaw", ...])` resolves under systemd's stripped
+ *  PATH. Centralised so spawn sites stay in lockstep. */
+function buildSpawnEnv(): NodeJS.ProcessEnv {
+  const extraDirs = new Set<string>();
+  const resolved = findOpenclawBin();
+  if (resolved !== "openclaw") extraDirs.add(path.dirname(resolved));
+  extraDirs.add(path.join(os.homedir(), ".local", "bin"));
+  extraDirs.add(path.join(os.homedir(), ".npm-global", "bin"));
+
+  const parentPath = process.env.PATH ?? "";
+  const prefix = Array.from(extraDirs).join(path.delimiter);
+  const augmentedPath = parentPath ? `${prefix}${path.delimiter}${parentPath}` : prefix;
+  return { ...process.env, CLAWKEEP_DATA_DIR, PATH: augmentedPath };
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Status
 // ────────────────────────────────────────────────────────────────────
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, resticInstalled, daemonBin] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
-    getResticInstalled(),
+    getOpenclawInstalled(),
     getDaemonBin(),
+    isRestoring(),
+    readSchedule(),
   ]);
 
-  const bits = parseConfigBits(configToml);
+  const server = readServer(configToml);
   return {
     paired: !!token,
-    configured: bits.paths.length > 0,
-    configPath: CLAWKEEP_CONFIG_PATH,
-    server: bits.server,
-    paths: bits.paths,
-    exclude: bits.exclude,
-    schedule: bits.schedule,
+    // openclaw decides what's in the archive — we no longer ask the user
+    // to declare paths, so any paired device with a valid config is
+    // "configured" enough to run.
+    configured: !!token && server.length > 0,
+    server,
     lastBackupAtMs: stateRaw.last_backup_at_ms ?? 0,
     lastHeartbeatAtMs: stateRaw.last_heartbeat_at_ms ?? 0,
-    lastHeartbeatStatus: stateRaw.last_heartbeat_status ?? "",
+    lastHeartbeatStatus: (stateRaw.last_heartbeat_status ?? "") as HeartbeatStatus,
     cloudBytes: stateRaw.last_cloud_bytes ?? 0,
     snapshotCount: stateRaw.last_snapshot_count ?? 0,
-    resticInstalled,
+    currentStep: stateRaw.last_step ?? "",
+    currentStepAtMs: stateRaw.last_step_at_ms ?? 0,
+    openclawInstalled,
     daemonInstalled: daemonBin !== null,
+    restoring,
+    schedule,
+    nextRunAtMs: computeNextRunMs(schedule, new Date()),
   };
 }
 
@@ -360,10 +444,11 @@ export interface BackupResult {
   stderr: string;
 }
 
-// Cap stdout/stderr capture so a 4-hour restic run on a chatty TTY can't
-// OOM the Next.js process. We only show a 2 KB tail in the UI anyway, so
-// keeping a generous tail buffer (64 KB) leaves plenty of room for the
-// final summary line + any stderr trace while staying bounded.
+// Cap stdout/stderr capture so a chatty `openclaw backup create` over a
+// large workspace can't OOM the Next.js process. We only show a 2 KB tail
+// in the UI anyway, so keeping a generous tail buffer (64 KB) leaves plenty
+// of room for the final summary line + any stderr trace while staying
+// bounded.
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 function appendCapped(prev: string, chunk: string): string {
@@ -372,10 +457,133 @@ function appendCapped(prev: string, chunk: string): string {
   return next.slice(next.length - MAX_OUTPUT_BYTES);
 }
 
+export interface CloudSnapshot {
+  name: string;
+  size_bytes: number;
+  last_modified_ms: number;
+}
+
+interface SnapshotsResponse {
+  ok: boolean;
+  error?: string;
+  snapshots?: CloudSnapshot[];
+  quotaBytes?: number;
+  cloudBytes?: number;
+}
+
+interface RestoreOk {
+  ok: true;
+  archive: string;
+  archiveBytes: number;
+  assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+}
+
+interface RestoreErr {
+  ok: false;
+  error: string;
+}
+
+type RestoreCliResponse = RestoreOk | RestoreErr;
+
+const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+
+function spawnCliJson<T>(
+  bin: string,
+  subcommand: string,
+  extraArgs: string[],
+  opts: { timeoutMs: number },
+): Promise<T> {
+  const { timeoutMs } = opts;
+  return new Promise((resolve, reject) => {
+    const env = buildSpawnEnv();
+
+    // The real `clawkeep` script lives next to clawkeepd. If we resolved
+    // clawkeepd to ~/.local/bin/clawkeepd, derive the sibling `clawkeep`
+    // binary path; the system PATH version may not exist.
+    const clawkeepBin = bin.endsWith("clawkeepd")
+      ? bin.replace(/clawkeepd$/, "clawkeep")
+      : "clawkeep";
+
+    // `--config` is a per-subcommand flag in cli.py — order is
+    // `clawkeep <subcommand> [<positional>] --config <path>`.
+    const args = [subcommand, ...extraArgs, "--config", CLAWKEEP_CONFIG_PATH];
+    const child = spawn(clawkeepBin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+
+    let stdout = "";
+    let stderr = "";
+    const killTimer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    }, timeoutMs);
+
+    child.stdout.on("data", (b: Buffer) => {
+      stdout = appendCapped(stdout, b.toString("utf8"));
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      stderr = appendCapped(stderr, b.toString("utf8"));
+    });
+    child.on("error", (err) => {
+      clearTimeout(killTimer);
+      reject(new Error(`spawn ${clawkeepBin} failed: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      clearTimeout(killTimer);
+      // Both `clawkeep snapshots` and `clawkeep restore` print a single JSON
+      // object on stdout — even on errors. Parse first; fall back to stderr
+      // text if parsing fails so the caller still gets a usable message.
+      try {
+        const parsed = JSON.parse(stdout.trim().split("\n").pop() || "{}") as T;
+        resolve(parsed);
+      } catch {
+        reject(
+          new Error(
+            `clawkeep ${subcommand} exited ${code ?? "?"}; ` +
+              `non-JSON output. stderr=${stderr.slice(-500)}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+export async function listCloudSnapshots(): Promise<CloudSnapshot[]> {
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "snapshots failed", 502);
+  }
+  return resp.snapshots ?? [];
+}
+
+export async function runRestore(name: string): Promise<RestoreOk> {
+  // Restore is destructive — sanity-check the name shape on this side too,
+  // not just inside the Python CLI. A hostile input here couldn't escape the
+  // prefix (we always concat with the portal-issued prefix on the Python
+  // side) but bouncing it early gives the user a clearer error.
+  if (!/^[A-Za-z0-9._-]+\.tar\.gz$/.test(name)) {
+    throw new ClawKeepError("invalid snapshot name", 400);
+  }
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  await setRestoring(true);
+  try {
+    const resp = await spawnCliJson<RestoreCliResponse>(
+      bin,
+      "restore",
+      [name],
+      { timeoutMs: RESTORE_TIMEOUT_MS },
+    );
+    if (!resp.ok) {
+      throw new ClawKeepError(resp.error, 502);
+    }
+    return resp;
+  } finally {
+    await setRestoring(false).catch(() => { /* best-effort cleanup */ });
+  }
+}
+
 export async function runBackup(opts: { idle?: boolean } = {}): Promise<BackupResult> {
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   return new Promise((resolve) => {
-    const env = { ...process.env, CLAWKEEP_DATA_DIR };
+    const env = buildSpawnEnv();
     const args = ["--config", CLAWKEEP_CONFIG_PATH];
     if (opts.idle) args.push("--idle");
     const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });

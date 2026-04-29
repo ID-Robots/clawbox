@@ -64,7 +64,10 @@ export async function GET(req: NextRequest) {
   const stat = fs.statSync(abs);
   if (!stat.isDirectory()) return NextResponse.json({ error: "Not a directory" }, { status: 400 });
 
-  const entries = fs.readdirSync(abs).filter((name) => !name.startsWith("."));
+  // Return everything including dotfiles. The client (FilesApp) hides
+  // them by default and toggles visibility via the visibility/visibility_off
+  // button — filtering server-side would defeat that toggle.
+  const entries = fs.readdirSync(abs);
   const files = entries
     .map((name) => {
       try {

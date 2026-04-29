@@ -158,10 +158,17 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
 
+  // `git reset --hard` snaps tracked files to upstream but leaves untracked
+  // junk behind (stale build artefacts checked into a release branch then
+  // dropped, partially-merged scripts from a manual fix, etc.) which can
+  // shadow new code or just rot on disk forever. Follow up with
+  // `git clean -fd` (no -x: keep gitignored data/, .env, node_modules,
+  // .next so we don't nuke user state and force a multi-minute rebuild).
   await execShell(
     `${gitCmd} fetch origin` +
     ` && ${gitCmd} checkout ${local}` +
-    ` && ${gitCmd} reset --hard ${upstream}`,
+    ` && ${gitCmd} reset --hard ${upstream}` +
+    ` && ${gitCmd} clean -fd`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);

@@ -123,6 +123,23 @@ export default function FilesApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  // Hidden by default — matches every desktop file manager. Persisted across
+  // window reopens so the user's choice sticks. Reading lazily inside
+  // useState's initializer guards against SSR (no `window` until mount).
+  const [showHidden, setShowHidden] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("clawbox.files.showHidden") === "1";
+  });
+
+  const toggleShowHidden = useCallback(() => {
+    setShowHidden((v) => {
+      const next = !v;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
+      }
+      return next;
+    });
+  }, []);
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>({ type: null });
   const [dragOver, setDragOver] = useState(false);
@@ -158,6 +175,11 @@ export default function FilesApp() {
   }, []);
 
   useEffect(() => { load(""); }, [load]);
+
+  // POSIX hidden files start with a dot. We filter client-side because the
+  // server returns the full directory; this lets the toggle flip instantly
+  // without a re-fetch.
+  const visibleFiles = showHidden ? files : files.filter((f) => !f.name.startsWith("."));
 
   // ─── Breadcrumbs ────────────────────────────────────────────────────────────
 
@@ -451,6 +473,18 @@ export default function FilesApp() {
               <Icon name="refresh" size={18} />
             </button>
             <button
+              onClick={toggleShowHidden}
+              className={`p-1.5 rounded-md transition-colors hover:bg-white/[0.06] cursor-pointer ${
+                showHidden
+                  ? "text-[var(--coral-bright)]"
+                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              }`}
+              title={showHidden ? t("files.hideHiddenFiles") : t("files.showHiddenFiles")}
+              aria-pressed={showHidden}
+            >
+              <Icon name={showHidden ? "visibility" : "visibility_off"} size={18} />
+            </button>
+            <button
               onClick={() => setViewMode(v => v === "grid" ? "list" : "grid")}
               className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
               title={viewMode === "grid" ? t("files.switchToList") : t("files.switchToGrid")}
@@ -488,15 +522,19 @@ export default function FilesApp() {
               <span className="text-sm">{error}</span>
               <button onClick={() => load(currentPath)} className="text-xs underline mt-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer">{t("files.retry")}</button>
             </div>
-          ) : files.length === 0 ? (
+          ) : visibleFiles.length === 0 ? (
             <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
               <Icon name="folder_open" size={56} color="var(--border-subtle)" />
-              <span className="text-sm">{t("files.emptyFolder")}</span>
-              <span className="text-xs">{t("files.dropOrUpload")}</span>
+              <span className="text-sm">
+                {files.length === 0 ? t("files.emptyFolder") : t("files.hiddenAllItems")}
+              </span>
+              <span className="text-xs">
+                {files.length === 0 ? t("files.dropOrUpload") : t("files.hiddenToggleEye")}
+              </span>
             </div>
           ) : viewMode === "grid" ? (
             <GridView
-              files={files}
+              files={visibleFiles}
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
@@ -506,7 +544,7 @@ export default function FilesApp() {
             />
           ) : (
             <ListView
-              files={files}
+              files={visibleFiles}
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
@@ -519,7 +557,12 @@ export default function FilesApp() {
 
         {/* ── Status bar ── */}
         <div className="px-4 py-1.5 text-xs flex items-center justify-between shrink-0 border-t border-[var(--border-subtle)] text-[var(--text-muted)]">
-          <span>{statusMsg ?? `${files.length} item${files.length !== 1 ? "s" : ""}`}</span>
+          <span>
+            {statusMsg ?? `${visibleFiles.length} item${visibleFiles.length !== 1 ? "s" : ""}`}
+            {!showHidden && files.length > visibleFiles.length && (
+              <span className="opacity-60"> · {files.length - visibleFiles.length} hidden</span>
+            )}
+          </span>
           {currentPath && <span className="opacity-60">~/{currentPath}</span>}
         </div>
       </div>

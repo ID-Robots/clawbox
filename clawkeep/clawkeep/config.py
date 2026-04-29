@@ -44,10 +44,14 @@ DEFAULT_CONFIG_PATH = default_config_path()
 
 
 @dataclass(frozen=True)
-class ResticConfig:
-    binary: str = "/usr/bin/restic"
-    compression: str = "auto"
-    read_concurrency: int = 2
+class OpenclawConfig:
+    binary: str = "openclaw"
+    include_workspace: bool = True
+    only_config: bool = False
+    verify: bool = True
+    # Empty string = use a per-run tmpdir. A persistent path is fine too,
+    # but the runner deletes the archive after upload either way.
+    output_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,10 +62,8 @@ class HeartbeatConfig:
 @dataclass(frozen=True)
 class Config:
     server: str
-    paths: list[str]
-    exclude: list[str] = field(default_factory=list)
     schedule: str = "daily"
-    restic: ResticConfig = field(default_factory=ResticConfig)
+    openclaw: OpenclawConfig = field(default_factory=OpenclawConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
 
 
@@ -74,6 +76,12 @@ def _safe_int(value: object, *, key: str, default: int) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as e:
         raise ConfigError(f"'{key}' must be an integer, got {value!r}") from e
+
+
+def _safe_bool(value: object, *, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"'{key}' must be a boolean, got {value!r}")
 
 
 def load(path: Path | str | None = None) -> Config:
@@ -92,27 +100,28 @@ def load(path: Path | str | None = None) -> Config:
     if not isinstance(server, str) or not server.strip():
         raise ConfigError("'server' must be a non-empty string")
 
-    paths = raw.get("paths")
-    if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
-        raise ConfigError("'paths' must be a non-empty list of strings")
-
-    exclude = raw.get("exclude", [])
-    if not isinstance(exclude, list) or not all(isinstance(p, str) for p in exclude):
-        raise ConfigError("'exclude' must be a list of strings")
-
     schedule = raw.get("schedule", "daily")
     if schedule not in ("daily", "weekly", "manual"):
         raise ConfigError(f"'schedule' must be daily|weekly|manual, got {schedule!r}")
 
-    restic_raw = raw.get("restic", {}) or {}
-    if not isinstance(restic_raw, dict):
-        raise ConfigError(f"'restic' must be a table, got {type(restic_raw).__name__}")
-    restic = ResticConfig(
-        binary=str(restic_raw.get("binary", "/usr/bin/restic")),
-        compression=str(restic_raw.get("compression", "auto")),
-        read_concurrency=_safe_int(
-            restic_raw.get("read_concurrency", 2), key="restic.read_concurrency", default=2,
+    openclaw_raw = raw.get("openclaw", {}) or {}
+    if not isinstance(openclaw_raw, dict):
+        raise ConfigError(f"'openclaw' must be a table, got {type(openclaw_raw).__name__}")
+    openclaw = OpenclawConfig(
+        binary=str(openclaw_raw.get("binary", "openclaw")),
+        include_workspace=_safe_bool(
+            openclaw_raw.get("include_workspace", True),
+            key="openclaw.include_workspace",
         ),
+        only_config=_safe_bool(
+            openclaw_raw.get("only_config", False),
+            key="openclaw.only_config",
+        ),
+        verify=_safe_bool(
+            openclaw_raw.get("verify", True),
+            key="openclaw.verify",
+        ),
+        output_dir=str(openclaw_raw.get("output_dir", "")),
     )
 
     heartbeat_raw = raw.get("heartbeat", {}) or {}
@@ -128,9 +137,7 @@ def load(path: Path | str | None = None) -> Config:
 
     return Config(
         server=server.rstrip("/"),
-        paths=list(paths),
-        exclude=list(exclude),
         schedule=schedule,
-        restic=restic,
+        openclaw=openclaw,
         heartbeat=heartbeat,
     )

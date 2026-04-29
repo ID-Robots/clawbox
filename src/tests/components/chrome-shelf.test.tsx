@@ -8,6 +8,7 @@ vi.mock("@/lib/i18n", () => ({
     t: (key: string) => {
       const translations: Record<string, string> = {
         "shelf.openClawKeep": "Open ClawKeep",
+        "shelf.clawkeepStale": "ClawKeep backup overdue",
         "shelf.connectClawBoxAI": "Connect ClawBox AI",
         "shelf.appLauncher": "App Launcher",
         "shelf.systemSettings": "System Settings",

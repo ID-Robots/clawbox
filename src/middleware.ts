@@ -38,12 +38,19 @@ const APPLE_PATHS = new Set([
 const PUBLIC_PREFIXES = [
   "/login",
   "/setup",
-  "/setup-api/",
   "/login-api",
   "/_next/",
   "/fonts/",
   "/images/",
 ];
+
+// Endpoints the unauthenticated /login + /setup pages must reach before a
+// session exists. Everything else under /setup-api/ requires a session
+// once SESSION_SECRET is provisioned (i.e. post-setup); pre-setup the
+// SESSION_SECRET short-circuit below keeps the wizard fully functional.
+const PRE_AUTH_API_PATHS = new Set([
+  "/setup-api/setup/status",
+]);
 
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
@@ -58,8 +65,16 @@ const PUBLIC_EXACT = new Set([
 
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;
+  if (PRE_AUTH_API_PATHS.has(pathname)) return true;
+  // Match each prefix on a path-segment boundary. Bare `startsWith("/setup")`
+  // would also match `/setup-api/...` and silently expose every protected
+  // setup-api route — that was the original auth-bypass.
   for (const prefix of PUBLIC_PREFIXES) {
-    if (pathname.startsWith(prefix)) return true;
+    if (prefix.endsWith("/")) {
+      if (pathname.startsWith(prefix)) return true;
+    } else if (pathname === prefix || pathname.startsWith(prefix + "/")) {
+      return true;
+    }
   }
   return false;
 }
@@ -130,6 +145,16 @@ export async function middleware(request: NextRequest) {
 
   // 3. If no session secret configured, auth is not active (pre-setup)
   if (!process.env.SESSION_SECRET) {
+    return NextResponse.next();
+  }
+
+  // 3a. Trusted-test-environment escape hatch for the e2e-install harness.
+  // Scoped to /setup-api/* only — page requests still go through the
+  // normal /login redirect so the login-round-trip spec can verify it.
+  // Mirrors the convention src/lib/network.ts uses to skip hardware-only
+  // nmcli paths; both are gated on the flag install.sh writes when it
+  // boots under CLAWBOX_TEST_MODE.
+  if (process.env.CLAWBOX_TEST_MODE === "1" && pathname.startsWith("/setup-api/")) {
     return NextResponse.next();
   }
 

@@ -143,6 +143,15 @@ function uuid(): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
+// Constrained set the gateway maps to DeepSeek's reasoning_effort field.
+// Anything outside this set is silently coerced to "high" so a stale or
+// hand-edited localStorage value can't reach the gateway.
+type ThinkingLevel = 'low' | 'medium' | 'high'
+const THINKING_LEVELS: readonly ThinkingLevel[] = ['low', 'medium', 'high']
+function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel {
+  return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'high'
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -157,6 +166,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
+    if (typeof window === 'undefined') return 'high'
+    return normalizeThinkingLevel(window.localStorage?.getItem('clawbox:chat:thinkingLevel'))
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
@@ -311,6 +324,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
       }, 30000)
     })
+  }, [])
+
+  // Push the latest thinkingLevel to the gateway whenever it changes or the
+  // WS reconnects. chat.send resolves thinking from the session entry, so
+  // patching the entry keeps every subsequent send aligned with the picker.
+  // Failures are surfaced to the dev console — full retry/rollback would
+  // be overkill for a UI knob whose worst case is one chat reverting to
+  // the gateway's last-known level until the user toggles again.
+  useEffect(() => {
+    if (status !== 'connected') return
+    const key = sessionKeyRef.current
+    if (!key) return
+    void wsRequest('sessions.patch', { key, thinkingLevel }).catch((err) => {
+      console.warn('[ChatPopup] sessions.patch(thinkingLevel) failed', err)
+    })
+  }, [status, thinkingLevel, wsRequest])
+
+  const handleThinkingLevelChange = useCallback((next: string) => {
+    const normalized = normalizeThinkingLevel(next)
+    setThinkingLevel(normalized)
+    try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', normalized) } catch {}
   }, [])
 
   // Connect to gateway
@@ -1108,6 +1142,55 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               </div>
             )
           })()}
+          <div
+            onPointerDown={stopHeaderDrag}
+            style={{
+              position: 'relative',
+              display: 'inline-flex',
+              alignItems: 'center',
+              maxWidth: 120,
+              marginLeft: 6,
+            }}
+          >
+            <select
+              aria-label="Reasoning effort"
+              value={thinkingLevel}
+              onChange={(e) => handleThinkingLevelChange(e.target.value)}
+              onPointerDown={stopHeaderDrag}
+              style={{
+                appearance: 'none',
+                WebkitAppearance: 'none',
+                MozAppearance: 'none',
+                width: '100%',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                color: '#fff',
+                borderRadius: 10,
+                padding: '6px 28px 6px 10px',
+                fontSize: 11,
+                fontWeight: 600,
+                outline: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              <option value="low" style={{ background: '#111827', color: '#fff' }}>Effort: low</option>
+              <option value="medium" style={{ background: '#111827', color: '#fff' }}>Effort: medium</option>
+              <option value="high" style={{ background: '#111827', color: '#fff' }}>Effort: high</option>
+            </select>
+            <span
+              className="material-symbols-rounded"
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                right: 8,
+                fontSize: 16,
+                color: 'rgba(255,255,255,0.35)',
+                pointerEvents: 'none',
+              }}
+            >
+              unfold_more
+            </span>
+          </div>
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (

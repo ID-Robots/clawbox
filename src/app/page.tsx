@@ -11,6 +11,7 @@ import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
@@ -31,7 +32,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -45,6 +46,7 @@ const apps: AppDef[] = [
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
+  { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -99,6 +101,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     terminal: "terminal",
     files: "folder",
     clawkeep: "shield_lock",
+    system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
     store: "storefront",
@@ -337,6 +340,58 @@ function ChromeDesktopInner() {
     setDesktopApps((current) => current.filter((appId) => appId !== "clawkeep"));
     setOpenWindows((current) => current.filter((windowItem) => windowItem.appId !== "clawkeep"));
     setShowClawAiOfferNotification(false);
+  }, [featureFlags]);
+
+  const [clawkeepStale, setClawkeepStale] = useState(false);
+  const [clawkeepBusy, setClawkeepBusy] = useState(false);
+  const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
+  useEffect(() => {
+    if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
+      setClawkeepStale(false);
+      setClawkeepBusy(false);
+      setClawkeepRestoring(false);
+      return;
+    }
+    let aborted = false;
+    let inFlight = false;
+    const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+    const check = async () => {
+      // Skip ticks while a previous fetch is still outstanding so a slow
+      // device doesn't pile up overlapping requests.
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json() as {
+          paired?: boolean;
+          lastBackupAtMs?: number;
+          lastHeartbeatStatus?: string;
+          restoring?: boolean;
+        };
+        if (aborted) return;
+        const stale =
+          !data.paired
+          || !data.lastBackupAtMs
+          || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS;
+        setClawkeepStale(stale);
+        setClawkeepBusy(data.lastHeartbeatStatus === "running");
+        setClawkeepRestoring(!!data.restoring);
+      } catch {
+        // Leave last-known state alone on transient failures so the shield
+        // doesn't flicker on a brief network blip.
+      } finally {
+        inFlight = false;
+      }
+    };
+    void check();
+    // Poll often enough for the shelf shield to start/stop pulsing within
+    // a few seconds of a backup beginning or finishing.
+    const id = window.setInterval(() => { void check(); }, 5_000);
+    return () => {
+      aborted = true;
+      window.clearInterval(id);
+    };
   }, [featureFlags]);
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
@@ -1298,6 +1353,8 @@ function ChromeDesktopInner() {
         return <FilesApp />;
       case "clawkeep":
         return <ClawKeepApp />;
+      case "system_update":
+        return <SystemUpdateApp />;
       case "browser":
         return <BrowserApp onOpenApp={openApp} />;
       case "vnc":
@@ -2011,6 +2068,7 @@ function ChromeDesktopInner() {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
         onClawKeepShieldClick={featureFlags[FEATURE_FLAG_KEYS.clawkeep] ? openClawKeepOrAiProvider : undefined}
+        clawkeepStatus={{ stale: clawkeepStale, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

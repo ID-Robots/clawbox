@@ -172,9 +172,8 @@ describe("AIModelsStep variants", () => {
     expect(getByText("ClawBox AI")).toBeInTheDocument();
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
-    expect(getByText("Recommended ClawBox AI service with simple token setup and owner benefits")).toBeInTheDocument();
-    expect(getByText("ClawBox AI is the recommended cloud experience for owners, with quick token setup and a smoother day-one path.")).toBeInTheDocument();
-    expect(getByText("ClawBox owners also get extended warranty benefits when using ClawBox services.")).toBeInTheDocument();
+    expect(getByText("All-in cloud AI for ClawBox — backups, remote desktop, full support")).toBeInTheDocument();
+    expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection
     // is handled exclusively through the portal handoff. Verify nothing in
     // the surface tries to mount a token-paste dialog.
@@ -269,7 +268,7 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("radio", { name: /^Pro tier/ }));
+    fireEvent.click(getByRole("radio", { name: /^Max tier/ }));
     fireEvent.click(getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {

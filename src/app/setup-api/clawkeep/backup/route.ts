@@ -6,7 +6,8 @@ export const dynamic = "force-dynamic";
 
 // POST /setup-api/clawkeep/backup
 // Body: {} or { idle: true } — `idle` sends a heartbeat-only ping; default
-// runs a full restic backup synchronously and returns the daemon's exit code.
+// runs a full backup synchronously (openclaw backup create + S3 PUT) and
+// returns the daemon's exit code.
 //
 // On Jetson a real backup can take minutes — the request stays open until
 // the daemon finishes. The UI should call this with no client-side timeout

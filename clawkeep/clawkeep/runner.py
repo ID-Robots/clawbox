@@ -1,22 +1,25 @@
-"""One backup run: mint creds → init/backup → stats → heartbeat.
+"""One backup run: mint creds → openclaw backup → s3 upload → stats → heartbeat.
 
 Section 8 of clawkeep-plan.md drives this. The daemon module wires it up
 to the systemd timer and exits with the appropriate code so systemd can
 schedule the next run.
+
 """
 
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
+from pathlib import Path
 
-from . import api, restic, state
+from . import api, openclaw, s3, state
 from .api import ApiError
 from .config import Config
 
 log = logging.getLogger(__name__)
 
-# Exit codes — used by daemon.py and surfaceable to systemd.
+# Exit codes — surfaceable to systemd via daemon.py.
 EXIT_OK = 0
 EXIT_BACKUP_FAILED = 1
 EXIT_QUOTA_FULL = 2
@@ -24,8 +27,17 @@ EXIT_AUTH_REVOKED = 3
 EXIT_TIER = 4
 EXIT_SERVER = 5
 EXIT_NETWORK = 6
-EXIT_RESTIC = 7
+EXIT_OPENCLAW = 7   # `openclaw backup create` failed
+EXIT_UPLOAD = 8     # S3 PUT failed
 EXIT_UNKNOWN = 99
+
+# Backup phase identifiers — kept in lockstep with `STEP_LABELS` in
+# src/components/ClawKeepApp.tsx. The strings are persisted to state.json
+# and read by the UI, so renaming requires a coordinated TS-side change.
+STEP_STARTING = "starting"
+STEP_ARCHIVING = "archiving"
+STEP_UPLOADING = "uploading"
+STEP_CHECKING_STATS = "checking-stats"
 
 
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
@@ -72,21 +84,46 @@ def _stamp_heartbeat(
     persists the same shape — a missing save here would let the idle timer
     re-fire on top of an in-flight backup."""
     st.last_heartbeat_at_ms = now_override if now_override is not None else api.now_ms()
-    st.last_heartbeat_status = status if ok else "error"
+    final_status = status if ok else "error"
+    st.last_heartbeat_status = final_status
+    # Clear the in-flight step on any terminal status so a reopened window
+    # doesn't keep showing "Uploading…" after the run failed/finished.
+    if final_status != "running":
+        st.last_step = ""
+        st.last_step_at_ms = 0
 
 
-def run_once(cfg: Config, token: str, repo_password: str) -> int:
+def _stamp_step(st: state.State, step: str) -> None:
+    """Persist the current backup phase so the UI can show "Uploading…"
+    vs "Building archive…" — and so reopening the window mid-run shows
+    the right step instead of restarting at zero. Empty string clears it."""
+    st.last_step = step
+    st.last_step_at_ms = api.now_ms() if step else 0
+    state.save(st)
+
+
+def _resolve_staging(cfg: Config) -> tuple[Path, bool]:
+    """Pick the directory the openclaw archive lands in.
+
+    Returns (path, ephemeral). When ephemeral is True the runner removes
+    the directory after upload; when False the user-configured directory
+    is preserved (only the archive itself is deleted).
+    """
+    if cfg.openclaw.output_dir:
+        return Path(cfg.openclaw.output_dir), False
+    return Path(tempfile.mkdtemp(prefix="clawkeep-")), True
+
+
+def run_once(cfg: Config, token: str) -> int:
     """One full backup cycle. Returns a process exit code."""
     st = state.load()
 
-    # 1. Mint creds (with retry on network/server failures).
     try:
         creds = _retry_credentials(cfg.server, token)
     except ApiError as e:
         if e.kind == "auth":
             log.error("auth failed: %s — token may be revoked, run 'clawkeep pair' again", e)
-            # Don't heartbeat — we have no valid auth to send it with.
-            # Also don't stamp local state (no portal exchange happened).
+            # No portal exchange happened — don't heartbeat or stamp state.
             return EXIT_AUTH_REVOKED
         msg_prefix = {"quota_full": "quota full", "tier": "tier", "server": "server"}.get(e.kind)
         prefixed = f"{msg_prefix}: {e}" if msg_prefix else str(e)
@@ -102,93 +139,100 @@ def run_once(cfg: Config, token: str, repo_password: str) -> int:
             return EXIT_SERVER
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
-    # 2. Tell server we're starting.
     running_ok = _heartbeat_safe(cfg.server, token, status="running")
     _stamp_heartbeat(st, running_ok, "running")
+    _stamp_step(st, STEP_STARTING)
 
-    repo = restic.repo_url(creds)
-    env = restic.restic_env(creds, repo_password)
-
-    # 3. Init repo (idempotent).
+    staging, ephemeral = _resolve_staging(cfg)
+    archive: openclaw.Archive | None = None
     try:
-        restic.init(cfg.restic.binary, repo, env)
-    except restic.ResticError as e:
-        log.error("restic init failed: %s", e)
-        ok = _heartbeat_safe(cfg.server, token, status="error", error=f"restic init: {e}")
-        _stamp_heartbeat(st, ok, "error")
-        state.save(st)
-        return EXIT_RESTIC
+        _stamp_step(st, STEP_ARCHIVING)
+        try:
+            archive = openclaw.create_archive(
+                cfg.openclaw.binary,
+                output_dir=staging,
+                include_workspace=cfg.openclaw.include_workspace,
+                only_config=cfg.openclaw.only_config,
+                verify=cfg.openclaw.verify,
+            )
+        except openclaw.OpenclawError as e:
+            log.error("openclaw backup create failed: %s", e)
+            ok = _heartbeat_safe(
+                cfg.server, token, status="error", error=f"openclaw: {e}"[:500],
+            )
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_OPENCLAW
 
-    # 4. Backup. _run already converts plumbing failures (TimeoutExpired,
-    # ENOENT) into a failed BackupResult, so we don't need to catch
-    # ResticError here — but keep the OSError fallback in case the
-    # restic module ever bubbles one up directly.
-    try:
-        result = restic.backup(
-            cfg.restic.binary,
-            repo,
-            env,
-            paths=cfg.paths,
-            excludes=cfg.exclude,
-            compression=cfg.restic.compression,
-            read_concurrency=cfg.restic.read_concurrency,
+        _stamp_step(st, STEP_UPLOADING)
+        try:
+            s3.upload(creds, archive_path=archive.path, object_name=archive.path.name)
+        except s3.S3Error as e:
+            log.error("s3 upload failed: %s", e)
+            ok = _heartbeat_safe(cfg.server, token, status="error", error=f"upload: {e}"[:500])
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_UPLOAD
+
+        # Best-effort stats — leave the per-run fields *unsent* on failure
+        # so a transient ListBucket doesn't clobber the portal's last-known
+        # cloudBytes/snapshotCount.
+        _stamp_step(st, STEP_CHECKING_STATS)
+        cloud: s3.CloudStats | None
+        try:
+            cloud = s3.stats(creds)
+        except s3.S3Error as e:
+            log.warning("s3 stats failed (continuing): %s", e)
+            cloud = None
+
+        now = api.now_ms()
+
+        heartbeat_ok = _heartbeat_safe(
+            cfg.server,
+            token,
+            status="ok",
+            cloud_bytes=cloud.cloud_bytes if cloud is not None else None,
+            snapshot_count=cloud.snapshot_count if cloud is not None else None,
+            last_backup_at=now,
         )
-    except (restic.ResticError, OSError) as e:
-        log.error("restic backup raised: %s", e)
-        ok = _heartbeat_safe(cfg.server, token, status="error", error=f"restic backup: {e}")
-        _stamp_heartbeat(st, ok, "error")
+
+        # Backup succeeded regardless of heartbeat outcome → always record
+        # last_backup_at_ms. cloudBytes/snapshotCount only update when stats
+        # are real, so a failed list-objects can't show "0 B" in the UI.
+        _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
+        st.last_backup_at_ms = now
+        if cloud is not None:
+            st.last_cloud_bytes = cloud.cloud_bytes
+            st.last_snapshot_count = cloud.snapshot_count
         state.save(st)
-        return EXIT_RESTIC
 
-    if not result.ok:
-        log.error("restic backup failed: %s", result.last_line)
-        ok = _heartbeat_safe(cfg.server, token, status="error", error=result.last_line)
-        _stamp_heartbeat(st, ok, "error")
-        state.save(st)
-        return EXIT_BACKUP_FAILED
+        log.info(
+            "backup ok: archive=%s (%d bytes); cloud=%s/%d, snapshots=%s",
+            archive.path.name,
+            archive.size_bytes,
+            cloud.cloud_bytes if cloud is not None else "?",
+            creds.quotaBytes,
+            cloud.snapshot_count if cloud is not None else "?",
+        )
+        return EXIT_OK
 
-    # 5. Stats. If unavailable, leave the stats fields *unsent* — sending
-    #    zero would clobber the portal's last-known cloudBytes/snapshotCount.
-    stats: restic.Stats | None
-    try:
-        stats = restic.stats(cfg.restic.binary, repo, env)
-    except restic.ResticError as e:
-        log.warning("restic stats failed (continuing): %s", e)
-        stats = None
-
-    now = api.now_ms()
-
-    # 6. Heartbeat success.
-    heartbeat_ok = _heartbeat_safe(
-        cfg.server,
-        token,
-        status="ok",
-        cloud_bytes=stats.total_size if stats is not None else None,
-        snapshot_count=stats.snapshot_count if stats is not None else None,
-        last_backup_at=now,
-    )
-
-    # 7. Persist state. The backup itself succeeded locally regardless of
-    #    the heartbeat outcome, so we always record last_backup_at_ms.
-    #    cloudBytes/snapshotCount only update when stats are real — a
-    #    failed restic.stats shouldn't show "0 B" in the desktop UI.
-    _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
-    st.last_backup_at_ms = now
-    if stats is not None:
-        st.last_cloud_bytes = stats.total_size
-        st.last_snapshot_count = stats.snapshot_count
-    state.save(st)
-
-    log.info(
-        "backup ok: %d bytes added, %d files new, %d files changed; cloud=%s/%d, snapshots=%s",
-        result.bytes_added,
-        result.files_new,
-        result.files_changed,
-        stats.total_size if stats is not None else "?",
-        creds.quotaBytes,
-        stats.snapshot_count if stats is not None else "?",
-    )
-    return EXIT_OK
+    finally:
+        # Always clean up the local archive — devices have ~32GB of disk
+        # and we don't want every run to leave a 300MB tarball behind.
+        # If staging is ephemeral (default), nuke the whole tmpdir.
+        if archive is not None:
+            try:
+                archive.path.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("failed to remove staging archive %s: %s", archive.path, e)
+        if ephemeral:
+            try:
+                staging.rmdir()
+            except OSError:
+                # Non-empty (e.g. verify left a temp dir, or the user pointed
+                # output_dir at a shared location even though we treated it as
+                # ephemeral) — best-effort, leave it for the OS to reap.
+                pass
 
 
 def run_idle(cfg: Config, token: str) -> int:

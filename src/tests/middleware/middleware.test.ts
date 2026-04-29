@@ -8,6 +8,7 @@ describe("middleware", () => {
     vi.resetModules();
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
     const mod = await import("@/middleware");
     middleware = mod.middleware;
   });
@@ -15,6 +16,7 @@ describe("middleware", () => {
   afterEach(() => {
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
   });
 
   function createRequest(pathname: string): NextRequest {
@@ -130,7 +132,9 @@ describe("middleware", () => {
       expect(response.status).toBe(200);
     });
 
-    it("passes through API paths", async () => {
+    it("passes through API paths when auth is not yet active", async () => {
+      // No SESSION_SECRET = pre-setup state. /setup-api/* must work for the
+      // wizard to bootstrap.
       const request = createRequest("/setup-api/wifi/scan");
       const response = await middleware(request);
 
@@ -227,7 +231,7 @@ describe("middleware", () => {
       expect(response.status).toBe(401);
     });
 
-    it.each(["/login", "/setup", "/setup-api/test", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
+    it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
       const mod = await import("@/middleware");
@@ -235,6 +239,60 @@ describe("middleware", () => {
       const req = createRequest(p);
       const response = await mod.middleware(req);
       expect(response.status).toBe(200);
+    });
+
+    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once auth is active", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest(p);
+      const response = await mod.middleware(req);
+      // No session cookie -> page-style requests redirect to /login (307).
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("skips auth on /setup-api/* when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.middleware(req);
+      // Pass-through, not a 307 redirect — the trusted test environment
+      // exercises every /setup-api endpoint directly via fetch().
+      expect(response.status).toBe(200);
+    });
+
+    it("does NOT bypass auth when CLAWBOX_TEST_MODE is a non-'1' truthy value", async () => {
+      // Strict equality on "1" — `true`, "true", "yes" et al. must not
+      // open the API surface in production environments where the env
+      // var was set casually by something else.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "true";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("still redirects page requests to /login under CLAWBOX_TEST_MODE", async () => {
+      // The login-round-trip e2e spec depends on this — clearing cookies
+      // and visiting `/` must still bounce to /login even in test mode.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
     });
 
     it("rejects invalid session cookie", async () => {

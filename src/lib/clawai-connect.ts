@@ -10,7 +10,7 @@ import { DATA_DIR } from "@/lib/config-store";
 // often drops mid-flight — leaving the UI stuck on the device-code
 // page even though the server already finished.
 export type ClawAiConnectStatus = "pending" | "configuring" | "complete" | "error";
-export type ClawAiTier = "flash" | "pro";
+export type ClawAiTier = "free" | "flash" | "pro";
 
 // Device-authorization session: a code the user types on the portal,
 // plus the device_id we use to poll the upstream service for token

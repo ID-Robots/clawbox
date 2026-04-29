@@ -4,12 +4,12 @@ On-device backup client for [ClawBox hardware](https://openclawhardware.dev/) an
 Linux box (Pi, Jetson, x86 server, VPS) that wants to back up to Cloudflare R2 through
 the OpenClaw portal.
 
-This is a thin Python wrapper around `restic` that:
+This is a thin Python wrapper around the [`openclaw backup`](https://docs.openclaw.ai/cli/backup) CLI that:
 
 1. Pairs the device with a portal account (one-time OAuth2 flow).
 2. On a daily systemd timer, mints short-lived R2 credentials from the portal.
-3. Runs `restic backup` to the user's R2 prefix.
-4. Reports status back to the portal.
+3. Runs `openclaw backup create` to produce a timestamped `.tar.gz` of OpenClaw state/config/credentials/workspaces, then PUTs it to the user's R2 prefix.
+4. Reports status (size + snapshot count from `list-objects-v2`) back to the portal.
 
 Server-side is already shipped on `clawbox-website`. This client implements
 the device half of the contract documented in `clawkeep-plan.md`.
@@ -17,8 +17,10 @@ the device half of the contract documented in `clawkeep-plan.md`.
 ## Quickstart
 
 ```bash
-# Build deps:
-sudo apt install -y python3 python3-pip restic
+# Build deps. `openclaw` is shipped with OpenClaw OS; install it from npm
+# (or the OpenClaw release tarball) on a non-clawbox host:
+sudo apt install -y python3 python3-pip
+npm install -g @openclaw/cli   # only needed off-device
 
 # Install:
 pip install --user .          # or: sudo pip install .
@@ -63,19 +65,21 @@ SSH to the device's listener.
 |---|---|---|---|
 | `/etc/clawkeep/config.toml` | 0644 | root | User-editable config |
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
-| `/var/lib/clawkeep/repo-pass` | 0600 | clawkeep | restic repo password (32 bytes hex) |
 | `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes |
 
-> **Critical:** `/var/lib/clawkeep/repo-pass` is the only secret that can decrypt the
-> backup. Lose it and the backup is permanently unrecoverable. v1 prints it during
-> `clawkeep pair` — copy it somewhere safe (password manager, paper, etc.). v1.1
-> will mirror an encrypted copy to the portal.
+> **Note on encryption:** the `openclaw backup` archive is plaintext —
+> Cloudflare R2 encrypts at rest, but anyone with read access to the bucket
+> sees the credentials/sessions inside the tarball. The portal-issued STS
+> creds are scoped to the user's prefix only, but if you need
+> defence-against-bucket-compromise, layer GPG/age over the archive before
+> upload. A future v1.1 will fold this in.
 
 ## Restoring a backup
 
-v1 doesn't ship a restore CLI. Until v2 lands, mint creds and pipe them
-straight into env vars — never write the response to a world-readable
-path like `/tmp/creds.json`:
+v1 doesn't ship a restore CLI. Until v2 lands, mint creds, list the user's
+prefix, and pull the most recent `.tar.gz` with `aws s3 cp` (or any
+S3-compatible client). Never write the credentials response to a
+world-readable path like `/tmp/creds.json`:
 
 ```bash
 TOKEN=$(sudo cat /var/lib/clawkeep/token)
@@ -89,11 +93,24 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 export AWS_ACCESS_KEY_ID=$(jq -r .accessKeyId "$CREDS_FILE")
 export AWS_SECRET_ACCESS_KEY=$(jq -r .secretAccessKey "$CREDS_FILE")
 export AWS_SESSION_TOKEN=$(jq -r .sessionToken "$CREDS_FILE")
-export RESTIC_PASSWORD=$(sudo cat /var/lib/clawkeep/repo-pass)
+export AWS_DEFAULT_REGION=auto
 
-REPO="s3:$(jq -r .endpoint "$CREDS_FILE")/$(jq -r .bucket "$CREDS_FILE")/$(jq -r .prefix "$CREDS_FILE")"
-restic -r "$REPO" snapshots
-restic -r "$REPO" restore <snapshot-id> --target /tmp/restore
+ENDPOINT=$(jq -r .endpoint "$CREDS_FILE")
+BUCKET=$(jq -r .bucket "$CREDS_FILE")
+PREFIX=$(jq -r .prefix "$CREDS_FILE")
+
+# List all snapshots under your prefix:
+aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/$PREFIX"
+
+# Pull the most recent one:
+LATEST=$(aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/$PREFIX" \
+  | awk '{print $4}' | sort | tail -1)
+aws --endpoint-url "$ENDPOINT" s3 cp \
+  "s3://$BUCKET/$PREFIX$LATEST" /tmp/restore.tar.gz
+
+# Then validate the manifest and unpack:
+openclaw backup verify /tmp/restore.tar.gz
+tar -xzf /tmp/restore.tar.gz -C /tmp/restore
 # trap shreds the temp creds file when the shell exits.
 ```
 

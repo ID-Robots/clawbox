@@ -550,3 +550,65 @@ input[type="range"].appearance-none::-moz-range-track {
   height: 6px;
   background: rgba(255, 255, 255, 0.08);
 }
+
+/* ClawKeep "Protected" hero shield. The animation sells the state — green
+   for safe, red for at-risk — through a gentle breathe + concentric rings
+   radiating outward like an antivirus dashboard. */
+@keyframes clawkeep-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+@keyframes clawkeep-pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.55; }
+  80% { opacity: 0; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+.clawkeep-shield-breathe {
+  animation: clawkeep-breathe 3.2s ease-in-out infinite;
+}
+.clawkeep-shield-ring {
+  animation: clawkeep-pulse-ring 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.clawkeep-shield-ring-delayed {
+  animation: clawkeep-pulse-ring 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  animation-delay: 1.4s;
+}
+
+/* Shelf shield — small green icon in the bottom-right tray that pulses
+   while a backup is running, so the user can dismiss the ClawKeep window
+   and still see at a glance that the device is working. */
+@keyframes clawkeep-shelf-pulse {
+  0% { transform: scale(0.6); opacity: 0.7; }
+  80% { opacity: 0; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+/* Single colour-parametrised keyframe driven by --glow-color so adding a
+   new variant only takes a class with a different custom-property value. */
+@keyframes clawkeep-shelf-glow {
+  0%, 100% { filter: drop-shadow(0 0 2px var(--glow-color, rgba(16, 185, 129, 0.55))); }
+  50%      { filter: drop-shadow(0 0 7px var(--glow-color, rgba(16, 185, 129, 0.95))); }
+}
+.clawkeep-shelf-pulse {
+  animation: clawkeep-shelf-pulse 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.clawkeep-shelf-pulse-delayed {
+  animation: clawkeep-shelf-pulse 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  animation-delay: 0.8s;
+}
+.clawkeep-shelf-glow,
+.clawkeep-shelf-glow-red,
+.clawkeep-shelf-glow-orange {
+  /* will-change tells the Jetson compositor to promote this glyph to its
+     own layer so the per-frame drop-shadow doesn't repaint the whole
+     shelf. */
+  will-change: filter;
+  animation: clawkeep-shelf-glow 1.6s ease-in-out infinite;
+}
+.clawkeep-shelf-glow-red {
+  --glow-color: rgba(239, 68, 68, 0.85);
+  animation-duration: 2.2s;
+}
+.clawkeep-shelf-glow-orange {
+  --glow-color: rgba(245, 158, 11, 0.95);
+}

@@ -21,6 +21,7 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
+  clawkeepStatus?: { stale: boolean; busy: boolean; restoring: boolean };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -39,6 +40,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
+  clawkeepStatus = { stale: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -102,24 +104,72 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && a.id !== "settings")
     : apps.filter(a => a.isPinned === false);
-  const shieldTitle = clawAiAuthenticated
-    ? t("shelf.openClawKeep")
-    : t("shelf.connectClawBoxAI");
-  const shieldClasses = clawAiAuthenticated
-    ? "text-emerald-300"
-    : "text-red-700";
+  // Priority: restoring (orange) > backup running (green) > stale/red > ok.
+  // Restore is the rarer, longer, more user-blocking operation, so it wins
+  // even if a backup heartbeat happens to be in flight at the same time.
+  const stale = clawAiAuthenticated && clawkeepStatus.stale;
+  const baseTitle = !clawAiAuthenticated
+    ? t("shelf.connectClawBoxAI")
+    : stale
+    ? t("shelf.clawkeepStale")
+    : t("shelf.openClawKeep");
+  const mode: "restoring" | "busy" | "alert" | "ok" =
+    clawkeepStatus.restoring ? "restoring"
+    : clawkeepStatus.busy ? "busy"
+    : !clawAiAuthenticated || clawkeepStatus.stale ? "alert"
+    : "ok";
+  // Tailwind JIT can only see *literal* class strings, so each variant
+  // ships its full pulse/icon class names rather than composing them.
+  const SHIELD_STYLE = {
+    restoring: {
+      icon: "text-amber-300 clawkeep-shelf-glow-orange",
+      pulse: "bg-amber-400/25",
+      pulseDelayed: "bg-amber-400/20",
+      tooltip: t("shelf.clawkeepRestoring"),
+    },
+    busy: {
+      icon: "text-emerald-300 clawkeep-shelf-glow",
+      pulse: "bg-emerald-400/20",
+      pulseDelayed: "bg-emerald-400/15",
+      tooltip: t("shelf.clawkeepBusy"),
+    },
+    alert: {
+      icon: "text-red-500 clawkeep-shelf-glow-red",
+      pulse: "bg-red-500/25",
+      pulseDelayed: "bg-red-500/20",
+      tooltip: baseTitle,
+    },
+    ok: {
+      icon: "text-emerald-300",
+      pulse: "",
+      pulseDelayed: "",
+      tooltip: baseTitle,
+    },
+  } as const;
+  const style = SHIELD_STYLE[mode];
   const shieldInteractive = typeof onClawKeepShieldClick === "function";
   const renderShieldButton = () => {
     if (!shieldInteractive) return null;
     return (
       <button
         onClick={onClawKeepShieldClick}
-        className="flex items-center justify-center w-10 h-10 rounded-full transition-colors hover:bg-white/10 active:bg-white/15 cursor-pointer"
-        title={shieldTitle}
-        aria-label={shieldTitle}
+        className="relative flex items-center justify-center w-10 h-10 rounded-full transition-colors hover:bg-white/10 active:bg-white/15 cursor-pointer"
+        title={style.tooltip}
+        aria-label={style.tooltip}
         data-testid="shelf-clawkeep-shield-button"
       >
-        <span className={`material-symbols-rounded ${shieldClasses}`} style={{ fontSize: 18 }}>shield</span>
+        {style.pulse && (
+          <>
+            <span className={`absolute inset-1 rounded-full ${style.pulse} clawkeep-shelf-pulse pointer-events-none`} aria-hidden="true" />
+            <span className={`absolute inset-1 rounded-full ${style.pulseDelayed} clawkeep-shelf-pulse-delayed pointer-events-none`} aria-hidden="true" />
+          </>
+        )}
+        <span
+          className={`material-symbols-rounded relative ${style.icon}`}
+          style={{ fontSize: 18 }}
+        >
+          shield
+        </span>
       </button>
     );
   };
