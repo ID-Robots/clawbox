@@ -44,7 +44,11 @@ export async function POST(request: NextRequest) {
           timeout: 30_000,
         });
       } catch (e) {
-        restartErrors.push(`${svc}: ${e instanceof Error ? e.message : String(e)}`);
+        const detail = e instanceof Error ? e.message : String(e);
+        // Service-restart failures are visible in journalctl this way even
+        // if the user dismisses the result card before reading restartErrors.
+        console.warn(`[clawkeep/restore] systemctl restart ${svc} failed: ${detail}`);
+        restartErrors.push(`${svc}: ${detail}`);
       }
     }
 

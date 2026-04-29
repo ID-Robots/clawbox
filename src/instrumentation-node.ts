@@ -1,6 +1,8 @@
 /**
  * Node.js-only instrumentation logic.
- * Auto-starts the WebSocket terminal server (node-pty) as a child process.
+ * Auto-starts the WebSocket terminal server (node-pty) as a child process,
+ * and re-establishes the Cloudflare Quick Tunnel if remote access was on
+ * before the last shutdown.
  * Loaded via require() from instrumentation.ts to avoid Edge Runtime warnings.
  */
 import { spawn, type ChildProcess } from 'child_process'

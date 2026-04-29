@@ -30,6 +30,12 @@ export const CLAWKEEP_CONFIG_PATH =
 
 const TOKEN_PATH = path.join(CLAWKEEP_DATA_DIR, "token");
 const STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "state.json");
+// Marker that a restore is in flight. The restore handler creates it
+// before invoking the Python CLI and removes it when done so the shelf
+// shield can pulse orange while it runs. Stamped with the start time so
+// crashes don't leave the shield pulsing forever.
+const RESTORING_FLAG_PATH = path.join(CLAWKEEP_DATA_DIR, "restoring.flag");
+const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "schedule.json");
 
 export const DEFAULT_PORTAL_SERVER =
   process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://openclawhardware.dev";
@@ -57,13 +63,37 @@ output_dir = ""
 idle_interval_hours = 24
 `;
 
+// Daemon heartbeat status values, mirrored from clawkeep/clawkeep/state.py.
+// Typed so callers reading `lastHeartbeatStatus` get an enum-like surface
+// without us having to ship a runtime constant into the client bundle
+// (clawkeep.ts uses node:fs and isn't safe to import from a client file).
+export type HeartbeatStatus = "" | "running" | "ok" | "error" | "idle";
+
+export type ScheduleFrequency = "daily" | "weekly";
+
+export interface ClawKeepSchedule {
+  enabled: boolean;
+  frequency: ScheduleFrequency;
+  /** "HH:MM" 24-hour, device-local time. */
+  timeOfDay: string;
+  /** 0=Sunday … 6=Saturday. Only used when frequency === "weekly". */
+  weekday: number;
+}
+
+export const DEFAULT_SCHEDULE: ClawKeepSchedule = {
+  enabled: false,
+  frequency: "daily",
+  timeOfDay: "02:00",
+  weekday: 0,
+};
+
 export interface ClawKeepStatus {
   paired: boolean;
   configured: boolean;
   server: string;
   lastBackupAtMs: number;
   lastHeartbeatAtMs: number;
-  lastHeartbeatStatus: string;
+  lastHeartbeatStatus: HeartbeatStatus;
   /** Sub-phase during an in-flight backup; empty when nothing is running. */
   currentStep: string;
   /** When the daemon entered its current step (unix ms). */
@@ -72,6 +102,12 @@ export interface ClawKeepStatus {
   snapshotCount: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
+  /** True while a restore is mid-flight (download → verify → swap). */
+  restoring: boolean;
+  /** Schedule for unattended backups. `enabled=false` disarms the in-process scheduler. */
+  schedule: ClawKeepSchedule;
+  /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
+  nextRunAtMs: number;
 }
 
 export class ClawKeepError extends Error {
@@ -90,6 +126,106 @@ export class ClawKeepError extends Error {
 
 async function ensureDataDir(): Promise<void> {
   await fs.mkdir(CLAWKEEP_DATA_DIR, { recursive: true, mode: 0o700 });
+}
+
+// Stale-flag window: if the restoring marker is older than the restore
+// timeout it almost certainly means the Next.js process crashed mid-run
+// and never cleaned up. Treat as not-restoring so the shield stops glowing.
+const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+
+function sanitiseSchedule(input: unknown): ClawKeepSchedule {
+  // Coerce-and-default: tolerate a missing/partial schedule file rather than
+  // crash the daemon. Only the four well-known fields are honoured; anything
+  // else is silently dropped so future schema changes can't poison the file.
+  const r = (input ?? {}) as Record<string, unknown>;
+  const frequency: ScheduleFrequency =
+    r.frequency === "weekly" ? "weekly" : "daily";
+  const time = typeof r.timeOfDay === "string" && /^\d{2}:\d{2}$/.test(r.timeOfDay)
+    ? r.timeOfDay
+    : DEFAULT_SCHEDULE.timeOfDay;
+  const weekdayRaw = Number(r.weekday);
+  const weekday = Number.isInteger(weekdayRaw) && weekdayRaw >= 0 && weekdayRaw <= 6
+    ? weekdayRaw
+    : DEFAULT_SCHEDULE.weekday;
+  return {
+    enabled: r.enabled === true,
+    frequency,
+    timeOfDay: time,
+    weekday,
+  };
+}
+
+export async function readSchedule(): Promise<ClawKeepSchedule> {
+  try {
+    const raw = await fs.readFile(SCHEDULE_PATH, "utf8");
+    return sanitiseSchedule(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_SCHEDULE };
+  }
+}
+
+export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
+  await ensureDataDir();
+  const sanitised = sanitiseSchedule(next);
+  const tmp = `${SCHEDULE_PATH}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(sanitised, null, 2), { mode: 0o600 });
+  await fs.rename(tmp, SCHEDULE_PATH);
+  return sanitised;
+}
+
+/** Compute the next wall-clock ms a backup should fire, given a schedule
+ * and a "now" reference. Pure function — exported for unit tests. */
+export function computeNextRunMs(schedule: ClawKeepSchedule, now: Date): number {
+  if (!schedule.enabled) return 0;
+  const [h, m] = schedule.timeOfDay.split(":").map((s) => Number(s));
+  if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return 0;
+  }
+  const candidate = new Date(now);
+  candidate.setHours(h, m, 0, 0);
+  if (schedule.frequency === "daily") {
+    if (candidate.getTime() <= now.getTime()) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return candidate.getTime();
+  }
+  // Weekly — advance until the candidate is in the future AND lands on the target weekday.
+  if (!Number.isInteger(schedule.weekday)) return 0;
+  const target = ((schedule.weekday % 7) + 7) % 7;
+  // At most 8 day-advances are needed (today + 7 days), so a guard of 9
+  // hops trips only on a clock/DST anomaly we'd rather skip than spin on.
+  for (let hops = 0; hops < 9; hops++) {
+    if (candidate.getDay() === target && candidate.getTime() > now.getTime()) {
+      return candidate.getTime();
+    }
+    candidate.setDate(candidate.getDate() + 1);
+  }
+  return 0;
+}
+
+async function setRestoring(active: boolean): Promise<void> {
+  await ensureDataDir();
+  if (active) {
+    await fs.writeFile(RESTORING_FLAG_PATH, "", { mode: 0o600 });
+  } else {
+    await fs.rm(RESTORING_FLAG_PATH, { force: true });
+  }
+}
+
+async function isRestoring(): Promise<boolean> {
+  let stat;
+  try {
+    stat = await fs.stat(RESTORING_FLAG_PATH);
+  } catch {
+    return false;
+  }
+  // Use mtime as the age signal — saves an open+read on the hot path
+  // (5 s polls) where the file usually doesn't exist anyway.
+  if (Date.now() - stat.mtimeMs > RESTORING_FLAG_MAX_AGE_MS) {
+    await fs.rm(RESTORING_FLAG_PATH, { force: true });
+    return false;
+  }
+  return true;
 }
 
 async function writeSecret(p: string, contents: string): Promise<void> {
@@ -265,12 +401,14 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
     getOpenclawInstalled(),
     getDaemonBin(),
+    isRestoring(),
+    readSchedule(),
   ]);
 
   const server = readServer(configToml);
@@ -283,13 +421,16 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     server,
     lastBackupAtMs: stateRaw.last_backup_at_ms ?? 0,
     lastHeartbeatAtMs: stateRaw.last_heartbeat_at_ms ?? 0,
-    lastHeartbeatStatus: stateRaw.last_heartbeat_status ?? "",
+    lastHeartbeatStatus: (stateRaw.last_heartbeat_status ?? "") as HeartbeatStatus,
     cloudBytes: stateRaw.last_cloud_bytes ?? 0,
     snapshotCount: stateRaw.last_snapshot_count ?? 0,
     currentStep: stateRaw.last_step ?? "",
     currentStepAtMs: stateRaw.last_step_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
+    restoring,
+    schedule,
+    nextRunAtMs: computeNextRunMs(schedule, new Date()),
   };
 }
 
@@ -374,8 +515,12 @@ function spawnCliJson<T>(
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
     }, timeoutMs);
 
-    child.stdout.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
-    child.stderr.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+    child.stdout.on("data", (b: Buffer) => {
+      stdout = appendCapped(stdout, b.toString("utf8"));
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      stderr = appendCapped(stderr, b.toString("utf8"));
+    });
     child.on("error", (err) => {
       clearTimeout(killTimer);
       reject(new Error(`spawn ${clawkeepBin} failed: ${err.message}`));
@@ -418,16 +563,21 @@ export async function runRestore(name: string): Promise<RestoreOk> {
     throw new ClawKeepError("invalid snapshot name", 400);
   }
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
-  const resp = await spawnCliJson<RestoreCliResponse>(
-    bin,
-    "restore",
-    [name],
-    { timeoutMs: RESTORE_TIMEOUT_MS },
-  );
-  if (!resp.ok) {
-    throw new ClawKeepError(resp.error, 502);
+  await setRestoring(true);
+  try {
+    const resp = await spawnCliJson<RestoreCliResponse>(
+      bin,
+      "restore",
+      [name],
+      { timeoutMs: RESTORE_TIMEOUT_MS },
+    );
+    if (!resp.ok) {
+      throw new ClawKeepError(resp.error, 502);
+    }
+    return resp;
+  } finally {
+    await setRestoring(false).catch(() => { /* best-effort cleanup */ });
   }
-  return resp;
 }
 
 export async function runBackup(opts: { idle?: boolean } = {}): Promise<BackupResult> {

@@ -138,7 +138,7 @@ def test_step_cleared_on_error(isolate_state: Path, tmp_path: Path) -> None:
         patch("clawkeep.runner.api.heartbeat"),
         patch(
             "clawkeep.runner.openclaw.create_archive",
-            side_effect=__import__("clawkeep.openclaw", fromlist=["OpenclawError"]).OpenclawError("boom"),
+            side_effect=OpenclawError("boom"),
         ),
     ):
         rc = runner.run_once(cfg, "claw_x")

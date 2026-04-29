@@ -91,31 +91,33 @@ def _read_manifest(archive_path: Path, archive_root: str) -> dict:
         raise RestoreError(f"could not read manifest from {archive_path}: {e}") from e
 
 
-def _safe_member(member: tarfile.TarInfo, prefix: str) -> bool:
-    """Reject path-traversal members. tarfile.data_filter (Python 3.12+)
-    handles this, but we still target 3.10. The archive layout is fixed
-    under `<root>/payload/posix/...` so anything outside that is suspicious.
-
-    Returns True if the member is in-prefix and safe to extract.
+def _member_name_unsafe(member: tarfile.TarInfo, prefix: str) -> bool:
+    """True if the member's *name* tries to escape `prefix` (absolute path or
+    `..` segments). Path-traversal in member names is always fatal — there's
+    no benign reason for an openclaw archive to ship one.
     """
     name = member.name
     if not name.startswith(prefix):
-        return False
-    # Block absolute paths and `..` segments anywhere inside the relative tail.
+        return True
     tail = name[len(prefix):]
     if tail.startswith("/"):
         tail = tail[1:]
     parts = tail.split("/")
-    if any(p in ("..", "") for p in parts if p):
+    return any(p == ".." for p in parts if p)
+
+
+def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
+    """True for symlinks/hardlinks whose target is absolute. Relative `..`
+    targets are allowed: openclaw plugin-runtime-deps legitimately ship
+    symlinks with `..` in their target (e.g. `dist/.buildstamp`). The
+    archive itself is cryptographically verified upstream by
+    `openclaw backup verify`, so trusted symlinks are OK to extract; we
+    still reject absolute targets as a defence-in-depth catch.
+    """
+    if not (member.islnk() or member.issym()):
         return False
-    if member.islnk() or member.issym():
-        # Symlinks/hardlinks aren't part of the openclaw archive layout we
-        # know — refuse to extract them rather than risk traversal via
-        # symlink-into-arbitrary-paths.
-        link = member.linkname or ""
-        if link.startswith("/") or ".." in link.split("/"):
-            return False
-    return True
+    link = member.linkname or ""
+    return link.startswith("/")
 
 
 def _extract_asset_from_open(
@@ -147,10 +149,19 @@ def _extract_asset_from_open(
         # don't need to hold simultaneously.
         for member in tf:
             if member.name == archive_subpath or member.name.startswith(prefix):
-                if not _safe_member(member, archive_subpath):
+                if _member_name_unsafe(member, archive_subpath):
                     raise RestoreError(
                         f"archive contains an unsafe member: {member.name!r}"
                     )
+                if _member_link_unsafe(member):
+                    # Absolute symlink target — skip rather than abort the
+                    # restore; the file isn't critical (openclaw rebuilds
+                    # plugin metadata on next launch) and the alternative
+                    # is failing the entire restore over a single bad link.
+                    log.warning(
+                        "skipping unsafe link %r → %r", member.name, member.linkname,
+                    )
+                    continue
                 relative = member.name[len(prefix):] if member.name != archive_subpath else ""
                 if not relative:
                     continue
@@ -225,6 +236,30 @@ def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
     return backup
 
 
+def _rollback_swaps(done: list[RestoredAsset], *, ts: int) -> list[str]:
+    """Reverse every successful asset swap. Used when a *later* asset's
+    extract or swap fails — the user shouldn't be left with a mixed
+    half-old/half-new state. Each entry's `target_path` currently holds
+    the new content; `backup_path` holds the old. We rename the new aside
+    (so the user can still recover it manually) and move the old back.
+
+    Returns a list of human-readable error strings — one per asset whose
+    rollback itself failed. The caller folds these into the user-facing
+    RestoreError so on-call can see the full picture.
+    """
+    errors: list[str] = []
+    for asset in done:
+        try:
+            new_aside = asset.target_path.with_name(
+                f"{asset.target_path.name}.failed-rollback-{ts}",
+            )
+            asset.target_path.rename(new_aside)
+            asset.backup_path.rename(asset.target_path)
+        except OSError as e:
+            errors.append(f"{asset.kind}: {e}")
+    return errors
+
+
 def restore_snapshot(cfg: Config, token: str, snapshot_name: str) -> RestoreResult:
     """Top-level orchestrator. Raises RestoreError on any failure; the live
     state on disk is rolled back to its pre-restore form (atomic rename) if
@@ -251,10 +286,10 @@ def restore_snapshot(cfg: Config, token: str, snapshot_name: str) -> RestoreResu
         ts = int(time.time())
         results: list[RestoredAsset] = []
 
-        # Read manifest + extract assets from a single open of the tarball.
-        # gzip framing makes seek-back expensive, so we re-open per asset
-        # below for actual extraction; the manifest is small and lives at
-        # the top of the archive, so reading it first is cheap.
+        # Read the manifest with one tarball open. We re-open per asset
+        # below because gzip framing makes seek-back expensive — streaming
+        # forward from a fresh handle is cheaper than rewinding a shared
+        # one across multi-hundred-MB archives.
         try:
             with tarfile.open(archive_path, "r:gz") as tf:
                 manifest = _read_manifest_from_open(tf, snapshot_name[: -len(".tar.gz")])
@@ -282,13 +317,23 @@ def restore_snapshot(cfg: Config, token: str, snapshot_name: str) -> RestoreResu
             target = Path(source_path)
             asset_staging = staging_dir / f"asset-{kind}-{ts}"
             log.info("extracting asset %s → %s", kind, asset_staging)
-            bytes_restored = _extract_asset(
-                archive_path,
-                archive_subpath=archive_subpath,
-                staging_root=asset_staging,
-            )
-
-            backup = _swap_into_place(asset_staging, target, ts=ts)
+            try:
+                bytes_restored = _extract_asset(
+                    archive_path,
+                    archive_subpath=archive_subpath,
+                    staging_root=asset_staging,
+                )
+                backup = _swap_into_place(asset_staging, target, ts=ts)
+            except Exception as primary:
+                # An asset failure after earlier assets already swapped would
+                # leave the device with a mixed restore (some new content,
+                # some old). Reverse every successful swap so the user lands
+                # back where they started.
+                rollback_errs = _rollback_swaps(results, ts=ts)
+                msg = f"asset {kind!r} failed: {primary}"
+                if rollback_errs:
+                    msg += f" (cross-asset rollback errors: {'; '.join(rollback_errs)})"
+                raise RestoreError(msg) from primary
 
             results.append(RestoredAsset(
                 kind=kind,

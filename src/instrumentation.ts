@@ -24,4 +24,15 @@ export async function register() {
     .catch((err: unknown) => {
       console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
     })
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const clawkeepScheduler = require('./lib/clawkeep-scheduler')
+    void clawkeepScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] ClawKeep scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    // The scheduler is opt-in — if its module fails to load (missing deps,
+    // syntax error in dev), the rest of the app must still boot.
+    console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
+  }
 }

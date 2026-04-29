@@ -6,10 +6,10 @@
  * across /pair/*, /backup, /config, /unpair).
  *
  * Skipped pending a rewrite against the new pair → backup flow. The
- * device-side code is already covered by src/tests/components/clawkeep-app.test.tsx
- * and the unit suites under src/tests/unit/clawkeep* and
- * src/tests/routes/ai-models/clawai-connect.test.ts (which the new
- * daemon mirrors).
+ * device-side code is already covered by the unit suites under
+ * src/tests/unit/clawkeep* (e.g. clawkeep-schedule.test.ts) and the
+ * pair-flow tests in src/tests/routes/ai-models/clawai-connect.test.ts
+ * (which the new daemon mirrors).
  */
 import { test, expect } from "@playwright/test";
 import { dockerExec } from "./helpers/container";

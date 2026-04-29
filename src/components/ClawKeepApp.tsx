@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 
+type ScheduleFrequency = "daily" | "weekly";
+interface ClawKeepSchedule {
+  enabled: boolean;
+  frequency: ScheduleFrequency;
+  timeOfDay: string;
+  weekday: number;
+}
 interface ClawKeepStatus {
   paired: boolean;
   configured: boolean;
@@ -16,6 +23,8 @@ interface ClawKeepStatus {
   snapshotCount: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
+  schedule: ClawKeepSchedule;
+  nextRunAtMs: number;
 }
 
 // Map the daemon's phase id to a friendly label for the progress panel.
@@ -123,6 +132,13 @@ export default function ClawKeepApp() {
   const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
   const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
   const [restoreOpen, setRestoreOpen] = useState(false);
+  const [confirmPending, setConfirmPending] = useState<{
+    title: string;
+    body: React.ReactNode;
+    confirmLabel: string;
+    danger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -232,20 +248,32 @@ export default function ClawKeepApp() {
     setError(null);
   }, []);
 
-  const onUnpair = useCallback(async () => {
-    if (!confirm("Unpair this device?")) return;
-    setBusy("unpair");
-    setError(null);
-    try {
-      await jsonOrError<{ ok: true }>(
-        await fetch("/setup-api/clawkeep/unpair", { method: "POST" }),
-      );
-      await refresh();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy("");
-    }
+  const onUnpair = useCallback(() => {
+    setConfirmPending({
+      title: "Unpair this device?",
+      body: (
+        <>
+          Cloud backups will stop until you pair again. Existing snapshots
+          stay on the portal — your local config and tokens are removed.
+        </>
+      ),
+      confirmLabel: "Unpair",
+      danger: true,
+      onConfirm: async () => {
+        setBusy("unpair");
+        setError(null);
+        try {
+          await jsonOrError<{ ok: true }>(
+            await fetch("/setup-api/clawkeep/unpair", { method: "POST" }),
+          );
+          await refresh();
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setBusy("");
+        }
+      },
+    });
   }, [refresh]);
 
   const onBackup = useCallback(async () => {
@@ -270,38 +298,50 @@ export default function ClawKeepApp() {
   }, [refresh]);
 
   const onRestore = useCallback(
-    async (name: string) => {
+    (name: string) => {
       // The restore is destructive — we move ~/.openclaw aside and replace
-      // it with the snapshot's contents, then bounce the gateway. Block
-      // the UI behind a strict confirm before letting the request fly.
-      const confirmed = confirm(
-        `Restore "${name}"?\n\n` +
-          "This replaces your current OpenClaw state, config, and credentials with " +
-          "the snapshot. Your existing state is moved aside to a .bak-restore-* " +
-          "directory so it can be recovered manually if needed.\n\n" +
-          "OpenClaw services will restart after the restore completes.",
-      );
-      if (!confirmed) return;
-
-      setBusy("restore");
-      setError(null);
-      setRestoreResult(null);
-      setRestoreOpen(false);
-      try {
-        const result = await jsonOrError<RestoreResponse>(
-          await fetch("/setup-api/clawkeep/restore", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-          }),
-        );
-        setRestoreResult(result);
-        await refresh();
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setBusy("");
-      }
+      // it with the snapshot's contents, then bounce the gateway. Route
+      // the confirm through our themed dialog instead of window.confirm
+      // so the look matches the rest of the app on every browser.
+      setConfirmPending({
+        title: `Restore "${name}"?`,
+        body: (
+          <>
+            <p>
+              This replaces your current OpenClaw state, config, and credentials
+              with the snapshot. Your existing state is moved aside to a{" "}
+              <code className="text-emerald-300">.bak-restore-*</code> directory
+              so it can be recovered manually if needed.
+            </p>
+            <p className="mt-2 text-[var(--text-muted)]">
+              OpenClaw services will restart after the restore completes.
+            </p>
+          </>
+        ),
+        confirmLabel: "Restore",
+        danger: true,
+        onConfirm: async () => {
+          setBusy("restore");
+          setError(null);
+          setRestoreResult(null);
+          setRestoreOpen(false);
+          try {
+            const result = await jsonOrError<RestoreResponse>(
+              await fetch("/setup-api/clawkeep/restore", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name }),
+              }),
+            );
+            setRestoreResult(result);
+            await refresh();
+          } catch (e) {
+            setError((e as Error).message);
+          } finally {
+            setBusy("");
+          }
+        },
+      });
     },
     [refresh],
   );
@@ -333,73 +373,351 @@ export default function ClawKeepApp() {
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200 p-6">
-      <div className="max-w-3xl mx-auto space-y-4">
-        <header className="flex items-baseline justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-bold font-display">ClawKeep</h1>
-            <p className="text-sm text-[var(--text-muted)]">
-              Cloud-grade protection for your OpenClaw — encrypted in transit, scoped to your prefix.
-            </p>
-          </div>
-          {status.paired && (
-            <button
-              type="button"
-              disabled={busy === "unpair"}
-              onClick={onUnpair}
-              className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
-            >
-              {busy === "unpair" ? "🔌 Unpairing…" : "Unpair"}
-            </button>
+    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
+      {status.paired && (
+        <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
+          <a
+            href={`${status.server}/portal/clawkeep`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer"
+            title="Manage backups, devices, and billing on the ClawKeep portal"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+              dashboard
+            </span>
+            Portal
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">
+              open_in_new
+            </span>
+          </a>
+          <button
+            type="button"
+            disabled={busy === "unpair"}
+            onClick={onUnpair}
+            className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+          >
+            {busy === "unpair" ? "🔌 Unpairing…" : "Unpair"}
+          </button>
+        </div>
+      )}
+
+      <div className="min-h-full w-full flex items-center justify-center p-6">
+        <div className="w-full max-w-2xl space-y-4">
+          {error && (
+            <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+              ⚠️ {error}
+            </div>
           )}
-        </header>
 
-        {error && (
-          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-            ⚠️ {error}
+          {pairChallenge ? (
+            <PairChallengeCard
+              challenge={pairChallenge}
+              phase={pairPhase}
+              onCancel={onCancelPair}
+            />
+          ) : status.paired ? (
+            <>
+              <DashboardCard
+                status={status}
+                onBackup={onBackup}
+                onOpenRestore={() => setRestoreOpen(true)}
+                // A running daemon is its own kind of busy — keep showing the
+                // progress panel even if the user closes and reopens the window
+                // mid-run. The local `busy` flag is only authoritative right
+                // after a click, before the daemon has heartbeat-published its
+                // "running" state.
+                busyKind={
+                  busy === "restore"
+                    ? "restore"
+                    : busy === "backup" || isBackupRunning(status)
+                    ? "backup"
+                    : null
+                }
+              />
+              <ScheduleCard
+                schedule={status.schedule}
+                nextRunAtMs={status.nextRunAtMs}
+                onSaved={(next) => {
+                  setStatus((prev) => prev ? { ...prev, schedule: next.schedule, nextRunAtMs: next.nextRunAtMs } : prev);
+                }}
+                onError={setError}
+              />
+            </>
+          ) : (
+            <PairCard onPair={onPair} busy={busy === "pair"} />
+          )}
+
+          {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+
+          {backupResult && <BackupResultCard result={backupResult} />}
+          {restoreResult && <RestoreResultCard result={restoreResult} />}
+
+          {restoreOpen && (
+            <RestoreModal
+              onClose={() => setRestoreOpen(false)}
+              onPick={(name) => onRestore(name)}
+              onError={setError}
+            />
+          )}
+        </div>
+      </div>
+
+      {confirmPending && (
+        <ConfirmDialog
+          title={confirmPending.title}
+          body={confirmPending.body}
+          confirmLabel={confirmPending.confirmLabel}
+          danger={confirmPending.danger}
+          onCancel={() => setConfirmPending(null)}
+          onConfirm={() => {
+            const fn = confirmPending.onConfirm;
+            setConfirmPending(null);
+            void fn();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function formatNextRun(ms: number): string {
+  if (!ms) return "—";
+  const diff = ms - Date.now();
+  if (diff <= 0) return "any moment";
+  const totalMin = Math.round(diff / 60_000);
+  const days = Math.floor(totalMin / (60 * 24));
+  const hours = Math.floor((totalMin % (60 * 24)) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `in ${days}d ${hours}h`;
+  if (hours > 0) return `in ${hours}h ${mins}m`;
+  return `in ${mins}m`;
+}
+
+function ScheduleCard({
+  schedule,
+  nextRunAtMs,
+  onSaved,
+  onError,
+}: {
+  schedule: ClawKeepSchedule;
+  nextRunAtMs: number;
+  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number }) => void;
+  onError: (msg: string) => void;
+}) {
+  const [draft, setDraft] = useState<ClawKeepSchedule>(schedule);
+  const [saving, setSaving] = useState(false);
+  // Re-sync the draft when the parent re-fetches (e.g. after a backup run
+  // bumped nextRunAtMs server-side).
+  useEffect(() => { setDraft(schedule); }, [schedule]);
+
+  const dirty =
+    draft.enabled !== schedule.enabled
+    || draft.frequency !== schedule.frequency
+    || draft.timeOfDay !== schedule.timeOfDay
+    || draft.weekday !== schedule.weekday;
+
+  const save = async (override?: ClawKeepSchedule) => {
+    const payload = override ?? draft;
+    setSaving(true);
+    try {
+      const body = await jsonOrError<{ schedule: ClawKeepSchedule; nextRunAtMs: number }>(
+        await fetch("/setup-api/clawkeep/schedule", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+      setDraft(body.schedule);
+      onSaved(body);
+    } catch (e) {
+      onError(`Could not save schedule: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={`${CARD} space-y-4`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-100">Auto-backup</h3>
+          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+            {draft.enabled
+              ? `Next run ${formatNextRun(nextRunAtMs)}`
+              : "Off — back up only when you click Back up now."}
+          </p>
+        </div>
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            className="sr-only peer"
+            checked={draft.enabled}
+            disabled={saving}
+            onChange={(e) => {
+              const next = { ...draft, enabled: e.target.checked };
+              setDraft(next);
+              void save(next);
+            }}
+          />
+          <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors" />
+          <span className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
+        </label>
+      </div>
+
+      {draft.enabled && (
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            {(["daily", "weekly"] as const).map((freq) => (
+              <button
+                key={freq}
+                type="button"
+                onClick={() => setDraft((d) => ({ ...d, frequency: freq }))}
+                className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                  draft.frequency === freq
+                    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                    : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                }`}
+              >
+                {freq === "daily" ? "Daily" : "Weekly"}
+              </button>
+            ))}
           </div>
-        )}
 
-        {pairChallenge ? (
-          <PairChallengeCard
-            challenge={pairChallenge}
-            phase={pairPhase}
-            onCancel={onCancelPair}
-          />
-        ) : status.paired ? (
-          <DashboardCard
-            status={status}
-            onBackup={onBackup}
-            onOpenRestore={() => setRestoreOpen(true)}
-            // A running daemon is its own kind of busy — keep showing the
-            // progress panel even if the user closes and reopens the window
-            // mid-run. The local `busy` flag is only authoritative right
-            // after a click, before the daemon has heartbeat-published its
-            // "running" state.
-            busyKind={
-              busy === "restore"
-                ? "restore"
-                : busy === "backup" || isBackupRunning(status)
-                ? "backup"
-                : null
-            }
-          />
-        ) : (
-          <PairCard onPair={onPair} busy={busy === "pair"} />
-        )}
+          <div className="flex items-center gap-3">
+            <label className="text-xs text-[var(--text-muted)] w-16">Time</label>
+            <input
+              type="time"
+              value={draft.timeOfDay}
+              onChange={(e) => setDraft((d) => ({ ...d, timeOfDay: e.target.value }))}
+              className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+            />
+            <span className="text-xs text-[var(--text-muted)]">device-local</span>
+          </div>
 
-        {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+          {draft.frequency === "weekly" && (
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-[var(--text-muted)] w-16">Day</label>
+              <div className="flex gap-1 flex-wrap">
+                {WEEKDAY_LABELS.map((label, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setDraft((d) => ({ ...d, weekday: idx }))}
+                    className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
+                      draft.weekday === idx
+                        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                        : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-        {backupResult && <BackupResultCard result={backupResult} />}
-        {restoreResult && <RestoreResultCard result={restoreResult} />}
+          {dirty && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => save()}
+                className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
+              >
+                {saving ? "Saving…" : "Save schedule"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
-        {restoreOpen && (
-          <RestoreModal
-            onClose={() => setRestoreOpen(false)}
-            onPick={(name) => onRestore(name)}
-            onError={setError}
-          />
-        )}
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  danger,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: React.ReactNode;
+  confirmLabel: string;
+  danger?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  // Esc closes via a global listener (the dialog itself doesn't focus a
+  // text input, so an inline onKeyDown wouldn't fire reliably). Enter is
+  // handled by whichever button has focus — autoFocus puts it on Confirm
+  // but tabbing to Cancel and pressing Enter must cancel, not confirm.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const confirmClasses = danger
+    ? "bg-red-500 hover:bg-red-400 text-white"
+    : "bg-emerald-500 hover:bg-emerald-400 text-black";
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="clawkeep-confirm-title"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 px-5 pt-5">
+          <div
+            className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
+              danger ? "bg-red-500/15 text-red-300" : "bg-emerald-500/15 text-emerald-300"
+            }`}
+            aria-hidden="true"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 22 }}>
+              {danger ? "warning" : "help"}
+            </span>
+          </div>
+          <h2 id="clawkeep-confirm-title" className="text-base font-semibold text-gray-100 break-words">
+            {title}
+          </h2>
+        </div>
+        <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
+          {body}
+        </div>
+        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            autoFocus
+            className={`px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer ${confirmClasses}`}
+          >
+            {confirmLabel}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -713,10 +1031,19 @@ function DashboardCard({
   busyKind: "backup" | "restore" | null;
 }) {
   if (busyKind) {
+    // Only anchor the elapsed counter to the daemon's heartbeat when the
+    // status is *currently* "running" — otherwise we'd read the previous
+    // run's "ok" timestamp (which can be hours old) and show 84:00 the
+    // instant the user clicks Back up now, before the new run has
+    // published its first "running" heartbeat.
+    const startedAtMs =
+      busyKind === "backup" && status.lastHeartbeatStatus === "running"
+        ? status.lastHeartbeatAtMs
+        : undefined;
     return (
       <BackupProgressPanel
         kind={busyKind}
-        startedAtMs={busyKind === "backup" ? status.lastHeartbeatAtMs : undefined}
+        startedAtMs={startedAtMs}
         stepLabel={busyKind === "backup" ? STEP_LABELS[status.currentStep] : undefined}
       />
     );
@@ -785,7 +1112,7 @@ function DashboardCard({
       </div>
 
       {/* Action row */}
-      <div className="relative mt-7 flex flex-col items-center gap-2">
+      <div className="relative mt-7 flex flex-wrap items-center justify-center gap-3">
         <button
           type="button"
           onClick={onBackup}
@@ -798,8 +1125,11 @@ function DashboardCard({
           <button
             type="button"
             onClick={onOpenRestore}
-            className="text-xs text-[var(--text-muted)] hover:text-gray-200 underline-offset-2 hover:underline cursor-pointer"
+            className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] hover:border-white/25 transition-colors cursor-pointer flex items-center gap-1.5"
           >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+              cloud_download
+            </span>
             Restore from snapshot
           </button>
         )}
@@ -916,6 +1246,12 @@ function RestoreModal({
 }) {
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
   const [loading, setLoading] = useState(true);
+  // Pin the callbacks to refs so the fetch effect doesn't refire when the
+  // parent passes inline arrows that change identity on every render.
+  const onCloseRef = useRef(onClose);
+  const onErrorRef = useRef(onError);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -927,8 +1263,8 @@ function RestoreModal({
         if (!cancelled) setSnapshots(data.snapshots);
       } catch (e) {
         if (!cancelled) {
-          onError((e as Error).message);
-          onClose();
+          onErrorRef.current((e as Error).message);
+          onCloseRef.current();
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -937,7 +1273,7 @@ function RestoreModal({
     return () => {
       cancelled = true;
     };
-  }, [onClose, onError]);
+  }, []);
 
   // Esc closes the modal — basic dialog hygiene; the click-on-backdrop
   // handler covers the mouse path.

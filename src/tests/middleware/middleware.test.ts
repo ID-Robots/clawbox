@@ -266,6 +266,21 @@ describe("middleware", () => {
       expect(response.status).toBe(200);
     });
 
+    it("does NOT bypass auth when CLAWBOX_TEST_MODE is a non-'1' truthy value", async () => {
+      // Strict equality on "1" — `true`, "true", "yes" et al. must not
+      // open the API surface in production environments where the env
+      // var was set casually by something else.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "true";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
     it("still redirects page requests to /login under CLAWBOX_TEST_MODE", async () => {
       // The login-round-trip e2e spec depends on this — clearing cookies
       // and visiting `/` must still bounce to /login even in test mode.

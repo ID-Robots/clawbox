@@ -479,7 +479,7 @@ export default function FilesApp() {
                   ? "text-[var(--coral-bright)]"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
               }`}
-              title={showHidden ? "Hide hidden files" : "Show hidden files"}
+              title={showHidden ? t("files.hideHiddenFiles") : t("files.showHiddenFiles")}
               aria-pressed={showHidden}
             >
               <Icon name={showHidden ? "visibility" : "visibility_off"} size={18} />
@@ -526,10 +526,10 @@ export default function FilesApp() {
             <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
               <Icon name="folder_open" size={56} color="var(--border-subtle)" />
               <span className="text-sm">
-                {files.length === 0 ? t("files.emptyFolder") : "All items here are hidden"}
+                {files.length === 0 ? t("files.emptyFolder") : t("files.hiddenAllItems")}
               </span>
               <span className="text-xs">
-                {files.length === 0 ? t("files.dropOrUpload") : "Toggle the eye icon in the toolbar to show them"}
+                {files.length === 0 ? t("files.dropOrUpload") : t("files.hiddenToggleEye")}
               </span>
             </div>
           ) : viewMode === "grid" ? (

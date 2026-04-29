@@ -340,31 +340,51 @@ function ChromeDesktopInner() {
   }, [featureFlags]);
 
   const [clawkeepStale, setClawkeepStale] = useState(false);
+  const [clawkeepBusy, setClawkeepBusy] = useState(false);
+  const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
   useEffect(() => {
     if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
       setClawkeepStale(false);
+      setClawkeepBusy(false);
+      setClawkeepRestoring(false);
       return;
     }
     let aborted = false;
-    const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+    let inFlight = false;
+    const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
     const check = async () => {
+      // Skip ticks while a previous fetch is still outstanding so a slow
+      // device doesn't pile up overlapping requests.
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
         if (!res.ok) return;
-        const data = await res.json() as { paired?: boolean; lastBackupAtMs?: number };
+        const data = await res.json() as {
+          paired?: boolean;
+          lastBackupAtMs?: number;
+          lastHeartbeatStatus?: string;
+          restoring?: boolean;
+        };
         if (aborted) return;
         const stale =
           !data.paired
           || !data.lastBackupAtMs
           || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS;
         setClawkeepStale(stale);
+        setClawkeepBusy(data.lastHeartbeatStatus === "running");
+        setClawkeepRestoring(!!data.restoring);
       } catch {
         // Leave last-known state alone on transient failures so the shield
         // doesn't flicker on a brief network blip.
+      } finally {
+        inFlight = false;
       }
     };
     void check();
-    const id = window.setInterval(() => { void check(); }, 5 * 60 * 1000);
+    // Poll often enough for the shelf shield to start/stop pulsing within
+    // a few seconds of a backup beginning or finishing.
+    const id = window.setInterval(() => { void check(); }, 5_000);
     return () => {
       aborted = true;
       window.clearInterval(id);
@@ -2043,7 +2063,7 @@ function ChromeDesktopInner() {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
         onClawKeepShieldClick={featureFlags[FEATURE_FLAG_KEYS.clawkeep] ? openClawKeepOrAiProvider : undefined}
-        clawkeepStale={clawkeepStale}
+        clawkeepStatus={{ stale: clawkeepStale, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

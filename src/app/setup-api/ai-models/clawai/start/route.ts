@@ -39,11 +39,11 @@ export async function POST(request: NextRequest) {
   // wrong* value used to be silently coerced to the default, which made
   // typos like {"tier":"PRO"} (capitalised) succeed against the wrong tier;
   // surface that as a 400 instead so the caller learns about it.
-  let tier: "flash" | "pro" = "flash";
+  let tier: "free" | "flash" | "pro" = "flash";
   if (body.tier !== undefined) {
-    if (body.tier !== "flash" && body.tier !== "pro") {
+    if (body.tier !== "free" && body.tier !== "flash" && body.tier !== "pro") {
       return NextResponse.json(
-        { error: "tier must be 'flash' or 'pro' when provided" },
+        { error: "tier must be 'free', 'flash', or 'pro' when provided" },
         { status: 400 },
       );
     }

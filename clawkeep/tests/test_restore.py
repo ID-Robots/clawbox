@@ -111,16 +111,29 @@ def test_read_manifest_rejects_missing_manifest(tmp_path: Path) -> None:
         restore._read_manifest(archive, "expected-root")
 
 
-def test_safe_member_blocks_traversal() -> None:
+def test_member_name_unsafe_blocks_traversal() -> None:
     info = tarfile.TarInfo("root/payload/posix/../etc/passwd")
-    assert not restore._safe_member(info, "root/payload/posix/etc")
+    assert restore._member_name_unsafe(info, "root/payload/posix/etc")
 
 
-def test_safe_member_blocks_absolute_symlink() -> None:
+def test_member_link_unsafe_blocks_absolute_symlink() -> None:
     info = tarfile.TarInfo("root/payload/posix/home/.openclaw/cfg")
     info.type = tarfile.SYMTYPE
     info.linkname = "/etc/shadow"
-    assert not restore._safe_member(info, "root/payload/posix/home/.openclaw")
+    assert restore._member_link_unsafe(info)
+
+
+def test_member_link_safe_allows_relative_dotdot_symlink() -> None:
+    # openclaw plugin-runtime-deps ship symlinks like
+    #   dist/.buildstamp -> ../../shared/<...>/.buildstamp
+    # These are part of the trusted, signed archive and must not break
+    # restore — we just refuse to treat them as path-traversal attempts.
+    info = tarfile.TarInfo(
+        "root/payload/posix/home/.openclaw/plugin-runtime-deps/openclaw-x/dist/.buildstamp"
+    )
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../shared/openclaw-x/.buildstamp"
+    assert not restore._member_link_unsafe(info)
 
 
 def test_swap_into_place_moves_old_aside_and_promotes_new(tmp_path: Path) -> None:
@@ -172,12 +185,15 @@ def test_restore_snapshot_end_to_end(tmp_path: Path) -> None:
     target.mkdir()
     (target / "live.txt").write_text("live-data")
 
-    archive_local = tmp_path / "downloaded.tar.gz"
     archive_root = "snap-root"
+    captured_dest: dict[str, Path] = {}
 
     def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
         # Simulate the S3 GET — write the archive at the daemon's chosen
-        # staging path, mirroring real download_file behaviour.
+        # staging path, mirroring real download_file behaviour. Capture
+        # the path so the test can confirm cleanup happened against the
+        # *real* staging file, not a guessed one.
+        captured_dest["path"] = dest_path
         _make_archive(
             dest_path,
             archive_root=archive_root,
@@ -201,9 +217,11 @@ def test_restore_snapshot_end_to_end(tmp_path: Path) -> None:
     assert (target / "restored.txt").read_text() == "from-cloud"
     assert (asset.backup_path / "live.txt").read_text() == "live-data"
 
-    # Cleanup of the staging dir (where the downloaded archive sat) — the
-    # restore should remove its own scratch space.
-    assert not archive_local.exists()
+    # The orchestrator must clean up its scratch dir — the actual download
+    # path captured above and its parent (the staging dir) should be gone.
+    download_dest = captured_dest["path"]
+    assert not download_dest.exists()
+    assert not download_dest.parent.exists()
 
 
 def test_restore_snapshot_rejects_bad_name() -> None:

@@ -62,8 +62,12 @@ def load(path: Path | str | None = None) -> State:
         return State()
     return State(
         last_heartbeat_at_ms=_safe_int(raw.get("last_heartbeat_at_ms", 0)),
-        last_heartbeat_status=str(raw.get("last_heartbeat_status", "")),
-        last_step=str(raw.get("last_step", "")),
+        last_heartbeat_status=(
+            raw["last_heartbeat_status"]
+            if isinstance(raw.get("last_heartbeat_status"), str)
+            else ""
+        ),
+        last_step=raw["last_step"] if isinstance(raw.get("last_step"), str) else "",
         last_step_at_ms=_safe_int(raw.get("last_step_at_ms", 0)),
         last_backup_at_ms=_safe_int(raw.get("last_backup_at_ms", 0)),
         last_cloud_bytes=_safe_int(raw.get("last_cloud_bytes", 0)),

@@ -23,8 +23,91 @@ import {
   isValidModelId,
 } from "@/lib/provider-models";
 
-type ClawaiTier = "flash" | "pro";
+type ClawaiTier = "free" | "flash" | "pro";
 const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
+
+interface ClawaiTierInfo {
+  /** Plan label rendered to the user (Free/Pro/Max). Internal "flash" is
+   *  marketed as "Pro" and internal "pro" is "Max" — preserved for
+   *  backwards-compat with stored localStorage values + portal handshake. */
+  planName: string;
+  /** Selector pill label — same as planName today, kept separate so the
+   *  pill can shorten if needed without touching the card. */
+  pillLabel: string;
+  priceEuro: number;
+  /** Subtitle on the price line — "free forever", "/month", etc. */
+  pricePeriod: string;
+  /** True for tiers that should advertise a 30-day free trial CTA. */
+  hasTrial: boolean;
+  /** Bullet copy shown in the highlight card. */
+  features: string[];
+  /** Tailwind palette classes for the highlight card + selector pill. */
+  cardClass: string;
+  cardHeadlineClass: string;
+  cardCheckClass: string;
+  pillActiveClass: string;
+}
+
+const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
+  free: {
+    planName: "Free plan",
+    pillLabel: "Free",
+    priceEuro: 0,
+    pricePeriod: "free forever",
+    hasTrial: false,
+    features: [
+      "Standard daily usage",
+      "DeepSeek V4 Flash",
+      "1 GB ClawKeep cloud backups",
+      "Portal access",
+    ],
+    cardClass: "border-white/10 bg-white/[0.03]",
+    cardHeadlineClass: "text-gray-100",
+    cardCheckClass: "text-emerald-300",
+    pillActiveClass: "bg-[var(--bg-surface)] text-gray-100",
+  },
+  flash: {
+    planName: "Pro plan",
+    pillLabel: "Pro",
+    priceEuro: 9,
+    pricePeriod: "/month",
+    hasTrial: true,
+    features: [
+      "5× more usage than Free",
+      "DeepSeek V4 Flash",
+      "5 GB ClawKeep cloud backups",
+      "Remote Desktop access",
+      "Priority processing",
+      "Email support",
+    ],
+    cardClass: "border-orange-400/20 bg-orange-500/5",
+    cardHeadlineClass: "text-orange-100",
+    cardCheckClass: "text-orange-300",
+    pillActiveClass: "bg-gradient-to-r from-orange-500/30 to-amber-500/20 text-orange-100",
+  },
+  pro: {
+    planName: "Max plan",
+    pillLabel: "Max",
+    priceEuro: 49,
+    pricePeriod: "/month",
+    hasTrial: true,
+    features: [
+      "Maximum usage",
+      "DeepSeek V4 Pro (frontier)",
+      "50 GB ClawKeep cloud backups",
+      "Remote Desktop access",
+      "Highest priority",
+      "Full Support — real humans via Call/Meeting",
+    ],
+    cardClass:
+      "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
+    cardHeadlineClass: "text-fuchsia-100",
+    cardCheckClass: "text-fuchsia-300",
+    pillActiveClass: "bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 text-pink-100",
+  },
+};
+
+const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -512,7 +595,8 @@ export default function AIModelsStep({
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => {
     if (typeof window === "undefined") return "flash";
     const stored = window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY);
-    return stored === "pro" ? "pro" : "flash";
+    if (stored === "free" || stored === "pro" || stored === "flash") return stored;
+    return "flash";
   });
   const persistClawaiTier = useCallback((tier: ClawaiTier) => {
     setClawaiTier(tier);
@@ -1816,14 +1900,10 @@ export default function AIModelsStep({
                 Tier
               </span>
               <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-0.5">
-                {(["flash", "pro"] as const).map((tier) => {
-                  const tierLabel = tier === "flash" ? "Pro" : "Max";
+                {CLAWAI_TIER_ORDER.map((tier) => {
+                  const info = CLAWAI_TIER_INFO[tier];
                   const isActive = clawaiTier === tier;
-                  // The visible label is just "Pro" or "Max" with the
-                  // "Trial" badge rendered as decorative text; screen readers
-                  // skip the badge (aria-hidden) so the radio's accessible
-                  // name needs to carry the tier-and-badge context itself.
-                  const ariaLabel = tier === "pro" ? `${tierLabel} tier, Trial` : `${tierLabel} tier`;
+                  const ariaLabel = info.hasTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
                   return (
                     <button
                       type="button"
@@ -1834,14 +1914,12 @@ export default function AIModelsStep({
                       onClick={() => persistClawaiTier(tier)}
                       className={`relative px-3 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
                         isActive
-                          ? tier === "pro"
-                            ? "bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 text-pink-100"
-                            : "bg-[var(--bg-surface)] text-gray-100"
+                          ? info.pillActiveClass
                           : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
                       }`}
                     >
-                      {tierLabel}
-                      {tier === "pro" && (
+                      {info.pillLabel}
+                      {info.hasTrial && (
                         <span
                           aria-hidden="true"
                           className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_2px_8px_rgba(217,70,239,0.45)] whitespace-nowrap leading-none"
@@ -1854,68 +1932,52 @@ export default function AIModelsStep({
                 })}
               </div>
             </div>
-            {/* Plan-tier card mirrors the dashboard's subscription cards so
-                the user sees which plan unlocks the chosen ClawBox AI tier
-                without leaving Settings. Flash maps to the Pro plan tier
-                (€9/month, includes V4 Flash); Pro maps to the Max plan
-                tier (€49/month, frontier V4 Pro, with the 30-day free
-                trial CTA the dashboard exposes). */}
-            <div className={`mt-3 rounded-lg border px-3.5 py-3 ${
-              clawaiTier === "pro"
-                ? "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent"
-                : "border-orange-400/20 bg-orange-500/5"
-            }`}>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-baseline gap-1.5">
-                  <span className={`text-sm font-bold ${clawaiTier === "pro" ? "text-fuchsia-100" : "text-orange-100"}`}>
-                    {clawaiTier === "pro" ? "Max plan" : "Pro plan"}
-                  </span>
-                  <span className="text-xs font-semibold text-[var(--text-secondary)]">
-                    {clawaiTier === "pro" ? "€49" : "€9"}
-                  </span>
-                  <span className="text-[11px] text-[var(--text-muted)]">/month</span>
+            {/* Plan-tier card mirrors the portal's Subscription Plans block:
+                same name/price/feature data so the in-Settings preview and
+                the portal billing page never disagree. */}
+            {(() => {
+              const info = CLAWAI_TIER_INFO[clawaiTier];
+              return (
+                <div className={`mt-3 rounded-lg border px-3.5 py-3 ${info.cardClass}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={`text-sm font-bold ${info.cardHeadlineClass}`}>
+                        {info.planName}
+                      </span>
+                      <span className="text-xs font-semibold text-[var(--text-secondary)]">
+                        €{info.priceEuro}
+                      </span>
+                      <span className="text-[11px] text-[var(--text-muted)]">{info.pricePeriod}</span>
+                    </div>
+                    {info.hasTrial && clawaiTier === "pro" && (
+                      <a
+                        href={`${PORTAL_LOGIN_URL}/billing`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] hover:from-fuchsia-400 hover:to-pink-400 transition-colors whitespace-nowrap"
+                      >
+                        Start 30-day free trial
+                        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
+                      </a>
+                    )}
+                  </div>
+                  <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
+                    {info.features.map((feature) => (
+                      <li key={feature} className="flex items-start gap-1.5">
+                        <span
+                          aria-hidden="true"
+                          className={`material-symbols-rounded shrink-0 ${info.cardCheckClass}`}
+                          style={{ fontSize: 12, marginTop: 2 }}
+                        >
+                          check_circle
+                        </span>
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                {clawaiTier === "pro" && (
-                  <a
-                    href={`${PORTAL_LOGIN_URL}/billing`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] hover:from-fuchsia-400 hover:to-pink-400 transition-colors whitespace-nowrap"
-                  >
-                    Start 30-day free trial
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
-                  </a>
-                )}
-              </div>
-              <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
-                {(clawaiTier === "pro"
-                  ? [
-                      "Maximum usage on frontier DeepSeek V4 Pro",
-                      "1M token context window",
-                      "ClawKeep cloud backups",
-                      "Remote Desktop access",
-                      "Highest priority + full human support",
-                    ]
-                  : [
-                      "5× more usage than Free, on DeepSeek V4 Flash",
-                      "ClawKeep cloud backups",
-                      "Remote Desktop access",
-                      "Priority processing + email support",
-                    ]
-                ).map((feature) => (
-                  <li key={feature} className="flex items-start gap-1.5">
-                    <span
-                      aria-hidden="true"
-                      className={`material-symbols-rounded shrink-0 ${clawaiTier === "pro" ? "text-fuchsia-300" : "text-orange-300"}`}
-                      style={{ fontSize: 12, marginTop: 2 }}
-                    >
-                      check_circle
-                    </span>
-                    <span>{feature}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+              );
+            })()}
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow

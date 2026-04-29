@@ -6,9 +6,10 @@ name: E2E Install
 # Triggers:
 #   - nightly (scheduled)
 #   - on-demand via `workflow_dispatch`
-#   - every PR (open / synchronize / reopen) — the previous opt-in
-#     `run-full-e2e` label gate was removed so PRs targeting beta/main
-#     get full install + updater coverage before they merge.
+#   - every PR (open / synchronize / reopen) — runs against PRs targeting
+#     any branch (no `branches:` filter on the trigger). The previous
+#     opt-in `run-full-e2e` label gate was removed so every PR gets full
+#     install + updater coverage before it merges.
 #
 # Runner choice:
 #   - Prefers `ubuntu-24.04-arm` for ~5-10 min runs (native arm64).
