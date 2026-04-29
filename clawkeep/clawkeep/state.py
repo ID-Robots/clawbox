@@ -31,6 +31,10 @@ DEFAULT_STATE_PATH = default_state_path()
 class State:
     last_heartbeat_at_ms: int = 0
     last_heartbeat_status: str = ""  # ok | error | running | idle
+    # Sub-phase of an in-flight backup so the UI can show "Building archive…"
+    # vs "Uploading…" when reopened mid-run. Empty when nothing is running.
+    last_step: str = ""           # "starting" | "archiving" | "uploading" | "checking-stats" | ""
+    last_step_at_ms: int = 0
     last_backup_at_ms: int = 0
     last_cloud_bytes: int = 0
     last_snapshot_count: int = 0
@@ -59,6 +63,8 @@ def load(path: Path | str | None = None) -> State:
     return State(
         last_heartbeat_at_ms=_safe_int(raw.get("last_heartbeat_at_ms", 0)),
         last_heartbeat_status=str(raw.get("last_heartbeat_status", "")),
+        last_step=str(raw.get("last_step", "")),
+        last_step_at_ms=_safe_int(raw.get("last_step_at_ms", 0)),
         last_backup_at_ms=_safe_int(raw.get("last_backup_at_ms", 0)),
         last_cloud_bytes=_safe_int(raw.get("last_cloud_bytes", 0)),
         last_snapshot_count=_safe_int(raw.get("last_snapshot_count", 0)),

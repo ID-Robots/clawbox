@@ -13,6 +13,8 @@ import stat
 from pathlib import Path
 
 
+
+
 def data_dir() -> Path:
     """Resolve $CLAWKEEP_DATA_DIR, with a smart fallback for clawbox.
 
@@ -37,15 +39,10 @@ def default_token_path() -> Path:
     return data_dir() / "token"
 
 
-def default_repo_pass_path() -> Path:
-    return data_dir() / "repo-pass"
-
-
-# Module-level constants for backward compat. Resolved at import time;
+# Module-level constant for backward compat. Resolved at import time;
 # tests and external imports that need to flip CLAWKEEP_DATA_DIR mid-run
-# should call default_token_path() / default_repo_pass_path() instead.
+# should call default_token_path() instead.
 DEFAULT_TOKEN_PATH = default_token_path()
-DEFAULT_REPO_PASS_PATH = default_repo_pass_path()
 
 
 class TokenError(Exception):
@@ -88,34 +85,6 @@ def delete_token(path: Path | str | None = None) -> None:
     p = Path(path if path is not None else default_token_path())
     if p.exists():
         p.unlink()
-
-
-def read_or_create_repo_password(path: Path | str | None = None) -> str:
-    """Restic repo password. Generated on first run; persisted at 0600.
-
-    Losing this file means losing access to the backup permanently — section 6
-    of clawkeep-plan.md flags it as the single most important secret on the
-    device. v1 prints it during `clawkeep pair`; v1.1 will mirror an encrypted
-    copy to the portal.
-    """
-    p = Path(path if path is not None else default_repo_pass_path())
-    if p.exists():
-        # Same rationale as read_token: refuse to use a repo-pass that
-        # has been widened to group/world-readable perms.
-        assert_perms(p)
-        pw = p.read_text(encoding="utf-8").strip()
-        if pw:
-            return pw
-    # Generate 32 bytes of randomness, hex-encoded → 64 chars.
-    pw = os.urandom(32).hex()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, pw.encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(p, 0o600)
-    return pw
 
 
 def assert_perms(path: Path | str) -> None:

@@ -6,18 +6,52 @@ import { copyToClipboard } from "@/lib/clipboard";
 interface ClawKeepStatus {
   paired: boolean;
   configured: boolean;
-  configPath: string;
   server: string;
-  paths: string[];
-  exclude: string[];
-  schedule: string;
   lastBackupAtMs: number;
   lastHeartbeatAtMs: number;
   lastHeartbeatStatus: string;
+  currentStep: string;
+  currentStepAtMs: number;
   cloudBytes: number;
   snapshotCount: number;
-  resticInstalled: boolean;
+  openclawInstalled: boolean;
   daemonInstalled: boolean;
+}
+
+// Map the daemon's phase id to a friendly label for the progress panel.
+// Keys must match clawkeep/clawkeep/runner.py: STEP_* constants — keep in
+// lockstep when adding/renaming phases.
+const STEP_LABELS: Record<string, string> = {
+  starting: "Connecting to ClawKeep…",
+  archiving: "Building openclaw archive…",
+  uploading: "Encrypting and uploading to your prefix…",
+  "checking-stats": "Verifying cloud snapshot…",
+};
+
+// If a "running" status hasn't been refreshed in this many ms, assume the
+// daemon crashed (systemd timer kill, OOM, …) and stop showing the
+// progress panel — otherwise reopens would spin forever after a fault.
+const STALE_RUNNING_MS = 4 * 60 * 60 * 1000; // matches systemd TimeoutStartSec
+
+function isBackupRunning(status: ClawKeepStatus | null): boolean {
+  if (!status) return false;
+  if (status.lastHeartbeatStatus !== "running") return false;
+  if (!status.lastHeartbeatAtMs) return false;
+  return Date.now() - status.lastHeartbeatAtMs < STALE_RUNNING_MS;
+}
+
+interface CloudSnapshot {
+  name: string;
+  size_bytes: number;
+  last_modified_ms: number;
+}
+
+interface RestoreResponse {
+  ok: true;
+  archive: string;
+  archiveBytes: number;
+  assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  restartErrors: string[];
 }
 
 interface PairStartResponse {
@@ -83,11 +117,12 @@ async function jsonOrError<T>(resp: Response): Promise<T> {
 export default function ClawKeepApp() {
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "save">("");
+  const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "restore">("");
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
+  const [restoreResult, setRestoreResult] = useState<RestoreResponse | null>(null);
   const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
   const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
   const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -105,6 +140,17 @@ export default function ClawKeepApp() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Poll the dashboard every 3s while a backup is in progress. The server
+  // is the source of truth, so reopening the window mid-run still picks up
+  // the live "running" state and shows the right step.
+  useEffect(() => {
+    if (!isBackupRunning(status)) return;
+    const id = window.setInterval(() => {
+      void refresh();
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [status, refresh]);
 
   // RFC 8628 device-code poll loop. While pairing is active we hit
   // /pair/poll every `interval` seconds (the upstream's recommended
@@ -223,6 +269,43 @@ export default function ClawKeepApp() {
     }
   }, [refresh]);
 
+  const onRestore = useCallback(
+    async (name: string) => {
+      // The restore is destructive — we move ~/.openclaw aside and replace
+      // it with the snapshot's contents, then bounce the gateway. Block
+      // the UI behind a strict confirm before letting the request fly.
+      const confirmed = confirm(
+        `Restore "${name}"?\n\n` +
+          "This replaces your current OpenClaw state, config, and credentials with " +
+          "the snapshot. Your existing state is moved aside to a .bak-restore-* " +
+          "directory so it can be recovered manually if needed.\n\n" +
+          "OpenClaw services will restart after the restore completes.",
+      );
+      if (!confirmed) return;
+
+      setBusy("restore");
+      setError(null);
+      setRestoreResult(null);
+      setRestoreOpen(false);
+      try {
+        const result = await jsonOrError<RestoreResponse>(
+          await fetch("/setup-api/clawkeep/restore", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          }),
+        );
+        setRestoreResult(result);
+        await refresh();
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy("");
+      }
+    },
+    [refresh],
+  );
+
   if (!status && !error) {
     return (
       <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)]">
@@ -256,7 +339,7 @@ export default function ClawKeepApp() {
           <div>
             <h1 className="text-xl font-bold font-display">ClawKeep</h1>
             <p className="text-sm text-[var(--text-muted)]">
-              Off-device backups to {status.server.replace(/^https?:\/\//, "")} via restic.
+              Cloud-grade protection for your OpenClaw — encrypted in transit, scoped to your prefix.
             </p>
           </div>
           {status.paired && (
@@ -284,39 +367,37 @@ export default function ClawKeepApp() {
             onCancel={onCancelPair}
           />
         ) : status.paired ? (
-          <DashboardCard status={status} onBackup={onBackup} busy={busy === "backup"} />
+          <DashboardCard
+            status={status}
+            onBackup={onBackup}
+            onOpenRestore={() => setRestoreOpen(true)}
+            // A running daemon is its own kind of busy — keep showing the
+            // progress panel even if the user closes and reopens the window
+            // mid-run. The local `busy` flag is only authoritative right
+            // after a click, before the daemon has heartbeat-published its
+            // "running" state.
+            busyKind={
+              busy === "restore"
+                ? "restore"
+                : busy === "backup" || isBackupRunning(status)
+                ? "backup"
+                : null
+            }
+          />
         ) : (
           <PairCard onPair={onPair} busy={busy === "pair"} />
         )}
 
-        {(!status.resticInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+        {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
 
         {backupResult && <BackupResultCard result={backupResult} />}
+        {restoreResult && <RestoreResultCard result={restoreResult} />}
 
-        {/* Path-list/schedule TOML editor is power-user territory — hide
-            by default so the dashboard stays scannable. */}
-        {status.paired && (
-          <div className="pt-2">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((v) => !v)}
-              className="text-xs text-[var(--text-muted)] hover:text-gray-200 inline-flex items-center gap-1.5 cursor-pointer bg-transparent border-none p-0"
-              aria-expanded={showAdvanced}
-            >
-              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>
-                {showAdvanced ? "expand_less" : "expand_more"}
-              </span>
-              {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
-            </button>
-          </div>
-        )}
-
-        {status.paired && showAdvanced && (
-          <ConfigCard
-            status={status}
-            onSaved={refresh}
+        {restoreOpen && (
+          <RestoreModal
+            onClose={() => setRestoreOpen(false)}
+            onPick={(name) => onRestore(name)}
             onError={setError}
-            onBusyChange={(v) => setBusy(v ? "save" : "")}
           />
         )}
       </div>
@@ -326,16 +407,42 @@ export default function ClawKeepApp() {
 
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   return (
-    <div className={`${CARD} space-y-3`}>
-      <h2 className="font-semibold">Pair this device</h2>
-      <p className="text-sm text-[var(--text-muted)]">
-        Connect to your portal account so this device can mint short-lived R2 credentials and back up to your ClawKeep storage.
+    <div
+      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 bg-[radial-gradient(circle,rgba(249,115,22,0.4),transparent_70%)] blur-3xl opacity-70"
+      />
+      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
+        <div
+          aria-hidden="true"
+          className="clawkeep-shield-ring absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
+        />
+        <div
+          aria-hidden="true"
+          className="clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
+        />
+        <div className="clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center bg-gradient-to-br from-orange-400 via-orange-500 to-amber-600 shadow-[0_0_60px_rgba(249,115,22,0.45)]">
+          <span
+            className="material-symbols-rounded text-white drop-shadow-[0_0_10px_rgba(249,115,22,0.55)]"
+            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600" }}
+            aria-hidden="true"
+          >
+            shield_lock
+          </span>
+        </div>
+      </div>
+      <h2 className="relative text-3xl font-bold font-display">Pair this device</h2>
+      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+        Link this OpenClaw to your portal account and we&apos;ll mint short-lived
+        R2 credentials so every backup lands in your private prefix.
       </p>
       <button
         type="button"
         onClick={onPair}
         disabled={busy}
-        className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
+        className="relative mt-7 px-6 py-2.5 rounded-full bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold shadow-lg cursor-pointer"
       >
         {busy ? "🔗 Connecting…" : "Pair with portal"}
       </button>
@@ -438,92 +545,265 @@ function formatElapsed(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function BackupProgressPanel() {
+function BackupProgressPanel({
+  kind = "backup",
+  startedAtMs,
+  stepLabel: explicitStepLabel,
+}: {
+  kind?: "backup" | "restore";
+  /** Server-anchored start time (ms). Anchoring elapsed to the daemon's
+   *  heartbeat means a reopened window shows "1:42" instead of "0:00". */
+  startedAtMs?: number;
+  /** Friendly label for the daemon's current sub-phase (backup only). */
+  stepLabel?: string;
+}) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => setElapsed((s) => s + 1), 1000);
+    // All `Date.now()` reads are inside the effect so render stays pure.
+    const startMs = startedAtMs && startedAtMs > 0 ? startedAtMs : Date.now();
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [startedAtMs]);
+
+  const isBackup = kind === "backup";
+  const fallback = isBackup
+    ? "Building the openclaw archive and uploading to your prefix. This can take a few minutes."
+    : "Downloading the snapshot, verifying it, and swapping it into place. OpenClaw services restart at the end.";
+  const stepLabel = explicitStepLabel || fallback;
+
+  // Backup = green (we're actively protecting). Restore = orange (recovery
+  // in flight). Keeping the two visually distinct so the user can tell at
+  // a glance which long-running op they're watching.
+  const palette = isBackup
+    ? {
+        border: "border-emerald-400/30",
+        gradient: "from-emerald-500/10 via-emerald-500/5",
+        spinnerRing: "border-emerald-400/30 border-t-emerald-400",
+        text: "text-emerald-100",
+        track: "bg-emerald-500/15",
+        bar: "bg-emerald-400",
+        ariaLabel: "Backup in progress",
+      }
+    : {
+        border: "border-orange-400/30",
+        gradient: "from-orange-500/10 via-orange-500/5",
+        spinnerRing: "border-orange-400/30 border-t-orange-400",
+        text: "text-orange-100",
+        track: "bg-orange-500/15",
+        bar: "bg-orange-400",
+        ariaLabel: "Restore in progress",
+      };
 
   return (
-    <div className="rounded-xl border border-orange-400/30 bg-gradient-to-br from-orange-500/10 via-orange-500/5 to-transparent p-6">
+    <div className={`rounded-xl border ${palette.border} bg-gradient-to-br ${palette.gradient} to-transparent p-6`}>
       <div className="flex items-center gap-4">
         <div
           aria-hidden="true"
-          className="shrink-0 w-12 h-12 rounded-full border-4 border-orange-400/30 border-t-orange-400 animate-spin"
+          className={`shrink-0 w-12 h-12 rounded-full border-4 ${palette.spinnerRing} animate-spin`}
         />
         <div className="flex-1 min-w-0">
-          <div className="text-base font-semibold text-orange-100">
-            Backing up to ClawBox cloud…
+          <div className={`text-base font-semibold ${palette.text}`}>
+            {isBackup ? "Protecting your OpenClaw…" : "Restoring from ClawBox cloud…"}
           </div>
           <div className="text-xs text-[var(--text-muted)] mt-0.5">
-            Restic is scanning files and uploading changes. This can take a few minutes.
+            {stepLabel}
           </div>
         </div>
         <div
-          className="shrink-0 text-2xl font-mono font-semibold text-orange-100 tabular-nums"
+          className={`shrink-0 text-2xl font-mono font-semibold ${palette.text} tabular-nums`}
           aria-label="Elapsed time"
         >
           {formatElapsed(elapsed)}
         </div>
       </div>
       <div
-        className="mt-4 h-1.5 rounded-full bg-orange-500/15 overflow-hidden"
+        className={`mt-4 h-1.5 rounded-full ${palette.track} overflow-hidden`}
         role="progressbar"
-        aria-label="Backup in progress"
+        aria-label={palette.ariaLabel}
       >
         <div
-          className="h-full rounded-full bg-orange-400"
+          className={`h-full rounded-full ${palette.bar}`}
           style={{ animation: "indeterminate 1.6s ease-in-out infinite" }}
         />
       </div>
       <p className="mt-3 text-xs text-[var(--text-muted)]">
-        Keep this app open. You can leave the device on and check back later.
+        {isBackup
+          ? "Safe to close — the backup keeps running on the device. Reopen ClawKeep any time to see the result."
+          : "Don't power off the device until this finishes — the on-disk swap should not be interrupted mid-flight."}
       </p>
     </div>
   );
 }
 
+type ProtectionState = "protected" | "lapsed" | "unprotected";
+
+function deriveProtection(status: ClawKeepStatus): ProtectionState {
+  if (status.lastHeartbeatStatus === "error") return "lapsed";
+  if (status.lastBackupAtMs > 0) return "protected";
+  return "unprotected";
+}
+
+interface ProtectionCopy {
+  headline: string;
+  subhead: string;
+  badge: string;
+  iconName: string;
+  badgeClass: string;
+  haloClass: string;
+  ringClass: string;
+  discClass: string;
+  iconClass: string;
+  primaryClass: string;
+}
+
+// Lapsed and unprotected share an "at-risk" red palette; only headline/
+// subhead/icon/badge differ. Spread a single base into both.
+const RED_PALETTE = {
+  badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
+  haloClass: "bg-[radial-gradient(circle,rgba(239,68,68,0.45),transparent_70%)]",
+  ringClass: "border-red-400/60 bg-red-500/10",
+  discClass:
+    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_60px_rgba(239,68,68,0.45)]",
+  iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
+  primaryClass: "bg-red-500 hover:bg-red-400",
+} as const;
+
+const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
+  protected: {
+    headline: "You're Protected",
+    subhead: "Your OpenClaw is safe in the ClawBox cloud — config, agents, credentials, the works.",
+    badge: "PROTECTED",
+    iconName: "verified_user",
+    badgeClass: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+    haloClass: "bg-[radial-gradient(circle,rgba(16,185,129,0.45),transparent_70%)]",
+    ringClass: "border-emerald-400/60 bg-emerald-500/10",
+    discClass:
+      "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_60px_rgba(16,185,129,0.45)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(16,185,129,0.55)]",
+    primaryClass: "bg-emerald-500 hover:bg-emerald-400",
+  },
+  lapsed: {
+    ...RED_PALETTE,
+    headline: "Protection Lapsed",
+    subhead: "Your last backup didn't complete. One retry and we'll lock it back down.",
+    badge: "AT RISK",
+    iconName: "gpp_maybe",
+  },
+  unprotected: {
+    ...RED_PALETTE,
+    headline: "Not Protected",
+    subhead:
+      "One click and your OpenClaw is locked safely in the ClawBox cloud. Config, agents, credentials — sleep easy.",
+    badge: "UNPROTECTED",
+    iconName: "gpp_bad",
+  },
+};
+
 function DashboardCard({
   status,
   onBackup,
-  busy,
+  onOpenRestore,
+  busyKind,
 }: {
   status: ClawKeepStatus;
   onBackup: () => void;
-  busy: boolean;
+  onOpenRestore: () => void;
+  busyKind: "backup" | "restore" | null;
 }) {
-  if (busy) {
-    return <BackupProgressPanel />;
+  if (busyKind) {
+    return (
+      <BackupProgressPanel
+        kind={busyKind}
+        startedAtMs={busyKind === "backup" ? status.lastHeartbeatAtMs : undefined}
+        stepLabel={busyKind === "backup" ? STEP_LABELS[status.currentStep] : undefined}
+      />
+    );
   }
 
+  const disabled = !status.daemonInstalled || !status.openclawInstalled;
+  // No snapshots → restore nothing. Hide rather than offer an action that's
+  // guaranteed to be empty.
+  const canRestore = !disabled && status.snapshotCount > 0;
+
+  const state = deriveProtection(status);
+  const copy = COPY_BY_STATE[state];
+
   return (
-    <div className={`${CARD} space-y-3`}>
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="font-semibold">Backup status</h2>
-        <span
-          className={`text-xs ${
-            status.lastHeartbeatStatus === "ok" ? "text-emerald-400" : "text-[var(--text-muted)]"
-          }`}
-        >
-          {status.lastHeartbeatStatus || "no runs yet"}
-        </span>
+    <div
+      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
+    >
+      {/* Status badge top-right — small, clean, antivirus-style */}
+      <div
+        className={`absolute top-3 right-3 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${copy.badgeClass}`}
+      >
+        {copy.badge}
       </div>
 
-      <div className="grid grid-cols-3 gap-3 text-sm">
+      {/* Halo glow behind the shield */}
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 ${copy.haloClass} blur-3xl opacity-70`}
+      />
+
+      {/* The shield itself */}
+      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
+        {/* Two outward-radiating rings — staggered so a wave is always mid-flight */}
+        <div
+          aria-hidden="true"
+          className={`clawkeep-shield-ring absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
+        />
+        <div
+          aria-hidden="true"
+          className={`clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
+        />
+        {/* Solid disc with a slow breathe */}
+        <div
+          className={`clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center ${copy.discClass}`}
+        >
+          <span
+            className={`material-symbols-rounded ${copy.iconClass}`}
+            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600, 'GRAD' 0" }}
+            aria-hidden="true"
+          >
+            {copy.iconName}
+          </span>
+        </div>
+      </div>
+
+      <h2 className="relative text-3xl font-bold font-display mt-2">{copy.headline}</h2>
+      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+        {copy.subhead}
+      </p>
+
+      {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
+      <div className="relative mt-6 grid grid-cols-3 gap-6 w-full max-w-md text-center">
         <Stat label="Last backup" value={timeAgo(status.lastBackupAtMs)} />
         <Stat label="Cloud usage" value={formatBytes(status.cloudBytes)} />
         <Stat label="Snapshots" value={status.snapshotCount.toString()} />
       </div>
 
-      <button
-        type="button"
-        onClick={onBackup}
-        disabled={!status.daemonInstalled || !status.resticInstalled}
-        className="px-3 py-2 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold"
-      >
-        Back up now
-      </button>
+      {/* Action row */}
+      <div className="relative mt-7 flex flex-col items-center gap-2">
+        <button
+          type="button"
+          onClick={onBackup}
+          disabled={disabled}
+          className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
+        >
+          {state === "protected" ? "Back up now" : "Protect my OpenClaw"}
+        </button>
+        {canRestore && (
+          <button
+            type="button"
+            onClick={onOpenRestore}
+            className="text-xs text-[var(--text-muted)] hover:text-gray-200 underline-offset-2 hover:underline cursor-pointer"
+          >
+            Restore from snapshot
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -533,10 +813,10 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
       <h2 className="font-semibold text-amber-200">⚙️ Setup needed</h2>
       <ul className="text-sm text-amber-100 space-y-1">
-        {!status.resticInstalled && (
+        {!status.openclawInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">restic</code> is not on $PATH. Install with{" "}
-            <code className="bg-black/30 px-1 rounded">apt install restic</code>.
+            <code className="bg-black/30 px-1 rounded">openclaw</code> is not on $PATH. Install with{" "}
+            <code className="bg-black/30 px-1 rounded">npm install -g openclaw</code>.
           </li>
         )}
         {!status.daemonInstalled && (
@@ -552,139 +832,11 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-white/[0.03] p-3">
-      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
-      <div className="mt-1 text-base font-semibold text-gray-100">{value}</div>
-    </div>
-  );
-}
-
-function ConfigCard({
-  status,
-  onSaved,
-  onError,
-  onBusyChange,
-}: {
-  status: ClawKeepStatus;
-  onSaved: () => void;
-  onError: (msg: string) => void;
-  onBusyChange: (busy: boolean) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const startEdit = useCallback(async () => {
-    try {
-      const resp = await fetch("/setup-api/clawkeep/config", { cache: "no-store" });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      setDraft(await resp.text());
-      setEditing(true);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }, [onError]);
-
-  const cancel = useCallback(() => {
-    setEditing(false);
-    setDraft("");
-  }, []);
-
-  const save = useCallback(async () => {
-    setSaving(true);
-    onBusyChange(true);
-    try {
-      const resp = await fetch("/setup-api/clawkeep/config", {
-        method: "PUT",
-        headers: { "Content-Type": "text/plain" },
-        body: draft,
-      });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${resp.status}`);
-      }
-      setEditing(false);
-      onSaved();
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setSaving(false);
-      onBusyChange(false);
-    }
-  }, [draft, onBusyChange, onError, onSaved]);
-
-  return (
-    <div className={`${CARD} space-y-3`}>
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="font-semibold">What gets backed up</h2>
-        {!editing && (
-          <button
-            type="button"
-            onClick={startEdit}
-            className="text-xs text-orange-300 hover:text-orange-200"
-          >
-            Edit
-          </button>
-        )}
-      </div>
-
-      {!editing ? (
-        <div className="space-y-2 text-sm">
-          <PathList label="Include" items={status.paths} fallback="(no paths configured — click Edit)" />
-          {status.exclude.length > 0 && <PathList label="Exclude" items={status.exclude} />}
-          <p className="text-xs text-[var(--text-muted)]">
-            Schedule: {status.schedule}. Config file:{" "}
-            <code className="bg-black/30 px-1 rounded">{status.configPath}</code>
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            aria-label="ClawKeep config TOML"
-            className="w-full h-72 rounded-md bg-black/40 border border-white/10 p-3 text-xs font-mono text-gray-100 focus:outline-none focus:border-orange-400"
-            spellCheck={false}
-          />
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving}
-              className="px-3 py-1.5 rounded-md bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-xs font-semibold"
-            >
-              {saving ? "💾 Saving…" : "Save"}
-            </button>
-            <button
-              type="button"
-              onClick={cancel}
-              disabled={saving}
-              className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PathList({ label, items, fallback }: { label: string; items: string[]; fallback?: string }) {
-  if (!items.length) {
-    return <div className="text-xs text-[var(--text-muted)]">{fallback ?? `${label}: (none)`}</div>;
-  }
+  // Wrapper div is load-bearing — each `<Stat>` is one cell of a 3-col grid.
   return (
     <div>
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
-      <ul className="mt-1 space-y-0.5">
-        {items.map((p, idx) => (
-          <li key={`${idx}-${p}`} className="text-xs font-mono text-gray-200">
-            {p}
-          </li>
-        ))}
-      </ul>
+      <div className="mt-1 text-base font-semibold text-gray-100 truncate">{value}</div>
     </div>
   );
 }
@@ -703,6 +855,237 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
       <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
         {tail}
       </pre>
+    </div>
+  );
+}
+
+function RestoreResultCard({ result }: { result: RestoreResponse }) {
+  return (
+    <div className={`${CARD} border-emerald-500/30 bg-emerald-500/5 space-y-2`}>
+      <h2 className="font-semibold">✅ Restore ok</h2>
+      <p className="text-sm text-[var(--text-muted)]">
+        Restored <code className="bg-black/30 px-1 rounded">{result.archive}</code>{" "}
+        ({formatBytes(result.archiveBytes)}).
+      </p>
+      <ul className="text-xs space-y-1">
+        {result.assets.map((a) => (
+          <li key={a.targetPath} className="text-gray-300">
+            <span className="font-mono">{a.targetPath}</span>{" "}
+            <span className="text-[var(--text-muted)]">
+              ({formatBytes(a.bytesRestored)} — previous version preserved at{" "}
+              <span className="font-mono">{a.backupPath}</span>)
+            </span>
+          </li>
+        ))}
+      </ul>
+      {result.restartErrors.length > 0 && (
+        <p className="text-xs text-amber-300">
+          ⚠️ Could not auto-restart {result.restartErrors.length} service(s). Run{" "}
+          <code className="bg-black/30 px-1 rounded">sudo systemctl restart clawbox-gateway</code>{" "}
+          manually.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Parse the timestamp embedded in `<2026-04-29T09-37-13.020Z>-openclaw-backup.tar.gz`
+// into a friendly display. Falls back to the raw name if the format ever
+// changes — better than crashing the modal over a regex miss.
+function parseSnapshotName(name: string): { date: string; time: string; raw: string } | null {
+  const m = name.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})\.\d+Z-/);
+  if (!m) return null;
+  const [, y, mo, d, h, min] = m;
+  const dt = new Date(Date.UTC(+y, +mo - 1, +d, +h, +min));
+  if (Number.isNaN(dt.getTime())) return null;
+  return {
+    date: dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
+    time: dt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }),
+    raw: name,
+  };
+}
+
+function RestoreModal({
+  onClose,
+  onPick,
+  onError,
+}: {
+  onClose: () => void;
+  onPick: (name: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await jsonOrError<{ snapshots: CloudSnapshot[] }>(
+          await fetch("/setup-api/clawkeep/snapshots", { cache: "no-store" }),
+        );
+        if (!cancelled) setSnapshots(data.snapshots);
+      } catch (e) {
+        if (!cancelled) {
+          onError((e as Error).message);
+          onClose();
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onClose, onError]);
+
+  // Esc closes the modal — basic dialog hygiene; the click-on-backdrop
+  // handler covers the mouse path.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Restore from cloud snapshot"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-xl rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <header className="relative px-6 pt-6 pb-4 border-b border-white/5">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute -top-16 -right-16 w-56 h-56 bg-[radial-gradient(circle,rgba(16,185,129,0.18),transparent_70%)] blur-2xl"
+          />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
+                <span
+                  className="material-symbols-rounded text-emerald-400"
+                  style={{ fontSize: 22, fontVariationSettings: "'FILL' 1" }}
+                  aria-hidden="true"
+                >
+                  cloud_download
+                </span>
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold leading-tight">Restore from snapshot</h2>
+                <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                  Roll back to any cloud backup. Your current state is moved aside, not deleted.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-white/5 hover:text-gray-100 cursor-pointer"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }} aria-hidden="true">
+                close
+              </span>
+            </button>
+          </div>
+        </header>
+
+        {/* List */}
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          {loading && (
+            <div className="py-12 flex flex-col items-center gap-3 text-sm text-[var(--text-muted)]">
+              <div
+                aria-hidden="true"
+                className="w-8 h-8 rounded-full border-2 border-white/10 border-t-emerald-400 animate-spin"
+              />
+              <span>Fetching snapshots from your prefix…</span>
+            </div>
+          )}
+
+          {!loading && snapshots && snapshots.length === 0 && (
+            <div className="py-12 text-center text-sm text-[var(--text-muted)]">
+              <span
+                className="material-symbols-rounded block mx-auto mb-2 text-[var(--text-muted)]/60"
+                style={{ fontSize: 32 }}
+                aria-hidden="true"
+              >
+                cloud_off
+              </span>
+              No snapshots in your prefix yet. Run a backup first.
+            </div>
+          )}
+
+          {!loading && snapshots && snapshots.length > 0 && (
+            <ul className="space-y-2">
+              {snapshots.map((s, idx) => {
+                const parsed = parseSnapshotName(s.name);
+                const newest = idx === 0;
+                return (
+                  <li key={s.name}>
+                    <button
+                      type="button"
+                      onClick={() => onPick(s.name)}
+                      className="group w-full text-left rounded-xl border border-white/10 bg-white/[0.02] hover:bg-emerald-500/[0.08] hover:border-emerald-500/40 px-4 py-3 cursor-pointer transition-colors flex items-center gap-3"
+                    >
+                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] group-hover:bg-emerald-500/15 border border-white/5 group-hover:border-emerald-500/30 flex items-center justify-center transition-colors">
+                        <span
+                          className="material-symbols-rounded text-[var(--text-muted)] group-hover:text-emerald-300"
+                          style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }}
+                          aria-hidden="true"
+                        >
+                          inventory_2
+                        </span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-gray-100 truncate">
+                            {parsed ? `${parsed.date} · ${parsed.time}` : s.name}
+                          </span>
+                          {newest && (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[9px] font-bold tracking-wider border border-emerald-500/30">
+                              LATEST
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+                          <span>{formatBytes(s.size_bytes)}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{timeAgo(s.last_modified_ms)}</span>
+                        </div>
+                      </div>
+                      <span
+                        className="shrink-0 material-symbols-rounded text-[var(--text-muted)]/50 group-hover:text-emerald-400 transition-colors"
+                        style={{ fontSize: 18 }}
+                        aria-hidden="true"
+                      >
+                        chevron_right
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <footer className="px-6 py-3 border-t border-white/5 bg-white/[0.02] text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+            info
+          </span>
+          <span>
+            Restoring overwrites your live state. Current state is preserved at{" "}
+            <code className="bg-black/40 px-1 rounded">~/.openclaw.bak-restore-*</code>.
+          </span>
+        </footer>
+      </div>
     </div>
   );
 }

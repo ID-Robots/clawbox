@@ -550,3 +550,27 @@ input[type="range"].appearance-none::-moz-range-track {
   height: 6px;
   background: rgba(255, 255, 255, 0.08);
 }
+
+/* ClawKeep "Protected" hero shield. The animation sells the state — green
+   for safe, red for at-risk — through a gentle breathe + concentric rings
+   radiating outward like an antivirus dashboard. */
+@keyframes clawkeep-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+@keyframes clawkeep-pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.55; }
+  80% { opacity: 0; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+.clawkeep-shield-breathe {
+  animation: clawkeep-breathe 3.2s ease-in-out infinite;
+}
+.clawkeep-shield-ring {
+  animation: clawkeep-pulse-ring 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.clawkeep-shield-ring-delayed {
+  animation: clawkeep-pulse-ring 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  animation-delay: 1.4s;
+}

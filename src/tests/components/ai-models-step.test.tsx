@@ -173,7 +173,6 @@ describe("AIModelsStep variants", () => {
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("All-in cloud AI for ClawBox — backups, remote desktop, full support")).toBeInTheDocument();
-    expect(getByText("The fastest way to unlock everything your ClawBox can do — one tap, no API keys.")).toBeInTheDocument();
     expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection
     // is handled exclusively through the portal handoff. Verify nothing in

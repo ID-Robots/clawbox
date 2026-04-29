@@ -37,15 +37,6 @@ def test_read_rejects_garbage(tmp_path: Path) -> None:
         token.read_token(p)
 
 
-def test_repo_password_is_persistent(tmp_path: Path) -> None:
-    p = tmp_path / "repo-pass"
-    pw1 = token.read_or_create_repo_password(p)
-    pw2 = token.read_or_create_repo_password(p)
-    assert pw1 == pw2
-    assert len(pw1) == 64  # 32 bytes hex
-    assert stat.S_IMODE(p.stat().st_mode) == 0o600
-
-
 def test_assert_perms_raises_on_world_readable(tmp_path: Path) -> None:
     p = tmp_path / "token"
     p.write_text("claw_x")

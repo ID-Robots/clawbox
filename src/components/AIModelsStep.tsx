@@ -1808,10 +1808,7 @@ export default function AIModelsStep({
 
         {selected?.id === "clawai" && (
           <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
-            <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
-              The fastest way to unlock everything your ClawBox can do — one tap, no API keys.
-            </p>
-            <p className="mt-2 text-xs leading-relaxed text-orange-200/90">
+            <p className="text-xs leading-relaxed text-orange-200/90">
               Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
             </p>
             <div className="mt-4 flex items-center justify-between gap-3">

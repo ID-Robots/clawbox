@@ -6,29 +6,18 @@
 # Portal endpoint. Change once the canonical domain migrates.
 server = "https://openclawhardware.dev"
 
-# What to back up. Globs are passed straight through to restic.
-paths = [
-    "/home",
-    "/etc/clawbox",
-]
-
-# What to skip. Common large/regenerable trees.
-exclude = [
-    "**/node_modules",
-    "**/.cache",
-    "**/.venv",
-    "**/__pycache__",
-    "*.tmp",
-    "*.log",
-]
-
 # How often the systemd timer fires. Keep in sync with the timer unit.
 schedule = "daily"  # daily | weekly | manual
 
-[restic]
-binary = "/usr/bin/restic"
-compression = "auto"   # auto | off | max
-read_concurrency = 2
+# clawkeep delegates "what to back up" to `openclaw backup create` —
+# it captures OpenClaw state, config, credentials, sessions, and
+# (optionally) workspaces. See https://docs.openclaw.ai/cli/backup.
+[openclaw]
+binary = "openclaw"          # absolute path or PATH-resolvable name
+include_workspace = true     # set false to skip ~/.openclaw/workspace
+only_config = false          # set true to back up only the active JSON config file
+verify = true                # run `openclaw backup verify` after writing
+output_dir = ""              # blank → tmpdir per run (cleaned up on exit)
 
 [heartbeat]
 idle_interval_hours = 24

@@ -12,6 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "ID Robots", email = "support@openclawhardware.dev" }]
 dependencies = [
     "requests>=2.31",
+    # Cloud upload + list-objects against R2. Lazy-imported in clawkeep.s3
+    # so the rest of the package still imports without it; pinning >=1.34
+    # gets the SigV4 fix that matters on Cloudflare R2.
+    "boto3>=1.34",
     # Stdlib `tomllib` only exists on 3.11+. Backport for 3.10
     # (Jetson L4T still ships Python 3.10 as system default).
     'tomli>=2.0; python_version < "3.11"',

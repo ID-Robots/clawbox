@@ -41,11 +41,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to token file (default: $CLAWKEEP_DATA_DIR/token)",
     )
     parser.add_argument(
-        "--repo-pass-path",
-        default=str(token.default_repo_pass_path()),
-        help="Path to restic repo password file",
-    )
-    parser.add_argument(
         "--idle",
         action="store_true",
         help="Send an 'idle' heartbeat instead of running a backup",
@@ -76,12 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.idle:
         return runner.run_idle(cfg, bearer)
 
-    try:
-        repo_pass = token.read_or_create_repo_password(Path(args.repo_pass_path))
-    except (OSError, token.TokenError) as e:
-        log.error("repo-password error at %s: %s", args.repo_pass_path, e)
-        return 73  # EX_CANTCREAT — file system issue creating/reading the secret
-    return runner.run_once(cfg, bearer, repo_pass)
+    return runner.run_once(cfg, bearer)
 
 
 if __name__ == "__main__":
