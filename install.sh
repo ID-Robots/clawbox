@@ -625,6 +625,29 @@ PATHEOF
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
 }
 
+step_clawkeep_install() {
+  # Install (or refresh) the device-side ClawKeep Python package from the
+  # in-tree source. The user-runtime CLI lives at ~/.local/bin/clawkeep
+  # and ~/.local/bin/clawkeepd; without --force-reinstall, an existing
+  # install with the same version string ("0.1.0") would skip the upgrade
+  # and leave stale code on disk after a `git pull`.
+  if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
+    echo "  ClawKeep source missing; skipping"
+    return 0
+  fi
+  echo "  Installing ClawKeep CLI (pip --user --force-reinstall)"
+  if ! as_clawbox_login "python3 -m pip install --user --force-reinstall --no-deps '$PROJECT_DIR/clawkeep'"; then
+    echo "  Warning: clawkeep pip install failed (non-fatal — restore/scheduler will be unavailable)" >&2
+    return 0
+  fi
+  # Boto3 is the only runtime dep that isn't already on the device
+  # (huggingface-hub installs requests but not boto3). Install it
+  # separately so --no-deps above doesn't strand us.
+  as_clawbox_login "python3 -m pip install --user --upgrade 'boto3>=1.34'" \
+    || echo "  Warning: boto3 install failed (cloud backups will be unavailable until installed manually)" >&2
+  echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+}
+
 step_openclaw_patch() {
   # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
   # releases ship .d.ts declaration files alongside bundled JS, and literal
@@ -944,6 +967,11 @@ step_post_update() {
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
   step_vnc_refresh || echo "  Warning: vnc_refresh step failed (non-fatal)"
+  # Refresh the device-side ClawKeep CLI from the repo. The Python package
+  # has the same version string ("0.1.0") across releases, so a plain
+  # `pip install` is a no-op even after restore/scheduler bug fixes land —
+  # we have to force-reinstall.
+  step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
 }
 
 step_polkit_rules() {
@@ -1449,6 +1477,9 @@ step_rebuild_reboot() {
   step_ollama_install
   step_openclaw_patch
   step_openclaw_config
+  # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
+  # sees the new restore.py / scheduler logic.
+  step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
   do_rebuild
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
@@ -1536,6 +1567,9 @@ step_build
 
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup
+
+log "Installing ClawKeep CLI..."
+step_clawkeep_install
 
 log "Setting up directories, permissions and DNS..."
 step_setup_config

@@ -13,8 +13,11 @@ const exec = promisify(execFile);
 // directory atomically, their existing file handles still see the OLD
 // inodes, so we restart them so user-facing behaviour reflects the
 // restored state. clawbox-gateway is the only known consumer today;
-// add more here as we discover them.
-const RESTART_SERVICES = ["clawbox-gateway"];
+// add more here as we discover them. Names use the .service suffix so
+// they match the NOPASSWD sudoers rules in config/clawbox-sudoers
+// verbatim (sudoers Cmnd_Spec is exact-string, so "clawbox-gateway"
+// would NOT match "clawbox-gateway.service").
+const RESTART_SERVICES = ["clawbox-gateway.service"];
 
 // POST /setup-api/clawkeep/restore
 // Body: { name: "<timestamp>-openclaw-backup.tar.gz" }
