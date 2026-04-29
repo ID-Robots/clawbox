@@ -59,7 +59,29 @@ as_clawbox_login() {
   # can find the toolkit during `as_clawbox_login` invocations.
   local cuda_prefix=""
   [ -x /usr/local/cuda/bin/nvcc ] && cuda_prefix="/usr/local/cuda/bin:"
-  su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
+  su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
+}
+
+ensure_clawbox_bashrc_path() {
+  # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
+  # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
+  # codex, gemini, hf, and clawkeep resolve without a full path.
+  local BASHRC="$CLAWBOX_HOME/.bashrc"
+  if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
+    cat >> "$BASHRC" <<'PATHEOF'
+
+# npm global binaries (openclaw, codex, gemini) and user-local binaries (claude, hf, clawkeep)
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+PATHEOF
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
+  elif ! grep -q '\.local/bin' "$BASHRC" 2>/dev/null; then
+    cat >> "$BASHRC" <<'PATHEOF'
+
+# user-local binaries (claude, hf, clawkeep)
+export PATH="$HOME/.local/bin:$PATH"
+PATHEOF
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
+  fi
 }
 
 ensure_env_setting() {
@@ -612,16 +634,7 @@ step_openclaw_install() {
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
   fi
-  # Ensure ~/.npm-global/bin is in PATH for interactive shells
-  local BASHRC="$CLAWBOX_HOME/.bashrc"
-  if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" <<'PATHEOF'
-
-# npm global binaries (openclaw)
-export PATH="$HOME/.npm-global/bin:$PATH"
-PATHEOF
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
-  fi
+  ensure_clawbox_bashrc_path
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
 }
 
@@ -1260,6 +1273,11 @@ step_ai_tools_install() {
     as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"
     echo "  Gemini CLI installed"
   fi
+
+  # Make claude / codex / gemini resolvable in the in-UI terminal's interactive
+  # shell (covers the standalone `step_ai_tools_install` invocation path where
+  # step_openclaw_install hasn't run).
+  ensure_clawbox_bashrc_path
 }
 
 step_vnc_install() {
