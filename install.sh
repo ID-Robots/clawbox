@@ -648,8 +648,40 @@ step_clawkeep_install() {
     echo "  ClawKeep source missing; skipping"
     return 0
   fi
-  echo "  Installing ClawKeep CLI (pip --user --force-reinstall)"
-  if ! as_clawbox_login "python3 -m pip install --user --force-reinstall --no-deps '$PROJECT_DIR/clawkeep'"; then
+
+  # Jetson L4T ships pip 22.0.2 + setuptools 59.6.0. setuptools 59
+  # predates PEP 621 ([project] in pyproject.toml), and pip 22's build
+  # isolation is patched on Debian/Ubuntu in a way that lets the legacy
+  # egg_info path shadow the isolated modern setuptools — so building
+  # *any* PEP 621-only package on a fresh Jetson silently produces a
+  # `UNKNOWN-0.0.0.whl` with no console scripts. The ClawKeep "Setup
+  # needed — clawkeepd is not on $PATH" banner is that failure mode.
+  #
+  # Fix: bootstrap user-site pip + setuptools to modern versions first,
+  # then run the real install with that pip. After this runs once the
+  # device will have pip>=23 and setuptools>=68 in ~/.local/lib so every
+  # subsequent install — including the post-update rebuild — uses the
+  # working toolchain.
+  echo "  Bootstrapping user-site pip + setuptools (Jetson stock is too old for PEP 621)"
+  if ! as_clawbox_login "python3 -m pip install --user --upgrade --no-warn-script-location pip 'setuptools>=68' wheel"; then
+    echo "  Warning: failed to upgrade user-site pip/setuptools — falling back to system pip" >&2
+  fi
+
+  # Stale build/ + UNKNOWN.egg-info from a previous bad install would
+  # otherwise be re-picked up by the next build and produce another
+  # UNKNOWN wheel even with the modern toolchain in place. Also remove
+  # the broken UNKNOWN dist-info that the bad install registered in
+  # site-packages so pip's --force-reinstall has a clean slate.
+  rm -rf "$PROJECT_DIR/clawkeep/build" \
+         "$PROJECT_DIR/clawkeep/dist" \
+         "$PROJECT_DIR/clawkeep"/*.egg-info 2>/dev/null || true
+  as_clawbox_login "rm -rf \"$CLAWBOX_HOME\"/.local/lib/python3.*/site-packages/UNKNOWN-0.0.0.dist-info" \
+    >/dev/null 2>&1 || true
+
+  echo "  Installing ClawKeep CLI (pip --user --force-reinstall --use-pep517)"
+  # --use-pep517 is explicit so we never silently fall back to the legacy
+  # `setup.py install` path even if the pip-bootstrap above failed.
+  if ! as_clawbox_login "python3 -m pip install --user --force-reinstall --no-deps --use-pep517 '$PROJECT_DIR/clawkeep'"; then
     echo "  Warning: clawkeep pip install failed (non-fatal — restore/scheduler will be unavailable)" >&2
     return 0
   fi
@@ -658,6 +690,21 @@ step_clawkeep_install() {
   # separately so --no-deps above doesn't strand us.
   as_clawbox_login "python3 -m pip install --user --upgrade 'boto3>=1.34'" \
     || echo "  Warning: boto3 install failed (cloud backups will be unavailable until installed manually)" >&2
+
+  # Hard-fail on the symptom that produced the "Setup needed" popup: the
+  # `[project.scripts]` entry points must be present on disk after install.
+  # If they're missing the install silently produced a UNKNOWN-0.0.0 wheel
+  # (see comment above) — surface it here instead of letting the UI tell
+  # the user to run pip themselves.
+  local CLAWKEEPD_BIN="$CLAWBOX_HOME/.local/bin/clawkeepd"
+  if [ ! -x "$CLAWKEEPD_BIN" ]; then
+    echo "Error: clawkeep pip install completed but $CLAWKEEPD_BIN is missing." >&2
+    echo "       The build likely produced a UNKNOWN-0.0.0 wheel. Try:" >&2
+    echo "         rm -rf $PROJECT_DIR/clawkeep/build $PROJECT_DIR/clawkeep/*.egg-info" >&2
+    echo "         python3 -m pip install --user --upgrade pip 'setuptools>=68'" >&2
+    echo "       then re-run sudo bash install.sh." >&2
+    return 1
+  fi
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
 }
 

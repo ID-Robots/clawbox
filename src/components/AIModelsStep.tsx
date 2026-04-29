@@ -1903,7 +1903,11 @@ export default function AIModelsStep({
                 {CLAWAI_TIER_ORDER.map((tier) => {
                   const info = CLAWAI_TIER_INFO[tier];
                   const isActive = clawaiTier === tier;
-                  const ariaLabel = info.hasTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
+                  // Trial chip lives on the picker only for the Max tier;
+                  // Pro's chip moves into the orange plan card below so the
+                  // CTA reads as part of the plan body instead of a floater.
+                  const showPickerTrial = info.hasTrial && tier !== "flash";
+                  const ariaLabel = showPickerTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
                   return (
                     <button
                       type="button"
@@ -1919,7 +1923,7 @@ export default function AIModelsStep({
                       }`}
                     >
                       {info.pillLabel}
-                      {info.hasTrial && (
+                      {showPickerTrial && (
                         <span
                           aria-hidden="true"
                           className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_2px_8px_rgba(217,70,239,0.45)] whitespace-nowrap leading-none"
@@ -1949,7 +1953,7 @@ export default function AIModelsStep({
                       </span>
                       <span className="text-[11px] text-[var(--text-muted)]">{info.pricePeriod}</span>
                     </div>
-                    {info.hasTrial && clawaiTier === "pro" && (
+                    {info.hasTrial && (
                       <a
                         href={`${PORTAL_LOGIN_URL}/billing`}
                         target="_blank"

@@ -21,7 +21,6 @@ import ChatPopup from "@/components/ChatPopup";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
-import { FEATURE_FLAG_KEYS, isFeatureFlagEnabled } from "@/lib/feature-flags";
 import type { InstalledMeta } from "@/lib/store-categories";
 
 
@@ -159,13 +158,6 @@ function isClawAiProvider(provider: unknown): boolean {
   return normalized === "clawai" || normalized === "deepseek";
 }
 
-function isBuiltInAppEnabled(appId: string, featureFlags: Record<string, boolean>) {
-  if (appId === "clawkeep") {
-    return !!featureFlags[FEATURE_FLAG_KEYS.clawkeep];
-  }
-  return true;
-}
-
 function ChromeDesktopInner() {
   const { t } = useT();
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
@@ -173,25 +165,13 @@ function ChromeDesktopInner() {
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
   const [clawAiAuthenticated, setClawAiAuthenticated] = useState(false);
-  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({
-    [FEATURE_FLAG_KEYS.clawkeep]: false,
-  });
-  const featureFlagsRef = useRef(featureFlags);
-
-  useEffect(() => {
-    featureFlagsRef.current = featureFlags;
-  }, [featureFlags]);
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
     setSetupRequired(!data.setup_complete);
     const hasClawAi = isClawAiProvider(data.ai_model_provider) && !!data.ai_model_configured;
     setClawAiAuthenticated(hasClawAi);
-    setShowClawAiOfferNotification(
-      !!data.setup_complete &&
-      !hasClawAi &&
-      !!featureFlagsRef.current[FEATURE_FLAG_KEYS.clawkeep],
-    );
+    setShowClawAiOfferNotification(!!data.setup_complete && !hasClawAi);
     return data;
   }, []);
 
@@ -270,24 +250,17 @@ function ChromeDesktopInner() {
       .then(r => r.json())
       .then((data: Record<string, unknown>) => {
         prefsLoaded.current = true;
-        const clawkeepEnabled = isFeatureFlagEnabled(data[FEATURE_FLAG_KEYS.clawkeep]);
         // Wallpaper
         if (data.wp_id) setWallpaperId(String(data.wp_id));
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
         if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
-        setFeatureFlags({
-          [FEATURE_FLAG_KEYS.clawkeep]: clawkeepEnabled,
-        });
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
         // Desktop
         if (Array.isArray(data.desktop_apps)) {
-          const nextFlags = {
-            [FEATURE_FLAG_KEYS.clawkeep]: clawkeepEnabled,
-          };
-          setDesktopApps((data.desktop_apps as string[]).filter((appId) => isBuiltInAppEnabled(appId, nextFlags)));
+          setDesktopApps(data.desktop_apps as string[]);
         }
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
@@ -320,38 +293,10 @@ function ChromeDesktopInner() {
       .catch(() => { prefsLoaded.current = true; });
   }, []);
 
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<Record<string, unknown>>).detail ?? {};
-      setFeatureFlags((current) => ({
-        ...current,
-        [FEATURE_FLAG_KEYS.clawkeep]: isFeatureFlagEnabled(detail[FEATURE_FLAG_KEYS.clawkeep]),
-      }));
-    };
-    window.addEventListener("clawbox:feature-flags-changed", handler);
-    return () => window.removeEventListener("clawbox:feature-flags-changed", handler);
-  }, []);
-
-  useEffect(() => {
-    if (featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
-      setDesktopApps((current) => (current.includes("clawkeep") ? current : [...current, "clawkeep"]));
-      return;
-    }
-    setDesktopApps((current) => current.filter((appId) => appId !== "clawkeep"));
-    setOpenWindows((current) => current.filter((windowItem) => windowItem.appId !== "clawkeep"));
-    setShowClawAiOfferNotification(false);
-  }, [featureFlags]);
-
   const [clawkeepStale, setClawkeepStale] = useState(false);
   const [clawkeepBusy, setClawkeepBusy] = useState(false);
   const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
   useEffect(() => {
-    if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
-      setClawkeepStale(false);
-      setClawkeepBusy(false);
-      setClawkeepRestoring(false);
-      return;
-    }
     let aborted = false;
     let inFlight = false;
     const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -392,7 +337,7 @@ function ChromeDesktopInner() {
       aborted = true;
       window.clearInterval(id);
     };
-  }, [featureFlags]);
+  }, []);
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
@@ -965,7 +910,7 @@ function ChromeDesktopInner() {
       }
     }
     return [
-      ...apps.filter((app) => isBuiltInAppEnabled(app.id, featureFlags)),
+      ...apps,
       ...installedAppDefs,
       {
         id: "setup",
@@ -977,7 +922,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [featureFlags, installedApps, installedMeta]);
+  }, [installedApps, installedMeta]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -1225,16 +1170,12 @@ function ChromeDesktopInner() {
   }, []);
 
   const openClawKeepOrAiProvider = useCallback(() => {
-    if (!featureFlags[FEATURE_FLAG_KEYS.clawkeep]) {
-      openUpdateSettings();
-      return;
-    }
     if (clawAiAuthenticated) {
       openApp("clawkeep");
       return;
     }
     openClawAiProviderSettings();
-  }, [clawAiAuthenticated, featureFlags, openApp, openClawAiProviderSettings, openUpdateSettings]);
+  }, [clawAiAuthenticated, openApp, openClawAiProviderSettings]);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -2067,7 +2008,7 @@ function ChromeDesktopInner() {
         onTrayClick={() => {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
-        onClawKeepShieldClick={featureFlags[FEATURE_FLAG_KEYS.clawkeep] ? openClawKeepOrAiProvider : undefined}
+        onClawKeepShieldClick={openClawKeepOrAiProvider}
         clawkeepStatus={{ stale: clawkeepStale, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);

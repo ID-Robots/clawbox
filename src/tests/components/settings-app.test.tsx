@@ -86,7 +86,6 @@ describe("SettingsApp factory reset overlay", () => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
       const url = input.toString();
 
-      if (url.startsWith("/setup-api/preferences?keys=")) return jsonResponse({ ff_clawkeep_enabled: 0, ff_remote_control_enabled: 0 });
       if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
       if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
@@ -182,64 +181,4 @@ describe("SettingsApp factory reset overlay", () => {
     expect(providerRadio).toBeChecked();
   });
 
-  it("toggles feature flags from the About section when on the beta channel", async () => {
-    // Feature Flags panel is gated behind the beta channel — override the
-    // update-branch mock so beta is considered enabled on mount.
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
-      const url = input.toString();
-      if (url.startsWith("/setup-api/preferences?keys=")) return jsonResponse({ ff_clawkeep_enabled: 0, ff_remote_control_enabled: 0 });
-      if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
-      if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
-      if (url === "/setup-api/update/versions") {
-        return jsonResponse({
-          clawbox: { current: "v1.0.0", target: null },
-          openclaw: { current: "v1.0.0", target: null },
-        });
-      }
-      if (url === "/setup-api/system/update-branch") return jsonResponse({ branch: "beta" });
-      if (url === "/setup-api/wifi/status") return jsonResponse({ connected: false, ssid: null });
-      if (url === "/setup-api/system/hotspot") return jsonResponse({ enabled: true, ssid: "ClawBox-Setup" });
-      if (url === "/setup-api/ai-models/status") {
-        return jsonResponse({ connected: false, provider: null, providerLabel: null, mode: null, model: null });
-      }
-      if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
-      if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
-      if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
-      if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });
-      if (url === "/setup-api/telegram/status") return jsonResponse({ configured: false });
-      return jsonResponse({});
-    }));
-
-    render(<SettingsApp ui={defaultUi} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /Feature Flags/i }));
-
-    const panel = await screen.findByTestId("feature-flags-panel");
-    expect(within(panel).getByText("ClawKeep")).toBeInTheDocument();
-    expect(within(panel).getByText("Remote Control")).toBeInTheDocument();
-
-    const toggles = within(panel).getAllByRole("button", { pressed: false });
-    fireEvent.click(toggles[0]); // ClawKeep (first flag)
-
-    await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/preferences", expect.objectContaining({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ff_clawkeep_enabled: 1 }),
-      }));
-    });
-  });
-
-  it("hides the Feature Flags panel when the device is not on the beta channel", async () => {
-    render(<SettingsApp ui={defaultUi} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
-    // Beta is off (default mock returns branch: ""), so the panel's disclosure
-    // button shouldn't be in the DOM.
-    await waitFor(() => {
-      expect(screen.queryByRole("button", { name: /Feature Flags/i })).toBeNull();
-    });
-  });
 });
