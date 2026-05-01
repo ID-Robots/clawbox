@@ -234,7 +234,12 @@ test("backup click renders the result card on success", async ({ page }) => {
         paired: true,
         configured: true,
         encryptionConfigured: true,
-        snapshotCount: 0,
+        // lastBackupAtMs > 0 puts deriveProtection() into "protected"
+        // state, which surfaces the "Back up now" button. With it at 0
+        // the dashboard renders "Protect my OpenClaw" instead and the
+        // click locator times out.
+        lastBackupAtMs: Date.now() - 3_600_000,
+        snapshotCount: 1,
       }),
     ),
   );
