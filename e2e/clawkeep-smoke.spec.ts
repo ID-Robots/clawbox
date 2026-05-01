@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
+import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
 // Smoke coverage for ClawKeepApp. The fixme'd clawkeep-flow.spec.ts
