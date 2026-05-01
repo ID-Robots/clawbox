@@ -3,7 +3,9 @@
 import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
 import * as kv from '@/lib/client-kv'
 import { useT } from '@/lib/i18n'
-import { INSPIRATION_PHRASES, ensureFullPhraseSet, type MascotPhraseSet } from '@/lib/mascot-phrases'
+import { INSPIRATION_PHRASES, type MascotPhraseSet } from '@/lib/mascot-phrases'
+import { fetchUserName, fetchPhraseSet, pickNameGreeting } from '@/lib/mascot-client'
+import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -14,7 +16,7 @@ import { INSPIRATION_PHRASES, ensureFullPhraseSet, type MascotPhraseSet } from '
 // `/setup-api/mascot-lines`, refreshed weekly with daily top-ups based on
 // what the user actually works on. Inspiration is the cold-start fallback.
 
-type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy' | 'ultimate'
+type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
 const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: number }[] = [
   { state: 'waddle',    dur: [6000, 12000], weight: 45 },
   { state: 'idle',      dur: [3000, 5000],  weight: 15 },
@@ -32,77 +34,6 @@ const POWER_PARTICLES = [
   { bottom: 42, left: 76, duration: 1.5, delay: 0.55 },
   { bottom: 30, left: 108, duration: 1.35, delay: 0.95 },
 ]
-
-// 8 lightning bolts arranged radially around the crab during ultimate
-const ULTIMATE_BOLTS = [0, 45, 90, 135, 180, 225, 270, 315]
-
-// `ui_user_name` cache — fetched once on mount and on the
-// `clawbox-user-name-changed` event from Settings so the popups
-// pick up edits without a reload.
-let cachedUserName: string | null = null
-
-async function fetchUserName(): Promise<string | null> {
-  try {
-    const res = await fetch('/setup-api/preferences?keys=ui_user_name')
-    if (!res.ok) return cachedUserName
-    const data = await res.json()
-    const raw = data?.ui_user_name
-    if (typeof raw === 'string') {
-      const trimmed = raw.trim()
-      cachedUserName = trimmed.length > 0 ? trimmed : null
-    }
-  } catch { /* keep last cached value */ }
-  return cachedUserName
-}
-
-// Categorized phrase set (LLM-generated in user's language, refreshed
-// weekly with daily top-ups). Cached at module level so multiple mascot
-// instances on the page share one fetch. Falls back to inspiration
-// arrays from `mascot-phrases.ts` when the API hasn't responded yet.
-//
-// Cache is keyed by `${date}:${locale}` so a language switch doesn't
-// keep showing yesterday's English phrases until midnight, and so two
-// locales can coexist in cache (e.g. user toggles back and forth).
-interface PhraseCacheEntry {
-  phrases: MascotPhraseSet
-  snippets: string[]
-}
-const phraseCache = new Map<string, PhraseCacheEntry>()
-
-function cacheKey(locale: string): string {
-  const today = new Date().toISOString().slice(0, 10)
-  return `${today}:${locale}`
-}
-
-async function fetchPhraseSet(locale: string): Promise<PhraseCacheEntry> {
-  const key = cacheKey(locale)
-  const hit = phraseCache.get(key)
-  if (hit) return hit
-  // Last successful entry for this locale (any date) — used as the fallback
-  // value if today's fetch fails, so we don't regress to plain inspiration.
-  const stalest = [...phraseCache.entries()]
-    .filter(([k]) => k.endsWith(`:${locale}`))
-    .pop()?.[1] ?? { phrases: INSPIRATION_PHRASES, snippets: [] }
-  try {
-    const res = await fetch(`/setup-api/mascot-lines?locale=${encodeURIComponent(locale)}`)
-    if (!res.ok) return stalest
-    const data = await res.json() as { phrases?: Partial<MascotPhraseSet>; lines?: string[] }
-    const fresh: PhraseCacheEntry = {
-      phrases: ensureFullPhraseSet(data.phrases ?? null),
-      snippets: Array.isArray(data.lines) ? data.lines : [],
-    }
-    phraseCache.set(key, fresh)
-    return fresh
-  } catch {
-    return stalest
-  }
-}
-
-function pickNameGreeting(name: string, phrases: MascotPhraseSet): string {
-  const list = phrases.nameGreetings.length > 0 ? phrases.nameGreetings : INSPIRATION_PHRASES.nameGreetings
-  const tpl = list[Math.floor(Math.random() * list.length)]
-  return tpl.replace(/\{name\}/g, name)
-}
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void } = {}) {
   const { locale } = useT()
@@ -213,12 +144,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const [state, setState] = useState<MascotState>('idle')
   const [physicsActive, setPhysicsActive] = useState(false)
   const [frenzy, setFrenzy] = useState(false)
-  // Ultimate (gateway-loading) animation — true while OpenClaw gateway is not yet ready
-  const [ultimate, setUltimate] = useState(false)
-  const ultimateRef = useRef(false)
-  ultimateRef.current = ultimate
-  const wasUltimateRef = useRef(false)
-  const ultimateSpeechRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; duration: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
@@ -734,7 +659,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   const doAction = useCallback(() => {
     if (frozenRef.current) return // Don't start new actions while frozen
     if (isSleepingRef.current) return // No random actions while sleeping
-    if (ultimateRef.current) return // Hold the ultimate-charging stance while gateway is loading
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     const action = pickAction()
@@ -1029,7 +953,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       case 'dance': return 'mascot-dance 0.4s ease-in-out infinite'
       case 'facepalm': return 'mascot-facepalm 1s ease'
       case 'frenzy': return 'mascot-frenzy 0.5s ease-in-out infinite'
-      case 'ultimate': return 'mascot-ultimate 1.6s ease-in-out infinite'
       default: return crabOnBox ? 'mascot-powerup 1.5s ease-in-out infinite' : 'mascot-idle 3s ease-in-out infinite'
     }
   })()
@@ -1037,7 +960,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   // Freeze/unfreeze mascot (e.g. when chat popup is open) — enter power stance
   useEffect(() => {
     frozenRef.current = !!frozen
-    if (ultimateRef.current) return // Ultimate animation owns the state while it runs
     if (frozen) {
       // Stop all movement — stay in place (don't teleport to box)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
@@ -1063,232 +985,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     return () => { window.removeEventListener('clawbox-show-mascot', showHandler); window.removeEventListener('clawbox-hide-mascot', hideHandler) }
   }, [])
 
-  // Poll OpenClaw gateway health — flip into Ultimate animation while the LLM is not ready
-  useEffect(() => {
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const poll = async () => {
-      let available = false
-      try {
-        const res = await fetch('/setup-api/gateway/health', { signal: AbortSignal.timeout(3000), cache: 'no-store' })
-        if (res.ok) {
-          const data = await res.json()
-          available = !!data.available
-        }
-      } catch { /* gateway unreachable counts as still loading */ }
-      if (cancelled) return
-      setUltimate(!available)
-      // Poll fast while charging, slower once ready (gateway can still drop later)
-      timer = setTimeout(poll, available ? 15000 : 2500)
-    }
-    poll()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [])
-
-  // Ultimate lifecycle — drive the charging animation while gateway is loading
-  useEffect(() => {
-    if (ultimate) {
-      wasUltimateRef.current = true
-      // Cancel current actions; perch crab on the box and lock the ultimate stance
-      if (stateTimeout.current) clearTimeout(stateTimeout.current)
-      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
-      if (ultimateSpeechRef.current) { clearInterval(ultimateSpeechRef.current); ultimateSpeechRef.current = null }
-      onBoxRef.current = true
-      setCrabOnBox(true)
-      setBoxGlow(true)
-      const bx = boxXRef.current
-      xRef.current = bx
-      setX(bx)
-      setState('ultimate')
-      const ultimateLines = phrasesRef.current.ultimateLoading.length > 0
-        ? phrasesRef.current.ultimateLoading
-        : INSPIRATION_PHRASES.ultimateLoading
-      let idx = Math.floor(Math.random() * ultimateLines.length)
-      say(ultimateLines[idx], 3200)
-      ultimateSpeechRef.current = setInterval(() => {
-        idx = (idx + 1) % ultimateLines.length
-        say(ultimateLines[idx], 3200)
-      }, 3500)
-      return () => {
-        if (ultimateSpeechRef.current) { clearInterval(ultimateSpeechRef.current); ultimateSpeechRef.current = null }
-      }
-    }
-    // Exit ultimate — only celebrate if we actually entered it (skip the initial mount when gateway was already up)
-    if (!wasUltimateRef.current) return
-    if (ultimateSpeechRef.current) { clearInterval(ultimateSpeechRef.current); ultimateSpeechRef.current = null }
-    setBoxGlow(false)
-    setCrabOnBox(false)
-    onBoxRef.current = false
-    setState('celebrate')
-    say('🔥 ULTIMATE READY! ⚡', 2500)
-    if (stateTimeout.current) clearTimeout(stateTimeout.current)
-    stateTimeout.current = setTimeout(() => doActionRef.current(), 2500)
-  }, [ultimate, say, setX])
-
   if (!mounted) return null // avoid hydration mismatch — render only on client
   if (hidden) return null
 
   return (
     <>
-      <style>{`
-        @keyframes mascot-waddle {
-          0% { transform: translateY(0) rotate(0deg) scaleX(1); }
-          10% { transform: translateY(-6px) rotate(-6deg) scaleX(0.95); }
-          20% { transform: translateY(-2px) rotate(-3deg) scaleX(1); }
-          30% { transform: translateY(-8px) rotate(0deg) scaleX(0.95); }
-          40% { transform: translateY(-2px) rotate(3deg) scaleX(1); }
-          50% { transform: translateY(-6px) rotate(6deg) scaleX(0.95); }
-          60% { transform: translateY(-2px) rotate(3deg) scaleX(1); }
-          70% { transform: translateY(-8px) rotate(0deg) scaleX(0.95); }
-          80% { transform: translateY(-2px) rotate(-3deg) scaleX(1); }
-          90% { transform: translateY(-6px) rotate(-6deg) scaleX(0.95); }
-          100% { transform: translateY(0) rotate(0deg) scaleX(1); }
-        }
-        @keyframes mascot-idle {
-          0%, 100% { transform: translateY(0) rotate(0deg); }
-          50% { transform: translateY(-2px) rotate(1deg); }
-        }
-        @keyframes mascot-thinking {
-          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
-          20% { transform: translateY(-4px) rotate(-3deg) scale(1.02); }
-          40% { transform: translateY(-2px) rotate(3deg) scale(1); }
-          60% { transform: translateY(-6px) rotate(-2deg) scale(1.03); }
-          80% { transform: translateY(-3px) rotate(2deg) scale(1.01); }
-        }
-        @keyframes mascot-celebrate {
-          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
-          25% { transform: translateY(-12px) rotate(-12deg) scale(1.15); }
-          50% { transform: translateY(-18px) rotate(0deg) scale(1.2); }
-          75% { transform: translateY(-12px) rotate(12deg) scale(1.15); }
-        }
-        @keyframes mascot-sleep {
-          0%, 100% { transform: translateY(0) rotate(8deg) scale(0.95); }
-          50% { transform: translateY(3px) rotate(12deg) scale(0.93); }
-        }
-        @keyframes mascot-sass {
-          0%, 100% { transform: rotate(0deg) scale(1); }
-          20% { transform: rotate(-8deg) scale(1.05); }
-          40% { transform: rotate(6deg) scale(1); }
-          60% { transform: rotate(-3deg); }
-        }
-        @keyframes mascot-squish {
-          0% { transform: scaleY(1) scaleX(1); }
-          20% { transform: scaleY(0.6) scaleX(1.3); }
-          50% { transform: scaleY(1.3) scaleX(0.8); }
-          100% { transform: scaleY(1) scaleX(1); }
-        }
-        @keyframes mascot-look {
-          0%, 100% { transform: translateX(0) rotate(0deg); }
-          25% { transform: translateX(-6px) rotate(-5deg); }
-          75% { transform: translateX(6px) rotate(5deg); }
-        }
-        @keyframes mascot-dance {
-          0%, 100% { transform: translateY(0) rotate(0deg) scale(1); }
-          25% { transform: translateY(-8px) rotate(-15deg) scale(1.1); }
-          50% { transform: translateY(0) rotate(0deg) scale(1); }
-          75% { transform: translateY(-8px) rotate(15deg) scale(1.1); }
-        }
-        @keyframes mascot-facepalm {
-          0% { transform: rotate(0deg); }
-          30% { transform: rotate(-10deg) translateY(5px); }
-          60% { transform: rotate(-15deg) translateY(8px) scale(0.9); }
-          100% { transform: rotate(-10deg) translateY(3px) scale(0.95); }
-        }
-        @keyframes mascot-powerup {
-          0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); }
-          33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); }
-          66% { transform: translateY(-4px) scale(1.08) rotate(2deg); }
-        }
-        @keyframes mascot-frenzy {
-          0% { transform: translateY(0) rotate(0deg) scale(1.05); }
-          15% { transform: translateY(-8px) rotate(-8deg) scale(1.1); }
-          30% { transform: translateY(-2px) rotate(5deg) scale(1.05); }
-          45% { transform: translateY(-10px) rotate(-5deg) scale(1.1); }
-          60% { transform: translateY(-2px) rotate(7deg) scale(1.05); }
-          75% { transform: translateY(-8px) rotate(-7deg) scale(1.1); }
-          100% { transform: translateY(0) rotate(0deg) scale(1.05); }
-        }
-        @keyframes mascot-ultimate {
-          0% { transform: translateY(0) rotate(0deg) scale(1.12); filter: brightness(1.1) saturate(1.2); }
-          25% { transform: translateY(-10px) rotate(-3deg) scale(1.18); filter: brightness(1.4) saturate(1.4); }
-          50% { transform: translateY(-16px) rotate(0deg) scale(1.22); filter: brightness(1.7) saturate(1.5); }
-          75% { transform: translateY(-10px) rotate(3deg) scale(1.18); filter: brightness(1.4) saturate(1.4); }
-          100% { transform: translateY(0) rotate(0deg) scale(1.12); filter: brightness(1.1) saturate(1.2); }
-        }
-        @keyframes ultimate-aura {
-          0%, 100% { transform: translate(-50%, -50%) scale(0.7); opacity: 0.85; }
-          50% { transform: translate(-50%, -50%) scale(1.5); opacity: 0.15; }
-        }
-        @keyframes ultimate-ring {
-          0% { transform: translate(-50%, -50%) scale(0.4) rotate(0deg); opacity: 0.95; border-width: 6px; }
-          100% { transform: translate(-50%, -50%) scale(3.6) rotate(360deg); opacity: 0; border-width: 1px; }
-        }
-        @keyframes ultimate-bolt {
-          0%, 100% { opacity: 0; transform: rotate(var(--rot)) translateY(-60px) scale(0.5); }
-          25%, 75% { opacity: 1; }
-          50% { opacity: 1; transform: rotate(var(--rot)) translateY(-95px) scale(1.1); }
-        }
-        @keyframes ultimate-charge {
-          0% { transform: translate(0,0) scale(0); opacity: 1; }
-          100% { transform: translate(var(--cx), var(--cy)) scale(1.4); opacity: 0; }
-        }
-        @keyframes money-rain {
-          0% { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
-          30% { opacity: 1; }
-          100% { transform: translateY(-350px) rotate(720deg) scale(0.5); opacity: 0; }
-        }
-        @keyframes frenzy-ring {
-          0% { transform: translate(-50%, -50%) scale(0.3); opacity: 1; border-width: 4px; }
-          100% { transform: translate(-50%, -50%) scale(4); opacity: 0; border-width: 1px; }
-        }
-        @keyframes power-ring {
-          0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; border-width: 3px; }
-          100% { transform: translate(-50%, -50%) scale(2.5); opacity: 0; border-width: 1px; }
-        }
-        @keyframes power-particles {
-          0% { transform: translateY(0) scale(1); opacity: 1; }
-          100% { transform: translateY(-40px) scale(0); opacity: 0; }
-        }
-        @keyframes box-idle {
-          0%, 100% { transform: translateY(0) rotate(0deg); }
-          50% { transform: translateY(-2px) rotate(1deg); }
-        }
-        @keyframes box-bump-right {
-          0% { transform: translateX(-75px) translateY(0) rotate(0deg); }
-          20% { transform: translateX(-50px) translateY(-20px) rotate(90deg); }
-          40% { transform: translateX(-25px) translateY(-30px) rotate(200deg); }
-          60% { transform: translateX(-10px) translateY(-15px) rotate(300deg); }
-          80% { transform: translateX(-3px) translateY(-5px) rotate(345deg); }
-          100% { transform: translateX(0) translateY(0) rotate(360deg); }
-        }
-        @keyframes box-bump-left {
-          0% { transform: translateX(75px) translateY(0) rotate(0deg); }
-          20% { transform: translateX(50px) translateY(-20px) rotate(-90deg); }
-          40% { transform: translateX(25px) translateY(-30px) rotate(-200deg); }
-          60% { transform: translateX(10px) translateY(-15px) rotate(-300deg); }
-          80% { transform: translateX(3px) translateY(-5px) rotate(-345deg); }
-          100% { transform: translateX(0) translateY(0) rotate(-360deg); }
-        }
-        @keyframes damage-float {
-          0% { transform: translateY(0) scale(0.5); opacity: 1; }
-          20% { transform: translateY(-20px) scale(1.2); opacity: 1; }
-          100% { transform: translateY(-80px) scale(0.8); opacity: 0; }
-        }
-        @keyframes speech-pop {
-          0% { transform: scale(0); opacity: 0; }
-          60% { transform: scale(1.08); }
-          100% { transform: scale(1); opacity: 1; }
-        }
-        @keyframes think-dot {
-          0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
-          40% { transform: translateY(-8px); opacity: 1; }
-        }
-        @keyframes zzz-float {
-          0% { transform: translateY(0) translateX(0) scale(0.5) rotate(-10deg); opacity: 0; }
-          15% { opacity: 1; }
-          100% { transform: translateY(-80px) translateX(30px) scale(1.3) rotate(10deg); opacity: 0; }
-        }
-      `}</style>
+      <style>{MASCOT_KEYFRAMES}</style>
       <div ref={crabElRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -1307,17 +1009,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         cursor: 'grab',
         touchAction: 'none',
         willChange: 'transform, bottom, filter',
-        filter: ultimate
-          ? 'drop-shadow(0 0 28px rgba(251,191,36,0.95)) drop-shadow(0 0 14px rgba(168,85,247,0.7))'
-          : isSleeping
-            ? 'drop-shadow(0 0 10px rgba(147,197,253,0.3))'
-            : frenzy
-              ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
-              : thinking
-                ? 'drop-shadow(0 0 12px rgba(99,179,237,0.6))'
-                : crabOnBox
-                  ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
-                  : 'none',
+        filter: isSleeping
+          ? 'drop-shadow(0 0 10px rgba(147,197,253,0.3))'
+          : frenzy
+            ? 'drop-shadow(0 0 20px rgba(251,191,36,0.8))'
+            : thinking
+              ? 'drop-shadow(0 0 12px rgba(99,179,237,0.6))'
+              : crabOnBox
+                ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
+                : 'none',
       }}>
         {/* Body */}
         <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
@@ -1341,46 +1041,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
                   width: 80, height: 80, borderRadius: '50%',
                   border: '3px solid rgba(251,191,36,0.7)',
                   animation: `frenzy-ring 1s ease-out ${delay}s infinite`,
-                  pointerEvents: 'none',
-                }} />
-              ))}
-            </>
-          )}
-          {/* ULTIMATE — gateway loading: charging aura, rings, radial lightning bolts */}
-          {ultimate && (
-            <>
-              {/* Pulsing radiant aura */}
-              <div style={{
-                position: 'absolute', top: '50%', left: '50%',
-                width: 180, height: 180, borderRadius: '50%',
-                background: 'radial-gradient(circle, rgba(251,191,36,0.55) 0%, rgba(249,115,22,0.35) 45%, rgba(168,85,247,0) 75%)',
-                animation: 'ultimate-aura 1.4s ease-in-out infinite',
-                pointerEvents: 'none',
-                mixBlendMode: 'screen',
-              }} />
-              {/* Expanding rotating energy rings */}
-              {[0, 0.5, 1.0].map((delay, i) => (
-                <div key={`ult-ring-${i}`} style={{
-                  position: 'absolute', top: '50%', left: '50%',
-                  width: 70, height: 70, borderRadius: '50%',
-                  border: '4px solid rgba(251,191,36,0.85)',
-                  boxShadow: '0 0 14px rgba(251,191,36,0.7), inset 0 0 10px rgba(168,85,247,0.5)',
-                  animation: `ultimate-ring 1.6s ease-out ${delay}s infinite`,
-                  pointerEvents: 'none',
-                }} />
-              ))}
-              {/* Radial lightning bolts */}
-              {ULTIMATE_BOLTS.map((rot, i) => (
-                <div key={`ult-bolt-${i}`} style={{
-                  position: 'absolute', top: '50%', left: '50%',
-                  width: 6, height: 36,
-                  marginLeft: -3, marginTop: -18,
-                  transformOrigin: 'center center',
-                  ['--rot' as never]: `${rot}deg`,
-                  background: 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(251,191,36,1) 35%, rgba(168,85,247,0.9) 100%)',
-                  boxShadow: '0 0 10px rgba(251,191,36,0.95), 0 0 18px rgba(255,255,255,0.6)',
-                  clipPath: 'polygon(40% 0, 100% 35%, 55% 45%, 90% 100%, 0 60%, 45% 50%, 10% 0)',
-                  animation: `ultimate-bolt 1.1s ease-in-out ${(i * 0.08).toFixed(2)}s infinite`,
                   pointerEvents: 'none',
                 }} />
               ))}
@@ -1430,28 +1090,33 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
           </div>
         ))}
         {/* Speech bubble — OUTSIDE body div so it doesn't wobble */}
-        {speech && (
-          <div style={{
-            position: 'absolute', bottom: 155, left: 75,
-            transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
-            zIndex: 10,
-          }}>
+        {speech && (() => {
+          const bubbleBg = frenzy ? 'rgba(251,191,36,0.95)'
+            : state === 'sass' ? 'rgba(220,38,38,0.9)'
+            : state === 'facepalm' ? 'rgba(100,100,100,0.9)'
+            : 'rgba(249,115,22,0.92)'
+          return (
             <div style={{
-              background: ultimate ? 'rgba(168,85,247,0.95)' : frenzy ? 'rgba(251,191,36,0.95)' : state === 'sass' ? 'rgba(220,38,38,0.9)' : state === 'facepalm' ? 'rgba(100,100,100,0.9)' : 'rgba(249,115,22,0.92)',
-              color: frenzy ? '#000' : '#fff',
-              padding: (frenzy || ultimate) ? '10px 20px' : '8px 18px',
-              borderRadius: 12, fontSize: (frenzy || ultimate) ? '1.2rem' : '1.1rem', fontWeight: 700,
-              whiteSpace: 'nowrap',
-              lineHeight: 1.3,
-              animation: 'speech-pop 0.3s ease-out forwards',
-              boxShadow: ultimate ? '0 0 18px rgba(168,85,247,0.7)' : 'none',
-              textAlign: 'center' as const,
+              position: 'absolute', bottom: 155, left: 75,
+              transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
+              zIndex: 10,
             }}>
-              {speech}
-              <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${ultimate ? 'rgba(168,85,247,0.95)' : frenzy ? 'rgba(251,191,36,0.95)' : state === 'sass' ? 'rgba(220,38,38,0.9)' : state === 'facepalm' ? 'rgba(100,100,100,0.9)' : 'rgba(249,115,22,0.92)'}` }} />
+              <div style={{
+                background: bubbleBg,
+                color: frenzy ? '#000' : '#fff',
+                padding: frenzy ? '10px 20px' : '8px 18px',
+                borderRadius: 12, fontSize: frenzy ? '1.2rem' : '1.1rem', fontWeight: 700,
+                whiteSpace: 'nowrap',
+                lineHeight: 1.3,
+                animation: 'speech-pop 0.3s ease-out forwards',
+                textAlign: 'center' as const,
+              }}>
+                {speech}
+                <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${bubbleBg}` }} />
+              </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
         {/* ZZZ floating animation when sleeping */}
         {isSleeping && (
           <div style={{

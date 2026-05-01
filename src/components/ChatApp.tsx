@@ -14,6 +14,8 @@ import {
 
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
+import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { prettifyAssistantText } from '@/lib/chat-sentinels'
 
 const HISTORY_CACHE_KEY = 'clawbox-chat-history-v1'
 
@@ -35,42 +37,6 @@ function extractText(msg: unknown): string {
       .join('\n')
   }
   return ''
-}
-
-// Protocol sentinels the gateway/LLM sometimes emits as a standalone chat
-// reply (sibling of NO_REPLY, which we drop entirely). They have no signal
-// for the user, so we swap them for a fun mascot-style line — mix of
-// emoji and emoji-free entries so the chat doesn't feel emoji-spammy.
-//
-// Match ONLY transport-level sentinels with a clear protocol shape — i.e.
-// `HEARTBEAT` optionally followed by an underscored upper-case suffix
-// (HEARTBEAT_OK, HEARTBEAT_PONG, …). Earlier we also matched bare tokens
-// like "OK" / "DONE" / "ACK" — those are legitimate things a model might
-// reply to a user, so prettifying them was corrupting real chat history.
-const PROTOCOL_SENTINEL_RE = /^\s*HEARTBEAT(?:_[A-Z]+)?\s*$/
-const PROTOCOL_SENTINEL_REPLIES = [
-  'still here, scuttling around 🦀',
-  'all good, boss',
-  'pulse normal — claws warm',
-  '*waves a claw*',
-  'standing by 👂',
-  'reporting for duty',
-  'mhm. carry on.',
-  'box secured. crab secured.',
-  'I exist and I\'m vibing ✨',
-  'crab.exe responded successfully',
-  'you got it 👍',
-  'check, check — mic still works',
-  '*nods sagely*',
-  'I heard that, by the way 🦀',
-  'OK but make it cooler:',
-  'roger that 🛰️',
-  'yep, alive. promise.',
-  'system: somewhat caffeinated ☕',
-]
-function prettifyAssistantText(text: string): string {
-  if (!PROTOCOL_SENTINEL_RE.test(text)) return text
-  return PROTOCOL_SENTINEL_REPLIES[Math.floor(Math.random() * PROTOCOL_SENTINEL_REPLIES.length)]
 }
 
 interface ChatAppProps {
@@ -102,6 +68,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
+  const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [errorMsg, setErrorMsg] = useState('')
   const [pendingImages, setPendingImages] = useState<{ dataUrl: string; mimeType: string; base64: string }[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -255,6 +222,20 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           return
         }
 
+        // Tool-call lifecycle: surface a small inline pill above the
+        // streaming bubble so the user can see when the agent is invoking
+        // tools (bash, file ops, etc.). Mirrors ChatPopup.
+        if (eventName === 'agent') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (!payload) return
+          const sk = payload.sessionKey as string | undefined
+          if (sk && sk !== sessionKeyRef.current) return
+          if (payload.stream === 'tool') {
+            applyToolEvent(payload.data as Record<string, unknown> | undefined)
+          }
+          return
+        }
+
         if (eventName === 'chat') {
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
@@ -273,6 +254,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
             setStreaming('')
+            clearToolCalls()
             runIdRef.current = null
             setSending(false)
           } else if (state === 'aborted' || state === 'error') {
@@ -282,6 +264,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               }
               return ''
             })
+            clearToolCalls()
             runIdRef.current = null
             setSending(false)
             if (state === 'error') {
@@ -639,6 +622,8 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             </div>
           </div>
         ))}
+
+        <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
         {streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>

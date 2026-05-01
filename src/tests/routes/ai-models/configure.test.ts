@@ -159,7 +159,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
     // wiped by mockClear call history cleanup, so we seed them per-test.
-    mockApplyModelOverrideToAllAgentSessions.mockResolvedValue(undefined);
+    mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
     mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
     mockGetDefaultLlamaCppModel.mockReturnValue("gemma4-e2b-it-q4_0");
     mockGetLlamaCppContextWindow.mockReturnValue(131072);

@@ -20,8 +20,6 @@ export interface MascotPhraseSet {
   nameGreetings: string[]
   /** Single-word friendly placeholders used when `ui_user_name` is unset. */
   nameFallbacks: string[]
-  /** Cycled while the OpenClaw gateway is still warming up. */
-  ultimateLoading: string[]
 }
 
 export const INSPIRATION_PHRASES: MascotPhraseSet = {
@@ -79,25 +77,6 @@ export const INSPIRATION_PHRASES: MascotPhraseSet = {
     '*nudges {name}*',
   ],
   nameFallbacks: ['boss', 'captain', 'friend', 'human', 'partner', 'buddy', 'шефе', 'capitão'],
-  ultimateLoading: [
-    '⚡ CHARGING ULTIMATE...',
-    '🔋 POWERING UP THE CORE!',
-    '🌀 ULTIMATE INSTINCT LOADING',
-    '⚡ PLUS ULTRA INCOMING!',
-    '🔥 GENKI DAMA CHARGING...',
-    '🌌 SUMMONING THE GATEWAY!',
-    '💫 ULTIMATE FORM SYNCING...',
-    '⚡ КАМЕХАМЕЕЕЕХАААА!',
-    '🌪️ CHANNELING POWER...',
-    '🦀 ASCENDING TO MAXIMUM...',
-    '⚡ GATEWAY BOOTING — STAND BACK!',
-    '🔱 FINAL FORM LOADING...',
-    '🧠 WARMING UP THE BRAIN!',
-    '🌀 ULTRA CRAB MODE: 1%... 24%... 67%...',
-    '💎 ALMOST THERE...',
-    '⚡ HOLD MY CLAW!',
-    '🔥 LLM SPINNING UP — DO NOT DISTURB',
-  ],
 }
 
 export const PHRASE_CATEGORIES = Object.keys(INSPIRATION_PHRASES) as (keyof MascotPhraseSet)[]
@@ -133,7 +112,6 @@ export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undef
     facepalm: [...INSPIRATION_PHRASES.facepalm],
     nameGreetings: [...INSPIRATION_PHRASES.nameGreetings],
     nameFallbacks: [...INSPIRATION_PHRASES.nameFallbacks],
-    ultimateLoading: [...INSPIRATION_PHRASES.ultimateLoading],
   }
   if (!set) return merged
   for (const key of PHRASE_CATEGORIES) {

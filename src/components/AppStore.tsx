@@ -109,6 +109,7 @@ interface InstallProgress {
   appId: string;
   status: "installing" | "success" | "error";
   message?: string;
+  rateLimited?: boolean;
 }
 
 interface AppStoreProps {
@@ -275,9 +276,14 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       });
       const data = await res.json();
       if (!res.ok || (data.clawhub && !data.clawhub.success)) {
-        const errMsg = data.clawhub?.error || data.error || "Install failed";
-        setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: errMsg } }));
-        setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), 6000);
+        const rateLimited = !!data.clawhub?.rateLimited;
+        const errMsg = rateLimited
+          ? t("store.rateLimited")
+          : (data.clawhub?.error || data.error || t("store.installFailed"));
+        setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: errMsg, rateLimited } }));
+        // Linger longer on rate-limit so the user has time to read it before
+        // hitting Retry — the typical ClawHub bucket refills within ~10s.
+        setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), rateLimited ? 12000 : 6000);
         return;
       }
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
@@ -290,7 +296,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: msg } }));
       setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), 6000);
     }
-  }, [onInstall]);
+  }, [onInstall, t]);
 
   const categoryTabs = ["All", ...categories.map(c => c.name)];
   const categoryIdMap: Record<string, string> = {};

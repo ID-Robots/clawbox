@@ -14,6 +14,8 @@ import {
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
+import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { isSentinel } from '@/lib/chat-sentinels'
 
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const HISTORY_CACHE_KEY = 'clawbox-chatpopup-history-v1'
@@ -167,6 +169,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
+  const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
@@ -600,6 +603,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           return
         }
 
+        // Tool-call lifecycle: surface a small inline pill in the chat so
+        // the user can see "🔧 bash · running…" while the agent is acting.
+        if (eventName === 'agent') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (!payload) return
+          const sk = payload.sessionKey as string | undefined
+          if (sk && sk !== sessionKeyRef.current) return
+          if (payload.stream === 'tool') {
+            applyToolEvent(payload.data as Record<string, unknown> | undefined)
+          }
+          return
+        }
+
         if (eventName === 'chat') {
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
@@ -611,23 +627,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
           if (state === 'delta') {
             const text = extractText(msg)
-            if (text) { setStreaming(text); setReloadingSkill(false) }
+            // Sentinels would flash before the final-state filter drops them.
+            if (text && !isSentinel(text)) {
+              setStreaming(text); setReloadingSkill(false)
+            }
           } else if (state === 'final') {
             const text = extractText(msg)
-            if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
+            if (text && !isSentinel(text)) {
               setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
               saveMascotSnippet(text)
             }
             setStreaming('')
+            clearToolCalls()
             runIdRef.current = null
             setSending(false)
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
-              if (prev.trim() && !/^\s*NO_REPLY\s*$/.test(prev)) {
+              if (prev.trim() && !isSentinel(prev)) {
                 setMessages(msgs => [...msgs, { role: 'assistant', text: prev, timestamp: Date.now() }])
               }
               return ''
             })
+            clearToolCalls()
             runIdRef.current = null
             setSending(false)
             if (state === 'error') {
@@ -710,7 +731,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const role = (m.role as string)?.toLowerCase()
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
-        if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
+        if (!text || isSentinel(text)) continue
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
@@ -1475,6 +1496,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </div>
           );
         })}
+
+        {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
 
         {/* Streaming message */}
         {!reloadingSkill && streaming && (

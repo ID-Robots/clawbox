@@ -111,7 +111,7 @@ describe("POST /setup-api/llamacpp/install", () => {
     mockFs.writeFile.mockResolvedValue();
     mockFs.unlink.mockResolvedValue(undefined);
     mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
-    mockFs.stat.mockImplementation(async (target: string) => {
+    mockFs.stat.mockImplementation((async (target: unknown) => {
       const normalized = String(target);
       if (
         normalized === "/usr/local/bin/llama-server"
@@ -120,7 +120,7 @@ describe("POST /setup-api/llamacpp/install", () => {
         return { size: 1 } as never;
       }
       throw new Error("ENOENT");
-    });
+    }) as typeof fsp.stat);
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
       journalctl: { stdout: "", stderr: "" },
@@ -248,7 +248,7 @@ describe("POST /setup-api/llamacpp/install", () => {
 
     mockSpawn.mockReturnValue(createSpawnedProcess(12345));
     let pidReadCount = 0;
-    mockFs.readFile.mockImplementation(async (target: string) => {
+    mockFs.readFile.mockImplementation((async (target: unknown) => {
       if (String(target).endsWith("server.pid")) {
         pidReadCount += 1;
         if (pidReadCount === 1) {
@@ -257,8 +257,8 @@ describe("POST /setup-api/llamacpp/install", () => {
         return "12345\n";
       }
       throw new Error("ENOENT");
-    });
-    mockFs.stat.mockImplementation(async (target: string) => {
+    }) as typeof fsp.readFile);
+    mockFs.stat.mockImplementation((async (target: unknown) => {
       if (
         String(target) === "/usr/local/bin/llama-server"
         || String(target).endsWith("gemma-4-e2b-it-edited-q4_0.gguf")
@@ -269,7 +269,7 @@ describe("POST /setup-api/llamacpp/install", () => {
         return { size: Buffer.byteLength(runtimeError) } as never;
       }
       throw new Error("ENOENT");
-    });
+    }) as typeof fsp.stat);
     mockFs.open.mockResolvedValue({
       stat: vi.fn().mockResolvedValue({ size: Buffer.byteLength(runtimeError) }),
       read: vi.fn().mockImplementation(async (buffer: Buffer) => {

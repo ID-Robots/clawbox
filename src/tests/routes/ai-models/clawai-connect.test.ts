@@ -154,7 +154,7 @@ describe("ClawBox AI device-auth routes", () => {
     // within the test's await window — production goes through the real
     // configure pipeline which is what makes the request take ~50 s and
     // is exactly why we now run it off the poll's request lifecycle.
-    mockConfigurePost.mockResolvedValueOnce(new Response(null, { status: 200 }));
+    mockConfigurePost.mockResolvedValueOnce(new Response(null, { status: 200 }) as unknown as Awaited<ReturnType<typeof mockConfigurePost>>);
 
     const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
     const response = await mod.POST();

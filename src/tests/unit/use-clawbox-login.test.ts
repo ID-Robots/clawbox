@@ -29,7 +29,7 @@ describe("useClawboxLogin", () => {
       provider: "clawai",
       clawaiTier: "pro",
     }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     expect(result.current.loading).toBe(true);
@@ -49,7 +49,7 @@ describe("useClawboxLogin", () => {
       connected: true,
       provider: "openai",
       clawaiTier: null,
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -62,7 +62,7 @@ describe("useClawboxLogin", () => {
       connected: true,
       provider: "clawai",
       clawaiTier: null,
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -71,7 +71,7 @@ describe("useClawboxLogin", () => {
   });
 
   it("does not flip out of loading on a non-2xx response, but still leaves loggedIn=false", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue(new Response("nope", { status: 500 })) as typeof fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("nope", { status: 500 })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -79,7 +79,7 @@ describe("useClawboxLogin", () => {
   });
 
   it("gracefully handles fetch throwing (e.g. network down)", async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline")) as typeof fetch;
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline")) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -96,7 +96,7 @@ describe("useClawboxLogin", () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       new Promise<Response>((resolve) => { resolvers.push(resolve); })
     );
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     // Long interval so the next poll's setTimeout doesn't fire during the
     // assertion below. We never wait for it to elapse — we resolve the
@@ -129,7 +129,7 @@ describe("useClawboxLogin", () => {
         ? { provider: "openai", clawaiTier: null }
         : { provider: "clawai", clawaiTier: "flash" };
       return Promise.resolve(jsonResponse(body));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin(50));
     await waitFor(() => expect(result.current.loggedIn).toBe(true), { timeout: 2_000 });
@@ -146,7 +146,7 @@ describe("useClawboxLogin", () => {
     const pendingResolvers: Array<(r: Response) => void> = [];
     globalThis.fetch = vi.fn().mockImplementation(() =>
       new Promise<Response>((resolve) => { pendingResolvers.push(resolve); })
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { unmount } = renderHook(() => useClawboxLogin(20));

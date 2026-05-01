@@ -31,7 +31,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update";
+  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -41,6 +41,7 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
+  { id: "clawbox", name: "ClawBox", color: "#0a0f1a", type: "chat", pinned: true },
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
@@ -69,6 +70,19 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
         <path d="m101.6 67.733c0 18.704-15.163 33.867-33.867 33.867-18.704 0-33.867-15.163-33.867-33.867s15.163-33.867 33.867-33.867c18.704 0 33.867 15.163 33.867 33.867" fill="#fff"/>
         <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
       </svg>
+    );
+  }
+
+  if (id === "clawbox") {
+    // PNG ships with transparent padding, so a 1× render looks shrunk inside
+    // the tile. Scale up and let the flex parent center the overflow.
+    const scaled = Math.round(px * 2.5);
+    return (
+      <img
+        src="/clawbox-crab.png"
+        alt=""
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
     );
   }
 
@@ -258,9 +272,11 @@ function ChromeDesktopInner() {
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
-        // Desktop
+        // Merge new built-ins into the saved list so they appear without a factory reset.
         if (Array.isArray(data.desktop_apps)) {
-          setDesktopApps(data.desktop_apps as string[]);
+          const saved = data.desktop_apps as string[];
+          const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
+          setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
         }
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
@@ -937,6 +953,11 @@ function ChromeDesktopInner() {
 
     if (app.type === "external" && app.url) {
       window.open(app.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    if (app.type === "chat") {
+      setChatOpen(true);
       return;
     }
 

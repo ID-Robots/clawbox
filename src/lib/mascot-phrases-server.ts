@@ -179,8 +179,7 @@ Output ONLY a single JSON object, no prose, in this exact shape:
   "dance": [...],
   "facepalm": [...],
   "nameGreetings": [...],
-  "nameFallbacks": [...],
-  "ultimateLoading": [...]
+  "nameFallbacks": [...]
 }`;
 }
 

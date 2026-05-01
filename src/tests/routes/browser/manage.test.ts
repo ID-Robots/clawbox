@@ -80,10 +80,10 @@ describe("/setup-api/browser/manage", () => {
       vi.mocked(fs.readdir).mockResolvedValue([
         { name: "chromium-1180", isDirectory: () => true },
       ] as never);
-      vi.mocked(fs.access).mockImplementation(async (target: string) => {
-        if (target.includes("chrome-linux/chrome")) return undefined as never;
+      vi.mocked(fs.access).mockImplementation((async (target: unknown) => {
+        if (String(target).includes("chrome-linux/chrome")) return undefined as never;
         throw new Error("ENOENT");
-      });
+      }) as typeof fs.access);
       mockExec.mockImplementation(async (...args: unknown[]) => {
         const [command, commandArgs] = args as [string, string[]];
         if (String(command).includes("chrome-linux/chrome") && commandArgs[0] === "--version") {
