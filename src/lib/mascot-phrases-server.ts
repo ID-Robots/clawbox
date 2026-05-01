@@ -295,22 +295,35 @@ export function maybeRegenerateInBackground(): Promise<void> {
 /**
  * Force a full regen regardless of cache state. Returns the new phrase set,
  * or null if generation failed (caller should fall back to inspiration).
+ *
+ * Concurrent callers share a single in-flight generation — duplicate clicks
+ * from the Settings UI must not spawn parallel Ollama runs (the model on a
+ * Jetson is single-tenant and the second call would just queue + waste tokens).
  */
-export async function forceRegenerate(): Promise<MascotPhraseSet | null> {
-  const ctx = await gatherContext();
-  const model = await pickOllamaModel();
-  if (!model) return null;
-  const prompt = buildPrompt(ctx, "full");
-  const fresh = await callOllama(model, prompt);
-  if (!fresh) return null;
-  const now = Date.now();
-  writeCache({
-    phrases: fresh,
-    language: ctx.language,
-    lastFullRegen: now,
-    lastTopUp: now,
-  });
-  return fresh;
+let inFlightForceRegen: Promise<MascotPhraseSet | null> | null = null;
+export function forceRegenerate(): Promise<MascotPhraseSet | null> {
+  if (inFlightForceRegen) return inFlightForceRegen;
+  inFlightForceRegen = (async () => {
+    try {
+      const ctx = await gatherContext();
+      const model = await pickOllamaModel();
+      if (!model) return null;
+      const prompt = buildPrompt(ctx, "full");
+      const fresh = await callOllama(model, prompt);
+      if (!fresh) return null;
+      const now = Date.now();
+      writeCache({
+        phrases: fresh,
+        language: ctx.language,
+        lastFullRegen: now,
+        lastTopUp: now,
+      });
+      return fresh;
+    } finally {
+      inFlightForceRegen = null;
+    }
+  })();
+  return inFlightForceRegen;
 }
 
 /**

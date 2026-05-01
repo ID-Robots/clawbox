@@ -121,7 +121,20 @@ export const LANG_NAMES: Record<string, string> = {
  * an empty array (which would silently break random pick).
  */
 export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undefined): MascotPhraseSet {
-  const merged: MascotPhraseSet = { ...INSPIRATION_PHRASES }
+  // Clone every array off INSPIRATION_PHRASES so a returned set never aliases
+  // the module-level defaults — callers that mutate (e.g. shuffling, push) on
+  // category arrays must not corrupt the shared seed.
+  const merged: MascotPhraseSet = {
+    sass: [...INSPIRATION_PHRASES.sass],
+    idle: [...INSPIRATION_PHRASES.idle],
+    sleep: [...INSPIRATION_PHRASES.sleep],
+    jump: [...INSPIRATION_PHRASES.jump],
+    dance: [...INSPIRATION_PHRASES.dance],
+    facepalm: [...INSPIRATION_PHRASES.facepalm],
+    nameGreetings: [...INSPIRATION_PHRASES.nameGreetings],
+    nameFallbacks: [...INSPIRATION_PHRASES.nameFallbacks],
+    ultimateLoading: [...INSPIRATION_PHRASES.ultimateLoading],
+  }
   if (!set) return merged
   for (const key of PHRASE_CATEGORIES) {
     const incoming = set[key]
@@ -129,7 +142,7 @@ export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undef
       // For nameGreetings, only keep entries that contain the {name} token
       if (key === 'nameGreetings') {
         const valid = incoming.filter(s => typeof s === 'string' && s.includes('{name}'))
-        merged.nameGreetings = valid.length > 0 ? valid : INSPIRATION_PHRASES.nameGreetings
+        merged.nameGreetings = valid.length > 0 ? valid : [...INSPIRATION_PHRASES.nameGreetings]
         continue
       }
       const cleaned = incoming.filter(s => typeof s === 'string' && s.length > 0 && s.length < 120)

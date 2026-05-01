@@ -47,7 +47,10 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
       try {
         const res = await fetch("/setup-api/ai-models/status", { cache: "no-store" });
         if (!res.ok) {
-          if (!cancelled) setState((s) => ({ ...s, loading: false }));
+          // A non-2xx response means the device can't currently confirm the
+          // session — clear stale loggedIn/tier so callers don't keep gating
+          // open after a previously-good poll.
+          if (!cancelled) setState({ loggedIn: false, tier: null, loading: false });
           return;
         }
         const data = (await res.json()) as AiStatusResponse;
@@ -59,7 +62,8 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
           loading: false,
         });
       } catch {
-        if (!cancelled) setState((s) => ({ ...s, loading: false }));
+        // Network failure → fall closed, same reasoning as the !res.ok branch.
+        if (!cancelled) setState({ loggedIn: false, tier: null, loading: false });
       } finally {
         if (!cancelled) {
           timer = setTimeout(tick, intervalMs);

@@ -1606,7 +1606,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=20
+TOTAL_STEPS=22
 step=0
 log() {
   step=$((step + 1))

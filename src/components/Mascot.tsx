@@ -148,8 +148,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
   // bag immediately instead of after the next midnight cache expiry.
   const phrasesRef = useRef<MascotPhraseSet>(INSPIRATION_PHRASES)
   const sassLinesRef = useRef<string[]>(INSPIRATION_PHRASES.sass)
+  // Per-effect token so a slow fetch from a stale locale (e.g. en→bg→en in
+  // quick succession) can't overwrite the phrase set with the wrong language.
+  const phraseFetchTokenRef = useRef(0)
   useEffect(() => {
+    const myToken = ++phraseFetchTokenRef.current
     fetchPhraseSet(locale).then(({ phrases, snippets }) => {
+      if (myToken !== phraseFetchTokenRef.current) return
       phrasesRef.current = phrases
       sassLinesRef.current = snippets.length > 0 ? [...phrases.sass, ...snippets] : phrases.sass
     })

@@ -33,14 +33,24 @@ export async function GET() {
   const { phrases, meta } = getMascotPhrases();
 
   // Conversation snippets (existing behavior — preserved for back-compat).
+  // The KV blob is written by ChatPopup, but the file is human-editable, so
+  // validate the shape before assigning — a corrupted entry shouldn't crash
+  // the mascot route or feed bad data into the phrase generator.
   const raw = kvGet(KV_CONVO_KEY);
   let lines: string[] = [];
   let date: string | undefined;
   if (raw) {
     try {
-      const data = JSON.parse(raw) as { lines: string[]; date: string };
-      lines = data.lines || [];
-      date = data.date;
+      const data = JSON.parse(raw) as unknown;
+      if (data && typeof data === "object") {
+        const obj = data as Record<string, unknown>;
+        if (Array.isArray(obj.lines) && obj.lines.every((item) => typeof item === "string")) {
+          lines = obj.lines as string[];
+        }
+        if (typeof obj.date === "string") {
+          date = obj.date;
+        }
+      }
     } catch { /* ignore */ }
   }
 

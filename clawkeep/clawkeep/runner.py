@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -185,20 +186,31 @@ def run_once(cfg: Config, token: str) -> int:
         # call — we accumulate and persist at most every 250 ms. The final
         # write happens unconditionally after upload_file returns so the UI
         # always sees done == total at the moment we move to checking-stats.
+        #
+        # Thread safety: boto3's multipart upload invokes the progress callback
+        # from each part-uploader worker, so concurrent calls into
+        # _on_upload_progress are expected. The lock guards the read-modify-
+        # write of upload_bytes_done / last_save_ms and serialises state.save
+        # so two threads can't race on the JSON file.
         last_save_ms = 0
         SAVE_THROTTLE_MS = 250
+        progress_lock = threading.Lock()
 
         def _on_upload_progress(delta: int) -> None:
             nonlocal last_save_ms
-            st.upload_bytes_done += int(delta)
-            now = api.now_ms()
-            if now - last_save_ms >= SAVE_THROTTLE_MS:
-                last_save_ms = now
-                try:
-                    state.save(st)
-                except OSError as save_err:
-                    # Disk hiccup mid-upload shouldn't kill the upload itself.
-                    log.warning("upload progress save failed: %s", save_err)
+            with progress_lock:
+                st.upload_bytes_done += int(delta)
+                now = api.now_ms()
+                should_save = now - last_save_ms >= SAVE_THROTTLE_MS
+                if should_save:
+                    last_save_ms = now
+            if not should_save:
+                return
+            try:
+                state.save(st)
+            except OSError as save_err:
+                # Disk hiccup mid-upload shouldn't kill the upload itself.
+                log.warning("upload progress save failed: %s", save_err)
 
         try:
             s3.upload(

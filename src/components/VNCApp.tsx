@@ -385,13 +385,27 @@ export default function VNCApp() {
       }
       // Repair succeeded — reboot so the freshly-installed services start
       // cleanly. /setup-api/system/power triggers `systemctl reboot` after
-      // a 1.5s delay so the response reaches us first.
-      setRepairState("rebooting");
-      await fetch("/setup-api/system/power", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "restart" }),
-      }).catch(() => { /* the reboot itself will sever the connection */ });
+      // a 1.5s delay so the response reaches us first. Only flip into the
+      // "rebooting" state once the request is accepted; a 4xx/5xx here
+      // would otherwise leave the UI stuck on the rebooting spinner.
+      try {
+        const rebootRes = await fetch("/setup-api/system/power", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "restart" }),
+        });
+        if (!rebootRes.ok) {
+          const body = await rebootRes.json().catch(() => ({}));
+          setRepairError(body?.error || `Reboot request failed (HTTP ${rebootRes.status})`);
+          setRepairState("failed");
+          return;
+        }
+        setRepairState("rebooting");
+      } catch {
+        // The reboot itself severs the connection — treat transport errors
+        // as a successful reboot trigger and let the user wait it out.
+        setRepairState("rebooting");
+      }
     } catch (err) {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");
