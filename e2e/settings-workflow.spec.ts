@@ -48,6 +48,14 @@ test("settings covers appearance, network, local AI, telegram, system, and about
   await settingsWindow.getByRole("button", { name: /Connect$/ }).last().click();
   await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
 
+  // Navigate into the AI Provider section to mount the embedded
+  // AIModelsStep — covers the `embedded` render branch of the same
+  // 2200-line component that the wizard step renders in non-embedded
+  // mode. We don't commit here (the inline portal-token form is in
+  // flux); just visiting the section is enough to add bundle coverage.
+  await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
+  await expect(settingsWindow.getByText(/ClawBox AI|OpenAI GPT|Anthropic Claude/).first()).toBeVisible();
+
   await settingsWindow.getByRole("button", { name: "Local AI" }).click();
   await expect(settingsWindow.getByText("Gemma 4 Local")).toBeVisible();
   await expect(settingsWindow.getByText("gemma4-e2b-it-q4_0").first()).toBeVisible();

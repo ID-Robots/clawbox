@@ -306,31 +306,55 @@ test("restore modal: clicking a snapshot opens the confirm dialog", async ({ pag
   await page.keyboard.press("Escape");
 });
 
-test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {
+test("paired-without-encryption opens and submits the passphrase setup modal", async ({ page }) => {
   await setupDesktop(page);
 
+  let encryptionCalled = 0;
+  let encryptionConfigured = false;
   await page.route("**/setup-api/clawkeep", (route) =>
     fulfillJson(
       route,
       buildStatus({
         paired: true,
         configured: true,
-        encryptionConfigured: false,
+        encryptionConfigured,
         snapshotCount: 0,
       }),
     ),
   );
+  await page.route("**/setup-api/clawkeep/encryption", (route) => {
+    encryptionCalled += 1;
+    encryptionConfigured = true;
+    return fulfillJson(route, { ok: true });
+  });
+  await page.route("**/setup-api/clawkeep/backup", (route) =>
+    fulfillJson(route, {
+      ok: true,
+      exitCode: 0,
+      stdoutTail: "first backup\n",
+      stderrTail: "",
+    }),
+  );
 
   const clawkeep = await openClawkeep(page);
-  // Without encryption configured the dashboard's primary CTA is
-  // "Protect my OpenClaw" — clicking it opens the passphrase setup
-  // modal (SetPassphraseModal, ~180 lines of un-rendered subtree).
   await clawkeep.getByRole("button", { name: "Protect my OpenClaw" }).click();
 
-  // SetPassphraseModal renders a password input, a confirm input, and
-  // a save button. We don't fill it (the post-save flow is exercised
-  // by other tests' implicit branches); just asserting the modal
-  // mounted is enough to cover its render + useEffect setup.
+  // SetPassphraseModal mounts. Fill passphrase + confirm + the
+  // acknowledge checkbox so the submit button enables.
   const passwordInputs = clawkeep.locator('input[type="password"]');
   await expect(passwordInputs.first()).toBeVisible();
+  await passwordInputs.nth(0).fill("strong-passphrase-1234");
+  await passwordInputs.nth(1).fill("strong-passphrase-1234");
+  // The acknowledgement checkbox is the only checkbox in the modal.
+  await clawkeep.locator('input[type="checkbox"]').first().check();
+  // Submit via the form's primary save button (last button in the
+  // modal — the others are Cancel and Esc-only handlers).
+  const submitButtons = clawkeep.getByRole("button");
+  await submitButtons.last().click();
+
+  // The modal closes and the encryption endpoint was called exactly
+  // once — covers SetPassphraseModal's submit branch + onSaved
+  // callback chain.
+  await expect(passwordInputs.first()).toBeHidden({ timeout: 5_000 });
+  expect(encryptionCalled).toBe(1);
 });
