@@ -1,16 +1,13 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: this end-to-end workflow asserts a modal dialog (role="dialog"
-// name "ClawBox AI token setup") and the placeholder "Paste your portal
-// token here" — neither lives in the current AI Provider settings (the
-// portal-token form is inline with placeholder "Paste your portal token",
-// and there's no wrapping dialog). Re-enable once Settings → AI Provider
-// either grows that dialog or this test is rewritten to drive the inline
-// form. The non-AI portions of this workflow (appearance, network, local
-// AI, telegram, system, about) are otherwise green and worth keeping when
-// the test is unblocked.
-test.fixme("settings covers appearance, network, ai, local ai, telegram, system, and about flows", async ({ page }) => {
+// Drives appearance, network, local AI, telegram, system, and about
+// settings panels. The AI Provider panel is intentionally NOT exercised
+// here — its previous portal-token modal was replaced by an inline form
+// and the dialog-driven assertions in the original test went stale.
+// A focused AI-Provider test belongs in its own spec; until then this
+// test still gives us the bulk of SettingsApp's render coverage.
+test("settings covers appearance, network, local AI, telegram, system, and about flows", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -50,18 +47,6 @@ test.fixme("settings covers appearance, network, ai, local ai, telegram, system,
   await settingsWindow.getByPlaceholder("Enter WiFi password").fill("guest-pass");
   await settingsWindow.getByRole("button", { name: /Connect$/ }).last().click();
   await expect(settingsWindow.getByText("Guest Network").first()).toBeVisible();
-
-  await settingsWindow.getByRole("button", { name: "AI Provider" }).click();
-  await settingsWindow.getByRole("button", { name: /^Connect$/ }).click();
-  const clawAiDialog = page.getByRole("dialog", { name: "ClawBox AI token setup" });
-  await expect(clawAiDialog).toBeVisible();
-  const clawAiTokenInput = clawAiDialog.getByPlaceholder("Paste your portal token here");
-  await clawAiTokenInput.fill("cbx-test-token");
-  await clawAiTokenInput.press("Enter");
-  await expect(settingsWindow.getByText("deepseek-r1")).toBeVisible();
-  // Dialog auto-closes on successful config; verify provider status shows
-  await expect(settingsWindow.getByText("ClawBox AI").first()).toBeVisible();
-  await expect(settingsWindow.getByText("llama.cpp Local")).toHaveCount(0);
 
   await settingsWindow.getByRole("button", { name: "Local AI" }).click();
   await expect(settingsWindow.getByText("Gemma 4 Local")).toBeVisible();
