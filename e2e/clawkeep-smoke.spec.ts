@@ -86,16 +86,18 @@ test("clawkeep renders the pair card when the device is unpaired", async ({ page
   await page.route("**/setup-api/clawkeep", (route) => fulfillJson(route, buildStatus({ paired: false })));
 
   const clawkeep = await openClawkeep(page);
-  // Unpaired branch: the only button is the "Connect" CTA.
-  await expect(clawkeep.getByRole("button").first()).toBeVisible();
+  // The pair card's CTA is the only in-card button before pairing kicks
+  // off. Locating by accessible name avoids matching the chrome-window
+  // titlebar buttons (Minimize/Maximize/Close), which sit inside the
+  // same testid and would otherwise be picked up by getByRole("button").
+  await expect(clawkeep.getByRole("button", { name: "Pair with portal" })).toBeVisible();
 });
 
-test("clawkeep walks through the pair-start challenge and cancels", async ({ page }) => {
+test("clawkeep walks through the pair-start challenge", async ({ page }) => {
   await setupDesktop(page);
 
-  let paired = false;
   await page.route("**/setup-api/clawkeep", (route) =>
-    fulfillJson(route, buildStatus({ paired })),
+    fulfillJson(route, buildStatus({ paired: false })),
   );
   await page.route("**/setup-api/clawkeep/pair/start", (route) =>
     fulfillJson(route, {
@@ -116,13 +118,12 @@ test("clawkeep walks through the pair-start challenge and cancels", async ({ pag
   });
 
   const clawkeep = await openClawkeep(page);
-  await clawkeep.getByRole("button").first().click();
+  await clawkeep.getByRole("button", { name: "Pair with portal" }).click();
 
   // PairChallengeCard renders the device code in a select-all span — its
   // presence confirms the challenge subtree mounted (covers code-copy
   // useEffect, polling useEffect setup, and the challenge layout).
   await expect(clawkeep.getByText("ABCD-1234")).toBeVisible({ timeout: 5000 });
-  paired = false; // unchanged; just keep the type checker quiet about unused mut
 });
 
 test("clawkeep paired dashboard renders backup affordances and snapshot count", async ({ page }) => {
