@@ -3,23 +3,12 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import net from "net";
+import { isPortOpen } from "@/lib/port-probe";
 
 const execFileAsync = promisify(execFile);
 
 const VNC_PORT = Number(process.env.VNC_PORT || 5900);
 const WS_PORT = Number(process.env.VNC_WS_PORT || 6080);
-
-async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    socket.setTimeout(2000);
-    socket.on("connect", () => { socket.destroy(); resolve(true); });
-    socket.on("timeout", () => { socket.destroy(); resolve(false); });
-    socket.on("error", () => { socket.destroy(); resolve(false); });
-    socket.connect(port, host);
-  });
-}
 
 export async function GET() {
   try {

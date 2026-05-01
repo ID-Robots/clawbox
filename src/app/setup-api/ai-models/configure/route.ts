@@ -14,6 +14,7 @@ import {
   readConfig as readOpenClawConfig,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
+  setProviderPlugins,
 } from "@/lib/openclaw-config";
 import {
   getDefaultLlamaCppModel,
@@ -780,6 +781,14 @@ export async function POST(request: Request) {
           console.error("[configure] Failed to sweep session overrides:", err);
         }
       }
+    }
+
+    // 8b. Gate the anthropic plugin to only when the active primary provider
+    //     actually needs it. The plugin's tool schemas otherwise add several
+    //     seconds to every agent prep — see setProviderPlugins.
+    if (!isLocalScope || shouldPromoteLocalToPrimary) {
+      const primaryProvider = config.defaultModel.split("/", 1)[0];
+      await setProviderPlugins(primaryProvider);
     }
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model

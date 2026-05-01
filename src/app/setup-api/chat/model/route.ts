@@ -7,6 +7,7 @@ import {
   runOpenclawConfigSet,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
+  setProviderPlugins,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
@@ -451,6 +452,9 @@ export async function POST(request: Request) {
         // the open chat. Log and continue.
         console.error("[chat/model] Failed to sweep session overrides:", err);
       }
+      // 3. Gate the anthropic plugin to only when the new primary actually
+      //    needs it. Other plugins stay where they are.
+      await setProviderPlugins(parsed.provider);
     }
 
     await restartGateway();

@@ -4,20 +4,18 @@ import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 import * as kv from '@/lib/client-kv'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
-
-// ── Gateway WebSocket chat app ──
-// Full-window chat component (fills parent container).
-// Extracted from ChatPopup for use as a proper app window.
-
-interface ChatMessage {
-  role: 'user' | 'assistant' | 'system'
-  text: string
-  timestamp: number
-  images?: string[] // data URLs for display
-}
+import {
+  type ChatMessage,
+  loadCachedHistory,
+  saveCachedHistory,
+  mergeMessages,
+  uuid,
+} from '@/lib/chat-history-cache'
 
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
+
+const HISTORY_CACHE_KEY = 'clawbox-chat-history-v1'
 
 function extractText(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return ''
@@ -75,16 +73,6 @@ function prettifyAssistantText(text: string): string {
   return PROTOCOL_SENTINEL_REPLIES[Math.floor(Math.random() * PROTOCOL_SENTINEL_REPLIES.length)]
 }
 
-function uuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
-  })
-}
-
 interface ChatAppProps {
   onThinkingChange?: (thinking: boolean) => void
   hideHeader?: boolean
@@ -107,7 +95,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     setWelcomeDismissed(true)
     kv.set('clawbox-portal-welcome-dismissed', '1')
   }, [])
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Hydrate from cache synchronously on first render so refresh is instant
+  // even when the gateway is busy. mergeMessages takes over once chat.history
+  // arrives.
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadCachedHistory(HISTORY_CACHE_KEY))
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -123,6 +114,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  // Sends queued while status is 'connecting'. Drained by a useEffect when
+  // we transition to 'connected'. The optimistic user message is added to
+  // `messages` immediately so the UI feels responsive even though the
+  // gateway hasn't accepted the request yet.
+  const pendingSendsRef = useRef<Array<{
+    text: string
+    images: { mimeType: string; base64: string }[]
+    idempotencyKey: string
+  }>>([])
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
@@ -140,12 +140,17 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       const id = uuid()
       pendingRef.current.set(id, { resolve, reject })
       ws.send(JSON.stringify({ type: 'req', id, method, params }))
+      // 120s, not 30s: the gateway's main loop blocks for tens of seconds
+      // during agent startup (core-plugin-tools / system-prompt / stream-setup
+      // run synchronously). chat.send is documented as non-blocking but the
+      // ack still has to traverse that loop, so the client must be patient
+      // enough to outlast the worst observed stall (~81s on this device).
       setTimeout(() => {
         if (pendingRef.current.has(id)) {
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 30000)
+      }, 120000)
     })
   }, [])
 
@@ -323,11 +328,19 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      setMessages(chatMsgs)
+      // Merge so optimistic local messages from a queued send aren't dropped
+      // when the server snapshot doesn't yet contain them.
+      setMessages(prev => mergeMessages(chatMsgs, prev))
     } catch (err) {
       console.error('Failed to load history:', err)
     }
   }, [wsRequest])
+
+  // Persist transcript to localStorage whenever it changes. Cheap because
+  // saveCachedHistory trims to last 50 and strips images before serializing.
+  useEffect(() => {
+    saveCachedHistory(HISTORY_CACHE_KEY, messages)
+  }, [messages])
 
   // Handle file/image selection
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -350,6 +363,29 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     setPendingImages(prev => prev.filter((_, i) => i !== index))
   }, [])
 
+  const dispatchSend = useCallback(async (
+    text: string,
+    images: { mimeType: string; base64: string }[],
+    idempotencyKey: string,
+  ) => {
+    const params: Record<string, unknown> = {
+      sessionKey: sessionKeyRef.current,
+      message: text || 'What do you see in this image?',
+      deliver: false,
+      idempotencyKey,
+    }
+    if (images.length > 0) {
+      params.attachments = images.map(img => ({ mimeType: img.mimeType, content: img.base64 }))
+    }
+    try {
+      await wsRequest('chat.send', params)
+    } catch (err) {
+      setSending(false)
+      runIdRef.current = null
+      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+    }
+  }, [wsRequest])
+
   const sendMessage = useCallback(async () => {
     const text = input.trim()
     const hasImages = pendingImages.length > 0
@@ -370,27 +406,45 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
+    const wirePayload = imagesToSend.map(img => ({ mimeType: img.mimeType, base64: img.base64 }))
 
-    try {
-      const params: Record<string, unknown> = {
-        sessionKey: sessionKeyRef.current,
-        message: text || 'What do you see in this image?',
-        deliver: false,
-        idempotencyKey,
-      }
-      if (imagesToSend.length > 0) {
-        params.attachments = imagesToSend.map(img => ({
-          mimeType: img.mimeType,
-          content: img.base64,
-        }))
-      }
-      await wsRequest('chat.send', params)
-    } catch (err) {
-      setSending(false)
-      runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+    // If the WS handshake hasn't completed yet, queue the send instead of
+    // failing fast. The user's message is already in `messages` from the
+    // setMessages call above, so the chat looks responsive — the actual
+    // network call happens once status flips to 'connected'.
+    if (status !== 'connected') {
+      pendingSendsRef.current.push({ text, images: wirePayload, idempotencyKey })
+      return
     }
-  }, [input, sending, wsRequest, pendingImages])
+
+    await dispatchSend(text, wirePayload, idempotencyKey)
+  }, [input, sending, pendingImages, status, dispatchSend])
+
+  // Drain queued sends on connect; flush them as system errors on error.
+  // Sequential dispatch preserves user-typed order — chat.send acks fast
+  // (per OpenClaw docs the response streams asynchronously), but firing
+  // in parallel risks the gateway processing them out of order or
+  // collapsing distinct turns.
+  useEffect(() => {
+    if (pendingSendsRef.current.length === 0) return
+    if (status === 'connected') {
+      const queue = pendingSendsRef.current
+      pendingSendsRef.current = []
+      void (async () => {
+        for (const q of queue) {
+          await dispatchSend(q.text, q.images, q.idempotencyKey)
+        }
+      })()
+    } else if (status === 'error') {
+      const dropped = pendingSendsRef.current.length
+      pendingSendsRef.current = []
+      setMessages(msgs => [...msgs, {
+        role: 'system',
+        text: `Could not deliver ${dropped} queued message${dropped === 1 ? '' : 's'} — gateway is unreachable.`,
+        timestamp: Date.now(),
+      }])
+    }
+  }, [status, dispatchSend])
 
   const abort = useCallback(async () => {
     try {
@@ -484,7 +538,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       }}>
         <style>{`@keyframes chatapp-spin { to { transform: rotate(360deg) } } @keyframes chatapp-blink { 50% { opacity: 0 } } @keyframes chatapp-bounce-dot { 0%, 80%, 100% { transform: translateY(0) } 40% { transform: translateY(-5px) } }`}</style>
 
-        {status === 'connecting' && (
+        {status === 'connecting' && messages.length === 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
             <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite' }} />
             {t("chat.connectingGateway")}

@@ -520,6 +520,35 @@ export async function setTelegramToken(botToken: string): Promise<void> {
   await writeConfig(config);
 }
 
+// Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
+// provider. Every enabled plugin loads its tool schemas synchronously on
+// the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),
+// so leaving it on while the user is not using Claude is pure waste. Other
+// plugins (openai) are shared across providers and stay enabled. Pass the
+// provider segment of `agents.defaults.model.primary`.
+export async function setProviderPlugins(activeProvider: string): Promise<void> {
+  const wantAnthropic = activeProvider === "anthropic";
+  try {
+    const config = await readConfig();
+    const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
+      ?.entries?.anthropic?.enabled;
+    if (current === wantAnthropic) return;
+  } catch {
+    // Fall through and write — readConfig already swallows errors.
+  }
+  try {
+    await runOpenclawConfigSet(
+      ["plugins.entries.anthropic.enabled", wantAnthropic ? "true" : "false", "--json"],
+    );
+  } catch (err) {
+    // Non-fatal: the gateway will still work, just with the heavier prep cost.
+    console.warn(
+      "[openclaw-config] Failed to toggle anthropic plugin:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 export async function restartGateway(): Promise<void> {
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
