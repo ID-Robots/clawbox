@@ -94,6 +94,62 @@ describe("gateway-proxy", () => {
     });
   });
 
+  describe("getOrGenerateGatewayToken", () => {
+    const HEX_64 = /^[0-9a-f]{64}$/;
+
+    it("returns the existing on-disk token when it is a valid random value", async () => {
+      const stored = "a".repeat(64);
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: stored } },
+      }));
+
+      const token = await gatewayProxy.getOrGenerateGatewayToken();
+
+      expect(token).toBe(stored);
+    });
+
+    it("rotates the legacy literal 'clawbox' to a fresh random token", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: "clawbox" } },
+      }));
+
+      const token = await gatewayProxy.getOrGenerateGatewayToken();
+
+      expect(token).not.toBe("clawbox");
+      expect(token).toMatch(HEX_64);
+    });
+
+    it("generates a token when openclaw.json is missing", async () => {
+      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+
+      const token = await gatewayProxy.getOrGenerateGatewayToken();
+
+      expect(token).toMatch(HEX_64);
+    });
+
+    it("generates a token when the on-disk value is shorter than 32 chars", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: "short" } },
+      }));
+
+      const token = await gatewayProxy.getOrGenerateGatewayToken();
+
+      expect(token).not.toBe("short");
+      expect(token).toMatch(HEX_64);
+    });
+
+    it("returns distinct values across successive generation calls", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: "clawbox" } },
+      }));
+
+      const a = await gatewayProxy.getOrGenerateGatewayToken();
+      const b = await gatewayProxy.getOrGenerateGatewayToken();
+
+      expect(a).not.toBe(b);
+    });
+  });
+
   describe("serveGatewayHTML", () => {
     it("fetches and injects ClawBox bar", async () => {
       const mockFetch = vi.fn().mockResolvedValue({

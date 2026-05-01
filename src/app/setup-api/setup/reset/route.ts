@@ -5,6 +5,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 
 const execFile = promisify(execFileCb);
 
@@ -124,10 +125,13 @@ export async function POST() {
       console.warn(`[Reset] ${allFailures.length} file deletion(s) failed — continuing with reboot`);
     }
 
-    // 4. Seed minimal openclaw.json with token-based gateway auth
-    // (gateway.auth.mode="token", token="clawbox") so the gateway can still
-    // bind on LAN after reboot. This is a predictable recovery token; keep it
-    // only as a short-lived recovery default and replace it during setup.
+    // 4. Seed minimal openclaw.json with token-based gateway auth so the
+    // gateway can still bind on LAN after reboot. The token is a freshly
+    // generated 32-byte random hex per reset — earlier builds wrote the
+    // literal "clawbox", which is public via the open-source repo and let
+    // any LAN client connect straight to the gateway WS. The wizard reads
+    // this back on the next configure save (`getOrGenerateGatewayToken`)
+    // and reuses it.
     try {
       await fs.mkdir(OPENCLAW_DIR, { recursive: true });
       const seed = {
@@ -139,7 +143,7 @@ export async function POST() {
           },
         },
         gateway: {
-          auth: { mode: "token", token: "clawbox" },
+          auth: { mode: "token", token: crypto.randomBytes(32).toString("hex") },
           controlUi: {
             allowInsecureAuth: true,
             dangerouslyDisableDeviceAuth: true,
