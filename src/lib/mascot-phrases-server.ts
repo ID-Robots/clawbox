@@ -208,7 +208,22 @@ async function callOllama(model: string, prompt: string): Promise<MascotPhraseSe
     }
     const data = await res.json() as { response?: string };
     if (!data.response) return null;
-    const parsed = JSON.parse(data.response) as Partial<MascotPhraseSet>;
+    let parsed: Partial<MascotPhraseSet>;
+    try {
+      parsed = JSON.parse(data.response) as Partial<MascotPhraseSet>;
+    } catch (parseErr) {
+      // Distinguish a malformed model output from a network/transport
+      // failure — the former isn't a real error from our side, just the
+      // small local LLM occasionally producing non-JSON despite
+      // `format: "json"`. Logging both the raw response and the parse
+      // error makes triage straightforward.
+      console.error(
+        "[mascot-phrases] Ollama response JSON parse failed:",
+        parseErr instanceof Error ? parseErr.message : parseErr,
+        "raw:", data.response.slice(0, 500),
+      );
+      return null;
+    }
     return ensureFullPhraseSet(parsed);
   } catch (err) {
     console.error("[mascot-phrases] Ollama call failed:", err instanceof Error ? err.message : err);

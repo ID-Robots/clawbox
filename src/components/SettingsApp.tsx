@@ -11,6 +11,7 @@ import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
@@ -515,18 +516,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [userName, setUserName] = useState<string>("");
   const [userNameSaved, setUserNameSaved] = useState<string>("");
   const userNameSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track whether the user has touched the field locally — without this,
+  // a slow GET /preferences could resolve after the user already started
+  // typing and overwrite their input mid-keystroke.
+  const userNameEditedRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
     fetch("/setup-api/preferences?keys=ui_user_name")
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (cancelled || !data) return;
+        if (userNameEditedRef.current) return;
         const initial = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
         setUserName(initial);
         setUserNameSaved(initial);
       })
       .catch(() => { /* fall back to empty — user can still type one in */ });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // Cancel any debounce-pending POST so a tab-close or section-switch
+      // mid-debounce doesn't fire after the component is gone.
+      if (userNameSaveTimerRef.current) {
+        clearTimeout(userNameSaveTimerRef.current);
+        userNameSaveTimerRef.current = null;
+      }
+    };
   }, []);
   const persistUserName = useCallback((value: string) => {
     if (userNameSaveTimerRef.current) clearTimeout(userNameSaveTimerRef.current);
@@ -684,7 +698,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [copiedLocalUrl, setCopiedLocalUrl] = useState(false);
   const copyLocalUrl = async () => {
     if (!fullLocalUrl) return;
-    try { await navigator.clipboard.writeText(fullLocalUrl); setCopiedLocalUrl(true); setTimeout(() => setCopiedLocalUrl(false), 1500); } catch { /* clipboard blocked */ }
+    // Shared helper — falls back to the textarea + execCommand path on
+    // plain http origins (clawbox.local etc.) where the modern Clipboard
+    // API is blocked by the secure-context requirement.
+    if (await copyToClipboard(fullLocalUrl)) {
+      setCopiedLocalUrl(true);
+      setTimeout(() => setCopiedLocalUrl(false), 1500);
+    }
   };
 
   useEffect(() => {
@@ -1259,7 +1279,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 value={userName}
                 placeholder={t("settings.userName.placeholder")}
                 maxLength={40}
-                onChange={e => { setUserName(e.target.value); persistUserName(e.target.value); }}
+                onChange={e => {
+                  userNameEditedRef.current = true;
+                  setUserName(e.target.value);
+                  persistUserName(e.target.value);
+                }}
                 className="w-full rounded-xl bg-white/[0.04] border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[var(--coral-bright)]/60 focus:bg-white/[0.06]"
               />
               <p className="mt-2 text-[11px] text-[var(--text-muted)]">

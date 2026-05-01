@@ -177,19 +177,27 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
   // Pull the next category off the queue, fetch its apps, append the unseen
   // slugs. Idempotent against rapid-fire scroll triggers via loadingMore.
+  // The fetch is cancellable so a pending request from the previous
+  // category/search/filter resolves into setApps after the user has
+  // already moved on.
+  const loadMoreControllerRef = useRef<AbortController | null>(null);
   const loadMore = useCallback(async () => {
     if (loadingMore || loading) return;
     if (pendingCategories.length === 0) return;
     const nextCat = pendingCategories[0];
     setLoadingMore(true);
+    loadMoreControllerRef.current?.abort();
+    const ctrl = new AbortController();
+    loadMoreControllerRef.current = ctrl;
     try {
       const params = new URLSearchParams({
         limit: String(STORE_PAGE_LIMIT),
         category: nextCat,
       });
-      const res = await fetch(`${STORE_API}?${params}`);
+      const res = await fetch(`${STORE_API}?${params}`, { signal: ctrl.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: ApiResponse = await res.json();
+      if (ctrl.signal.aborted) return;
       const additions: StoreApp[] = [];
       for (const raw of data.apps) {
         if (seenSlugsRef.current.has(raw.slug)) continue;
@@ -200,17 +208,34 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         setApps(prev => [...prev, ...additions]);
       }
     } catch (err) {
-      console.error("[AppStore] load-more failed:", err);
+      // Aborts are expected (category/search changed mid-flight); only
+      // log genuine failures.
+      if ((err as { name?: string })?.name !== "AbortError") {
+        console.error("[AppStore] load-more failed:", err);
+      }
     } finally {
-      // Drop the just-fetched category regardless of outcome — retrying the
-      // same category in a tight scroll loop wastes round trips.
-      setPendingCategories(prev => prev.slice(1));
+      if (loadMoreControllerRef.current === ctrl) {
+        loadMoreControllerRef.current = null;
+      }
+      if (!ctrl.signal.aborted) {
+        // Drop the just-fetched category regardless of outcome — retrying
+        // the same category in a tight scroll loop wastes round trips.
+        setPendingCategories(prev => prev.slice(1));
+      }
       setLoadingMore(false);
     }
   }, [loading, loadingMore, pendingCategories]);
 
+  // Stable observer callback via ref — without this, the IntersectionObserver
+  // effect below was tearing down + rebuilding on every loadMore identity
+  // change (which is every pendingCategories slice). The ref keeps the
+  // observer attached to the same DOM node for the lifetime of the
+  // sentinel + scroll container.
+  const loadMoreRef = useRef(loadMore);
+  useEffect(() => { loadMoreRef.current = loadMore; }, [loadMore]);
+
   // IntersectionObserver against a sentinel just below the grid. Fires
-  // loadMore whenever the sentinel enters the scroll viewport.
+  // loadMore (via the ref) whenever the sentinel enters the scroll viewport.
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const root = scrollContainerRef.current;
@@ -218,12 +243,22 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     if (pendingCategories.length === 0) return;
     const obs = new IntersectionObserver((entries) => {
       if (entries.some(e => e.isIntersecting)) {
-        loadMore();
+        loadMoreRef.current();
       }
     }, { root, rootMargin: "400px" });
     obs.observe(sentinel);
     return () => obs.disconnect();
-  }, [loadMore, pendingCategories.length]);
+  }, [pendingCategories.length]);
+
+  // Cancel any in-flight load-more when the category/search filter changes
+  // — those filters reset `pendingCategories` upstream, and a stale
+  // response slipping into `setApps` would mix the old filter's apps in.
+  useEffect(() => {
+    return () => {
+      loadMoreControllerRef.current?.abort();
+      loadMoreControllerRef.current = null;
+    };
+  }, [category, search]);
 
   const requestInstall = useCallback((app: StoreApp) => {
     setConfirmInstall(app);

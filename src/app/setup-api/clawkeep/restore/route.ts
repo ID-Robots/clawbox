@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, runRestore } from "@/lib/clawkeep";
+import { ClawKeepError, RestoreNeedsPassphraseError, runRestore } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -34,8 +34,17 @@ export async function POST(request: NextRequest) {
         { status: 400, headers: { "Cache-Control": "no-store" } },
       );
     }
+    // Optional one-shot passphrase from the UI prompt — used when the
+    // device has no stored passphrase, or to retry after a wrong-password
+    // failure on a previous attempt. Empty string is treated as "not
+    // supplied" so a misbehaving form doesn't accidentally try to
+    // decrypt with an empty key.
+    const passphraseRaw = body.passphrase;
+    const passphrase = typeof passphraseRaw === "string" && passphraseRaw.length > 0
+      ? passphraseRaw
+      : undefined;
 
-    const result = await runRestore(name);
+    const result = await runRestore(name, { passphrase });
 
     // Best-effort service restart. Swallow individual failures — the
     // restore itself succeeded, and a manual `systemctl restart` is a
@@ -66,6 +75,15 @@ export async function POST(request: NextRequest) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
+    if (err instanceof RestoreNeedsPassphraseError) {
+      // Surface the structured "kind" so the UI can decide between
+      // "prompt for password" (passphrase_missing) and "show error +
+      // re-prompt" (wrong_password) without parsing the message string.
+      return NextResponse.json(
+        { error: err.message, kind: err.kind, needsPassphrase: true },
+        { status: err.status, headers: { "Cache-Control": "no-store" } },
+      );
+    }
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Restore failed" },

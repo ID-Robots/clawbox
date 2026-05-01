@@ -1,0 +1,34 @@
+[Unit]
+Description=ClawBox portal heartbeat ping
+After=clawbox-tunnel.service network-online.target clawbox-setup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Hit the tick endpoint on the local web app. The handler calls
+# pushHeartbeatTick(readTunnelUrl()) and returns immediately —
+# the actual portal POST happens in the Next.js process, not here,
+# so this curl is a cheap kick rather than a heavy request.
+ExecStart=/usr/bin/curl -fsS --max-time 10 http://127.0.0.1/setup-api/portal/heartbeat-tick
+# Don't fail the unit if the local app is briefly down — the next tick
+# will retry on the timer's normal cadence. Curl exit codes 7/22/28
+# = connection refused, HTTP error, timeout: all transient and
+# self-recovering, so we treat them as success at the unit level.
+SuccessExitStatus=0 7 22 28
+
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+# This unit runs nothing but curl against loopback. Keep the surface tight.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react'
 
 // ── Gateway WebSocket chat widget ──
 // Connects directly to the OpenClaw gateway, no iframe.
@@ -98,8 +98,8 @@ import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
 import {
   extractProviderModelId,
-  getProviderCatalog,
 } from '@/lib/provider-models'
+import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -181,6 +181,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Reset position and size when reopened
   useEffect(() => { if (isOpen) { setPos(null); setSize(DEFAULT_SIZE) } }, [isOpen])
+
+  // Provider id for the header model dropdown. Memoised on the active
+  // option so the catalog hook below only re-fetches when the provider
+  // actually changes — `chatModelState` is replaced on every status
+  // poll, so depending on the whole object would refetch the catalog
+  // on every poll tick.
+  const headerProvider = useMemo<string | null>(() => {
+    if (!chatModelState) return null
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    return activeOption?.provider ?? null
+  }, [chatModelState])
+  const chatProviderCatalog = useProviderCatalog(headerProvider)
 
   // Sync panel width from parent (handles async preferences load after mount)
   useEffect(() => {
@@ -1048,19 +1062,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           )}
           {(() => {
             // Inline model switcher: renders next to the provider dropdown
-            // whenever the active provider has multiple curated models.
+            // whenever the active provider has multiple available models.
             // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
             // variants, Gemini variants, or OpenRouter's 340+ models
             // mid-chat without opening Settings. If the current model
-            // isn't in our curated list (custom ID typed in Settings),
+            // isn't in the live catalog (custom ID typed in Settings),
             // we prepend it as a "Custom" entry so the select reflects
             // reality.
+            //
+            // The catalog is the live one from /setup-api/ai-models/catalog
+            // (kept in sync via the useEffect above), with the static
+            // fallback as cold-start render. Used to be a hand-curated
+            // array that rotted on every upstream rename — see the comment
+            // at the top of provider-models.ts for the migration history.
             if (!chatModelState) return null
             const activeOption = chatModelState.options.find(
               (option) => option.id === chatModelState.activeOptionId,
             )
             if (!activeOption?.provider) return null
-            const catalog = getProviderCatalog(activeOption.provider)
+            const catalog = chatProviderCatalog
             if (!catalog || catalog.models.length < 2) return null
             const activeModelId = extractProviderModelId(
               chatModelState.activeModel,

@@ -950,7 +950,32 @@ step_system_config() {
 }
 
 step_systemd_services() {
-  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service clawbox-tunnel.service)
+  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service clawbox-tunnel.service clawbox-heartbeat.service clawbox-heartbeat.timer)
+  # Drift guard: every *.service / *.timer in config/ must be in
+  # ALL_SERVICES, otherwise a new unit added to the repo would silently
+  # not get installed on fresh devices. The opposite direction (units
+  # listed but missing on disk) is caught by the per-file existence
+  # check below. (clawkeep/systemd/ is intentionally NOT covered: those
+  # units target a standalone ClawKeep deployment with a dedicated
+  # `clawkeep` user and /usr/bin/clawkeepd, which doesn't apply on
+  # ClawBox — the in-Next.js scheduler in src/lib/clawkeep-scheduler.ts
+  # drives backups on this device.)
+  local found_unit
+  for found_unit in "$PROJECT_DIR/config"/*.service "$PROJECT_DIR/config"/*.timer; do
+    [ -f "$found_unit" ] || continue
+    local basename
+    basename="$(basename "$found_unit")"
+    local registered=0
+    for svc in "${ALL_SERVICES[@]}"; do
+      if [ "$svc" = "$basename" ]; then registered=1; break; fi
+    done
+    if [ "$registered" = "0" ]; then
+      echo "Error: $basename exists in config/ but is not in ALL_SERVICES." >&2
+      echo "       Add it to step_systemd_services in install.sh so fresh installs pick it up." >&2
+      exit 1
+    fi
+  done
+
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"
@@ -967,11 +992,21 @@ step_systemd_services() {
   # device is unreachable until they SSH in or open the portal again. The
   # heartbeat hook only pushes URLs when a `claw_*` portal token is present,
   # so an unpaired box still won't leak a public URL into anyone's portal.
+  #
+  # clawbox-heartbeat.service itself is one-shot (no boot-time activation
+  # without the timer); it's the .timer that keeps the portal's lastSeenAt
+  # fresh. Skip the .service when iterating enable-targets — systemctl
+  # would only complain that a oneshot has no [Install] target — and pick
+  # the .timer up explicitly below.
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
     systemctl enable "$svc"
   done
+  # Start the heartbeat timer immediately so the portal sees the device
+  # transition to Online without waiting for the next reboot.
+  systemctl enable --now clawbox-heartbeat.timer
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)

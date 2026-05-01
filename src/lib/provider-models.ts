@@ -30,157 +30,68 @@ export interface ProviderCatalog {
   allowCustom: boolean;
 }
 
-// IMPORTANT: every `id` below must be a real model the provider's API
-// currently accepts. Invented/speculative slugs (e.g. guessing a version
-// that hasn't shipped) produce a 400 from the upstream and the chat
-// silently falls back to the local model. When adding entries, verify
-// against the provider's docs — don't guess based on marketing names.
+// COLD-START FALLBACK ONLY — the live catalog comes from
+// `/setup-api/ai-models/catalog?provider=<id>`, which proxies
+// `openclaw models list --provider <p> --all --json` (and OpenRouter's
+// own /api/v1/models endpoint for openrouter). The arrays below are
+// rendered ONLY when:
+//   * the picker is mounting and the async fetch hasn't returned yet, or
+//   * the catalog endpoint failed AND no cached payload was previously
+//     served (network blip on a fresh device).
 //
-// Anthropic direct API uses hyphen-dash versioning (claude-haiku-4-5),
-// OpenRouter mirrors with dot versioning (anthropic/claude-haiku-4.5),
-// and the two catalogs update at different cadences — OpenRouter
-// typically lags Anthropic by one release, so the latest Anthropic
-// flagship (Sonnet 4.6, Opus 4.7) may not be on OR yet.
-// Source: https://platform.claude.com/docs/en/docs/about-claude/models/overview
+// Hand-curated lists used to be the primary source and rotted every
+// time an upstream rename or deprecation shipped (gemini-2.0-flash,
+// claude-haiku-4-5 dash vs dot, grok-4-1-fast, gpt-5.4, …). The fix is
+// to make these short enough to keep current by sight (3-4 obviously
+// stable entries per provider) and let the live catalog fill in the
+// rest. If you find yourself adding the latest model here, stop —
+// that's the catalog route's job.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
-  {
-    id: "claude-haiku-4-5",
-    label: "Claude Haiku 4.5",
-    hint: "Fastest, near-frontier, cheap.",
-  },
-  {
-    id: "claude-sonnet-4-6",
-    label: "Claude Sonnet 4.6",
-    hint: "Default. Best speed + intelligence balance.",
-  },
-  {
-    id: "claude-opus-4-7",
-    label: "Claude Opus 4.7",
-    hint: "Most capable, complex reasoning, pricier.",
-  },
-  {
-    id: "claude-opus-4-6",
-    label: "Claude Opus 4.6",
-    hint: "Legacy flagship, still supported.",
-  },
-  {
-    id: "claude-sonnet-4-5",
-    label: "Claude Sonnet 4.5",
-    hint: "Legacy Sonnet, still supported.",
-  },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Default. Speed + intelligence." },
+  { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Most capable." },
 ] as const;
 
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
-  {
-    id: "gpt-5",
-    label: "GPT-5",
-    hint: "Flagship.",
-  },
-  {
-    id: "gpt-5-mini",
-    label: "GPT-5 Mini",
-    hint: "Cheap, very fast.",
-  },
-  {
-    id: "gpt-5-nano",
-    label: "GPT-5 Nano",
-    hint: "Cheapest, lightweight.",
-  },
+  { id: "gpt-5", label: "GPT-5", hint: "Flagship." },
+  { id: "gpt-5-mini", label: "GPT-5 Mini", hint: "Cheap, very fast." },
+  { id: "gpt-5-nano", label: "GPT-5 Nano", hint: "Cheapest, lightweight." },
 ] as const;
 
 // OpenAI ChatGPT subscription (Codex) models. Available when the user
-// authenticates via OAuth instead of pasting an API key. IDs verified
-// against `openclaw models list --provider openai-codex --all` — the
-// ChatGPT backend uses its own internal versioning separate from the
-// platform API (e.g. `gpt-5.4` here has no equivalent on api.openai.com).
+// authenticates via OAuth instead of pasting an API key. The ChatGPT
+// backend uses its own internal versioning separate from the platform
+// API (e.g. `gpt-5.4` exists here but not on api.openai.com).
+//
+// Trimmed to the last two generations — the live catalog shows the
+// rest. Earlier we shipped a long list including gpt-5.1-codex-max,
+// which "blew up" in chat for at least one user; the catalog route
+// (which checks tags="deprecated") and the gateway's own model-resolution
+// catch it now.
 export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
-  {
-    id: "gpt-5.4",
-    label: "GPT-5.4",
-    hint: "Default. ChatGPT flagship.",
-  },
-  {
-    id: "gpt-5.4-mini",
-    label: "GPT-5.4 Mini",
-    hint: "Fast, cheap.",
-  },
-  {
-    id: "gpt-5.4-pro",
-    label: "GPT-5.4 Pro",
-    hint: "Max reasoning.",
-  },
-  {
-    id: "gpt-5.3-codex",
-    label: "GPT-5.3 Codex",
-    hint: "Codex coding model.",
-  },
-  {
-    id: "gpt-5.3-codex-spark",
-    label: "GPT-5.3 Codex Spark",
-    hint: "Newer Codex variant.",
-  },
-  {
-    id: "gpt-5.2",
-    label: "GPT-5.2",
-    hint: "Prior flagship.",
-  },
-  {
-    id: "gpt-5.2-codex",
-    label: "GPT-5.2 Codex",
-    hint: "Coding-specialized.",
-  },
-  {
-    id: "gpt-5.1",
-    label: "GPT-5.1",
-    hint: "Legacy flagship.",
-  },
-  {
-    id: "gpt-5.1-codex-max",
-    label: "GPT-5.1 Codex Max",
-    hint: "Large-context coding.",
-  },
-  {
-    id: "gpt-5.1-codex-mini",
-    label: "GPT-5.1 Codex Mini",
-    hint: "Compact coding.",
-  },
+  { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. ChatGPT flagship." },
+  { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
+  { id: "gpt-5.4-pro", label: "GPT-5.4 Pro", hint: "Max reasoning." },
 ] as const;
 
-// Source: https://ai.google.dev/gemini-api/docs/models
-// 2.5 line is production; 3.x are preview (marked -preview in the ID).
-// Gemini 3 Pro has no `-pro` stable yet — the preview is what's shipping.
 export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
-  {
-    id: "gemini-2.5-flash",
-    label: "Gemini 2.5 Flash",
-    hint: "Default. Best price-performance.",
-  },
-  {
-    id: "gemini-2.5-flash-lite",
-    label: "Gemini 2.5 Flash-Lite",
-    hint: "Fastest, most budget-friendly.",
-  },
-  {
-    id: "gemini-2.5-pro",
-    label: "Gemini 2.5 Pro",
-    hint: "Complex reasoning and coding.",
-  },
-  {
-    id: "gemini-3-flash-preview",
-    label: "Gemini 3 Flash (preview)",
-    hint: "Frontier-class performance at Flash cost.",
-  },
-  {
-    id: "gemini-3.1-pro-preview",
-    label: "Gemini 3.1 Pro (preview)",
-    hint: "Advanced reasoning and agentic.",
-  },
-  {
-    id: "gemini-3.1-flash-lite-preview",
-    label: "Gemini 3.1 Flash-Lite (preview)",
-    hint: "Speed and efficiency optimized.",
-  },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "Default. Best price-performance." },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", hint: "Fastest, budget-friendly." },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", hint: "Complex reasoning." },
 ] as const;
+
+// Provider IDs the live-catalog route knows how to fetch from upstream
+// (`openclaw models list --provider <p>` for the first four; OpenRouter's
+// own /api/v1/models for the last). Single source of truth so the route's
+// allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
+// header dropdown all gate on the same set.
+export const CATALOG_PROVIDERS = ["anthropic", "openai", "openai-codex", "google", "openrouter"] as const;
+export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
+
+export function isCatalogProvider(provider: string | null | undefined): provider is CatalogProvider {
+  if (!provider) return false;
+  return (CATALOG_PROVIDERS as readonly string[]).includes(provider);
+}
 
 export const PROVIDER_CATALOGS = Object.freeze({
   anthropic: {
@@ -217,11 +128,103 @@ export const PROVIDER_CATALOGS = Object.freeze({
 
 type ProviderCatalogKey = keyof typeof PROVIDER_CATALOGS;
 
+/**
+ * Synchronous fallback catalog. Returns the cold-start arrays defined
+ * above so callers always have *something* to render before the live
+ * fetch resolves. Prefer {@link fetchProviderCatalog} in components —
+ * the live catalog from `/setup-api/ai-models/catalog` is the source
+ * of truth for routeable model IDs.
+ */
 export function getProviderCatalog(provider: string | null | undefined): ProviderCatalog | null {
   if (!provider) return null;
   return Object.prototype.hasOwnProperty.call(PROVIDER_CATALOGS, provider)
     ? PROVIDER_CATALOGS[provider as ProviderCatalogKey]
     : null;
+}
+
+interface CatalogApiModel {
+  id: string;
+  label: string;
+  hint?: string;
+  contextWindow: number;
+  input?: string;
+}
+
+interface CatalogApiResponse {
+  provider: string;
+  models: CatalogApiModel[];
+  defaultModelId: string;
+  allowCustom: boolean;
+  fetchedAt: number;
+  /** True when the route fell back to a stale cached payload because the
+   * upstream catalog query just failed; UI may want to show a warning. */
+  stale?: boolean;
+}
+
+/**
+ * Fetch the live model catalog for `provider` from the catalog route.
+ * The route proxies `openclaw models list --provider <p> --all --json`
+ * (and OpenRouter's own /api/v1/models endpoint for openrouter), so the
+ * returned list is by construction routeable through the gateway.
+ *
+ * On network failure or non-2xx response, returns the static fallback
+ * catalog so the picker still has *something* to show. Callers can
+ * detect a fallback render by comparing the returned `defaultModelId`
+ * to the live one — or by checking whether the call rejected (we
+ * resolve, not reject, on the fallback path so picker render stays
+ * synchronous).
+ */
+export async function fetchProviderCatalog(
+  provider: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<ProviderCatalog & { stale?: boolean }> {
+  const fallback = getProviderCatalog(provider);
+  try {
+    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`;
+    const res = await fetch(url, { signal: opts.signal, cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as CatalogApiResponse;
+    if (!body.models || body.models.length === 0) {
+      // Empty catalog — keep the fallback so the picker isn't blank.
+      if (fallback) return { ...fallback, stale: true };
+      throw new Error("empty catalog");
+    }
+    return {
+      provider,
+      models: body.models.map(({ id, label, hint }) => ({
+        id,
+        label: label || id,
+        // OpenRouter sometimes ships long descriptions; trim so the
+        // picker row doesn't blow up vertically.
+        hint: typeof hint === "string" ? hint.slice(0, 120) : "",
+      })),
+      defaultModelId: body.defaultModelId
+        || body.models[0].id
+        || fallback?.defaultModelId
+        || "",
+      allowCustom: body.allowCustom !== false,
+      stale: body.stale,
+    };
+  } catch (err) {
+    // AbortError isn't a real failure — the consumer cancelled because
+    // the provider changed. Re-throw so the caller's signal handler can
+    // discard the result without it falling back through to the static
+    // catalog (which would race the fresh provider's fetch and visibly
+    // flash the wrong list).
+    if ((err as { name?: string })?.name === "AbortError") {
+      throw err;
+    }
+    if (fallback) {
+      console.warn(
+        `[provider-models] catalog fetch failed for ${provider}, using fallback:`,
+        err instanceof Error ? err.message : err,
+      );
+      return { ...fallback, stale: true };
+    }
+    throw err;
+  }
 }
 
 /**

@@ -85,6 +85,13 @@ const PUBLIC_PREFIXES = [
 // SESSION_SECRET short-circuit below keeps the wizard fully functional.
 const PRE_AUTH_API_PATHS = new Set([
   "/setup-api/setup/status",
+  // Hit by the clawbox-heartbeat.timer systemd unit every 5 min via curl
+  // against loopback. The handler itself does no privileged work — it
+  // just nudges the in-process portal-heartbeat helper, which only POSTs
+  // to the portal when a `claw_*` token is already configured. Letting
+  // it through pre-auth keeps the timer working on a freshly-booted
+  // device before the user has logged in (or after they've logged out).
+  "/setup-api/portal/heartbeat-tick",
 ]);
 
 const PUBLIC_EXACT = new Set([

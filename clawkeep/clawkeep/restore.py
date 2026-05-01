@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import api, openclaw, s3
+from . import api, crypto, openclaw, passphrase, s3
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,22 @@ class RestoreResult:
 
 class RestoreError(Exception):
     pass
+
+
+class WrongPasswordError(RestoreError):
+    """Raised when the supplied passphrase fails to decrypt the archive.
+
+    Distinct from generic RestoreError so the CLI / API surface can map it
+    to a dedicated exit code (and the UI can prompt the user to re-enter
+    their password instead of giving up on the restore entirely).
+    """
+
+
+class PassphraseMissingError(RestoreError):
+    """Raised when the chosen archive is encrypted but no passphrase is
+    available — neither on disk nor passed by the caller. The UI handles
+    this by surfacing a password prompt.
+    """
 
 
 def _read_manifest_from_open(tf: tarfile.TarFile, archive_root: str) -> dict:
@@ -260,12 +276,109 @@ def _rollback_swaps(done: list[RestoredAsset], *, ts: int) -> list[str]:
     return errors
 
 
-def restore_snapshot(cfg: Config, token: str, snapshot_name: str) -> RestoreResult:
+def _plaintext_name_for(snapshot_name: str, *, staging_dir: Path | None = None) -> str:
+    """Strip the `.enc` suffix when present so the resulting name lands
+    on the post-decrypt `.tar.gz`. Callers that pass an already-plain
+    snapshot get a `.decrypted.tar.gz` suffix to keep it disambiguated
+    from the (defensively-renamed) ciphertext sibling on disk.
+
+    `staging_dir` is consulted when set: if the chosen plaintext name
+    already exists in that directory (e.g. a half-finished previous
+    restore got partially-cleaned), a numeric suffix is appended until
+    the name is unique. Prevents two concurrent restores or a retry
+    after a crash from silently overwriting an in-flight staging file.
+    """
+    if snapshot_name.endswith(crypto.ENCRYPTED_SUFFIX):
+        base = snapshot_name[: -len(crypto.ENCRYPTED_SUFFIX)]
+        suffix = ""
+    else:
+        base = snapshot_name
+        suffix = ".decrypted.tar.gz"
+
+    if staging_dir is None:
+        return base + suffix
+
+    candidate = base + suffix
+    if not (staging_dir / candidate).exists():
+        return candidate
+    # Collision — append `.<n>` before the .tar.gz suffix until free.
+    # Bounded probe so a permission error masquerading as "exists"
+    # doesn't spin forever.
+    for n in range(1, 1000):
+        if suffix:
+            probe = f"{base}.{n}{suffix}"
+        else:
+            # `base` already ends in .tar.gz; insert n before that suffix.
+            stem = base[: -len(".tar.gz")] if base.endswith(".tar.gz") else base
+            ext = ".tar.gz" if base.endswith(".tar.gz") else ""
+            probe = f"{stem}.{n}{ext}"
+        if not (staging_dir / probe).exists():
+            return probe
+    # Fall through with the bare candidate; the open-for-write that
+    # follows will surface the collision as a real error.
+    return candidate
+
+
+def _resolve_passphrase_file(
+    explicit_path: Path | None,
+    *,
+    encrypted: bool,
+) -> Path | None:
+    """Return the passphrase file to use for decryption, or None if the
+    archive is unencrypted (legacy `.tar.gz`).
+
+    Order of preference:
+      1. The caller's explicit path (the API route writes a 0600 tmpfile
+         from a one-shot UI prompt and passes it here).
+      2. The device-local stored passphrase, if present.
+      3. None — only valid when the archive isn't encrypted.
+
+    Raises PassphraseMissingError when an encrypted archive has no
+    passphrase available from either source; the UI handles that signal
+    by prompting and retrying with `explicit_path` set.
+    """
+    if not encrypted:
+        return None
+    if explicit_path is not None:
+        if not explicit_path.is_file():
+            raise PassphraseMissingError(
+                f"explicit passphrase file does not exist: {explicit_path}",
+            )
+        return explicit_path
+    if passphrase.is_set():
+        return passphrase.default_passphrase_path()
+    raise PassphraseMissingError(
+        "archive is encrypted but no passphrase is set on this device",
+    )
+
+
+def restore_snapshot(
+    cfg: Config,
+    token: str,
+    snapshot_name: str,
+    *,
+    passphrase_file: Path | None = None,
+) -> RestoreResult:
     """Top-level orchestrator. Raises RestoreError on any failure; the live
     state on disk is rolled back to its pre-restore form (atomic rename) if
     the swap step fails partway through.
+
+    `passphrase_file` is consulted first when the snapshot is encrypted —
+    typically a 0600 tmpfile written by the API route from a one-shot UI
+    prompt — falling back to the device-local stored passphrase. Pass
+    None for unencrypted (legacy) snapshots.
     """
-    if not snapshot_name.endswith(".tar.gz"):
+    # New-format archives always end in `.tar.gz.enc`; legacy ones end in
+    # `.tar.gz`. We accept either so a mixed-archive prefix is restorable.
+    if snapshot_name.endswith(crypto.ENCRYPTED_SUFFIX):
+        if not snapshot_name.endswith(".tar.gz" + crypto.ENCRYPTED_SUFFIX):
+            raise RestoreError(
+                f"expected .tar.gz{crypto.ENCRYPTED_SUFFIX} snapshot name, got {snapshot_name!r}",
+            )
+        is_encrypted_name = True
+    elif snapshot_name.endswith(".tar.gz"):
+        is_encrypted_name = False
+    else:
         raise RestoreError(f"expected a .tar.gz snapshot name, got {snapshot_name!r}")
 
     creds = api.mint_credentials(cfg.server, token)
@@ -276,6 +389,45 @@ def restore_snapshot(cfg: Config, token: str, snapshot_name: str) -> RestoreResu
         log.info("downloading snapshot %s", snapshot_name)
         s3.download(creds, object_name=snapshot_name, dest_path=archive_path)
         size = archive_path.stat().st_size
+
+        # Sniff the header — a legacy `.tar.gz` could in theory be an
+        # encrypted blob misnamed at upload time, and vice versa. The
+        # filename suffix is the primary signal; the magic check is a
+        # cheap belt-and-suspenders so we never feed openclaw a
+        # ciphertext to "verify".
+        header_says_encrypted = crypto.is_likely_encrypted(archive_path)
+        encrypted = is_encrypted_name or header_says_encrypted
+
+        if encrypted:
+            pw_file = _resolve_passphrase_file(passphrase_file, encrypted=True)
+            assert pw_file is not None  # encrypted=True guarantees this
+            decrypted_path = staging_dir / _plaintext_name_for(
+                snapshot_name, staging_dir=staging_dir,
+            )
+            log.info("decrypting %s (%d bytes)", archive_path, size)
+            try:
+                crypto.decrypt_file(
+                    ciphertext_path=archive_path,
+                    plaintext_path=decrypted_path,
+                    password_file=pw_file,
+                )
+            except crypto.CryptoError as e:
+                if crypto.is_bad_password_error(e):
+                    raise WrongPasswordError(
+                        "the passphrase did not decrypt this archive",
+                    ) from e
+                raise RestoreError(f"decryption failed: {e}") from e
+            # Drop the on-disk ciphertext now that we have the plaintext;
+            # re-running restore on a failure would just re-download it.
+            try:
+                archive_path.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — best effort
+                pass
+            archive_path = decrypted_path
+            size = archive_path.stat().st_size
+            # Fix up the snapshot name we feed to verify_archive / manifest
+            # readers below — they expect the plaintext form.
+            snapshot_name = archive_path.name
 
         log.info("verifying %s (%d bytes)", archive_path, size)
         try:

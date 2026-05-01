@@ -463,6 +463,39 @@ export async function POST(request: Request) {
     }
 
     // 1. Write token to auth-profiles.json
+    //
+    // ── AUDIT: schema-drift risk ───────────────────────────────────
+    // We construct the auth profile JSON inline and write it directly to
+    // ~/.openclaw/agents/main/agent/auth-profiles.json plus mirror the
+    // public metadata into openclaw.json via `openclaw config set
+    // auth.profiles.<key> {...}` (step 3 below). The canonical OpenClaw
+    // path is `openclaw onboard --auth-choice <provider>-api-key
+    // --<provider>-api-key <value> --non-interactive --accept-risk`
+    // (see `openclaw onboard --help` for the full --auth-choice list).
+    //
+    // If OpenClaw adds a required field to the auth-profile schema —
+    // e.g. a key-rotation timestamp or a per-key scope tag — our writes
+    // here will silently produce non-conformant profiles that the
+    // gateway then rejects with cryptic errors at chat time. The fix is
+    // to migrate each provider branch below to the `onboard` CLI:
+    //
+    //   * anthropic     → --auth-choice apiKey --anthropic-api-key
+    //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
+    //   * openai-codex  → --auth-choice openai-codex (OAuth flow)
+    //   * google        → --auth-choice gemini-api-key --gemini-api-key
+    //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
+    //   * deepseek      → no canonical onboard equivalent today; we use
+    //                     a custom proxy URL + DeepSeek-compatible API
+    //                     so direct write is unavoidable until OpenClaw
+    //                     ships a `--clawbox-ai-token` choice.
+    //   * ollama, llamacpp → onboard has --auth-choice ollama / lmstudio
+    //                     but we set baseUrl/model server-side from
+    //                     env-derived runtime config; not a 1:1 mapping.
+    //
+    // For now: keep the inline write but DO NOT add new fields here
+    // without first checking the gateway's auth-profile schema. If
+    // OpenClaw bumps the schema and we see profile-rejected errors in
+    // production, the migration target is `openclaw onboard`.
     {
       const authProfiles = await readAuthProfiles();
       if (isClawAI) {
@@ -666,9 +699,13 @@ export async function POST(request: Request) {
       // The `models` array drives model resolution: OpenClaw needs every
       // selectable id present here, otherwise mid-conversation switches
       // (curated or custom) fail silently because the runtime can't
-      // resolve the new slug. Seeding the full curated list here (plus
-      // the user-picked id, even if off-list) makes every in-UI option
-      // immediately routeable without a re-save.
+      // resolve the new slug. We seed with the user-picked id plus a
+      // tiny static fallback (cold-start coverage). The chat-header
+      // model switch in /setup-api/chat/model auto-extends this array
+      // when the user picks a model that isn't already in it, so we
+      // don't need to bake in OpenRouter's full 340+ catalogue at save
+      // time — that catalogue churns and the seed-everything strategy
+      // bit us four times during the original PR.
       //
       // We intentionally emit only `id` + `name`. contextWindow,
       // maxTokens, input modalities and cost are looked up from

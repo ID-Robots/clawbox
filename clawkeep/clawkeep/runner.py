@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import api, openclaw, s3, state
+from . import api, crypto, openclaw, passphrase, s3, state
 from .api import ApiError
 from .config import Config
 
@@ -30,6 +30,8 @@ EXIT_SERVER = 5
 EXIT_NETWORK = 6
 EXIT_OPENCLAW = 7   # `openclaw backup create` failed
 EXIT_UPLOAD = 8     # S3 PUT failed
+EXIT_NEED_PASSPHRASE = 9  # encryption is mandatory but no passphrase set on device
+EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, disk full, …)
 EXIT_UNKNOWN = 99
 
 # Backup phase identifiers — kept in lockstep with `STEP_LABELS` in
@@ -37,6 +39,7 @@ EXIT_UNKNOWN = 99
 # and read by the UI, so renaming requires a coordinated TS-side change.
 STEP_STARTING = "starting"
 STEP_ARCHIVING = "archiving"
+STEP_ENCRYPTING = "encrypting"
 STEP_UPLOADING = "uploading"
 STEP_CHECKING_STATS = "checking-stats"
 
@@ -125,6 +128,31 @@ def run_once(cfg: Config, token: str) -> int:
     """One full backup cycle. Returns a process exit code."""
     st = state.load()
 
+    # Encryption gate — refuse to run if no passphrase is set. The user-
+    # supplied passphrase is what makes backups opaque to the portal
+    # operator, so a missing one is a hard stop, not a warning. The UI
+    # detects this state from `lastHeartbeatStatus == "needs-passphrase"`
+    # and prompts for a passphrase before retrying.
+    if not passphrase.is_set():
+        log.error("encryption passphrase not set — refusing to back up")
+        ok = _heartbeat_safe(
+            cfg.server, token, status="error",
+            error="encryption passphrase not set on device",
+        )
+        # Use a distinct heartbeat status so the UI can distinguish
+        # "needs the user to set a password" from generic errors. The
+        # _stamp_heartbeat helper coerces non-"running" statuses to "error"
+        # by default; we override here to keep the original signal.
+        st.last_heartbeat_at_ms = api.now_ms()
+        st.last_heartbeat_status = "needs-passphrase" if ok else "error"
+        st.last_step = ""
+        st.last_step_at_ms = 0
+        st.upload_bytes_total = 0
+        st.upload_bytes_done = 0
+        st.upload_started_at_ms = 0
+        state.save(st)
+        return EXIT_NEED_PASSPHRASE
+
     try:
         creds = _retry_credentials(cfg.server, token)
     except ApiError as e:
@@ -171,13 +199,52 @@ def run_once(cfg: Config, token: str) -> int:
             state.save(st)
             return EXIT_OPENCLAW
 
+        # Encrypt the freshly-built tarball before it leaves the device.
+        # The encrypted file replaces the plaintext for the upload step;
+        # we wipe the plaintext immediately on success so a transient peek
+        # at the staging dir can't recover the unprotected archive.
+        _stamp_step(st, STEP_ENCRYPTING)
+        encrypted_path = archive.path.with_suffix(
+            archive.path.suffix + crypto.ENCRYPTED_SUFFIX,
+        )
+        try:
+            crypto.encrypt_file(
+                plaintext_path=archive.path,
+                ciphertext_path=encrypted_path,
+                password_file=passphrase.default_passphrase_path(),
+            )
+        except crypto.CryptoError as e:
+            log.error("clawkeep encryption failed: %s", e)
+            ok = _heartbeat_safe(
+                cfg.server, token, status="error", error=f"encrypt: {e}"[:500],
+            )
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_ENCRYPTION_FAILED
+
+        # The plaintext archive is no longer needed. Best-effort wipe before
+        # unlink — the runner's `finally` block also unlinks, but this gets
+        # the secret off disk earlier in the timeline.
+        try:
+            crypto.secure_unlink(archive.path)
+        except OSError as e:  # pragma: no cover — best effort
+            log.warning("plaintext wipe failed for %s: %s", archive.path, e)
+
+        # Refresh size after encryption — openssl's salted format adds a
+        # small header but ciphertext size is dominated by the (gzipped)
+        # plaintext, so this stays close to the original on disk.
+        try:
+            encrypted_size = encrypted_path.stat().st_size
+        except OSError as e:
+            raise s3.S3Error(f"could not stat encrypted archive: {e}") from e
+
         _stamp_step(st, STEP_UPLOADING)
         # Seed live upload-progress fields so the UI immediately switches from
         # the indeterminate "Uploading…" bar to a determinate one anchored at
         # 0/total. The progress callback below increments upload_bytes_done
         # and re-saves state, throttled so we don't write state.json hundreds
         # of times per second on multipart parts.
-        st.upload_bytes_total = int(archive.size_bytes)
+        st.upload_bytes_total = int(encrypted_size)
         st.upload_bytes_done = 0
         st.upload_started_at_ms = api.now_ms()
         state.save(st)
@@ -198,25 +265,30 @@ def run_once(cfg: Config, token: str) -> int:
 
         def _on_upload_progress(delta: int) -> None:
             nonlocal last_save_ms
+            # Hold the lock across the state.save too — `state.save` uses
+            # atomic-rename so the on-disk file is never torn, but two
+            # concurrent saves could still both stat the staging tmpfile
+            # under the same suffix and one's write be replaced by the
+            # other before the rename completes (per-pid + random suffix
+            # in state.py keeps that safe today, but we don't want the
+            # safety to depend on state.py's internal naming choice).
             with progress_lock:
                 st.upload_bytes_done += int(delta)
                 now = api.now_ms()
-                should_save = now - last_save_ms >= SAVE_THROTTLE_MS
-                if should_save:
-                    last_save_ms = now
-            if not should_save:
-                return
-            try:
-                state.save(st)
-            except OSError as save_err:
-                # Disk hiccup mid-upload shouldn't kill the upload itself.
-                log.warning("upload progress save failed: %s", save_err)
+                if now - last_save_ms < SAVE_THROTTLE_MS:
+                    return
+                last_save_ms = now
+                try:
+                    state.save(st)
+                except OSError as save_err:
+                    # Disk hiccup mid-upload shouldn't kill the upload itself.
+                    log.warning("upload progress save failed: %s", save_err)
 
         try:
             s3.upload(
                 creds,
-                archive_path=archive.path,
-                object_name=archive.path.name,
+                archive_path=encrypted_path,
+                object_name=encrypted_path.name,
                 progress_cb=_on_upload_progress,
             )
         except s3.S3Error as e:
@@ -268,9 +340,9 @@ def run_once(cfg: Config, token: str) -> int:
         state.save(st)
 
         log.info(
-            "backup ok: archive=%s (%d bytes); cloud=%s/%d, snapshots=%s",
-            archive.path.name,
-            archive.size_bytes,
+            "backup ok: archive=%s (encrypted %d bytes); cloud=%s/%d, snapshots=%s",
+            encrypted_path.name,
+            encrypted_size,
             cloud.cloud_bytes if cloud is not None else "?",
             creds.quotaBytes,
             cloud.snapshot_count if cloud is not None else "?",
@@ -281,11 +353,21 @@ def run_once(cfg: Config, token: str) -> int:
         # Always clean up the local archive — devices have ~32GB of disk
         # and we don't want every run to leave a 300MB tarball behind.
         # If staging is ephemeral (default), nuke the whole tmpdir.
+        # Both the plaintext (already wiped above on the happy path, but
+        # may still exist on a failure between archive create and encrypt)
+        # and the ciphertext get cleaned up here.
         if archive is not None:
             try:
                 archive.path.unlink(missing_ok=True)
             except OSError as e:
                 log.warning("failed to remove staging archive %s: %s", archive.path, e)
+            enc_candidate = archive.path.with_suffix(
+                archive.path.suffix + crypto.ENCRYPTED_SUFFIX,
+            )
+            try:
+                enc_candidate.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("failed to remove encrypted archive %s: %s", enc_candidate, e)
         if ephemeral:
             try:
                 staging.rmdir()

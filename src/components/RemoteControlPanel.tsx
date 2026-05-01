@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
+import { copyToClipboard } from "@/lib/clipboard";
 
 interface TunnelInfo {
   installed: boolean;
@@ -161,11 +162,17 @@ export default function RemoteControlPanel() {
 
   const copyUrl = async () => {
     if (!status?.tunnel.url) return;
-    try {
-      await navigator.clipboard.writeText(status.tunnel.url);
+    // Use the shared helper — it tries `navigator.clipboard.writeText`
+    // first (only works on https/localhost), then falls back to the
+    // legacy textarea + execCommand path that *does* work on plain
+    // http origins like http://clawbox.local. Without the fallback the
+    // device's own LAN URL would always show "browser blocked clipboard
+    // access" because the secure-context check rejects the modern API.
+    const ok = await copyToClipboard(status.tunnel.url);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       setError(t("remoteControl.copyFailed"));
     }
   };
@@ -207,9 +214,7 @@ export default function RemoteControlPanel() {
             </div>
             <div className="flex-1">
               <div className="text-sm font-medium text-[var(--text-primary)] mb-0.5">{t("remoteControl.tunnelNotInstalled")}</div>
-              <div className="text-xs text-[var(--text-muted)]">
-                Cloudflare Tunnel isn&apos;t installed yet. One click installs it now — no terminal needed.
-              </div>
+              <div className="text-xs text-[var(--text-muted)]">{t("remoteControl.tunnelInstallDesc")}</div>
             </div>
           </div>
           {installError && (
@@ -230,12 +235,12 @@ export default function RemoteControlPanel() {
             {installState === "installing" ? (
               <>
                 <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
-                Installing… (a few minutes)
+                {t("remoteControl.tunnelInstalling")}
               </>
             ) : (
               <>
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
-                Install Cloudflare Tunnel
+                {t("remoteControl.tunnelInstallButton")}
               </>
             )}
           </button>

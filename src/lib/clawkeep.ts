@@ -17,6 +17,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +30,7 @@ export const CLAWKEEP_CONFIG_PATH =
   process.env.CLAWKEEP_CONFIG_PATH?.trim() || path.join(CLAWKEEP_DATA_DIR, "config.toml");
 
 const TOKEN_PATH = path.join(CLAWKEEP_DATA_DIR, "token");
+const PASSPHRASE_PATH = path.join(CLAWKEEP_DATA_DIR, "passphrase");
 const STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "state.json");
 // Marker that a restore is in flight. The restore handler creates it
 // before invoking the Python CLI and removes it when done so the shelf
@@ -67,7 +69,11 @@ idle_interval_hours = 24
 // Typed so callers reading `lastHeartbeatStatus` get an enum-like surface
 // without us having to ship a runtime constant into the client bundle
 // (clawkeep.ts uses node:fs and isn't safe to import from a client file).
-export type HeartbeatStatus = "" | "running" | "ok" | "error" | "idle";
+//
+// "needs-passphrase" is the daemon's signal that encryption is mandatory
+// but no passphrase is set on the device — the UI shows a "Set passphrase"
+// modal in response and re-runs the backup once the user supplies one.
+export type HeartbeatStatus = "" | "running" | "ok" | "error" | "idle" | "needs-passphrase";
 
 export type ScheduleFrequency = "daily" | "weekly";
 
@@ -112,6 +118,10 @@ export interface ClawKeepStatus {
   schedule: ClawKeepSchedule;
   /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
   nextRunAtMs: number;
+  /** True when the device-local passphrase file is present (and non-empty).
+   * `paired && !encryptionConfigured` is the gate the UI watches to surface
+   * the "Set encryption passphrase" CTA before the first backup. */
+  encryptionConfigured: boolean;
 }
 
 export class ClawKeepError extends Error {
@@ -275,6 +285,49 @@ export async function deleteToken(): Promise<void> {
   });
 }
 
+/**
+ * Clear the in-flight tracking fields in state.json so the dashboard
+ * stops showing a "running" spinner inherited from a daemon that was
+ * killed mid-backup (systemd restart, OOM, manual `kill`, etc.).
+ *
+ * Preserves the historical "last successful" stats — `last_backup_at_ms`,
+ * `last_cloud_bytes`, `last_snapshot_count` — so the user doesn't lose
+ * the "you're protected" history just because they cleared a stuck
+ * spinner. Idempotent: if state.json doesn't exist or the fields are
+ * already clean, this is a no-op.
+ */
+export async function resetRunningState(): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(STATE_PATH, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+  let parsed: StateFile;
+  try {
+    parsed = JSON.parse(raw) as StateFile;
+  } catch {
+    parsed = {};
+  }
+  const cleaned: StateFile = {
+    last_backup_at_ms: parsed.last_backup_at_ms ?? 0,
+    last_cloud_bytes: parsed.last_cloud_bytes ?? 0,
+    last_snapshot_count: parsed.last_snapshot_count ?? 0,
+    last_heartbeat_at_ms: parsed.last_heartbeat_at_ms ?? 0,
+    last_heartbeat_status: "",
+    last_step: "",
+    last_step_at_ms: 0,
+    upload_bytes_total: 0,
+    upload_bytes_done: 0,
+    upload_started_at_ms: 0,
+  };
+  await ensureDataDir();
+  const tmp = `${STATE_PATH}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(cleaned, null, 2), { mode: 0o600 });
+  await fs.rename(tmp, STATE_PATH);
+}
+
 export async function readConfigToml(): Promise<string> {
   try {
     return await fs.readFile(CLAWKEEP_CONFIG_PATH, "utf8");
@@ -406,9 +459,100 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
 // Status
 // ────────────────────────────────────────────────────────────────────
 
+export async function isEncryptionConfigured(): Promise<boolean> {
+  // Mirror the Python `passphrase.is_set()` check: file exists AND is
+  // non-empty. A 0-byte file is treated as "not configured" so a botched
+  // first-write doesn't get interpreted as an empty passphrase.
+  try {
+    const st = await fs.stat(PASSPHRASE_PATH);
+    return st.isFile() && st.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stage `secret` in a 0600 tmpfile, run `fn` with its path, then wipe
+ * (zero-overwrite + rm) the file regardless of outcome. Used to hand
+ * passphrases to the Python CLI without ever putting them on argv.
+ *
+ * The wipe is best-effort: tmpfs is volatile and the swap-out window is
+ * short, but the overwrite is cheap (≤ a few hundred bytes) and a real
+ * defence on disk-backed /tmp.
+ */
+async function withSecretTmpfile<T>(
+  secret: string,
+  fn: (tmpFile: string) => Promise<T>,
+): Promise<T> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawkeep-pw-"));
+  const tmpFile = path.join(tmpDir, "pw");
+  try {
+    const fd = await fs.open(tmpFile, "w", 0o600);
+    try {
+      await fd.writeFile(secret, "utf8");
+    } finally {
+      await fd.close();
+    }
+    return await fn(tmpFile);
+  } finally {
+    try {
+      const sz = (await fs.stat(tmpFile)).size;
+      if (sz > 0) {
+        const fd = await fs.open(tmpFile, "r+");
+        try {
+          // Cryptographically random bytes rather than zeros so a
+          // forensic disk pass can't tell apart "this file held a
+          // secret" from any other random tmpfile. Mirrors the Python
+          // side's os.urandom() approach in clawkeep/crypto.py.
+          await fd.write(randomBytes(sz), 0, sz, 0);
+        } finally {
+          await fd.close();
+        }
+      }
+    } catch { /* tmpfile may already be gone */ }
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export async function setPassphrase(passphrase: string): Promise<void> {
+  // Reject empty / whitespace-only here too — the Python side also
+  // rejects, but bouncing it before we shell out gives the API a clean
+  // 400 instead of the daemon's 64-coded error envelope.
+  if (!passphrase || !passphrase.trim()) {
+    throw new ClawKeepError("passphrase must be non-empty", 400);
+  }
+  await ensureDataDir();
+  await withSecretTmpfile(passphrase, async (tmpFile) => {
+    const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+    const resp = await spawnCliJson<{ ok: boolean; error?: string }>(
+      bin,
+      "set-passphrase",
+      ["--from-file", tmpFile],
+      { timeoutMs: 10_000 },
+    );
+    if (!resp.ok) {
+      throw new ClawKeepError(resp.error ?? "set-passphrase failed", 502);
+    }
+  });
+}
+
+export async function clearPassphrase(): Promise<{ removed: boolean }> {
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<{ ok: boolean; removed?: boolean; error?: string }>(
+    bin,
+    "clear-passphrase",
+    [],
+    { timeoutMs: 10_000 },
+  );
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "clear-passphrase failed", 502);
+  }
+  return { removed: resp.removed ?? false };
+}
+
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
@@ -416,6 +560,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     getDaemonBin(),
     isRestoring(),
     readSchedule(),
+    isEncryptionConfigured(),
   ]);
 
   const server = readServer(configToml);
@@ -441,6 +586,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
+    encryptionConfigured,
   };
 }
 
@@ -491,9 +637,21 @@ interface RestoreOk {
 interface RestoreErr {
   ok: false;
   error: string;
+  /** Distinct error kinds the daemon emits so the UI can react with the
+   * right modal — otherwise `error: "..."` is opaque. */
+  kind?: "wrong_password" | "passphrase_missing";
 }
 
 type RestoreCliResponse = RestoreOk | RestoreErr;
+
+/** Thrown by runRestore when the daemon needs a passphrase the device
+ * doesn't currently have stored. The UI catches this and prompts. */
+export class RestoreNeedsPassphraseError extends ClawKeepError {
+  constructor(message: string, readonly kind: "wrong_password" | "passphrase_missing") {
+    super(message, 401);
+    this.name = "RestoreNeedsPassphraseError";
+  }
+}
 
 const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
 
@@ -564,27 +722,46 @@ export async function listCloudSnapshots(): Promise<CloudSnapshot[]> {
   return resp.snapshots ?? [];
 }
 
-export async function runRestore(name: string): Promise<RestoreOk> {
+export async function runRestore(
+  name: string,
+  opts: { passphrase?: string } = {},
+): Promise<RestoreOk> {
   // Restore is destructive — sanity-check the name shape on this side too,
   // not just inside the Python CLI. A hostile input here couldn't escape the
   // prefix (we always concat with the portal-issued prefix on the Python
-  // side) but bouncing it early gives the user a clearer error.
-  if (!/^[A-Za-z0-9._-]+\.tar\.gz$/.test(name)) {
+  // side) but bouncing it early gives the user a clearer error. Accept both
+  // the new encrypted form (`.tar.gz.enc`) and the legacy unencrypted one
+  // (`.tar.gz`); the daemon detects which is which on its end too.
+  if (!/^[A-Za-z0-9._-]+\.tar\.gz(\.enc)?$/.test(name)) {
     throw new ClawKeepError("invalid snapshot name", 400);
   }
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   await setRestoring(true);
   try {
-    const resp = await spawnCliJson<RestoreCliResponse>(
-      bin,
-      "restore",
-      [name],
-      { timeoutMs: RESTORE_TIMEOUT_MS },
-    );
-    if (!resp.ok) {
-      throw new ClawKeepError(resp.error, 502);
+    const runWith = async (extraArgs: string[]) => {
+      const resp = await spawnCliJson<RestoreCliResponse>(
+        bin,
+        "restore",
+        [name, ...extraArgs],
+        { timeoutMs: RESTORE_TIMEOUT_MS },
+      );
+      if (!resp.ok) {
+        if (resp.kind === "wrong_password" || resp.kind === "passphrase_missing") {
+          throw new RestoreNeedsPassphraseError(resp.error, resp.kind);
+        }
+        throw new ClawKeepError(resp.error, 502);
+      }
+      return resp;
+    };
+    // Stage a one-shot passphrase tmpfile when the caller supplied one, so
+    // the password is fed via `--passphrase-file` rather than ever entering
+    // argv (which would expose it in /proc/<pid>/cmdline).
+    if (opts.passphrase) {
+      return await withSecretTmpfile(opts.passphrase, (tmpFile) =>
+        runWith(["--passphrase-file", tmpFile]),
+      );
     }
-    return resp;
+    return await runWith([]);
   } finally {
     await setRestoring(false).catch(() => { /* best-effort cleanup */ });
   }
