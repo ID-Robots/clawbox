@@ -628,12 +628,15 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(providerDef.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(providerDef.api).toBe("openai-completions");
-    // Every curated model must be listed so mid-conversation switches
-    // (in the chat popup secondary dropdown) are routable.
+    // The seed includes the user's default + the small static fallback
+    // list. Mid-conversation switches to slugs outside this seed are
+    // handled by the chat-header dropdown (chat/model/route.ts), which
+    // auto-extends models.providers.openrouter.models on demand. Don't
+    // assert a specific count — the static fallback is intentionally
+    // tiny and may shrink further as upstream renames bite us.
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("anthropic/claude-haiku-4.5");
-    expect(modelIds).toContain("google/gemini-2.0-flash-001");
-    expect(modelIds.length).toBeGreaterThan(10);
+    expect(modelIds.length).toBeGreaterThanOrEqual(1);
   });
 
   it("honors an openrouter model picked by the user", async () => {

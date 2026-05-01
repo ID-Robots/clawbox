@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
+import { useT } from "@/lib/i18n";
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -28,22 +29,38 @@ interface ClawKeepStatus {
   daemonInstalled: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  /** True when the device has a stored backup-encryption passphrase. The
+   * "Run a backup now" button is gated on this; without it the runner
+   * refuses to run since unencrypted backups would leak to the operator. */
+  encryptionConfigured: boolean;
 }
 
-// Map the daemon's phase id to a friendly label for the progress panel.
+// Map the daemon's phase id to an i18n key for the progress panel.
 // Keys must match clawkeep/clawkeep/runner.py: STEP_* constants — keep in
-// lockstep when adding/renaming phases.
-const STEP_LABELS: Record<string, string> = {
-  starting: "Connecting to ClawKeep…",
-  archiving: "Building openclaw archive…",
-  uploading: "Encrypting and uploading to your prefix…",
-  "checking-stats": "Verifying cloud snapshot…",
+// lockstep when adding/renaming phases. The values resolve to translated
+// labels at render time via t().
+const STEP_LABEL_KEYS: Record<string, string> = {
+  starting: "clawkeep.step.starting",
+  archiving: "clawkeep.step.archiving",
+  encrypting: "clawkeep.step.encrypting",
+  uploading: "clawkeep.step.uploading",
+  "checking-stats": "clawkeep.step.checkingStats",
 };
 
 // If a "running" status hasn't been refreshed in this many ms, assume the
 // daemon crashed (systemd timer kill, OOM, …) and stop showing the
 // progress panel — otherwise reopens would spin forever after a fault.
-const STALE_RUNNING_MS = 4 * 60 * 60 * 1000; // matches systemd TimeoutStartSec
+//
+// Real backups on Jetson finish in 2-5 minutes (archive build + upload to
+// R2 over a typical home connection). 30 minutes is a comfortable upper
+// bound — a backup that genuinely takes longer almost always means the
+// upload is stuck, in which case the user wants the "Reset stuck backup"
+// affordance below, not a 4-hour spinner that pretends progress is fine.
+const STALE_RUNNING_MS = 30 * 60 * 1000;
+// Show a "Looks stuck?" reset button after this much wall-clock time on
+// the same heartbeat. Tighter than STALE_RUNNING_MS so the user has a
+// recovery path *before* the panel auto-hides.
+const RESET_HINT_AFTER_MS = 6 * 60 * 1000;
 
 function isBackupRunning(status: ClawKeepStatus | null): boolean {
   if (!status) return false;
@@ -87,17 +104,19 @@ interface BackupResponse {
 
 const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
 
-function timeAgo(ms: number): string {
-  if (!ms) return "never";
+type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+function timeAgo(ms: number, t: Translator): string {
+  if (!ms) return t("clawkeep.never");
   const diff = Date.now() - ms;
-  if (diff < 0) return "in the future";
+  if (diff < 0) return t("clawkeep.inFuture");
   const minutes = Math.floor(diff / 60_000);
   const hours = Math.floor(diff / 3_600_000);
   const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  return `${days}d ago`;
+  if (minutes < 1) return t("clawkeep.justNow");
+  if (minutes < 60) return t("clawkeep.minutesAgo", { count: minutes });
+  if (hours < 24) return t("clawkeep.hoursAgo", { count: hours });
+  return t("clawkeep.daysAgo", { count: days });
 }
 
 function formatBytes(n: number): string {
@@ -127,6 +146,7 @@ async function jsonOrError<T>(resp: Response): Promise<T> {
 }
 
 export default function ClawKeepApp() {
+  const { t } = useT();
   // Per-feature ClawBox-AI gating lives inside the ClawKeep app itself
   // (e.g. the Cloud mode shows "Connect ClawBox AI first" inline). An
   // outer full-app login gate was tried and removed — it duplicated the
@@ -139,6 +159,21 @@ export default function ClawKeepApp() {
   const [pairChallenge, setPairChallenge] = useState<PairStartResponse | null>(null);
   const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
   const [restoreOpen, setRestoreOpen] = useState(false);
+  // Set-passphrase modal — shown either as a one-shot before the first
+  // backup (if the user hasn't configured encryption yet) or via an
+  // explicit "Change encryption passphrase" button. The pending action
+  // is what we run after the passphrase is saved and status refetched.
+  const [passphraseSetup, setPassphraseSetup] = useState<{
+    onSaved?: () => void;
+  } | null>(null);
+  // Restore-passphrase modal — shown when the daemon reports the archive
+  // needs a passphrase the device doesn't currently have stored, or when
+  // a previous attempt's passphrase was wrong. We retain the snapshot
+  // name so the user can retry without picking from the list again.
+  const [restorePassphrase, setRestorePassphrase] = useState<{
+    name: string;
+    error?: string;
+  } | null>(null);
   const [confirmPending, setConfirmPending] = useState<{
     title: string;
     body: React.ReactNode;
@@ -206,7 +241,7 @@ export default function ClawKeepApp() {
           stopPolling();
           setPairChallenge(null);
           setPairPhase("");
-          setError(ps.error || "Pair failed");
+          setError(ps.error || t("clawkeep.pair.failed"));
           return;
         }
         // "pending" — keep polling
@@ -257,14 +292,9 @@ export default function ClawKeepApp() {
 
   const onUnpair = useCallback(() => {
     setConfirmPending({
-      title: "Unpair this device?",
-      body: (
-        <>
-          Cloud backups will stop until you pair again. Existing snapshots
-          stay on the portal — your local config and tokens are removed.
-        </>
-      ),
-      confirmLabel: "Unpair",
+      title: t("clawkeep.confirm.unpairTitle"),
+      body: <>{t("clawkeep.confirm.unpairBody")}</>,
+      confirmLabel: t("clawkeep.unpairButton"),
       danger: true,
       onConfirm: async () => {
         setBusy("unpair");
@@ -281,9 +311,9 @@ export default function ClawKeepApp() {
         }
       },
     });
-  }, [refresh]);
+  }, [refresh, t]);
 
-  const onBackup = useCallback(async () => {
+  const runBackupNow = useCallback(async () => {
     setBusy("backup");
     setError(null);
     setBackupResult(null);
@@ -304,6 +334,84 @@ export default function ClawKeepApp() {
     }
   }, [refresh]);
 
+  const onResetStuck = useCallback(() => {
+    // Surface a dire-warning confirm because a stuck heartbeat *might*
+    // still be a slow-but-real upload — clearing the spinner doesn't
+    // kill the underlying clawkeepd process, but it does hide its
+    // progress signal until the next status poll, which can confuse
+    // someone watching a 100MB+ upload over a flaky link.
+    setConfirmPending({
+      title: t("clawkeep.confirm.resetStuckTitle"),
+      body: <>{t("clawkeep.confirm.resetStuckBody")}</>,
+      confirmLabel: t("clawkeep.confirm.resetStuckButton"),
+      onConfirm: async () => {
+        try {
+          await jsonOrError<{ ok: true }>(
+            await fetch("/setup-api/clawkeep/reset-state", { method: "POST" }),
+          );
+          await refresh();
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      },
+    });
+  }, [refresh, t]);
+
+  const onBackup = useCallback(async () => {
+    // First-backup gate: encryption must be configured before we let the
+    // runner upload anything. Without a device-local passphrase the runner
+    // exits early with NEED_PASSPHRASE, but we'd rather surface that as a
+    // friendly modal than as a red error banner.
+    if (!status?.encryptionConfigured) {
+      setPassphraseSetup({ onSaved: () => { void runBackupNow(); } });
+      return;
+    }
+    void runBackupNow();
+  }, [status?.encryptionConfigured, runBackupNow]);
+
+  // Inner restore call shared between the regular confirm flow and the
+  // password-prompt retry path. Returns true on full success so the
+  // caller knows whether to close its modal.
+  const performRestore = useCallback(
+    async (name: string, passphrase?: string): Promise<{ ok: boolean; needsPassphrase?: boolean; wrong?: boolean }> => {  // eslint-disable-line @typescript-eslint/no-shadow
+      setBusy("restore");
+      setError(null);
+      setRestoreResult(null);
+      try {
+        const res = await fetch("/setup-api/clawkeep/restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(passphrase ? { name, passphrase } : { name }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            needsPassphrase?: boolean;
+            kind?: "wrong_password" | "passphrase_missing";
+          };
+          if (body.needsPassphrase) {
+            return {
+              ok: false,
+              needsPassphrase: true,
+              wrong: body.kind === "wrong_password",
+            };
+          }
+          throw new Error(body.error || `HTTP ${res.status}`);
+        }
+        const result = (await res.json()) as RestoreResponse;
+        setRestoreResult(result);
+        await refresh();
+        return { ok: true };
+      } catch (e) {
+        setError((e as Error).message);
+        return { ok: false };
+      } finally {
+        setBusy("");
+      }
+    },
+    [refresh],
+  );
+
   const onRestore = useCallback(
     (name: string) => {
       // The restore is destructive — we move ~/.openclaw aside and replace
@@ -311,52 +419,42 @@ export default function ClawKeepApp() {
       // the confirm through our themed dialog instead of window.confirm
       // so the look matches the rest of the app on every browser.
       setConfirmPending({
-        title: `Restore "${name}"?`,
+        title: t("clawkeep.confirm.restoreTitle", { name }),
         body: (
           <>
-            <p>
-              This replaces your current OpenClaw state, config, and credentials
-              with the snapshot. Your existing state is moved aside to a{" "}
-              <code className="text-emerald-300">.bak-restore-*</code> directory
-              so it can be recovered manually if needed.
-            </p>
+            <p>{t("clawkeep.confirm.restoreBody1")}</p>
             <p className="mt-2 text-[var(--text-muted)]">
-              OpenClaw services will restart after the restore completes.
+              {t("clawkeep.confirm.restoreBody2")}
             </p>
           </>
         ),
-        confirmLabel: "Restore",
+        confirmLabel: t("clawkeep.restoreButton"),
         danger: true,
         onConfirm: async () => {
-          setBusy("restore");
-          setError(null);
-          setRestoreResult(null);
           setRestoreOpen(false);
-          try {
-            const result = await jsonOrError<RestoreResponse>(
-              await fetch("/setup-api/clawkeep/restore", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name }),
-              }),
-            );
-            setRestoreResult(result);
-            await refresh();
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy("");
+          const outcome = await performRestore(name);
+          if (outcome.needsPassphrase) {
+            // Open the password prompt modal — the user types their
+            // passphrase, we retry with it, and only on success do we
+            // show the result card. `wrong` flag pre-fills the error
+            // copy so the user understands a previous attempt mismatched.
+            setRestorePassphrase({
+              name,
+              error: outcome.wrong
+                ? t("clawkeep.encryption.wrongPassphrase")
+                : undefined,
+            });
           }
         },
       });
     },
-    [refresh],
+    [performRestore, t],
   );
 
   if (!status && !error) {
     return (
       <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)]">
-        Loading…
+        {t("clawkeep.loading")}
       </div>
     );
   }
@@ -365,14 +463,14 @@ export default function ClawKeepApp() {
     return (
       <div className="h-full w-full flex items-center justify-center p-6">
         <div className={`${CARD} max-w-md text-sm`}>
-          <p className="text-red-300">⚠️ Load failed</p>
+          <p className="text-red-300">⚠️ {t("clawkeep.loadFailed")}</p>
           {error && <p className="mt-2 text-xs text-[var(--text-muted)]">{error}</p>}
           <button
             type="button"
             onClick={refresh}
             className="mt-3 px-3 py-1.5 rounded-md bg-orange-500 text-white text-xs font-semibold"
           >
-            Retry
+            {t("clawkeep.retry")}
           </button>
         </div>
       </div>
@@ -388,12 +486,12 @@ export default function ClawKeepApp() {
             target="_blank"
             rel="noopener noreferrer"
             className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer"
-            title="Manage backups, devices, and billing on the ClawKeep portal"
+            title={t("clawkeep.portalTitle")}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
               dashboard
             </span>
-            Portal
+            {t("clawkeep.portal")}
             <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">
               open_in_new
             </span>
@@ -404,7 +502,7 @@ export default function ClawKeepApp() {
             onClick={onUnpair}
             className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
           >
-            {busy === "unpair" ? "🔌 Unpairing…" : "Unpair"}
+            {busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}
           </button>
         </div>
       )}
@@ -429,6 +527,7 @@ export default function ClawKeepApp() {
                 status={status}
                 onBackup={onBackup}
                 onOpenRestore={() => setRestoreOpen(true)}
+                onResetStuck={onResetStuck}
                 // A running daemon is its own kind of busy — keep showing the
                 // progress panel even if the user closes and reopens the window
                 // mid-run. The local `busy` flag is only authoritative right
@@ -484,23 +583,67 @@ export default function ClawKeepApp() {
           }}
         />
       )}
+
+      {passphraseSetup && (
+        <SetPassphraseModal
+          onCancel={() => setPassphraseSetup(null)}
+          onSaved={async () => {
+            const next = passphraseSetup.onSaved;
+            setPassphraseSetup(null);
+            await refresh();
+            if (next) next();
+          }}
+          onError={setError}
+        />
+      )}
+
+      {restorePassphrase && (
+        <RestorePassphraseModal
+          name={restorePassphrase.name}
+          initialError={restorePassphrase.error}
+          onCancel={() => setRestorePassphrase(null)}
+          onSubmit={async (pw) => {
+            const outcome = await performRestore(restorePassphrase.name, pw);
+            if (outcome.ok) {
+              setRestorePassphrase(null);
+              return { ok: true };
+            }
+            // Wrong passphrase → keep the modal open with an inline error
+            // so the user can re-type without picking the snapshot again.
+            return {
+              ok: false,
+              error: outcome.wrong
+                ? t("clawkeep.encryption.wrongPassphrase")
+                : t("clawkeep.encryption.restoreFailed"),
+            };
+          }}
+        />
+      )}
     </div>
   );
 }
 
-const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_LABEL_KEYS = [
+  "clawkeep.weekday.sun",
+  "clawkeep.weekday.mon",
+  "clawkeep.weekday.tue",
+  "clawkeep.weekday.wed",
+  "clawkeep.weekday.thu",
+  "clawkeep.weekday.fri",
+  "clawkeep.weekday.sat",
+];
 
-function formatNextRun(ms: number): string {
+function formatNextRun(ms: number, t: Translator): string {
   if (!ms) return "—";
   const diff = ms - Date.now();
-  if (diff <= 0) return "any moment";
+  if (diff <= 0) return t("clawkeep.anyMoment");
   const totalMin = Math.round(diff / 60_000);
   const days = Math.floor(totalMin / (60 * 24));
   const hours = Math.floor((totalMin % (60 * 24)) / 60);
   const mins = totalMin % 60;
-  if (days > 0) return `in ${days}d ${hours}h`;
-  if (hours > 0) return `in ${hours}h ${mins}m`;
-  return `in ${mins}m`;
+  if (days > 0) return t("clawkeep.inDays", { days, hours });
+  if (hours > 0) return t("clawkeep.inHours", { hours, mins });
+  return t("clawkeep.inMinutes", { mins });
 }
 
 function ScheduleCard({
@@ -514,6 +657,7 @@ function ScheduleCard({
   onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number }) => void;
   onError: (msg: string) => void;
 }) {
+  const { t } = useT();
   const [draft, setDraft] = useState<ClawKeepSchedule>(schedule);
   const [saving, setSaving] = useState(false);
   // Re-sync the draft when the parent re-fetches (e.g. after a backup run
@@ -540,7 +684,7 @@ function ScheduleCard({
       setDraft(body.schedule);
       onSaved(body);
     } catch (e) {
-      onError(`Could not save schedule: ${(e as Error).message}`);
+      onError(t("clawkeep.schedule.saveFailed", { error: (e as Error).message }));
     } finally {
       setSaving(false);
     }
@@ -550,11 +694,11 @@ function ScheduleCard({
     <div className={`${CARD} space-y-4`}>
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-gray-100">Auto-backup</h3>
+          <h3 className="text-sm font-semibold text-gray-100">{t("clawkeep.schedule.title")}</h3>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
             {draft.enabled
-              ? `Next run ${formatNextRun(nextRunAtMs)}`
-              : "Off — back up only when you click Back up now."}
+              ? t("clawkeep.schedule.nextRun", { when: formatNextRun(nextRunAtMs, t) })
+              : t("clawkeep.schedule.off")}
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">
@@ -588,27 +732,27 @@ function ScheduleCard({
                     : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
                 }`}
               >
-                {freq === "daily" ? "Daily" : "Weekly"}
+                {freq === "daily" ? t("clawkeep.schedule.daily") : t("clawkeep.schedule.weekly")}
               </button>
             ))}
           </div>
 
           <div className="flex items-center gap-3">
-            <label className="text-xs text-[var(--text-muted)] w-16">Time</label>
+            <label className="text-xs text-[var(--text-muted)] w-16">{t("clawkeep.schedule.time")}</label>
             <input
               type="time"
               value={draft.timeOfDay}
               onChange={(e) => setDraft((d) => ({ ...d, timeOfDay: e.target.value }))}
               className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
             />
-            <span className="text-xs text-[var(--text-muted)]">device-local</span>
+            <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
           </div>
 
           {draft.frequency === "weekly" && (
             <div className="flex items-center gap-3">
-              <label className="text-xs text-[var(--text-muted)] w-16">Day</label>
+              <label className="text-xs text-[var(--text-muted)] w-16">{t("clawkeep.schedule.day")}</label>
               <div className="flex gap-1 flex-wrap">
-                {WEEKDAY_LABELS.map((label, idx) => (
+                {WEEKDAY_LABEL_KEYS.map((labelKey, idx) => (
                   <button
                     key={idx}
                     type="button"
@@ -619,7 +763,7 @@ function ScheduleCard({
                         : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
                     }`}
                   >
-                    {label}
+                    {t(labelKey)}
                   </button>
                 ))}
               </div>
@@ -634,7 +778,7 @@ function ScheduleCard({
                 onClick={() => save()}
                 className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
               >
-                {saving ? "Saving…" : "Save schedule"}
+                {saving ? t("clawkeep.schedule.saving") : t("clawkeep.schedule.save")}
               </button>
             </div>
           )}
@@ -659,6 +803,7 @@ function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useT();
   // Esc closes via a global listener (the dialog itself doesn't focus a
   // text input, so an inline onKeyDown wouldn't fire reliably). Enter is
   // handled by whichever button has focus — autoFocus puts it on Confirm
@@ -714,7 +859,7 @@ function ConfirmDialog({
             onClick={onCancel}
             className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
           >
-            Cancel
+            {t("clawkeep.cancel")}
           </button>
           <button
             type="button"
@@ -731,6 +876,7 @@ function ConfirmDialog({
 }
 
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
+  const { t } = useT();
   return (
     <div
       className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
@@ -758,10 +904,9 @@ function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
           </span>
         </div>
       </div>
-      <h2 className="relative text-3xl font-bold font-display">Pair this device</h2>
+      <h2 className="relative text-3xl font-bold font-display">{t("clawkeep.pair.title")}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        Link this OpenClaw to your portal account and we&apos;ll mint short-lived
-        R2 credentials so every backup lands in your private prefix.
+        {t("clawkeep.pair.description")}
       </p>
       <button
         type="button"
@@ -769,7 +914,7 @@ function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
         disabled={busy}
         className="relative mt-7 px-6 py-2.5 rounded-full bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold shadow-lg cursor-pointer"
       >
-        {busy ? "🔗 Connecting…" : "Pair with portal"}
+        {busy ? t("clawkeep.pair.connecting") : t("clawkeep.pair.button")}
       </button>
     </div>
   );
@@ -784,6 +929,7 @@ function PairChallengeCard({
   phase: "" | "pending" | "configuring";
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const code = challenge.user_code;
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
@@ -818,26 +964,28 @@ function PairChallengeCard({
   return (
     <div className={`${CARD} space-y-4`}>
       <h2 className="font-semibold">
-        {phase === "configuring" ? "🔄 Configuring…" : "👉 Enter this code"}
+        {phase === "configuring"
+          ? t("clawkeep.pair.configuring")
+          : t("clawkeep.pair.enterCode")}
       </h2>
       <div className="flex items-center justify-center gap-2 py-2">
         <span
           className="select-all cursor-text px-4 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
-          aria-label="Pairing code"
+          aria-label={t("clawkeep.pair.codeAriaLabel")}
         >
           {code}
         </span>
         <button
           type="button"
           onClick={onCopyClick}
-          aria-label={copied ? "Code copied" : "Copy code"}
+          aria-label={copied ? t("clawkeep.pair.codeCopied") : t("clawkeep.pair.copyCode")}
           className="px-2.5 py-2 rounded-md text-xs font-medium text-orange-300 bg-black/30 border border-white/10 hover:bg-black/50 cursor-pointer transition-colors"
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("clawkeep.pair.copied") : t("clawkeep.pair.copy")}
         </button>
       </div>
       <p className="text-sm text-[var(--text-muted)] text-center">
-        On the portal page that opened, type the code and approve.
+        {t("clawkeep.pair.typeCodeOnPortal")}
       </p>
       <div className="flex justify-center gap-2">
         <a
@@ -846,7 +994,7 @@ function PairChallengeCard({
           rel="noreferrer"
           className="text-xs text-orange-300 hover:text-orange-200 underline"
         >
-          Re-open portal page
+          {t("clawkeep.pair.reopenPortal")}
         </a>
         <span className="text-xs text-[var(--text-muted)]">·</span>
         <button
@@ -854,11 +1002,13 @@ function PairChallengeCard({
           onClick={onCancel}
           className="text-xs text-[var(--text-muted)] hover:text-gray-200"
         >
-          Cancel
+          {t("clawkeep.cancel")}
         </button>
       </div>
       <p className="text-xs text-[var(--text-muted)] text-center">
-        {phase === "configuring" ? "⏳ Saving token…" : "🕒 Waiting for approval…"}
+        {phase === "configuring"
+          ? t("clawkeep.pair.savingToken")
+          : t("clawkeep.pair.waitingApproval")}
       </p>
     </div>
   );
@@ -870,6 +1020,8 @@ function BackupProgressPanel({
   uploadBytesTotal = 0,
   uploadBytesDone = 0,
   uploadStartedAtMs = 0,
+  heartbeatAtMs = 0,
+  onReset,
 }: {
   kind?: "backup" | "restore";
   /** Friendly label for the daemon's current sub-phase (backup only). */
@@ -878,7 +1030,15 @@ function BackupProgressPanel({
   uploadBytesTotal?: number;
   uploadBytesDone?: number;
   uploadStartedAtMs?: number;
+  /** Last heartbeat timestamp; used to surface the "looks stuck" reset
+   * affordance after a few minutes without progress. */
+  heartbeatAtMs?: number;
+  /** Backup-only: invoked when the user taps "Reset stuck backup". The
+   * parent decides what that means (POSTs to /reset-state, clears the
+   * spinner, etc.). When omitted the affordance is hidden. */
+  onReset?: () => void;
 }) {
+  const { t } = useT();
   // `nowMs` is sampled by the 1s tick so render stays pure (no `Date.now()`
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
@@ -906,8 +1066,8 @@ function BackupProgressPanel({
 
   const isBackup = kind === "backup";
   const fallback = isBackup
-    ? "Building the openclaw archive and uploading to your prefix. This can take a few minutes."
-    : "Downloading the snapshot, verifying it, and swapping it into place. OpenClaw services restart at the end.";
+    ? t("clawkeep.progress.backupFallback")
+    : t("clawkeep.progress.restoreFallback");
   const stepLabel = explicitStepLabel || fallback;
 
   // Backup = green (we're actively protecting). Restore = orange (recovery
@@ -921,7 +1081,7 @@ function BackupProgressPanel({
         text: "text-emerald-100",
         track: "bg-emerald-500/15",
         bar: "bg-emerald-400",
-        ariaLabel: "Backup in progress",
+        ariaLabel: t("clawkeep.progress.backupAria"),
       }
     : {
         border: "border-orange-400/30",
@@ -930,7 +1090,7 @@ function BackupProgressPanel({
         text: "text-orange-100",
         track: "bg-orange-500/15",
         bar: "bg-orange-400",
-        ariaLabel: "Restore in progress",
+        ariaLabel: t("clawkeep.progress.restoreAria"),
       };
 
   return (
@@ -942,7 +1102,9 @@ function BackupProgressPanel({
         />
         <div className="flex-1 min-w-0">
           <div className={`text-base font-semibold ${palette.text}`}>
-            {isBackup ? "Protecting your OpenClaw…" : "Restoring from ClawBox cloud…"}
+            {isBackup
+              ? t("clawkeep.progress.backupTitle")
+              : t("clawkeep.progress.restoreTitle")}
           </div>
           <div className="text-xs text-[var(--text-muted)] mt-0.5">
             {stepLabel}
@@ -980,9 +1142,26 @@ function BackupProgressPanel({
       )}
       <p className="mt-3 text-xs text-[var(--text-muted)]">
         {isBackup
-          ? "Safe to close — the backup keeps running on the device. Reopen ClawKeep any time to see the result."
-          : "Don't power off the device until this finishes — the on-disk swap should not be interrupted mid-flight."}
+          ? t("clawkeep.progress.backupHint")
+          : t("clawkeep.progress.restoreHint")}
       </p>
+      {/* "Looks stuck?" recovery link. Surfaces after ~6 minutes on the
+          same heartbeat (real Jetson backups complete in 2-5 min) — gives
+          the user a way out before the 30-minute auto-stale kicks in.
+          Only on backup; restore has its own swap-cant-be-interrupted
+          hint above and a reset there would be actively dangerous. */}
+      {isBackup && onReset && heartbeatAtMs > 0
+        && nowMs > 0 && nowMs - heartbeatAtMs > RESET_HINT_AFTER_MS && (
+        <div className="mt-2 flex items-center justify-end">
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[11px] text-[var(--text-muted)] hover:text-emerald-200 underline underline-offset-2 cursor-pointer"
+          >
+            {t("clawkeep.progress.resetStuck")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -996,9 +1175,9 @@ function deriveProtection(status: ClawKeepStatus): ProtectionState {
 }
 
 interface ProtectionCopy {
-  headline: string;
-  subhead: string;
-  badge: string;
+  headlineKey: string;
+  subheadKey: string;
+  badgeKey: string;
   iconName: string;
   badgeClass: string;
   haloClass: string;
@@ -1022,9 +1201,9 @@ const RED_PALETTE = {
 
 const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
   protected: {
-    headline: "You're Protected",
-    subhead: "Your OpenClaw is safe in the ClawBox cloud — config, agents, credentials, the works.",
-    badge: "PROTECTED",
+    headlineKey: "clawkeep.status.protected",
+    subheadKey: "clawkeep.status.protectedSub",
+    badgeKey: "clawkeep.badge.protected",
     iconName: "verified_user",
     badgeClass: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
     haloClass: "bg-[radial-gradient(circle,rgba(16,185,129,0.45),transparent_70%)]",
@@ -1036,17 +1215,16 @@ const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
   },
   lapsed: {
     ...RED_PALETTE,
-    headline: "Protection Lapsed",
-    subhead: "Your last backup didn't complete. One retry and we'll lock it back down.",
-    badge: "AT RISK",
+    headlineKey: "clawkeep.status.lapsed",
+    subheadKey: "clawkeep.status.lapsedSub",
+    badgeKey: "clawkeep.badge.atRisk",
     iconName: "gpp_maybe",
   },
   unprotected: {
     ...RED_PALETTE,
-    headline: "Not Protected",
-    subhead:
-      "One click and your OpenClaw is locked safely in the ClawBox cloud. Config, agents, credentials — sleep easy.",
-    badge: "UNPROTECTED",
+    headlineKey: "clawkeep.status.unprotected",
+    subheadKey: "clawkeep.status.unprotectedSub",
+    badgeKey: "clawkeep.badge.unprotected",
     iconName: "gpp_bad",
   },
 };
@@ -1055,21 +1233,27 @@ function DashboardCard({
   status,
   onBackup,
   onOpenRestore,
+  onResetStuck,
   busyKind,
 }: {
   status: ClawKeepStatus;
   onBackup: () => void;
   onOpenRestore: () => void;
+  onResetStuck: () => void;
   busyKind: "backup" | "restore" | null;
 }) {
+  const { t } = useT();
   if (busyKind) {
+    const stepKey = busyKind === "backup" ? STEP_LABEL_KEYS[status.currentStep] : undefined;
     return (
       <BackupProgressPanel
         kind={busyKind}
-        stepLabel={busyKind === "backup" ? STEP_LABELS[status.currentStep] : undefined}
+        stepLabel={stepKey ? t(stepKey) : undefined}
         uploadBytesTotal={busyKind === "backup" ? status.uploadBytesTotal : 0}
         uploadBytesDone={busyKind === "backup" ? status.uploadBytesDone : 0}
         uploadStartedAtMs={busyKind === "backup" ? status.uploadStartedAtMs : 0}
+        heartbeatAtMs={busyKind === "backup" ? status.lastHeartbeatAtMs : 0}
+        onReset={busyKind === "backup" ? onResetStuck : undefined}
       />
     );
   }
@@ -1090,7 +1274,7 @@ function DashboardCard({
       <div
         className={`absolute top-3 right-3 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${copy.badgeClass}`}
       >
-        {copy.badge}
+        {t(copy.badgeKey)}
       </div>
 
       {/* Halo glow behind the shield */}
@@ -1124,16 +1308,16 @@ function DashboardCard({
         </div>
       </div>
 
-      <h2 className="relative text-3xl font-bold font-display mt-2">{copy.headline}</h2>
+      <h2 className="relative text-3xl font-bold font-display mt-2">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {copy.subhead}
+        {t(copy.subheadKey)}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
       <div className="relative mt-6 grid grid-cols-3 gap-6 w-full max-w-md text-center">
-        <Stat label="Last backup" value={timeAgo(status.lastBackupAtMs)} />
-        <Stat label="Cloud usage" value={formatBytes(status.cloudBytes)} />
-        <Stat label="Snapshots" value={status.snapshotCount.toString()} />
+        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t)} />
+        <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
+        <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
 
       {/* Action row */}
@@ -1144,7 +1328,7 @@ function DashboardCard({
           disabled={disabled}
           className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
         >
-          {state === "protected" ? "Back up now" : "Protect my OpenClaw"}
+          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw")}
         </button>
         {canRestore && (
           <button
@@ -1155,7 +1339,7 @@ function DashboardCard({
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
               cloud_download
             </span>
-            Restore from snapshot
+            {t("clawkeep.restoreFromSnapshot")}
           </button>
         )}
       </div>
@@ -1164,20 +1348,24 @@ function DashboardCard({
 }
 
 function SystemCard({ status }: { status: ClawKeepStatus }) {
+  const { t } = useT();
   return (
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
-      <h2 className="font-semibold text-amber-200">⚙️ Setup needed</h2>
+      <h2 className="font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
       <ul className="text-sm text-amber-100 space-y-1">
         {!status.openclawInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">openclaw</code> is not on $PATH. Install with{" "}
+            <code className="bg-black/30 px-1 rounded">openclaw</code>{" "}
+            {t("clawkeep.system.notOnPath")}{" "}
             <code className="bg-black/30 px-1 rounded">npm install -g openclaw</code>.
           </li>
         )}
         {!status.daemonInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">clawkeepd</code> is not on $PATH. From{" "}
-            <code className="bg-black/30 px-1 rounded">clawbox/clawkeep</code> run{" "}
+            <code className="bg-black/30 px-1 rounded">clawkeepd</code>{" "}
+            {t("clawkeep.system.notOnPathFrom")}{" "}
+            <code className="bg-black/30 px-1 rounded">clawbox/clawkeep</code>{" "}
+            {t("clawkeep.system.run")}{" "}
             <code className="bg-black/30 px-1 rounded">pip install --user .</code>.
           </li>
         )}
@@ -1197,7 +1385,8 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function BackupResultCard({ result }: { result: BackupResponse }) {
-  const tail = result.stderrTail || result.stdoutTail || "(no output)";
+  const { t } = useT();
+  const tail = result.stderrTail || result.stdoutTail || t("clawkeep.result.noOutput");
   return (
     <div
       className={`${CARD} ${
@@ -1205,7 +1394,9 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
       }`}
     >
       <h2 className="font-semibold">
-        {result.ok ? "✅ Backup ok" : `❌ Failed (exit ${result.exitCode})`}
+        {result.ok
+          ? t("clawkeep.result.backupOk")
+          : t("clawkeep.result.backupFailed", { code: result.exitCode })}
       </h2>
       <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
         {tail}
@@ -1215,11 +1406,13 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
 }
 
 function RestoreResultCard({ result }: { result: RestoreResponse }) {
+  const { t } = useT();
   return (
     <div className={`${CARD} border-emerald-500/30 bg-emerald-500/5 space-y-2`}>
-      <h2 className="font-semibold">✅ Restore ok</h2>
+      <h2 className="font-semibold">{t("clawkeep.result.restoreOk")}</h2>
       <p className="text-sm text-[var(--text-muted)]">
-        Restored <code className="bg-black/30 px-1 rounded">{result.archive}</code>{" "}
+        {t("clawkeep.result.restoredPrefix")}{" "}
+        <code className="bg-black/30 px-1 rounded">{result.archive}</code>{" "}
         ({formatBytes(result.archiveBytes)}).
       </p>
       <ul className="text-xs space-y-1">
@@ -1227,7 +1420,8 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
           <li key={a.targetPath} className="text-gray-300">
             <span className="font-mono">{a.targetPath}</span>{" "}
             <span className="text-[var(--text-muted)]">
-              ({formatBytes(a.bytesRestored)} — previous version preserved at{" "}
+              ({formatBytes(a.bytesRestored)} —{" "}
+              {t("clawkeep.result.previousAt")}{" "}
               <span className="font-mono">{a.backupPath}</span>)
             </span>
           </li>
@@ -1235,9 +1429,9 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       </ul>
       {result.restartErrors.length > 0 && (
         <p className="text-xs text-amber-300">
-          ⚠️ Could not auto-restart {result.restartErrors.length} service(s). Run{" "}
+          ⚠️ {t("clawkeep.result.restartFailed", { count: result.restartErrors.length })}{" "}
           <code className="bg-black/30 px-1 rounded">sudo systemctl restart clawbox-gateway</code>{" "}
-          manually.
+          {t("clawkeep.result.manually")}
         </p>
       )}
     </div>
@@ -1269,6 +1463,7 @@ function RestoreModal({
   onPick: (name: string) => void;
   onError: (msg: string) => void;
 }) {
+  const { t } = useT();
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
   const [loading, setLoading] = useState(true);
   // Pin the callbacks to refs so the fetch effect doesn't refire when the
@@ -1315,7 +1510,7 @@ function RestoreModal({
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
       role="dialog"
       aria-modal="true"
-      aria-label="Restore from cloud snapshot"
+      aria-label={t("clawkeep.restoreModal.aria")}
       onClick={onClose}
     >
       <div
@@ -1340,16 +1535,16 @@ function RestoreModal({
                 </span>
               </div>
               <div>
-                <h2 className="text-lg font-semibold leading-tight">Restore from snapshot</h2>
+                <h2 className="text-lg font-semibold leading-tight">{t("clawkeep.restoreModal.title")}</h2>
                 <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                  Roll back to any cloud backup. Your current state is moved aside, not deleted.
+                  {t("clawkeep.restoreModal.description")}
                 </p>
               </div>
             </div>
             <button
               type="button"
               onClick={onClose}
-              aria-label="Close"
+              aria-label={t("clawkeep.restoreModal.close")}
               className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-white/5 hover:text-gray-100 cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }} aria-hidden="true">
@@ -1367,7 +1562,7 @@ function RestoreModal({
                 aria-hidden="true"
                 className="w-8 h-8 rounded-full border-2 border-white/10 border-t-emerald-400 animate-spin"
               />
-              <span>Fetching snapshots from your prefix…</span>
+              <span>{t("clawkeep.restoreModal.fetching")}</span>
             </div>
           )}
 
@@ -1380,7 +1575,7 @@ function RestoreModal({
               >
                 cloud_off
               </span>
-              No snapshots in your prefix yet. Run a backup first.
+              {t("clawkeep.restoreModal.empty")}
             </div>
           )}
 
@@ -1412,14 +1607,14 @@ function RestoreModal({
                           </span>
                           {newest && (
                             <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[9px] font-bold tracking-wider border border-emerald-500/30">
-                              LATEST
+                              {t("clawkeep.restoreModal.latest")}
                             </span>
                           )}
                         </div>
                         <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
                           <span>{formatBytes(s.size_bytes)}</span>
                           <span aria-hidden="true">·</span>
-                          <span>{timeAgo(s.last_modified_ms)}</span>
+                          <span>{timeAgo(s.last_modified_ms, t)}</span>
                         </div>
                       </div>
                       <span
@@ -1442,11 +1637,305 @@ function RestoreModal({
             info
           </span>
           <span>
-            Restoring overwrites your live state. Current state is preserved at{" "}
+            {t("clawkeep.restoreModal.footerPrefix")}{" "}
             <code className="bg-black/40 px-1 rounded">~/.openclaw.bak-restore-*</code>.
           </span>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Encryption modals
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * First-time-encryption setup. Two password fields + a "I understand the
+ * data is unrecoverable if I lose this passphrase" checkbox the user has
+ * to tick. We send `{ passphrase, confirm }` so the API can mismatch-check
+ * server-side too (browser autofill occasionally fills the second field
+ * with a stale value, and silently encrypting with the wrong one would be
+ * a foot-gun the user couldn't recover from).
+ */
+function SetPassphraseModal({
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const { t } = useT();
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  // Esc cancels the modal (consistent with ConfirmDialog and RestoreModal).
+  // Skip while a save is in flight so the user can't half-cancel a request.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !submitting) {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, submitting]);
+
+  const canSubmit =
+    pw.length >= 8 && pw === confirm && acknowledged && !submitting;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setLocalError(null);
+    try {
+      const res = await fetch("/setup-api/clawkeep/encryption", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passphrase: pw, confirm }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const msg = body.error || `HTTP ${res.status}`;
+        setLocalError(msg);
+        onError(msg);
+        return;
+      }
+      onSaved();
+    } catch (e) {
+      const msg = (e as Error).message;
+      setLocalError(msg);
+      onError(msg);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+      >
+        <h2 className="text-base font-semibold text-white mb-1">
+          {t("clawkeep.encryption.setTitle")}
+        </h2>
+        <p className="text-sm text-white/60 leading-relaxed mb-4">
+          {t("clawkeep.encryption.setDescription")}
+        </p>
+
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 mb-4 flex gap-2">
+          <span
+            className="material-symbols-rounded text-amber-300 shrink-0"
+            style={{ fontSize: 18 }}
+            aria-hidden="true"
+          >
+            warning
+          </span>
+          <p className="text-xs text-amber-100/90 leading-relaxed">
+            {t("clawkeep.encryption.warning1")}{" "}
+            <strong>{t("clawkeep.encryption.warning2")}</strong>
+            {t("clawkeep.encryption.warning3")}
+          </p>
+        </div>
+
+        <label className="block text-xs font-medium text-white/80 mb-1">
+          {t("clawkeep.encryption.passphraseLabel")}
+        </label>
+        <input
+          type="password"
+          value={pw}
+          onChange={(e) => setPw(e.target.value)}
+          autoFocus
+          autoComplete="new-password"
+          aria-describedby="clawkeep-passphrase-hint"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          placeholder={t("clawkeep.encryption.passphrasePlaceholder")}
+        />
+        {/* Live "min length" feedback. Mirrors the canSubmit gate so the
+            user sees why "Save" stays disabled before they tab to it. */}
+        <p
+          id="clawkeep-passphrase-hint"
+          className={`text-[11px] mt-1 ${
+            pw.length === 0
+              ? "text-white/40"
+              : pw.length >= 8
+                ? "text-emerald-300"
+                : "text-amber-300"
+          }`}
+        >
+          {pw.length === 0
+            ? t("clawkeep.encryption.passphrasePlaceholder")
+            : pw.length >= 8
+              ? t("clawkeep.encryption.lengthOk")
+              : t("clawkeep.encryption.lengthShort", { remaining: 8 - pw.length })}
+        </p>
+
+        <label className="block text-xs font-medium text-white/80 mb-1 mt-3">
+          {t("clawkeep.encryption.confirmLabel")}
+        </label>
+        <input
+          type="password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          autoComplete="new-password"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          placeholder={t("clawkeep.encryption.confirmPlaceholder")}
+        />
+        {confirm.length > 0 && pw !== confirm && (
+          <p className="text-[11px] text-red-300 mt-1">
+            {t("clawkeep.encryption.mismatch")}
+          </p>
+        )}
+
+        <label className="mt-4 flex items-start gap-2 text-xs text-white/80 leading-relaxed cursor-pointer">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(e) => setAcknowledged(e.target.checked)}
+            className="mt-0.5 accent-orange-500"
+          />
+          <span>
+            {t("clawkeep.encryption.ack1")}{" "}
+            <strong>{t("clawkeep.encryption.ack2")}</strong>
+            {t("clawkeep.encryption.ack3")}
+          </span>
+        </label>
+
+        {localError && (
+          <p className="mt-3 text-xs text-red-300">{localError}</p>
+        )}
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-md text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 cursor-pointer"
+          >
+            {t("clawkeep.cancel")}
+          </button>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="px-4 py-1.5 rounded-md text-xs font-semibold text-white bg-orange-500 hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          >
+            {submitting ? t("clawkeep.encryption.saving") : t("clawkeep.encryption.save")}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * Restore-time prompt. Used when the device-local passphrase is missing
+ * (e.g. user reset the device, or chose a snapshot uploaded from a
+ * different device) or when a previous restore attempt's passphrase was
+ * wrong. The submit handler reports back whether it should keep the modal
+ * open (wrong-password retry) or close it (success / hard failure).
+ */
+function RestorePassphraseModal({
+  name,
+  initialError,
+  onCancel,
+  onSubmit,
+}: {
+  name: string;
+  initialError?: string;
+  onCancel: () => void;
+  onSubmit: (passphrase: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const { t } = useT();
+  const [pw, setPw] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(initialError ?? null);
+
+  // Esc cancels the modal (consistent with ConfirmDialog/RestoreModal).
+  // Skip while a decrypt+restore is in flight — interrupting via Esc
+  // wouldn't actually abort the underlying CLI subprocess and would
+  // leave the user thinking they cancelled when they didn't.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !submitting) {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, submitting]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pw || submitting) return;
+    setSubmitting(true);
+    const outcome = await onSubmit(pw);
+    setSubmitting(false);
+    if (!outcome.ok) {
+      setErr(outcome.error || t("clawkeep.encryption.restoreFailed"));
+    }
+  };
+
+  // Description splits around the snapshot name so the <code> styling can
+  // wrap the dynamic value while the rest of the sentence stays translatable.
+  const descPrefix = t("clawkeep.encryption.enterDescriptionPrefix");
+  const descSuffix = t("clawkeep.encryption.enterDescriptionSuffix");
+
+  return (
+    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+      >
+        <h2 className="text-base font-semibold text-white mb-1">
+          {t("clawkeep.encryption.enterTitle")}
+        </h2>
+        <p className="text-sm text-white/60 leading-relaxed mb-4">
+          {descPrefix} <code className="text-emerald-300">{name}</code> {descSuffix}
+        </p>
+
+        <input
+          type="password"
+          value={pw}
+          onChange={(e) => setPw(e.target.value)}
+          autoFocus
+          autoComplete="off"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          placeholder={t("clawkeep.encryption.passphraseLabel")}
+        />
+        {err && <p className="mt-2 text-xs text-red-300">{err}</p>}
+
+        <p className="mt-3 text-[11px] text-white/40 leading-relaxed">
+          {t("clawkeep.encryption.localOnly")}
+        </p>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            className="px-3 py-1.5 rounded-md text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 disabled:opacity-50 cursor-pointer"
+          >
+            {t("clawkeep.cancel")}
+          </button>
+          <button
+            type="submit"
+            disabled={!pw || submitting}
+            className="px-4 py-1.5 rounded-md text-xs font-semibold text-white bg-orange-500 hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          >
+            {submitting
+              ? t("clawkeep.encryption.decrypting")
+              : t("clawkeep.encryption.decryptRestore")}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

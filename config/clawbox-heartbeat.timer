@@ -1,0 +1,21 @@
+[Unit]
+Description=Tick the ClawBox portal heartbeat every 5 minutes
+Requires=clawbox-heartbeat.service
+
+[Timer]
+# 30 seconds after boot is enough for clawbox-setup.service to be up
+# and serving on port 80 — earlier ticks would just hit the
+# SuccessExitStatus retry path until the web app finishes booting.
+OnBootSec=30s
+# 5 minutes is half the server's 10-minute staleness window, so a single
+# missed tick (network blip, cloudflared restart bouncing the local app
+# briefly) doesn't drop the device to Offline.
+OnUnitActiveSec=5min
+# Coarse accuracy = systemd batches our wake-up with other timers,
+# saving wake-from-sleep cycles on a laptop-class device. The portal
+# tolerates ±15s easily.
+AccuracySec=15s
+Unit=clawbox-heartbeat.service
+
+[Install]
+WantedBy=timers.target

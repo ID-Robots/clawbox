@@ -406,6 +406,30 @@ export default function VNCApp() {
         // as a successful reboot trigger and let the user wait it out.
         setRepairState("rebooting");
       }
+      // Once we're in the rebooting state, start polling /setup-api/vnc so
+      // the panel auto-recovers when the device comes back. Without this
+      // the UI would sit on the "Rebooting…" spinner indefinitely; the
+      // user would have to reload the whole page to dismiss it.
+      const start = Date.now();
+      const TIMEOUT_MS = 5 * 60 * 1000;
+      const POLL_INTERVAL_MS = 4_000;
+      while (Date.now() - start < TIMEOUT_MS) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        try {
+          const probe = await fetch("/setup-api/vnc", { cache: "no-store" });
+          if (!probe.ok) continue;
+          const data = await probe.json().catch(() => ({}));
+          if (data?.available) {
+            setRepairState("idle");
+            setRepairError(null);
+            setVncInfo({ host: window.location.hostname, wsPort: data.wsPort || 6080 });
+            setStatus("connecting");
+            return;
+          }
+        } catch { /* device still rebooting, keep waiting */ }
+      }
+      setRepairError("Reboot timed out waiting for the VNC service. Refresh the page if it has come back.");
+      setRepairState("failed");
     } catch (err) {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");

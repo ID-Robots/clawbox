@@ -119,6 +119,7 @@ describe("translations", () => {
         "login",
         "updateNotification",
         "remoteControl",
+        "clawkeep",
       ]);
 
       for (const key of Object.keys(translations.en)) {

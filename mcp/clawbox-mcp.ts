@@ -1823,12 +1823,22 @@ server.tool(
   "clawbox_context",
   "Return the ClawBox field guide: what ClawBox is, the mascot, available tools, architecture, and house rules. Call once at the start of a session to understand the device you're operating.",
   async () => {
-    if (cachedFieldGuide === undefined) cachedFieldGuide = loadClawBoxFieldGuide();
-    if (cachedFieldGuide === null) {
-      return { content: [{ type: "text", text: `Clawbox.md not found at ${CLAWBOX_FIELD_GUIDE_PATH}.` }] };
-    }
-    if (cachedFieldGuide === "") {
-      return { content: [{ type: "text", text: `Clawbox.md at ${CLAWBOX_FIELD_GUIDE_PATH} is empty.` }] };
+    // Only cache *successful* loads. Memoising null (file missing) or ""
+    // (file empty) would freeze a transient state — e.g. a fresh device
+    // that hasn't synced Clawbox.md yet — into the rest of the session,
+    // and the agent would keep showing "not found" even after the file
+    // arrives. A re-read on every call costs ~10kb of disk read and is
+    // dwarfed by the surrounding tool-call overhead.
+    if (cachedFieldGuide === undefined || cachedFieldGuide === null || cachedFieldGuide === "") {
+      const fresh = loadClawBoxFieldGuide();
+      if (typeof fresh === "string" && fresh.length > 0) {
+        cachedFieldGuide = fresh;
+      } else {
+        if (fresh === null) {
+          return { content: [{ type: "text", text: `Clawbox.md not found at ${CLAWBOX_FIELD_GUIDE_PATH}.` }] };
+        }
+        return { content: [{ type: "text", text: `Clawbox.md at ${CLAWBOX_FIELD_GUIDE_PATH} is empty.` }] };
+      }
     }
     return { content: [{ type: "text", text: cachedFieldGuide }] };
   }

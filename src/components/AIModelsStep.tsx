@@ -19,9 +19,10 @@ import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 import { copyToClipboard } from "@/lib/clipboard";
 import {
   extractProviderModelId,
-  getProviderCatalog,
+  isCatalogProvider,
   isValidModelId,
 } from "@/lib/provider-models";
+import { useProviderCatalog } from "@/hooks/useProviderCatalog";
 
 type ClawaiTier = "free" | "flash" | "pro";
 const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
@@ -550,12 +551,18 @@ export default function AIModelsStep({
   // API catalog — `gpt-5.4` only exists via codex, `gpt-5` only via the
   // public API. Matching the catalog to the actual namespace prevents
   // the picker from offering IDs that the upstream will reject.
-  const activeCatalog = useMemo(() => {
+  // Resolve which catalog namespace the picker should pull from. Differs
+  // from `selectedProvider` for OpenAI in subscription/OAuth mode, where
+  // the routeable namespace is `openai-codex` (ChatGPT backend) rather
+  // than `openai` (api.openai.com). Same swap the configure route applies.
+  const catalogProvider = useMemo<string | null>(() => {
     if (selectedProvider === "openai" && authMode === "subscription") {
-      return getProviderCatalog("openai-codex");
+      return "openai-codex";
     }
-    return getProviderCatalog(selectedProvider);
+    return isCatalogProvider(selectedProvider) ? selectedProvider : null;
   }, [selectedProvider, authMode]);
+
+  const activeCatalog = useProviderCatalog(catalogProvider);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [customModelId, setCustomModelId] = useState<string>("");
   const [useCustomModel, setUseCustomModel] = useState<boolean>(false);

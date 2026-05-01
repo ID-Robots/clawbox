@@ -109,3 +109,57 @@ describe("portal-heartbeat — pushHeartbeatIfChanged", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("portal-heartbeat — pushHeartbeatTick (periodic liveness)", () => {
+  it("pushes even when the URL hasn't changed since the last push", async () => {
+    // The IfChanged guard intentionally skips repeats; the Tick path
+    // intentionally doesn't, because the portal's lastSeenAt freshness
+    // check needs every ~5 minutes' worth of activity even when the
+    // URL is rock-stable.
+    await configStore.set("clawai_token", "claw_0123456789abcdef0123456789abcdef");
+    fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+
+    heartbeat.pushHeartbeatIfChanged("https://stable.trycloudflare.com");
+    await flushHeartbeat();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    heartbeat.pushHeartbeatTick("https://stable.trycloudflare.com");
+    await flushHeartbeat();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // And again — every tick re-pushes.
+    heartbeat.pushHeartbeatTick("https://stable.trycloudflare.com");
+    await flushHeartbeat();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does nothing when tunnelUrl is null (no tunnel published yet)", async () => {
+    heartbeat.pushHeartbeatTick(null);
+    await flushHeartbeat();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when no clawai_token is configured", async () => {
+    await configStore.set("clawai_token", undefined);
+    heartbeat.pushHeartbeatTick("https://abc.trycloudflare.com");
+    await flushHeartbeat();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("posts the same payload shape as the URL-change path", async () => {
+    await configStore.set("clawai_token", "claw_0123456789abcdef0123456789abcdef");
+    fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+    heartbeat.pushHeartbeatTick("https://liveness.trycloudflare.com");
+    await flushHeartbeat();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as {
+      deviceId: string;
+      tunnelUrl: string;
+      name: string;
+    };
+    expect(body.tunnelUrl).toBe("https://liveness.trycloudflare.com");
+    expect(body.deviceId).toMatch(/^dev_[a-f0-9]{16}$/);
+    expect(body.name).toMatch(/^ClawBox-[A-F0-9]{4}$/);
+  });
+});

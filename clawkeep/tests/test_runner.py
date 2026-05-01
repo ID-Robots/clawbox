@@ -62,8 +62,16 @@ CREDS = Credentials(
 @pytest.fixture
 def isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Point CLAWKEEP_DATA_DIR at a tmp dir so tests don't touch
-    /var/lib/clawkeep or whatever the real device directory is."""
+    /var/lib/clawkeep or whatever the real device directory is.
+
+    Also seeds a passphrase file under that dir — encryption is now
+    mandatory in the runner, so tests need a passphrase to exercise the
+    happy path. Tests that explicitly want the "no passphrase" branch
+    can `passphrase.clear()` after the fixture runs.
+    """
     monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(tmp_path))
+    from clawkeep import passphrase as passphrase_mod
+    passphrase_mod.write("test-passphrase")
     yield tmp_path / "state.json"
 
 

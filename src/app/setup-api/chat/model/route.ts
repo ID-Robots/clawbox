@@ -325,24 +325,55 @@ export async function POST(request: Request) {
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
-        // Fail-fast check: for OpenRouter specifically, OpenClaw needs
-        // the model to be listed in `models.providers.openrouter.models`
-        // or the gateway silently falls back to local with no error
-        // message the user can see. If it's not in the configured list,
-        // reject here so the chat popup shows a real error instead.
-        // (Other providers like anthropic/openai/google have built-in
-        // model catalogs in OpenClaw so we don't need this guard for them.)
+        // OpenRouter quirk: OpenClaw needs the chosen model to be listed
+        // in `models.providers.openrouter.models`, otherwise the gateway
+        // silently falls back to local with no error message the user can
+        // see. Previously we'd fail-fast here when the slug wasn't in the
+        // configured list — now we auto-extend instead, since the chat
+        // header pulls from the live OpenRouter catalog (340+ models)
+        // and forcing a "Re-save in Settings" round trip on every fresh
+        // pick is hostile UX. Other providers (anthropic/openai/google)
+        // have built-in catalogs in OpenClaw so this dance is OpenRouter-
+        // only.
         if (parsed.provider === "openrouter") {
           const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
-          const providerDef = openclawConfig.models?.providers?.openrouter;
-          const configuredIds = providerDef?.models?.map((m: { id?: string }) => m?.id).filter(Boolean) ?? [];
-          if (configuredIds.length > 0 && !configuredIds.includes(parsed.modelId)) {
-            return NextResponse.json(
-              {
-                error: `Model ${requestedModel} is not in the configured OpenRouter catalog. Re-save OpenRouter in Settings to refresh the model list.`,
-              },
-              { status: 400 },
-            );
+          const providerDef = openclawConfig.models?.providers?.openrouter as
+            | { models?: { id?: string; name?: string }[] }
+            | undefined;
+          const existingModels = providerDef?.models ?? [];
+          const configuredIds = existingModels
+            .map((m) => m?.id)
+            .filter((id): id is string => typeof id === "string" && id.length > 0);
+          // Append whenever the requested slug isn't already there — even
+          // for a freshly-configured provider with an empty models[]. The
+          // earlier `configuredIds.length > 0` guard caused the gateway to
+          // silently fall back to local on the first chat-header switch
+          // after a clean openrouter setup, because the seed providerDef
+          // has only the user's chosen default and any other slug would
+          // be skipped by the guard.
+          if (!configuredIds.includes(parsed.modelId)) {
+            // Append + persist. We emit only `id`+`name` because OpenClaw
+            // looks the rest (contextWindow, modalities, cost) up from
+            // its bundled provider catalog by id.
+            const nextModels = [
+              ...existingModels,
+              { id: parsed.modelId, name: parsed.modelId },
+            ];
+            try {
+              await runOpenclawConfigSet([
+                "models.providers.openrouter.models",
+                JSON.stringify(nextModels),
+                "--json",
+              ]);
+            } catch (err) {
+              console.error("[chat/model] auto-extend openrouter providerDef failed:", err);
+              return NextResponse.json(
+                {
+                  error: `Could not register ${requestedModel} with the OpenRouter provider. Re-save OpenRouter in Settings to refresh the model list.`,
+                },
+                { status: 502 },
+              );
+            }
           }
         }
         targetModel = requestedModel;
@@ -383,25 +414,37 @@ export async function POST(request: Request) {
     //    gateway reloads concurrently with the write.
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
 
-    // 2. Sweep every existing session's per-session override to the
-    //    same model, tagged `source: "user"` so OpenClaw's per-turn
-    //    model resolver returns early and leaves the override alone
-    //    on each subsequent message. Without this step, changing the
-    //    chat model dropdown only affected newly-opened sessions —
-    //    the currently-open chat pane kept routing to whatever
-    //    provider its `modelOverrideSource: "auto"` entry had picked,
-    //    making the UI dropdown feel broken. (NB: "manual" *looks*
-    //    like the right string but isn't recognised anywhere in the
-    //    OpenClaw dist; only "user" is sticky. See the docstring on
-    //    `applyModelOverrideToAllAgentSessions`.)
+    // 2. Sweep existing sessions' per-session overrides to the new
+    //    target — but only the ones tagged `auto` (or untagged). Sessions
+    //    whose `modelOverrideSource === "user"` AND whose existing
+    //    override differs from the target are LEFT ALONE: the user
+    //    explicitly picked a model on those sessions and we treat that
+    //    as sticky intent (e.g. parallel chats deliberately running
+    //    Sonnet for code review + Haiku for casual chat).
+    //
+    //    Without the sweep at all, changing the chat dropdown only
+    //    affected newly-opened sessions, which felt broken. With a full
+    //    sweep, one click homogenised every parallel chat. The middle
+    //    ground — sweep auto-tagged, preserve user-tagged — is what the
+    //    chat-header dropdown wants. The wizard / Settings configure
+    //    flow does a full sweep separately (see configure/route.ts) when
+    //    the user changes the primary provider entirely.
+    //
+    //    NB: "manual" *looks* like the right sticky tag but isn't
+    //    recognised anywhere in the OpenClaw dist; only "user" is
+    //    sticky. See the docstring on
+    //    `applyModelOverrideToAllAgentSessions`.
     const parsed = parseFullyQualifiedModel(targetModel);
     if (parsed) {
       try {
-        await applyModelOverrideToAllAgentSessions({
-          provider: parsed.provider,
-          modelId: parsed.modelId,
-          source: "user",
-        });
+        await applyModelOverrideToAllAgentSessions(
+          {
+            provider: parsed.provider,
+            modelId: parsed.modelId,
+            source: "user",
+          },
+          { skipUserTagged: true },
+        );
       } catch (err) {
         // Non-fatal: the default change (step 1) still takes effect
         // for brand-new sessions. Worst case the user has to /reset

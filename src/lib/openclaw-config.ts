@@ -186,6 +186,26 @@ interface SessionOverrideUpdate {
   authProfile?: string;
 }
 
+interface ApplyModelOverrideOpts {
+  agentsDir?: string;
+  /**
+   * When true, sessions whose `modelOverrideSource === "user"` AND whose
+   * existing override differs from the new target are LEFT ALONE — the
+   * user explicitly picked a model on those sessions and we treat that
+   * as sticky intent. Sessions tagged `auto`/`manual`/missing get the
+   * normal sweep.
+   *
+   * Used by the chat-popup model dropdown so switching the model in one
+   * chat doesn't homogenise parallel sessions deliberately running
+   * different models (e.g. Sonnet for code review + Haiku for chat).
+   * The wizard / Settings AI-provider configure flow does NOT pass this
+   * — when the user changes the primary provider entirely, sweeping
+   * every session is the documented intent (the provider switch tears
+   * down auth profiles too).
+   */
+  skipUserTagged?: boolean;
+}
+
 async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
   const results: string[] = [];
   let entries: string[];
@@ -232,11 +252,12 @@ async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise
  */
 export async function applyModelOverrideToAllAgentSessions(
   update: SessionOverrideUpdate,
-  opts: { agentsDir?: string } = {},
+  opts: ApplyModelOverrideOpts = {},
 ): Promise<{ filesUpdated: number; sessionsUpdated: number }> {
   const agentsDir = opts.agentsDir ?? AGENTS_DIR;
   const source = update.source ?? "user";
   const authProfile = update.authProfile ?? `${update.provider}:default`;
+  const skipUserTagged = opts.skipUserTagged === true;
 
   let filesUpdated = 0;
   let sessionsUpdated = 0;
@@ -256,6 +277,21 @@ export async function applyModelOverrideToAllAgentSessions(
     let touchedInFile = 0;
     for (const session of Object.values(sessions)) {
       if (!session || typeof session !== "object") continue;
+      // Preserve sticky per-session user choices when the caller asked
+      // for a soft sweep. A session whose existing override matches
+      // the new target is still touched so its source/authProfile
+      // converge with the target — only diverging user picks stay put.
+      if (skipUserTagged && session.modelOverrideSource === "user") {
+        const sameProvider =
+          session.providerOverride === update.provider ||
+          session.modelProvider === update.provider;
+        const sameModel =
+          session.modelOverride === update.modelId ||
+          session.model === update.modelId;
+        if (!sameProvider || !sameModel) {
+          continue;
+        }
+      }
       session.providerOverride = update.provider;
       session.modelOverride = update.modelId;
       session.modelOverrideSource = source;

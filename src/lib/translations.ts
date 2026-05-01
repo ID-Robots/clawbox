@@ -1,14 +1,24 @@
 import type { Locale } from "./i18n";
+import { clawkeepTranslations } from "./clawkeep-translations";
 import { desktopTranslations } from "./desktop-translations";
 
-// Merge setup + desktop translations per locale
+// Merge setup + desktop + clawkeep translations per locale.
+// Order matters: later sources override earlier ones, so a clawkeep-specific
+// key shadows a same-named setup or desktop key. Today there are no
+// collisions, but the precedence is documented so future additions don't
+// silently swap which copy wins.
 function mergeTranslations(
   setup: Record<Locale, Record<string, string>>,
   desktop: Record<Locale, Record<string, string>>,
+  clawkeep: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
-    merged[locale] = { ...setup[locale], ...desktop[locale] };
+    merged[locale] = {
+      ...setup[locale],
+      ...desktop[locale],
+      ...clawkeep[locale],
+    };
   }
   return merged;
 }
@@ -288,6 +298,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Expose this ClawBox over a Cloudflare Quick Tunnel, then paste the URL into your portal account to access it from anywhere.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel not installed",
     "remoteControl.tunnelNotInstalledDesc": "Run {command} to install it, then retry.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel isn't installed yet. One click installs it now — no terminal needed.",
+    "remoteControl.tunnelInstallButton": "Install Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Installing… (a few minutes)",
     "remoteControl.offTitle": "Remote access is off",
     "remoteControl.offDesc": "Start a tunnel to get a public URL you can paste into the portal.",
     "remoteControl.start": "Start Remote Access",
@@ -667,6 +680,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Изложете този ClawBox през Cloudflare Quick Tunnel и поставете URL в акаунта си в портала, за да имате достъп отвсякъде.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel не е инсталиран",
     "remoteControl.tunnelNotInstalledDesc": "Изпълнете {command}, за да го инсталирате, след което опитайте отново.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel още не е инсталиран. Един клик го инсталира — без терминал.",
+    "remoteControl.tunnelInstallButton": "Инсталирай Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Инсталиране… (няколко минути)",
     "remoteControl.offTitle": "Дистанционният достъп е изключен",
     "remoteControl.offDesc": "Стартирайте тунел, за да получите публичен URL за портала.",
     "remoteControl.start": "Старт на дистанционен достъп",
@@ -1046,6 +1062,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Stelle diese ClawBox über einen Cloudflare Quick Tunnel bereit und füge die URL in deinem Portal-Konto ein, um überall darauf zuzugreifen.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel nicht installiert",
     "remoteControl.tunnelNotInstalledDesc": "Führe {command} aus, um ihn zu installieren, und versuche es erneut.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel ist noch nicht installiert. Ein Klick installiert es jetzt — kein Terminal nötig.",
+    "remoteControl.tunnelInstallButton": "Cloudflare Tunnel installieren",
+    "remoteControl.tunnelInstalling": "Installation läuft… (ein paar Minuten)",
     "remoteControl.offTitle": "Fernzugriff ist aus",
     "remoteControl.offDesc": "Starte einen Tunnel, um eine öffentliche URL für das Portal zu erhalten.",
     "remoteControl.start": "Fernzugriff starten",
@@ -1425,6 +1444,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Expón esta ClawBox a través de un Cloudflare Quick Tunnel y pega la URL en tu cuenta del portal para acceder desde cualquier lugar.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel no instalado",
     "remoteControl.tunnelNotInstalledDesc": "Ejecuta {command} para instalarlo y vuelve a intentarlo.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel aún no está instalado. Un clic lo instala ahora — sin terminal.",
+    "remoteControl.tunnelInstallButton": "Instalar Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Instalando… (unos minutos)",
     "remoteControl.offTitle": "Acceso remoto desactivado",
     "remoteControl.offDesc": "Inicia un túnel para obtener una URL pública que pegar en el portal.",
     "remoteControl.start": "Iniciar acceso remoto",
@@ -1804,6 +1826,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Exposez cette ClawBox via un Cloudflare Quick Tunnel, puis collez l’URL dans votre compte portail pour y accéder depuis n’importe où.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel non installé",
     "remoteControl.tunnelNotInstalledDesc": "Exécutez {command} pour l’installer, puis réessayez.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel n'est pas encore installé. Un clic l'installe maintenant — sans terminal.",
+    "remoteControl.tunnelInstallButton": "Installer Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Installation… (quelques minutes)",
     "remoteControl.offTitle": "Accès à distance désactivé",
     "remoteControl.offDesc": "Démarrez un tunnel pour obtenir une URL publique à coller dans le portail.",
     "remoteControl.start": "Démarrer l’accès à distance",
@@ -2183,6 +2208,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Esponi questo ClawBox tramite un Cloudflare Quick Tunnel, poi incolla l’URL nel tuo account portale per accedervi da ovunque.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel non installato",
     "remoteControl.tunnelNotInstalledDesc": "Esegui {command} per installarlo, quindi riprova.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel non è ancora installato. Un clic lo installa ora — senza terminale.",
+    "remoteControl.tunnelInstallButton": "Installa Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Installazione… (qualche minuto)",
     "remoteControl.offTitle": "Accesso remoto disattivato",
     "remoteControl.offDesc": "Avvia un tunnel per ottenere un URL pubblico da incollare nel portale.",
     "remoteControl.start": "Avvia accesso remoto",
@@ -2562,6 +2590,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Cloudflare Quick Tunnel を通じてこの ClawBox を公開し、URL をポータルアカウントに貼り付けてどこからでもアクセスできるようにします。",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel がインストールされていません",
     "remoteControl.tunnelNotInstalledDesc": "{command} を実行してインストールし、再度お試しください。",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel はまだインストールされていません。クリック1回でインストール — ターミナル不要です。",
+    "remoteControl.tunnelInstallButton": "Cloudflare Tunnel をインストール",
+    "remoteControl.tunnelInstalling": "インストール中… (数分)",
     "remoteControl.offTitle": "リモートアクセスはオフです",
     "remoteControl.offDesc": "トンネルを開始してポータルに貼り付ける公開 URL を取得します。",
     "remoteControl.start": "リモートアクセスを開始",
@@ -2941,6 +2972,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Stel deze ClawBox beschikbaar via een Cloudflare Quick Tunnel en plak de URL in je portal-account om overal toegang te krijgen.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel niet geïnstalleerd",
     "remoteControl.tunnelNotInstalledDesc": "Voer {command} uit om het te installeren en probeer het opnieuw.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel is nog niet geïnstalleerd. Eén klik installeert het — geen terminal nodig.",
+    "remoteControl.tunnelInstallButton": "Cloudflare Tunnel installeren",
+    "remoteControl.tunnelInstalling": "Installeren… (enkele minuten)",
     "remoteControl.offTitle": "Externe toegang is uit",
     "remoteControl.offDesc": "Start een tunnel om een publieke URL te krijgen die je in de portal kunt plakken.",
     "remoteControl.start": "Externe toegang starten",
@@ -3320,6 +3354,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "Exponera denna ClawBox via en Cloudflare Quick Tunnel och klistra in URL:en i ditt portalkonto för att nå den var som helst.",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel inte installerat",
     "remoteControl.tunnelNotInstalledDesc": "Kör {command} för att installera det och försök igen.",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel är inte installerat än. Ett klick installerar det nu — ingen terminal behövs.",
+    "remoteControl.tunnelInstallButton": "Installera Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "Installerar… (några minuter)",
     "remoteControl.offTitle": "Fjärråtkomst är av",
     "remoteControl.offDesc": "Starta en tunnel för att få en offentlig URL att klistra in i portalen.",
     "remoteControl.start": "Starta fjärråtkomst",
@@ -3699,6 +3736,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.subtitle": "通过 Cloudflare Quick Tunnel 公开此 ClawBox，然后将 URL 粘贴到您的门户账号，即可随时随地访问。",
     "remoteControl.tunnelNotInstalled": "Cloudflare Tunnel 未安装",
     "remoteControl.tunnelNotInstalledDesc": "运行 {command} 安装它，然后重试。",
+    "remoteControl.tunnelInstallDesc": "Cloudflare Tunnel 尚未安装。一键安装,无需终端。",
+    "remoteControl.tunnelInstallButton": "安装 Cloudflare Tunnel",
+    "remoteControl.tunnelInstalling": "安装中… (几分钟)",
     "remoteControl.offTitle": "远程访问已关闭",
     "remoteControl.offDesc": "启动隧道以获取可粘贴到门户的公共 URL。",
     "remoteControl.start": "启动远程访问",
@@ -3806,4 +3846,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 };
 
-export const translations = mergeTranslations(setupTranslations, desktopTranslations);
+export const translations = mergeTranslations(
+  setupTranslations,
+  desktopTranslations,
+  clawkeepTranslations,
+);

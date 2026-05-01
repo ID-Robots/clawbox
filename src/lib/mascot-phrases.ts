@@ -139,13 +139,23 @@ export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undef
   for (const key of PHRASE_CATEGORIES) {
     const incoming = set[key]
     if (Array.isArray(incoming) && incoming.length > 0) {
-      // For nameGreetings, only keep entries that contain the {name} token
+      // Trim before validating so " spaces only " or "\n" entries are
+      // dropped instead of slipping through as "valid" but invisible.
+      // For nameGreetings, only keep entries that contain the {name} token.
       if (key === 'nameGreetings') {
-        const valid = incoming.filter(s => typeof s === 'string' && s.includes('{name}'))
+        const valid = incoming.filter((s) => {
+          if (typeof s !== 'string') return false
+          const trimmed = s.trim()
+          return trimmed.length > 0 && trimmed.length < 120 && trimmed.includes('{name}')
+        })
         merged.nameGreetings = valid.length > 0 ? valid : [...INSPIRATION_PHRASES.nameGreetings]
         continue
       }
-      const cleaned = incoming.filter(s => typeof s === 'string' && s.length > 0 && s.length < 120)
+      const cleaned = incoming.filter((s) => {
+        if (typeof s !== 'string') return false
+        const trimmed = s.trim()
+        return trimmed.length > 0 && trimmed.length < 120
+      })
       if (cleaned.length > 0) merged[key] = cleaned
     }
   }
