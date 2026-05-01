@@ -38,6 +38,13 @@ class State:
     last_backup_at_ms: int = 0
     last_cloud_bytes: int = 0
     last_snapshot_count: int = 0
+    # Live upload progress (only meaningful while last_step == "uploading"):
+    # the UI uses these to render "<done>/<total> · <MB/s>" instead of a bare
+    # indeterminate spinner. Cleared on terminal status (ok / error) by
+    # _stamp_heartbeat() so the next reopen doesn't show stale numbers.
+    upload_bytes_total: int = 0
+    upload_bytes_done: int = 0
+    upload_started_at_ms: int = 0
 
 
 def _safe_int(value: object) -> int:
@@ -72,6 +79,9 @@ def load(path: Path | str | None = None) -> State:
         last_backup_at_ms=_safe_int(raw.get("last_backup_at_ms", 0)),
         last_cloud_bytes=_safe_int(raw.get("last_cloud_bytes", 0)),
         last_snapshot_count=_safe_int(raw.get("last_snapshot_count", 0)),
+        upload_bytes_total=_safe_int(raw.get("upload_bytes_total", 0)),
+        upload_bytes_done=_safe_int(raw.get("upload_bytes_done", 0)),
+        upload_started_at_ms=_safe_int(raw.get("upload_started_at_ms", 0)),
     )
 
 

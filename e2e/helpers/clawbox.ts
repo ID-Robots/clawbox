@@ -1112,9 +1112,9 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#ai-api-key").fill("sk-test-openai-key");
   await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 
-  await expect(page.getByTestId("setup-step-local-ai")).toBeVisible();
-  await page.getByRole("button", { name: /Enable Gemma 4/i }).click();
-
+  // Local AI step was removed from initial setup (see SetupWizard.tsx) —
+  // owners now reach Gemma/Ollama via Settings → Local AI on demand. The
+  // wizard now goes straight from AI provider to Telegram.
   await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
   await page.getByRole("button", { name: "Skip for now" }).click();
 }

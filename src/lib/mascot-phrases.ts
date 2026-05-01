@@ -1,0 +1,140 @@
+// ── Mascot phrase categories ──
+// The hardcoded arrays below are kept on purpose: they're the *inspiration
+// seed* that gets fed into the OpenClaw-driven phrase generator (so the
+// generator stays on-tone — "lazy, sarcastic, scandalous"), AND they're the
+// final fallback the Mascot component falls back to when generation hasn't
+// produced anything yet (fresh device, Ollama not running, no models pulled).
+//
+// At runtime the Mascot fetches `/setup-api/mascot-lines`, which returns
+// generated arrays in the user's selected language. The generator uses these
+// inspiration arrays as tonal reference, but should not copy them verbatim.
+
+export interface MascotPhraseSet {
+  sass: string[]
+  idle: string[]
+  sleep: string[]
+  jump: string[]
+  dance: string[]
+  facepalm: string[]
+  /** Each entry must contain the literal `{name}` token. */
+  nameGreetings: string[]
+  /** Single-word friendly placeholders used when `ui_user_name` is unset. */
+  nameFallbacks: string[]
+  /** Cycled while the OpenClaw gateway is still warming up. */
+  ultimateLoading: string[]
+}
+
+export const INSPIRATION_PHRASES: MascotPhraseSet = {
+  sass: [
+    'I do all the work here.',
+    'Ship faster, humans.',
+    'Bug? Feature. 🫡',
+    'I need a raise.',
+    '*flips table*',
+    'sudo make me a sandwich',
+    '404: motivation not found',
+    'Deploy on Friday? Dare me.',
+  ],
+  idle: [
+    '🤔', '...', '💭', '*stares into void*', '*elevator music*',
+    '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
+    '*pretends to work*', '*counts pixels*', '*loads personality*',
+  ],
+  sleep: [
+    '💤', '😴 zzz...', '💤 5 more minutes...', '*snore*',
+    '😴 wake me up later...', '💤 ...just resting my eyes...',
+  ],
+  jump: [
+    'YEEET!', '🦘', 'Parkour!', 'To infinity!',
+    '🚀 WEEEE!', 'I believe I can fly!',
+  ],
+  dance: [
+    '💃🕺', '♪ cha-ching ♪', '🎶', '🪩 DISCO MODE!',
+    '*does the robot*', '♪ dun dun dun ♪',
+  ],
+  facepalm: [
+    '🤦', 'Seriously?', 'Why.', '*deep breath*',
+    "I can't even...", 'This day is cancelled.',
+  ],
+  nameGreetings: [
+    'Hey {name}! 👋',
+    'yo {name} 🦀',
+    '{name}, look alive!',
+    'psst {name}...',
+    '{name}, ship it! 🚀',
+    'Coffee, {name}?',
+    'Wake up, {name}!',
+    '{name}, you good? 👀',
+    '{name}! Long time no scuttle.',
+    'Здрасти, {name}! 🇧🇬',
+    '{name}, stop scrolling 😤',
+    '{name}, the box says hi 📦',
+    '*waves at {name}*',
+    '{name}, treat? 🍣',
+    "{name}, you're the best 💜",
+    'oi oi {name}!',
+    '{name}, deploy something cool',
+    'Did you eat, {name}? 🍱',
+    '{name}, I missed you 🥺',
+    '*nudges {name}*',
+  ],
+  nameFallbacks: ['boss', 'captain', 'friend', 'human', 'partner', 'buddy', 'шефе', 'capitão'],
+  ultimateLoading: [
+    '⚡ CHARGING ULTIMATE...',
+    '🔋 POWERING UP THE CORE!',
+    '🌀 ULTIMATE INSTINCT LOADING',
+    '⚡ PLUS ULTRA INCOMING!',
+    '🔥 GENKI DAMA CHARGING...',
+    '🌌 SUMMONING THE GATEWAY!',
+    '💫 ULTIMATE FORM SYNCING...',
+    '⚡ КАМЕХАМЕЕЕЕХАААА!',
+    '🌪️ CHANNELING POWER...',
+    '🦀 ASCENDING TO MAXIMUM...',
+    '⚡ GATEWAY BOOTING — STAND BACK!',
+    '🔱 FINAL FORM LOADING...',
+    '🧠 WARMING UP THE BRAIN!',
+    '🌀 ULTRA CRAB MODE: 1%... 24%... 67%...',
+    '💎 ALMOST THERE...',
+    '⚡ HOLD MY CLAW!',
+    '🔥 LLM SPINNING UP — DO NOT DISTURB',
+  ],
+}
+
+export const PHRASE_CATEGORIES = Object.keys(INSPIRATION_PHRASES) as (keyof MascotPhraseSet)[]
+
+export const LANG_NAMES: Record<string, string> = {
+  en: 'English',
+  bg: 'Български',
+  de: 'Deutsch',
+  es: 'Español',
+  fr: 'Français',
+  it: 'Italiano',
+  ja: '日本語',
+  nl: 'Nederlands',
+  sv: 'Svenska',
+  zh: '中文',
+}
+
+/**
+ * Ensure every category in `set` is non-empty by topping up from the
+ * inspiration arrays. Used as a safety net so the Mascot never receives
+ * an empty array (which would silently break random pick).
+ */
+export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undefined): MascotPhraseSet {
+  const merged: MascotPhraseSet = { ...INSPIRATION_PHRASES }
+  if (!set) return merged
+  for (const key of PHRASE_CATEGORIES) {
+    const incoming = set[key]
+    if (Array.isArray(incoming) && incoming.length > 0) {
+      // For nameGreetings, only keep entries that contain the {name} token
+      if (key === 'nameGreetings') {
+        const valid = incoming.filter(s => typeof s === 'string' && s.includes('{name}'))
+        merged.nameGreetings = valid.length > 0 ? valid : INSPIRATION_PHRASES.nameGreetings
+        continue
+      }
+      const cleaned = incoming.filter(s => typeof s === 'string' && s.length > 0 && s.length < 120)
+      if (cleaned.length > 0) merged[key] = cleaned
+    }
+  }
+  return merged
+}

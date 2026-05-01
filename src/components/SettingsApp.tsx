@@ -11,6 +11,8 @@ import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
@@ -123,6 +125,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
+
+  // ClawBox account gate — Remote Control needs the user to be signed in to
+  // the portal so the tunnel can be claimed. The hook polls /ai-models/status
+  // (already the truth source for active provider + tier).
+  const clawboxLogin = useClawboxLogin();
+  const [loginModal, setLoginModal] = useState<{ open: boolean; feature: ClawBoxLoginFeature }>(
+    { open: false, feature: "remote" },
+  );
+  const requireLoginFor = useCallback((feature: ClawBoxLoginFeature): boolean => {
+    // Don't gate while we still don't know — assume logged in to avoid a
+    // brief modal flash for users who actually are. The 30s poll will
+    // self-correct in either direction.
+    if (clawboxLogin.loading) return false;
+    if (clawboxLogin.loggedIn) return false;
+    setLoginModal({ open: true, feature });
+    return true;
+  }, [clawboxLogin.loading, clawboxLogin.loggedIn]);
+  // Section setter that intercepts gated sections. Use this everywhere a
+  // user action wants to navigate; bypass it for programmatic restorations
+  // (URL deep-link, tier-based redirects) where blocking would be confusing.
+  const setSectionGated = useCallback((next: Section) => {
+    if (next === "remote" && requireLoginFor("remote")) return;
+    setSection(next);
+  }, [requireLoginFor]);
 
   // Allow other parts of the desktop (e.g. the "new version available" toast)
   // to deep-link into a specific Settings section. Read a pending value left
@@ -484,6 +510,48 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setSavedBusy(null);
     }
   };
+
+  /* ── User name (used by mascot greetings) ── */
+  const [userName, setUserName] = useState<string>("");
+  const [userNameSaved, setUserNameSaved] = useState<string>("");
+  const userNameSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/setup-api/preferences?keys=ui_user_name")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (cancelled || !data) return;
+        const initial = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
+        setUserName(initial);
+        setUserNameSaved(initial);
+      })
+      .catch(() => { /* fall back to empty — user can still type one in */ });
+    return () => { cancelled = true; };
+  }, []);
+  const persistUserName = useCallback((value: string) => {
+    if (userNameSaveTimerRef.current) clearTimeout(userNameSaveTimerRef.current);
+    // Debounce so every keystroke doesn't hit the API; the mascot only
+    // needs the latest committed value.
+    userNameSaveTimerRef.current = setTimeout(() => {
+      fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ui_user_name: value.trim() }),
+      })
+        .then((res) => {
+          // Only treat the write as committed if the server actually accepted
+          // it. Previously every completed fetch flipped the "Saved." badge —
+          // including 4xx/5xx — which lied to the user when the preference
+          // never landed.
+          if (!res.ok) {
+            throw new Error(`preferences POST failed (${res.status})`);
+          }
+          setUserNameSaved(value.trim());
+          window.dispatchEvent(new Event("clawbox-user-name-changed"));
+        })
+        .catch(() => { /* keep local edit; next save attempt will retry */ });
+    }, 600);
+  }, []);
 
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
@@ -1178,6 +1246,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── Appearance ─── */}
         {activeSection === "appearance" && (
           <div className="max-w-xl space-y-5">
+
+            {/* Your name — used by the mascot for occasional name-greeting popups */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>person</span>
+                <label htmlFor="ui-user-name" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.userName.label")}</label>
+              </div>
+              <input
+                id="ui-user-name"
+                type="text"
+                value={userName}
+                placeholder={t("settings.userName.placeholder")}
+                maxLength={40}
+                onChange={e => { setUserName(e.target.value); persistUserName(e.target.value); }}
+                className="w-full rounded-xl bg-white/[0.04] border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[var(--coral-bright)]/60 focus:bg-white/[0.06]"
+              />
+              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                {t("settings.userName.helper")}
+                {userNameSaved && userNameSaved === userName.trim() && userNameSaved.length > 0 && (
+                  <span className="ml-1 text-emerald-400/80">{t("settings.userName.saved")}</span>
+                )}
+              </p>
+            </div>
 
             {/* Wallpaper card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -2475,7 +2566,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Remote Control ─── */}
-        {activeSection === "remote" && <RemoteControlPanel />}
+        {activeSection === "remote" && (
+          clawboxLogin.loggedIn || clawboxLogin.loading ? (
+            <RemoteControlPanel />
+          ) : (
+            <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />
+          )
+        )}
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
@@ -2701,7 +2798,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 return (
                   <button
                     key={item.id}
-                    onClick={() => { setSection(item.id); setMobileSection(item.id); }}
+                    onClick={() => {
+                      if (item.id === "remote" && requireLoginFor("remote")) return;
+                      setSection(item.id);
+                      setMobileSection(item.id);
+                    }}
                     className="flex items-center gap-4 w-full px-4 py-3.5 text-left border-none cursor-pointer transition-colors bg-transparent hover:bg-white/[0.04] active:bg-white/[0.08]"
                   >
                     <span className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--coral-bright)]/15 shrink-0">
@@ -2899,7 +3000,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           return (
             <button
               key={item.id}
-              onClick={() => setSection(item.id)}
+              onClick={() => setSectionGated(item.id)}
               className={`flex items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
                 active
                   ? "bg-[var(--coral-bright)]/15 text-[var(--text-primary)]"
@@ -2923,6 +3024,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           {renderContent()}
         </div>
       </div>
+
+      <ClawBoxLoginModal
+        open={loginModal.open}
+        feature={loginModal.feature}
+        onClose={() => setLoginModal((m) => ({ ...m, open: false }))}
+      />
 
       {/* Update confirmation modal */}
       {updateConfirm && (
@@ -3237,6 +3344,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {resetOverlay}
+    </div>
+  );
+}
+
+function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
+  return (
+    <div className="max-w-xl">
+      <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 flex flex-col items-center text-center gap-4">
+        <img
+          src="/clawbox-crab.png"
+          alt=""
+          width={64}
+          height={64}
+          className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
+        />
+        <div>
+          <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">Sign in to use Remote Control</h3>
+          <p className="text-sm text-[var(--text-muted)] leading-relaxed">
+            Remote Control needs your ClawBox account so the portal can publish a secure tunnel back to this device.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onSignIn}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer"
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 18 }}>open_in_new</span>
+          Open ClawBox Portal
+        </button>
+      </div>
     </div>
   );
 }

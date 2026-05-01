@@ -32,6 +32,12 @@ export default function VNCApp() {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [vncInfo, setVncInfo] = useState<{ host: string; wsPort: number } | null>(null);
+  // Install/repair flow: when the VNC API is unreachable or reports VNC as
+  // missing, the user can trigger `install.sh --step vnc_install` through
+  // /setup-api/vnc/repair. On success we reboot to make sure the freshly
+  // installed clawbox-vnc / websockify services come up cleanly.
+  const [repairState, setRepairState] = useState<"idle" | "repairing" | "rebooting" | "failed">("idle");
+  const [repairError, setRepairError] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const pasteTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -362,6 +368,36 @@ export default function VNCApp() {
     checkVnc();
   }, [checkVnc]);
 
+  const handleRepairAndReboot = useCallback(async () => {
+    setRepairError(null);
+    setRepairState("repairing");
+    try {
+      const res = await fetch("/setup-api/install/run-step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step: "vnc_install" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setRepairError(data?.error || `vnc_install failed (HTTP ${res.status})`);
+        setRepairState("failed");
+        return;
+      }
+      // Repair succeeded — reboot so the freshly-installed services start
+      // cleanly. /setup-api/system/power triggers `systemctl reboot` after
+      // a 1.5s delay so the response reaches us first.
+      setRepairState("rebooting");
+      await fetch("/setup-api/system/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "restart" }),
+      }).catch(() => { /* the reboot itself will sever the connection */ });
+    } catch (err) {
+      setRepairError(err instanceof Error ? err.message : "Repair request failed");
+      setRepairState("failed");
+    }
+  }, []);
+
   const openPasteModal = useCallback(() => {
     setPasteText("");
     pasteOpenRef.current = true;
@@ -392,16 +428,52 @@ export default function VNCApp() {
   }, [focusVncSurface, pasteText]);
 
   if (status === "error" && !vncInfo) {
+    const repairing = repairState === "repairing";
+    const rebooting = repairState === "rebooting";
+    const busy = repairing || rebooting;
     return (
       <div className="flex flex-col items-center justify-center h-full bg-black text-white/70 gap-4 p-8">
         <span className="material-symbols-rounded text-red-400" style={{ fontSize: 48 }}>error</span>
         <p className="text-sm text-center max-w-md">{error}</p>
-        <button
-          onClick={handleReconnect}
-          className="mt-2 px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer"
-        >
-          {t("vnc.retryConnection")}
-        </button>
+        {repairError && (
+          <p
+            role="alert"
+            aria-atomic="true"
+            className="text-xs text-red-400/80 text-center max-w-md whitespace-pre-wrap"
+          >
+            {repairError}
+          </p>
+        )}
+        {rebooting ? (
+          <div className="flex flex-col items-center gap-2 mt-2">
+            <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
+            <p className="text-sm text-white/80">Rebooting device — Remote Desktop will be ready in ~30s.</p>
+          </div>
+        ) : repairing ? (
+          <div className="flex flex-col items-center gap-2 mt-2">
+            <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
+            <p className="text-sm text-white/80">Installing / repairing Remote Desktop… this may take a few minutes.</p>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+            <button
+              onClick={handleReconnect}
+              disabled={busy}
+              className="px-4 py-2 rounded-lg text-sm text-white/90 bg-white/10 hover:bg-white/15 disabled:opacity-50 cursor-pointer"
+            >
+              {t("vnc.retryConnection")}
+            </button>
+            <button
+              onClick={handleRepairAndReboot}
+              disabled={busy}
+              className="px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2"
+              title="Runs install.sh --step vnc_install, then reboots"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>build</span>
+              Install / Repair &amp; Reboot
+            </button>
+          </div>
+        )}
       </div>
     );
   }

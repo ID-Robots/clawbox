@@ -91,6 +91,12 @@ def _stamp_heartbeat(
     if final_status != "running":
         st.last_step = ""
         st.last_step_at_ms = 0
+        # Also drop the live upload-progress fields — they're only meaningful
+        # while last_step == "uploading"; leaving them set would render
+        # "480/480 MB · 0 MB/s" in the panel after a successful finish.
+        st.upload_bytes_total = 0
+        st.upload_bytes_done = 0
+        st.upload_started_at_ms = 0
 
 
 def _stamp_step(st: state.State, step: str) -> None:
@@ -165,14 +171,57 @@ def run_once(cfg: Config, token: str) -> int:
             return EXIT_OPENCLAW
 
         _stamp_step(st, STEP_UPLOADING)
+        # Seed live upload-progress fields so the UI immediately switches from
+        # the indeterminate "Uploading…" bar to a determinate one anchored at
+        # 0/total. The progress callback below increments upload_bytes_done
+        # and re-saves state, throttled so we don't write state.json hundreds
+        # of times per second on multipart parts.
+        st.upload_bytes_total = int(archive.size_bytes)
+        st.upload_bytes_done = 0
+        st.upload_started_at_ms = api.now_ms()
+        state.save(st)
+
+        # boto3 calls Callback per chunk with the *delta* bytes since the last
+        # call — we accumulate and persist at most every 250 ms. The final
+        # write happens unconditionally after upload_file returns so the UI
+        # always sees done == total at the moment we move to checking-stats.
+        last_save_ms = 0
+        SAVE_THROTTLE_MS = 250
+
+        def _on_upload_progress(delta: int) -> None:
+            nonlocal last_save_ms
+            st.upload_bytes_done += int(delta)
+            now = api.now_ms()
+            if now - last_save_ms >= SAVE_THROTTLE_MS:
+                last_save_ms = now
+                try:
+                    state.save(st)
+                except OSError as save_err:
+                    # Disk hiccup mid-upload shouldn't kill the upload itself.
+                    log.warning("upload progress save failed: %s", save_err)
+
         try:
-            s3.upload(creds, archive_path=archive.path, object_name=archive.path.name)
+            s3.upload(
+                creds,
+                archive_path=archive.path,
+                object_name=archive.path.name,
+                progress_cb=_on_upload_progress,
+            )
         except s3.S3Error as e:
             log.error("s3 upload failed: %s", e)
+            # Clear the live progress fields so a reopened window doesn't
+            # render a half-finished MB/s readout against a failed run.
+            st.upload_bytes_total = 0
+            st.upload_bytes_done = 0
+            st.upload_started_at_ms = 0
             ok = _heartbeat_safe(cfg.server, token, status="error", error=f"upload: {e}"[:500])
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
             return EXIT_UPLOAD
+
+        # Upload finished — pin the readout at 100% before moving on.
+        st.upload_bytes_done = st.upload_bytes_total
+        state.save(st)
 
         # Best-effort stats — leave the per-run fields *unsent* on failure
         # so a transient ListBucket doesn't clobber the portal's last-known

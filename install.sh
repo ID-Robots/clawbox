@@ -610,6 +610,12 @@ step_openclaw_setup() {
 }
 
 step_openclaw_install() {
+  # Always re-assert the .bashrc PATH stanza before any early-return. The
+  # function is idempotent (greps before appending), and skipping it here
+  # was the root cause of the recurring `bash: openclaw: command not found`
+  # regression in the in-UI terminal after update runs.
+  ensure_clawbox_bashrc_path
+
   local LATEST
   LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
   local TARGET="${LATEST:-$OPENCLAW_VERSION}"
@@ -634,7 +640,6 @@ step_openclaw_install() {
     echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
     exit 1
   fi
-  ensure_clawbox_bashrc_path
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
 }
 
@@ -685,11 +690,16 @@ step_clawkeep_install() {
     echo "  Warning: clawkeep pip install failed (non-fatal — restore/scheduler will be unavailable)" >&2
     return 0
   fi
-  # Boto3 is the only runtime dep that isn't already on the device
-  # (huggingface-hub installs requests but not boto3). Install it
-  # separately so --no-deps above doesn't strand us.
+  # Runtime deps that aren't already on the device. --no-deps above
+  # skips the pyproject.toml dependency block entirely, so we install
+  # the missing pieces explicitly:
+  #   - boto3: cloud upload (huggingface-hub installs requests but not boto3)
+  #   - tomli: stdlib `tomllib` is 3.11+ only; Jetson L4T ships Python 3.10
+  #     as system default, and clawkeep.config imports tomli on <3.11.
   as_clawbox_login "python3 -m pip install --user --upgrade 'boto3>=1.34'" \
     || echo "  Warning: boto3 install failed (cloud backups will be unavailable until installed manually)" >&2
+  as_clawbox_login "python3 -m pip install --user --upgrade 'tomli>=2.0; python_version < \"3.11\"'" \
+    || echo "  Warning: tomli install failed (clawkeepd will fail to start on Python <3.11 until installed manually)" >&2
 
   # Hard-fail on the symptom that produced the "Setup needed" popup: the
   # `[project.scripts]` entry points must be present on disk after install.
@@ -1668,6 +1678,14 @@ step_vnc_install
 
 log "Applying ClawBox desktop theme..."
 step_desktop_theme
+
+# Belt-and-suspenders PATH stanza — covers update runs that early-return out
+# of step_openclaw_install / step_ai_tools_install when those tools are
+# already up to date, and also restores the stanza if .bashrc was wiped or
+# replaced (e.g. user re-creation, /etc/skel refresh). The function is
+# idempotent: it greps before appending.
+log "Ensuring clawbox user PATH (openclaw, claude, codex, gemini, hf, clawkeep)..."
+ensure_clawbox_bashrc_path
 
 log "Starting services..."
 step_start_services

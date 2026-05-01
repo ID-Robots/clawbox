@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * ClawBox MCP Server v3.0.0
+ * ClawBox MCP Server v3.1.0
  *
  * Full coding-agent tool suite (clean-room reimplementation of Claude Code tools)
  * plus ClawBox-specific device, desktop, and webapp tools.
@@ -14,6 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
 import type { Dirent } from "fs";
+import { readFileSync } from "fs";
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir, unlink } from "fs/promises";
 import { resolve, relative, dirname, extname, join, basename } from "path";
 
@@ -33,13 +34,33 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const GLOB_RESULT_LIMIT = 200;
 const GREP_RESULT_LIMIT = 250;
 const WEB_CACHE_TTL = 15 * 60_000; // 15 minutes
-const CLAWBOX_MCP_INSTRUCTIONS = `Use the dedicated browser_* tools for web browsing and browser automation.
+const BROWSER_ROUTING_INSTRUCTIONS = `Use the dedicated browser_* tools for web browsing and browser automation.
 
 Important browser routing:
 - When asked to "open the browser", open a website, search the web, or interact with a page, use browser_open or browser_launch.
 - browser_* tools control the real Chromium window on the ClawBox desktop through CDP.
 - Do not use ui_open_app("browser") for normal browsing. The desktop "browser" app is only the Browser Setup / integration panel.
 - Only open the Browser Setup app when the user asks to configure browser integration or the browser tools report that setup is required.`;
+
+// The ClawBox field guide (Clawbox.md) is exposed via the `clawbox_context`
+// tool — load-on-demand instead of being embedded in `instructions`, so it
+// only consumes context when the model actually needs it.
+const CLAWBOX_FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
+// Returns the file contents (possibly the empty string), or `null` when the
+// file doesn't exist / can't be opened. Distinguishing the two lets the
+// caller surface a precise message instead of conflating them.
+function loadClawBoxFieldGuide(): string | null {
+  try {
+    return readFileSync(CLAWBOX_FIELD_GUIDE_PATH, "utf8");
+  } catch (err) {
+    console.error(`[clawbox-mcp] Could not load ${CLAWBOX_FIELD_GUIDE_PATH}:`, err);
+    return null;
+  }
+}
+
+const CLAWBOX_STUB = `You are the AI inside a ClawBox — a private NVIDIA Jetson AI device on the user's desk, running OpenClaw OS. The desktop has a sarcastic crab mascot. Call the \`clawbox_context\` tool once at the start of a session for the full field guide (hardware, mascot lore, tools, architecture, house rules, and the first-contact intro template). Especially load it before answering any "what can you do / what is this / hi" question on a fresh device — those introductions follow a specific positives-only shape defined in the guide.`;
+
+const CLAWBOX_MCP_INSTRUCTIONS = `${CLAWBOX_STUB}\n\n${BROWSER_ROUTING_INSTRUCTIONS}`;
 
 // ══════════════════════════════════════════════════════════════════════
 // HTTP HELPERS
@@ -392,7 +413,7 @@ function htmlToText(html: string): string {
 // ══════════════════════════════════════════════════════════════════════
 
 const server = new McpServer(
-  { name: "clawbox", version: "3.0.0" },
+  { name: "clawbox", version: "3.1.0" },
   { instructions: CLAWBOX_MCP_INSTRUCTIONS },
 );
 
@@ -1790,13 +1811,37 @@ server.tool("code_project_delete", "Delete a code project source files.",
 );
 
 // ══════════════════════════════════════════════════════════════════════
+// TOOL: clawbox_context
+// ══════════════════════════════════════════════════════════════════════
+
+// `undefined` = never tried to load; `null` = file missing; `""` = file
+// exists but empty. Distinguishing these lets the handler return a
+// specific message for each ("not found" vs "is empty") instead of
+// collapsing both into a misleading "not found".
+let cachedFieldGuide: string | null | undefined = undefined;
+server.tool(
+  "clawbox_context",
+  "Return the ClawBox field guide: what ClawBox is, the mascot, available tools, architecture, and house rules. Call once at the start of a session to understand the device you're operating.",
+  async () => {
+    if (cachedFieldGuide === undefined) cachedFieldGuide = loadClawBoxFieldGuide();
+    if (cachedFieldGuide === null) {
+      return { content: [{ type: "text", text: `Clawbox.md not found at ${CLAWBOX_FIELD_GUIDE_PATH}.` }] };
+    }
+    if (cachedFieldGuide === "") {
+      return { content: [{ type: "text", text: `Clawbox.md at ${CLAWBOX_FIELD_GUIDE_PATH} is empty.` }] };
+    }
+    return { content: [{ type: "text", text: cachedFieldGuide }] };
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════
 // START SERVER
 // ══════════════════════════════════════════════════════════════════════
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[clawbox-mcp] Server v3.0.0 started on stdio");
+  console.error("[clawbox-mcp] Server v3.1.0 started on stdio");
 }
 
 main().catch((err) => {

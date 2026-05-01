@@ -11,10 +11,11 @@ unit tests, etc.) can run on a host that has not yet installed boto3.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .api import Credentials
 
@@ -87,12 +88,18 @@ def upload(
     *,
     archive_path: Path,
     object_name: str,
+    progress_cb: Optional[Callable[[int], None]] = None,
 ) -> str:
     """PUT the archive into s3://<bucket>/<prefix>/<object_name>. Returns the key.
 
     Uses boto3's `upload_file` which transparently switches to multipart for
     files >8MB — the openclaw archive is typically hundreds of MB on a real
     Jetson, so multipart matters.
+
+    `progress_cb` is forwarded as boto3's `Callback=` and fires per chunk with
+    the *delta* bytes transferred since the last call — the runner accumulates
+    those into the live upload-progress fields in state.json so the UI can
+    show MB/s.
     """
     try:
         from botocore.exceptions import BotoCoreError, ClientError
@@ -102,7 +109,7 @@ def upload(
     cli = _client(creds)
     key = _join(creds.prefix, object_name)
     try:
-        cli.upload_file(str(archive_path), creds.bucket, key)
+        cli.upload_file(str(archive_path), creds.bucket, key, Callback=progress_cb)
     except (BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"upload failed for s3://{creds.bucket}/{key}: {e}") from e
     return key
