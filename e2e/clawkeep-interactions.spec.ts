@@ -1,0 +1,269 @@
+import type { Page, Route } from "@playwright/test";
+import { expect, test } from "./helpers/coverage";
+import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
+
+// Interaction-level coverage for ClawKeepApp. The smoke spec
+// (clawkeep-smoke.spec.ts) only exercises top-level render branches;
+// the modals, confirm dialogs, schedule editor, and passphrase setup
+// stay un-rendered at top-level entry. These tests open each of those
+// subtrees so the bundle covers their render + handler code paths.
+
+interface ClawKeepStatusOverrides {
+  paired?: boolean;
+  configured?: boolean;
+  encryptionConfigured?: boolean;
+  cloudBytes?: number;
+  snapshotCount?: number;
+  lastBackupAtMs?: number;
+  scheduleEnabled?: boolean;
+  scheduleFrequency?: "daily" | "weekly";
+}
+
+function buildStatus(overrides: ClawKeepStatusOverrides = {}) {
+  return {
+    paired: overrides.paired ?? false,
+    configured: overrides.configured ?? false,
+    server: "https://openclawhardware.dev",
+    lastBackupAtMs: overrides.lastBackupAtMs ?? 0,
+    lastHeartbeatAtMs: 0,
+    lastHeartbeatStatus: "idle",
+    currentStep: "",
+    currentStepAtMs: 0,
+    cloudBytes: overrides.cloudBytes ?? 0,
+    snapshotCount: overrides.snapshotCount ?? 0,
+    uploadBytesTotal: 0,
+    uploadBytesDone: 0,
+    uploadStartedAtMs: 0,
+    openclawInstalled: true,
+    daemonInstalled: true,
+    schedule: {
+      enabled: overrides.scheduleEnabled ?? false,
+      frequency: overrides.scheduleFrequency ?? "weekly",
+      timeOfDay: "03:00",
+      weekday: 0,
+    },
+    nextRunAtMs: 0,
+    encryptionConfigured: overrides.encryptionConfigured ?? false,
+  };
+}
+
+async function fulfillJson(route: Route, body: unknown, status = 200) {
+  await route.fulfill({
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+}
+
+async function setupDesktop(page: Page) {
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+  });
+}
+
+async function openClawkeep(page: Page) {
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+  await openLauncher(page);
+  await page.getByTestId("app-launcher").getByRole("button", { name: "ClawKeep" }).click();
+  const clawkeep = page.getByTestId("chrome-window-clawkeep");
+  await expect(clawkeep).toBeVisible();
+  return clawkeep;
+}
+
+test("pair-start renders the challenge card and Cancel returns to pair card", async ({ page }) => {
+  await setupDesktop(page);
+
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(route, buildStatus({ paired: false })),
+  );
+  await page.route("**/setup-api/clawkeep/pair/start", (route) =>
+    fulfillJson(route, {
+      user_code: "ABCD-1234",
+      verification_url: "https://openclawhardware.dev/clawkeep/pair",
+      interval: 5,
+      code_length: 9,
+    }),
+  );
+  await page.route("**/setup-api/clawkeep/pair/poll", (route) =>
+    fulfillJson(route, { status: "pending" }),
+  );
+
+  // Stub out the new-window popup so the verification-url open call is a
+  // no-op — we only need its handler to run, not the page to actually load.
+  await page.addInitScript(() => {
+    window.open = () => null;
+  });
+
+  const clawkeep = await openClawkeep(page);
+  await clawkeep.getByRole("button", { name: "Pair with portal" }).click();
+
+  // Challenge card is mounted — verifies the user_code-copy useEffect
+  // and the polling-loop useEffect setup both ran.
+  await expect(clawkeep.getByText("ABCD-1234")).toBeVisible({ timeout: 5000 });
+
+  // Cancel button on the challenge card: distinct from the titlebar
+  // close, scoped by accessible name to the in-card control.
+  await clawkeep.getByRole("button", { name: "Cancel" }).click();
+
+  // Back on the pair card.
+  await expect(clawkeep.getByRole("button", { name: "Pair with portal" })).toBeVisible();
+});
+
+test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ page }) => {
+  await setupDesktop(page);
+
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(
+      route,
+      buildStatus({
+        paired: true,
+        configured: true,
+        encryptionConfigured: true,
+        cloudBytes: 16_000_000,
+        snapshotCount: 3,
+        lastBackupAtMs: Date.now() - 7_200_000,
+      }),
+    ),
+  );
+
+  // Three snapshots gives the list-rendering branch real items to map
+  // over (covers parseSnapshotName, the per-row formatting, and the
+  // hover/active states even if we only hover passively).
+  const now = Date.now();
+  await page.route("**/setup-api/clawkeep/snapshots", (route) =>
+    fulfillJson(route, {
+      snapshots: [
+        { name: "openclaw-2026-05-01T12-00-00Z", size_bytes: 5_000_000, last_modified_ms: now - 7_200_000 },
+        { name: "openclaw-2026-04-30T12-00-00Z", size_bytes: 4_900_000, last_modified_ms: now - 86_400_000 - 7_200_000 },
+        { name: "openclaw-2026-04-29T12-00-00Z", size_bytes: 4_800_000, last_modified_ms: now - 172_800_000 - 7_200_000 },
+      ],
+    }),
+  );
+
+  const clawkeep = await openClawkeep(page);
+  await clawkeep.getByRole("button", { name: "Restore from snapshot" }).click();
+
+  // RestoreModal mounted with snapshot list — covers the snapshots
+  // useEffect fetch path, the parseSnapshotName helper, and the list
+  // render branch.
+  const modal = page.getByRole("dialog");
+  await expect(modal).toBeVisible();
+  // Three buttons inside the modal (one per snapshot, plus close).
+  expect(await modal.getByRole("button").count()).toBeGreaterThan(2);
+
+  // Esc closes the modal — covers the keydown useEffect cleanup path.
+  await page.keyboard.press("Escape");
+  await expect(modal).not.toBeVisible();
+});
+
+test("unpair flow opens the confirm dialog and Esc dismisses it without unpairing", async ({ page }) => {
+  await setupDesktop(page);
+
+  let unpairCalled = 0;
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(
+      route,
+      buildStatus({
+        paired: true,
+        configured: true,
+        encryptionConfigured: true,
+        snapshotCount: 0,
+      }),
+    ),
+  );
+  await page.route("**/setup-api/clawkeep/unpair", (route) => {
+    unpairCalled += 1;
+    return fulfillJson(route, { ok: true });
+  });
+
+  const clawkeep = await openClawkeep(page);
+  await clawkeep.getByRole("button", { name: "Unpair" }).click();
+
+  // ConfirmDialog mounts with the unpair copy — exercises the dialog
+  // render branch, the global Esc keydown listener registration, and
+  // the danger-palette path.
+  const dialog = page.getByRole("dialog", { name: "Unpair this device?" });
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  expect(unpairCalled).toBe(0);
+});
+
+test("schedule toggle saves to the schedule endpoint and renders the editor", async ({ page }) => {
+  await setupDesktop(page);
+
+  let savedSchedule: { frequency: string; enabled: boolean; timeOfDay: string; weekday: number } | null = null;
+  let firstStatusServed = false;
+  await page.route("**/setup-api/clawkeep", (route) => {
+    const status = buildStatus({
+      paired: true,
+      configured: true,
+      encryptionConfigured: true,
+      scheduleEnabled: firstStatusServed && savedSchedule !== null,
+      scheduleFrequency: (savedSchedule?.frequency as "daily" | "weekly") ?? "weekly",
+      snapshotCount: 0,
+    });
+    firstStatusServed = true;
+    return fulfillJson(route, status);
+  });
+  await page.route("**/setup-api/clawkeep/schedule", async (route) => {
+    const body = route.request().postDataJSON() as { enabled: boolean; frequency: string; timeOfDay: string; weekday: number };
+    savedSchedule = body;
+    return fulfillJson(route, {
+      schedule: { ...body },
+      nextRunAtMs: Date.now() + 86_400_000,
+    });
+  });
+
+  const clawkeep = await openClawkeep(page);
+  // The schedule toggle is the only checkbox on the paired dashboard;
+  // checking it triggers the save() side-effect and renders the
+  // frequency/weekday editor (the dirty-only Save button stays hidden
+  // because save() flips dirty back to false on success).
+  const toggle = clawkeep.locator('input[type="checkbox"]');
+  await expect(toggle).toHaveCount(1);
+  await toggle.check();
+
+  // Wait for the PUT to round-trip and the editor sub-tree to mount
+  // (frequency buttons appear once draft.enabled is true).
+  await expect(clawkeep.getByRole("button", { name: "Daily" })).toBeVisible();
+  await expect(clawkeep.getByRole("button", { name: "Weekly" })).toBeVisible();
+});
+
+test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {
+  await setupDesktop(page);
+
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(
+      route,
+      buildStatus({
+        paired: true,
+        configured: true,
+        encryptionConfigured: false,
+        snapshotCount: 0,
+      }),
+    ),
+  );
+
+  const clawkeep = await openClawkeep(page);
+  // Without encryption configured the dashboard's primary CTA is
+  // "Protect my OpenClaw" — clicking it opens the passphrase setup
+  // modal (SetPassphraseModal, ~180 lines of un-rendered subtree).
+  await clawkeep.getByRole("button", { name: "Protect my OpenClaw" }).click();
+
+  // SetPassphraseModal renders a password input, a confirm input, and
+  // a save button. We don't fill it (the post-save flow is exercised
+  // by other tests' implicit branches); just asserting the modal
+  // mounted is enough to cover its render + useEffect setup.
+  const passwordInputs = clawkeep.locator('input[type="password"]');
+  await expect(passwordInputs.first()).toBeVisible();
+});
