@@ -52,6 +52,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   // new primary provider takes effect on the open chat without a reset.
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
+  // Plugin gating: configure route now toggles `plugins.entries.anthropic.enabled`
+  // based on the active provider. Tests don't care about the side effect; just
+  // make the import resolve.
+  setProviderPlugins: vi.fn().mockResolvedValue(undefined),
 }));
 
 // llamacpp / local-ai-runtime have pure getters, but local-ai-runtime

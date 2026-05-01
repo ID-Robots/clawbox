@@ -7,8 +7,16 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from '
 
 // Save short assistant snippets for mascot speech lines via client-kv
 import * as kv from '@/lib/client-kv'
+import {
+  loadCachedHistory,
+  saveCachedHistory,
+  mergeMessages,
+  uuid,
+  type ChatMessage as BaseChatMessage,
+} from '@/lib/chat-history-cache'
 
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
+const HISTORY_CACHE_KEY = 'clawbox-chatpopup-history-v1'
 const MAX_RETRIES = 8
 // During a skill install the gateway restarts to load the new skill, so
 // extend the retry budget to quadruple so the chat reconnects automatically
@@ -52,19 +60,9 @@ interface ChatPopupProps {
   trayMode?: boolean
 }
 
-interface ChatMessage {
-  role: 'user' | 'assistant' | 'system'
-  text: string
-  timestamp: number
-  /**
-   * Visual variant for `system` role messages. "error" is the default
-   * (red pill) and is what surfaces for WebSocket failures, model-switch
-   * errors, and similar user-visible problems. "success" (green pill)
-   * is for confirmations — e.g. "Switched chat to X" after the user
-   * picks a new model. Ignored for 'user' and 'assistant' roles.
-   */
-  variant?: 'success' | 'error'
-}
+// `system`-role messages render as colored pill banners; `variant` picks
+// the colour (red error, green confirmation). Ignored for user/assistant.
+type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' }
 
 interface ChatModelState {
   activeOptionId: string | null
@@ -130,26 +128,30 @@ function extractText(msg: unknown): string {
   return ''
 }
 
-// uuid() requires secure context (HTTPS).
-// Fall back for HTTP deployments.
-function uuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
-  })
-}
-
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-// Constrained set the gateway maps to DeepSeek's reasoning_effort field.
-// Anything outside this set is silently coerced to "high" so a stale or
+// Mirrors OpenClaw's canonical thinking-level set
+// (`openclaw/dist/thinking-BW_4_Ip1.js: BASE_THINKING_LEVELS` + xhigh/max/
+// adaptive). 'default' is a UI-only sentinel meaning "don't override —
+// let the gateway use its configured default"; we map it to undefined on
+// the wire. Anything outside this set is silently coerced so a stale or
 // hand-edited localStorage value can't reach the gateway.
-type ThinkingLevel = 'low' | 'medium' | 'high'
-const THINKING_LEVELS: readonly ThinkingLevel[] = ['low', 'medium', 'high']
+type ThinkingLevel = 'default' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'adaptive'
+const THINKING_LEVELS: readonly ThinkingLevel[] = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'adaptive']
+const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
+  default: 'Default',
+  off: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'X-High',
+  max: 'Max',
+  adaptive: 'Adaptive',
+}
 function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel {
-  return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'high'
+  return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'default'
 }
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
@@ -158,7 +160,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const panelMode = panelWidth !== null
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Hydrate from localStorage synchronously so a refresh paints the prior
+  // conversation immediately. mergeMessages takes over once chat.history
+  // arrives over the WS, so optimistic queued sends aren't dropped.
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadCachedHistory(HISTORY_CACHE_KEY))
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -309,7 +314,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
-
+  // Sends queued while the WS handshake hasn't completed yet. Drained by
+  // a useEffect when status flips to 'connected' so the user can type and
+  // hit Enter before the gateway is ready without seeing a hard error.
+  const pendingSendsRef = useRef<Array<{
+    text: string
+    attachments: { name: string; path: string; type: string }[]
+    idempotencyKey: string
+  }>>([])
   // Auto-scroll to bottom — instant jump, no smooth animation
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
@@ -330,34 +342,58 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const id = uuid()
       pendingRef.current.set(id, { resolve, reject })
       ws.send(JSON.stringify({ type: 'req', id, method, params }))
-      // Timeout after 30s
+      // Timeout after 120s. Gateway main-loop blocks for tens of seconds
+      // during agent startup; we need to outlast the worst observed stall
+      // (~81s) so chat.send acks aren't dropped client-side.
       setTimeout(() => {
         if (pendingRef.current.has(id)) {
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 30000)
+      }, 120000)
     })
   }, [])
 
-  // Push the latest thinkingLevel to the gateway whenever it changes or the
-  // WS reconnects. chat.send resolves thinking from the session entry, so
-  // patching the entry keeps every subsequent send aligned with the picker.
-  // Failures are surfaced to the dev console — full retry/rollback would
-  // be overkill for a UI knob whose worst case is one chat reverting to
-  // the gateway's last-known level until the user toggles again.
+  // Push thinkingLevel to the gateway as a sticky session override
+  // (per OpenClaw control-ui docs: model + thinking pickers patch via
+  // sessions.patch and persist for every subsequent turn). 'default'
+  // maps to null on the wire so the gateway falls back to its config.
+  // The lastSent ref dedupes — without it, every reconnect re-pushes
+  // an identical value and a user click triggers two patches (state
+  // change + this effect).
+  const lastSentThinkingRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
     if (status !== 'connected') return
     const key = sessionKeyRef.current
     if (!key) return
-    void wsRequest('sessions.patch', { key, thinkingLevel }).catch((err) => {
-      console.warn('[ChatPopup] sessions.patch(thinkingLevel) failed', err)
+    const wireValue = thinkingLevel === 'default' ? null : thinkingLevel
+    if (wireValue === lastSentThinkingRef.current) return
+    lastSentThinkingRef.current = wireValue
+    void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err) => {
+      // Reset so a reconnect or next user change retries.
+      lastSentThinkingRef.current = undefined
+      setMessages(msgs => [...msgs, {
+        role: 'system',
+        text: `Failed to change effort: ${err instanceof Error ? err.message : 'unknown error'}`,
+        timestamp: Date.now(),
+        variant: 'error',
+      }])
     })
   }, [status, thinkingLevel, wsRequest])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
     const normalized = normalizeThinkingLevel(next)
-    setThinkingLevel(normalized)
+    setThinkingLevel(prev => {
+      if (prev === normalized) return prev
+      const label = THINKING_LEVEL_LABELS[normalized] ?? normalized
+      setMessages(msgs => [...msgs, {
+        role: 'system',
+        text: `Switched effort to ${label}.`,
+        timestamp: Date.now(),
+        variant: 'success',
+      }])
+      return normalized
+    })
     try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', normalized) } catch {}
   }, [])
 
@@ -378,6 +414,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const connect = useCallback(async () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -400,6 +437,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Auto-retry if gateway config not ready yet. Extend the budget
       // during skill-install windows so the chat silently recovers once
       // the restarted gateway finishes reloading skills.
+
       const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
       if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
@@ -425,6 +463,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         resolve: (hello: unknown) => {
           setStatus('connected')
           connectedOnceRef.current = true
+
           retryCountRef.current = 0
           const h = hello as Record<string, unknown>
           const snapshot = h.snapshot as Record<string, unknown> | undefined
@@ -505,6 +544,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           }
         },
         reject: (err: Error) => {
+
           setStatus('error')
           setErrorMsg(err.message || 'Auth failed')
         },
@@ -601,6 +641,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
     const onClose = () => {
       wsRef.current = null
+
       // While a skill install is in-flight the gateway is restarting to
       // load the new skill — use the extended retry budget so the chat
       // reconnects automatically once it comes back, instead of bailing
@@ -673,7 +714,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      setMessages(chatMsgs)
+      // Merge so optimistic local messages from a queued send aren't dropped
+      // when the server snapshot doesn't yet contain them.
+      setMessages(prev => mergeMessages(chatMsgs, prev))
 
       // Auto-send a greeting if no history exists (first conversation)
       if (chatMsgs.length === 0 && !greetedRef.current) {
@@ -724,6 +767,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setAttachments(prev => prev.filter((_, i) => i !== idx))
   }, [])
 
+  const dispatchSend = useCallback(async (
+    text: string,
+    sendAttachments: { name: string; path: string; type: string }[],
+    idempotencyKey: string,
+  ) => {
+    let messageText = text
+    if (sendAttachments.length > 0) {
+      const filePaths = sendAttachments.map(a => `[Attached file: ${a.path}]`).join('\n')
+      messageText = [filePaths, text].filter(Boolean).join('\n')
+    }
+    try {
+      await wsRequest('chat.send', {
+        sessionKey: sessionKeyRef.current,
+        message: messageText || '(file attached)',
+        deliver: false,
+        idempotencyKey,
+      })
+    } catch (err) {
+      setSending(false)
+      runIdRef.current = null
+      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+    }
+  }, [wsRequest])
+
   // Send a message
   const sendMessage = useCallback(async () => {
     const text = input.trim()
@@ -744,26 +811,47 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
 
-    // Build message with file paths — gateway only supports 'message' string
-    let messageText = text
-    if (currentAttachments.length > 0) {
-      const filePaths = currentAttachments.map(a => `[Attached file: ${a.path}]`).join('\n')
-      messageText = [filePaths, text].filter(Boolean).join('\n')
+    // If the WS handshake hasn't completed yet, queue the send instead of
+    // failing fast. The optimistic user message is already on screen, so the
+    // chat looks responsive while the gateway finishes its agent prep.
+    if (status !== 'connected') {
+      pendingSendsRef.current.push({ text, attachments: currentAttachments, idempotencyKey })
+      return
     }
 
-    try {
-      await wsRequest('chat.send', {
-        sessionKey: sessionKeyRef.current,
-        message: messageText || '(file attached)',
-        deliver: false,
-        idempotencyKey,
-      })
-    } catch (err) {
-      setSending(false)
-      runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+    await dispatchSend(text, currentAttachments, idempotencyKey)
+  }, [input, sending, attachments, status, dispatchSend])
+
+  // Persist transcript to localStorage on every change so refresh paints
+  // the prior conversation in <100ms. Cheap — saveCachedHistory trims
+  // and strips before serializing.
+  useEffect(() => {
+    saveCachedHistory(HISTORY_CACHE_KEY, messages)
+  }, [messages])
+
+  // Drain queued sends on connect; flush them as system errors on error
+  // so messages don't sit forever in a ref the user has no way to see.
+  // Sequential dispatch preserves user-typed order on the gateway.
+  useEffect(() => {
+    if (pendingSendsRef.current.length === 0) return
+    if (status === 'connected') {
+      const queue = pendingSendsRef.current
+      pendingSendsRef.current = []
+      void (async () => {
+        for (const q of queue) {
+          await dispatchSend(q.text, q.attachments, q.idempotencyKey)
+        }
+      })()
+    } else if (status === 'error') {
+      const dropped = pendingSendsRef.current.length
+      pendingSendsRef.current = []
+      setMessages(msgs => [...msgs, {
+        role: 'system',
+        text: `Could not deliver ${dropped} queued message${dropped === 1 ? '' : 's'} — gateway is unreachable.`,
+        timestamp: Date.now(),
+      }])
     }
-  }, [input, sending, attachments, wsRequest])
+  }, [status, dispatchSend])
 
   // Abort generation
   const abort = useCallback(async () => {
@@ -822,17 +910,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     await switchChatModel({ model: target.model, label: target.label })
   }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
-  // Connect/disconnect on open/close
+  // Pre-warm the gateway WebSocket on mount so opening chat is instant —
+  // the WS handshake happens silently while the user is still on the desktop.
+  // onClose's retry budget covers a dropped pre-warm; no need for the isOpen
+  // effect to also call connect().
+  useEffect(() => {
+    connect()
+  }, [connect])
+
   useEffect(() => {
     if (isOpen) {
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        connect()
-      }
     } else {
       setVisible(false)
     }
-  }, [isOpen, connect])
+  }, [isOpen])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -925,7 +1017,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.removeEventListener('clawbox:primary-ai-configured', providerHandler)
       if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
     }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- connect is stable (useCallback [])
 
   // Safety net: if the chat ever lands in the error state while a skill
   // install is still in flight, auto-retry the connection instead of
@@ -1193,9 +1285,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 cursor: 'pointer',
               }}
             >
-              <option value="low" style={{ background: '#111827', color: '#fff' }}>Effort: low</option>
-              <option value="medium" style={{ background: '#111827', color: '#fff' }}>Effort: medium</option>
-              <option value="high" style={{ background: '#111827', color: '#fff' }}>Effort: high</option>
+              {/* Mirrors the OpenClaw Control UI's effort picker: Default (=
+                  use server config) plus the canonical BASE_THINKING_LEVELS
+                  + xhigh / max / adaptive. */}
+              {THINKING_LEVELS.map(level => (
+                <option
+                  key={level}
+                  value={level}
+                  style={{ background: '#111827', color: '#fff' }}
+                >
+                  Effort: {THINKING_LEVEL_LABELS[level]}
+                </option>
+              ))}
             </select>
             <span
               className="material-symbols-rounded"
@@ -1293,7 +1394,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
-        {(status === 'connecting' || reloadingSkill) && (
+        {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
             <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } }`}</style>
             {reloadingSkill ? (
@@ -1468,6 +1569,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 ? t("chat.greetingPlaceholder")
                 : t("chat.messagePlaceholder")
           }
+          // Block input while the WS handshake is still in flight. Allowing
+          // sends during 'connecting' caused them to queue behind a busy
+          // gateway loop and feel broken to users — better to clearly gate
+          // the input until the connection is ready.
           disabled={status !== 'connected' || greetingPending}
           rows={1}
           style={{
@@ -1502,7 +1607,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         ) : (
           <button
             onClick={sendMessage}
-            disabled={(!input.trim() && attachments.length === 0) || status !== 'connected'}
+            disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
             title={t("chat.send")}
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',

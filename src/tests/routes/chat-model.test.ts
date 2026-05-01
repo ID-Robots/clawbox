@@ -21,6 +21,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   runOpenclawConfigSet: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
+  // Plugin gating: chat/model route toggles `plugins.entries.anthropic.enabled`
+  // when switching providers. Stubbed since tests don't assert on it.
+  setProviderPlugins: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/sqlite-store", () => ({

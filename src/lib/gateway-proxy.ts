@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
+import os from "os";
+import net from "net";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 const OPENCLAW_CONFIG_PATH = "/home/clawbox/.openclaw/openclaw.json";
@@ -13,7 +15,34 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean)
 );
 
-export function redirectToSetup(request: NextRequest) {
+// Single mDNS label — letters/digits/hyphens, no dots, no leading/trailing
+// hyphen. We append `.local` ourselves; allowing dots in the input would
+// let a host header like `evil..local` slip through host comparison.
+const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+let cachedMdnsHost: string | null | undefined; // undefined = not loaded yet
+function getSystemMdnsHost(): string | null {
+  if (cachedMdnsHost !== undefined) return cachedMdnsHost;
+  try {
+    const label = os.hostname().trim().toLowerCase();
+    cachedMdnsHost = MDNS_LABEL_RE.test(label) ? `${label}.local` : null;
+  } catch {
+    cachedMdnsHost = null;
+  }
+  return cachedMdnsHost;
+}
+
+// Without renamed-host support, ALLOWED_HOSTS was frozen to `clawbox.local`
+// at install time, so any rename bounced the user to a NXDOMAIN page when
+// the gateway was busy and we fell back to CANONICAL_ORIGIN.
+function isReflectableHost(rawHost: string): boolean {
+  if (ALLOWED_HOSTS.has(rawHost)) return true;
+  if (rawHost === getSystemMdnsHost()) return true;
+  if (net.isIPv4(rawHost)) return true;
+  return false;
+}
+
+export function redirectToSetup(request: NextRequest): NextResponse {
   const rawProto = request.headers.get("x-forwarded-proto");
   const proto =
     rawProto
@@ -24,7 +53,7 @@ export function redirectToSetup(request: NextRequest) {
     .get("host")
     ?.toLowerCase()
     .replace(/:\d+$/, "");
-  if (rawHost && ALLOWED_HOSTS.has(rawHost)) {
+  if (rawHost && isReflectableHost(rawHost)) {
     return NextResponse.redirect(
       new URL(`${proto}://${request.headers.get("host")}/setup`),
       302

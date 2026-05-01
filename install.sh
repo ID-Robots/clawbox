@@ -986,21 +986,23 @@ step_systemd_services() {
     cp "$src" /etc/systemd/system/
   done
   systemctl daemon-reload
-  # Enable all services except templates and the on-demand browser unit.
-  # clawbox-tunnel was previously kept on-demand here, but Remote Access has
-  # to survive reboots once the user has paired ClawBox AI — otherwise the
-  # device is unreachable until they SSH in or open the portal again. The
-  # heartbeat hook only pushes URLs when a `claw_*` portal token is present,
-  # so an unpaired box still won't leak a public URL into anyone's portal.
+  # Enable all services except templates and on-demand units.
   #
-  # clawbox-heartbeat.service itself is one-shot (no boot-time activation
-  # without the timer); it's the .timer that keeps the portal's lastSeenAt
-  # fresh. Skip the .service when iterating enable-targets — systemctl
-  # would only complain that a oneshot has no [Install] target — and pick
-  # the .timer up explicitly below.
+  # Browser is launched ad-hoc by the desktop, never at boot.
+  #
+  # clawbox-tunnel must be opt-in from Settings → Remote Control: enabling
+  # it by default when cloudflared isn't installed produces a permanent
+  # restart loop, and even with cloudflared present, exposing a public URL
+  # should be a deliberate user choice. The Settings toggle calls
+  # `systemctl enable --now` itself.
+  #
+  # clawbox-heartbeat.service is one-shot — it has no [Install] target and
+  # is driven by the matching .timer, which is enabled explicitly below.
+  # Skip the .service in this loop so systemctl doesn't complain.
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
     systemctl enable "$svc"
   done
@@ -1009,6 +1011,13 @@ step_systemd_services() {
   systemctl enable --now clawbox-heartbeat.timer
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
+  # Migration: prior installs enabled clawbox-tunnel by default, which loops
+  # forever on devices without cloudflared. Stop the loop on those boxes,
+  # but only when the binary is missing — devices where the user opted in
+  # via Settings have cloudflared installed and should keep their choice.
+  if [ ! -x /usr/local/bin/cloudflared ]; then
+    systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
+  fi
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
