@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import os from "os";
 import net from "net";
+import crypto from "crypto";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 const OPENCLAW_CONFIG_PATH = "/home/clawbox/.openclaw/openclaw.json";
@@ -75,6 +76,33 @@ export async function getGatewayToken(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// Legacy literal that earlier ClawBox builds wrote into `gateway.auth.token`.
+// Public knowledge (it's in the open-source git history), so any device still
+// carrying it gets rotated to a per-device random token on the next configure
+// or reset.
+const LEGACY_GATEWAY_TOKEN = "clawbox";
+const MIN_GATEWAY_TOKEN_LENGTH = 32;
+
+/**
+ * Returns the existing per-device gateway auth token, or freshly generates
+ * one when the on-disk value is missing, the legacy literal `"clawbox"`, or
+ * shorter than the minimum random length.
+ *
+ * Caller is responsible for persisting the returned value (via
+ * `runOpenclawConfigSet`, `runCommand`, or a direct seed write).
+ */
+export async function getOrGenerateGatewayToken(): Promise<string> {
+  const existing = await getGatewayToken();
+  if (
+    existing &&
+    existing !== LEGACY_GATEWAY_TOKEN &&
+    existing.length >= MIN_GATEWAY_TOKEN_LENGTH
+  ) {
+    return existing;
+  }
+  return crypto.randomBytes(32).toString("hex");
 }
 
 /**

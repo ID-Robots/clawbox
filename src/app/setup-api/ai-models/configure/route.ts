@@ -23,6 +23,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
 import {
   CLAWBOX_AI_PROVIDER,
   CLAWBOX_AI_FLASH_MODEL_ID,
@@ -583,12 +584,20 @@ export async function POST(request: Request) {
     // 4c. Local device gateway setup: keep token auth enabled for LAN binding,
     // but relax Control UI browser checks because the setup surface runs over
     // plain HTTP on the local device.
+    //
+    // The token is per-device random (32 bytes hex) — earlier builds wrote
+    // the literal "clawbox", which is public via the open-source repo and
+    // let anyone on the LAN connect straight to the gateway WS bypassing the
+    // wizard login. `getOrGenerateGatewayToken` reuses the existing token
+    // when one is already in place so re-saving Settings doesn't break open
+    // WS connections, and rotates legacy "clawbox" tokens automatically.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
+    const gatewayToken = await getOrGenerateGatewayToken();
     await runCommand(OPENCLAW_BIN, [
       "config", "set", "gateway.auth.mode", "token",
     ]);
     await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.auth.token", "clawbox",
+      "config", "set", "gateway.auth.token", gatewayToken,
     ]);
     await runCommand(OPENCLAW_BIN, [
       "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",

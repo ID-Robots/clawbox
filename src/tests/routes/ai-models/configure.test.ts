@@ -77,6 +77,16 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   ),
 }));
 
+// Configure route asks gateway-proxy for the per-device gateway auth token
+// so the literal "clawbox" never lands on disk. Real impl reads
+// openclaw.json — we hand it a stable test value so the assertion below
+// can compare against a known string.
+vi.mock("@/lib/gateway-proxy", () => ({
+  getOrGenerateGatewayToken: vi.fn().mockResolvedValue(
+    "deadbeefcafef00d1234567890abcdef" + "deadbeefcafef00d1234567890abcdef",
+  ),
+}));
+
 import { getAll, setMany } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -324,7 +334,13 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
     expect(commands).toContain("config set gateway.auth.mode token");
-    expect(commands).toContain("config set gateway.auth.token clawbox");
+    // Token must be the per-device random value from getOrGenerateGatewayToken,
+    // never the legacy literal "clawbox" (public via the open-source repo).
+    expect(commands).toContain(
+      "config set gateway.auth.token " +
+        "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef",
+    );
+    expect(commands).not.toContain("config set gateway.auth.token clawbox");
   });
 
   it("promotes local AI to the active default when no primary AI provider was configured", async () => {
