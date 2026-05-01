@@ -223,6 +223,84 @@ test("paired dashboard renders the schedule card with an off-state subtitle", as
   await expect(clawkeep.getByRole("heading", { name: "Auto-backup" })).toBeVisible();
 });
 
+test("backup click renders the result card on success", async ({ page }) => {
+  await setupDesktop(page);
+
+  let backupCalled = 0;
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(
+      route,
+      buildStatus({
+        paired: true,
+        configured: true,
+        encryptionConfigured: true,
+        snapshotCount: 0,
+      }),
+    ),
+  );
+  await page.route("**/setup-api/clawkeep/backup", (route) => {
+    backupCalled += 1;
+    return fulfillJson(route, {
+      ok: true,
+      exitCode: 0,
+      stdoutTail: "snapshot saved\n",
+      stderrTail: "",
+    });
+  });
+
+  const clawkeep = await openClawkeep(page);
+  await clawkeep.getByRole("button", { name: "Back up now" }).click();
+
+  // BackupResultCard renders below the dashboard once `backupResult`
+  // is set on the parent. Asserting any of its visible text confirms
+  // the success-render branch ran.
+  await expect(clawkeep.getByText(/snapshot saved/i)).toBeVisible({ timeout: 10_000 });
+  expect(backupCalled).toBe(1);
+});
+
+test("restore modal: clicking a snapshot opens the confirm dialog", async ({ page }) => {
+  await setupDesktop(page);
+
+  await page.route("**/setup-api/clawkeep", (route) =>
+    fulfillJson(
+      route,
+      buildStatus({
+        paired: true,
+        configured: true,
+        encryptionConfigured: true,
+        snapshotCount: 2,
+      }),
+    ),
+  );
+  const now = Date.now();
+  await page.route("**/setup-api/clawkeep/snapshots", (route) =>
+    fulfillJson(route, {
+      snapshots: [
+        { name: "openclaw-2026-05-01T12-00-00Z", size_bytes: 5_000_000, last_modified_ms: now - 7_200_000 },
+        { name: "openclaw-2026-04-30T12-00-00Z", size_bytes: 4_900_000, last_modified_ms: now - 86_400_000 },
+      ],
+    }),
+  );
+
+  const clawkeep = await openClawkeep(page);
+  await clawkeep.getByRole("button", { name: "Restore from snapshot" }).click();
+
+  const modal = page.getByRole("dialog").first();
+  await expect(modal).toBeVisible();
+  // Click the first snapshot row (the dialog's buttons start with the
+  // close X, then one button per snapshot).
+  const snapshotRows = modal.getByRole("button");
+  await expect(snapshotRows.nth(1)).toBeVisible();
+  await snapshotRows.nth(1).click();
+
+  // Confirm dialog stacks on top of the restore modal — covers the
+  // ConfirmDialog render branch with the "restore" copy variant
+  // (different from the unpair variant exercised earlier).
+  const confirmDialogs = page.getByRole("dialog");
+  expect(await confirmDialogs.count()).toBeGreaterThanOrEqual(2);
+  await page.keyboard.press("Escape");
+});
+
 test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {
   await setupDesktop(page);
 
