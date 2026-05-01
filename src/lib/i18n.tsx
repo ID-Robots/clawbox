@@ -66,10 +66,14 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       .catch(() => setLocaleState(detectLocale()));
   }, []);
 
-  // Load translations when locale changes
+  // Load translations when locale changes. Layer the active locale on
+  // top of English so any key missing from the active locale falls back
+  // to the English copy instead of rendering as the raw key string.
   useEffect(() => {
     import("@/lib/translations").then((mod) => {
-      setTranslations(mod.translations[locale] ?? mod.translations.en);
+      const enBase = mod.translations.en ?? {};
+      const active = mod.translations[locale] ?? enBase;
+      setTranslations({ ...enBase, ...active });
     });
   }, [locale]);
 

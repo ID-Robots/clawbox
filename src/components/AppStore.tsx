@@ -1,11 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 
 const STORE_API = "/setup-api/apps/store";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+// Upstream `/api/store/apps` caps any single response at 200 apps and offers
+// no `offset`/`page` parameter, so on the "All" view we walk through each
+// category (also capped at 200) to surface more of the 6000+ catalogue as
+// the user scrolls. Per-category requests are deduped by slug against the
+// firehose page we already have.
+const STORE_PAGE_LIMIT = 200;
 
 // Brand orange from openclawhardware.dev
 const BRAND_ORANGE = "#fe6e00";
@@ -119,9 +125,18 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   const [apps, setApps] = useState<StoreApp[]>([]);
   const [categories, setCategories] = useState<ApiCategory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [totalApps, setTotalApps] = useState(0);
   const [selectedApp, setSelectedApp] = useState<StoreApp | null>(null);
   const [confirmInstall, setConfirmInstall] = useState<StoreApp | null>(null);
+  // Categories still to lazy-fetch when the user scrolls the "All" view.
+  // Resets to the full list on every category/search change. We append in
+  // queue order so the user sees a stable, growing list rather than a
+  // reshuffle.
+  const [pendingCategories, setPendingCategories] = useState<string[]>([]);
+  const seenSlugsRef = useRef<Set<string>>(new Set());
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (category === "Installed") return;
@@ -129,15 +144,25 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const doFetch = async () => {
       setLoading(true);
       try {
-        const params = new URLSearchParams({ limit: "50" });
+        const params = new URLSearchParams({ limit: String(STORE_PAGE_LIMIT) });
         if (category && category !== "All") params.set("category", category);
         if (search) params.set("q", search);
         const res = await fetch(`${STORE_API}?${params}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: ApiResponse = await res.json();
-        setApps(data.apps.map(apiToStoreApp));
+        const fresh = data.apps.map(apiToStoreApp);
+        setApps(fresh);
+        seenSlugsRef.current = new Set(fresh.map(a => a.id));
         if (data.categories.length > 0) setCategories(data.categories);
         setTotalApps(data.total);
+        // Only the firehose "All" view (no search) gets the per-category
+        // sweep — a category-filtered or search-filtered request already
+        // exhausts what the upstream can return for that scope.
+        if (category === "All" && !search && data.categories.length > 0) {
+          setPendingCategories(data.categories.map(c => c.id));
+        } else {
+          setPendingCategories([]);
+        }
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           console.error("[AppStore] fetch failed:", err);
@@ -149,6 +174,56 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const timer = setTimeout(doFetch, search ? 300 : 0);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [category, search]);
+
+  // Pull the next category off the queue, fetch its apps, append the unseen
+  // slugs. Idempotent against rapid-fire scroll triggers via loadingMore.
+  const loadMore = useCallback(async () => {
+    if (loadingMore || loading) return;
+    if (pendingCategories.length === 0) return;
+    const nextCat = pendingCategories[0];
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({
+        limit: String(STORE_PAGE_LIMIT),
+        category: nextCat,
+      });
+      const res = await fetch(`${STORE_API}?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ApiResponse = await res.json();
+      const additions: StoreApp[] = [];
+      for (const raw of data.apps) {
+        if (seenSlugsRef.current.has(raw.slug)) continue;
+        seenSlugsRef.current.add(raw.slug);
+        additions.push(apiToStoreApp(raw));
+      }
+      if (additions.length > 0) {
+        setApps(prev => [...prev, ...additions]);
+      }
+    } catch (err) {
+      console.error("[AppStore] load-more failed:", err);
+    } finally {
+      // Drop the just-fetched category regardless of outcome — retrying the
+      // same category in a tight scroll loop wastes round trips.
+      setPendingCategories(prev => prev.slice(1));
+      setLoadingMore(false);
+    }
+  }, [loading, loadingMore, pendingCategories]);
+
+  // IntersectionObserver against a sentinel just below the grid. Fires
+  // loadMore whenever the sentinel enters the scroll viewport.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = scrollContainerRef.current;
+    if (!sentinel || !root) return;
+    if (pendingCategories.length === 0) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) {
+        loadMore();
+      }
+    }, { root, rootMargin: "400px" });
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [loadMore, pendingCategories.length]);
 
   const requestInstall = useCallback((app: StoreApp) => {
     setConfirmInstall(app);
@@ -446,7 +521,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       </div>
 
       {/* App Grid */}
-      <div className="flex-1 overflow-y-auto p-4 @container">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 @container">
         {loading && apps.length === 0 ? (
           <div className="flex items-center justify-center py-12">
             <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
@@ -504,6 +579,16 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         {!loading && displayApps.length === 0 && (
           <div className="text-center py-12 text-white/40">
             <p className="text-sm">{t("store.noAppsFound")}</p>
+          </div>
+        )}
+
+        {/* Infinite-scroll sentinel + loading spinner. Only shown on the
+            "All" view while there are still per-category pages to fetch. */}
+        {category === "All" && !search && pendingCategories.length > 0 && (
+          <div ref={sentinelRef} className="flex items-center justify-center py-6">
+            {loadingMore && (
+              <div className="w-5 h-5 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+            )}
           </div>
         )}
       </div>

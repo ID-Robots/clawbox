@@ -25,6 +25,13 @@ export default function RemoteControlPanel() {
   const [action, setAction] = useState<"idle" | "starting" | "stopping" | "regenerating">("idle");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Inline autoinstall — replaces the old "run sudo bash install.sh ..."
+  // warning text with a one-click button. Posts to the generic install
+  // runner which spawns clawbox-root-update@cloudflared_install.service.
+  // The handler itself is defined further down — after `fetchStatus` is
+  // declared — so its useCallback dependency array doesn't hit the TDZ.
+  const [installState, setInstallState] = useState<"idle" | "installing" | "failed">("idle");
+  const [installError, setInstallError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async (): Promise<StatusResponse | null> => {
     try {
@@ -126,6 +133,32 @@ export default function RemoteControlPanel() {
     }
   };
 
+  const handleInstallTunnel = useCallback(async () => {
+    setInstallError(null);
+    setInstallState("installing");
+    try {
+      const res = await fetch("/setup-api/install/run-step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step: "cloudflared_install" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setInstallError(data?.error || `cloudflared_install failed (HTTP ${res.status})`);
+        setInstallState("failed");
+        return;
+      }
+      // Cloudflared is just a binary install — no reboot needed. Refresh
+      // status so the UI flips out of the "not installed" branch as soon
+      // as portal/status sees the new binary.
+      setInstallState("idle");
+      await fetchStatus();
+    } catch (err) {
+      setInstallError(err instanceof Error ? err.message : "Install request failed");
+      setInstallState("failed");
+    }
+  }, [fetchStatus]);
+
   const copyUrl = async () => {
     if (!status?.tunnel.url) return;
     try {
@@ -155,7 +188,6 @@ export default function RemoteControlPanel() {
   const isStarting = (svc === "active" || svc === "activating") && !url;
   const busy = action !== "idle";
 
-  const installCmd = "sudo bash install.sh --step cloudflared_install";
   const journalCmd = "journalctl -u clawbox-tunnel";
 
   return (
@@ -168,21 +200,45 @@ export default function RemoteControlPanel() {
       {error && <StatusMessage type="error" message={error} />}
 
       {!tunnelInstalled && (
-        <div
-          role="alert"
-          aria-live="assertive"
-          className="rounded-xl border border-amber-500/30 bg-amber-500/[0.08] p-4 flex gap-3"
-        >
-          <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">warning</span>
-          <div className="text-sm text-amber-100/90">
-            <strong className="block mb-1">{t("remoteControl.tunnelNotInstalled")}</strong>
-            {t("remoteControl.tunnelNotInstalledDesc", { command: installCmd }).split(installCmd).map((seg, i, arr) => (
-              <span key={i}>
-                {seg}
-                {i < arr.length - 1 && <code className="px-1 py-0.5 bg-black/30 rounded text-xs">{installCmd}</code>}
-              </span>
-            ))}
+        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+          <div className="flex items-start gap-4 mb-4">
+            <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">download</span>
+            </div>
+            <div className="flex-1">
+              <div className="text-sm font-medium text-[var(--text-primary)] mb-0.5">{t("remoteControl.tunnelNotInstalled")}</div>
+              <div className="text-xs text-[var(--text-muted)]">
+                Cloudflare Tunnel isn&apos;t installed yet. One click installs it now — no terminal needed.
+              </div>
+            </div>
           </div>
+          {installError && (
+            <p
+              role="alert"
+              aria-atomic="true"
+              className="text-xs text-red-400/80 mb-3 whitespace-pre-wrap"
+            >
+              {installError}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleInstallTunnel}
+            disabled={installState === "installing"}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {installState === "installing" ? (
+              <>
+                <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                Installing… (a few minutes)
+              </>
+            ) : (
+              <>
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
+                Install Cloudflare Tunnel
+              </>
+            )}
+          </button>
         </div>
       )}
 

@@ -100,6 +100,10 @@ export interface ClawKeepStatus {
   currentStepAtMs: number;
   cloudBytes: number;
   snapshotCount: number;
+  /** Live upload progress (only populated while currentStep === "uploading"). */
+  uploadBytesTotal: number;
+  uploadBytesDone: number;
+  uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
   /** True while a restore is mid-flight (download → verify → swap). */
@@ -302,6 +306,9 @@ interface StateFile {
   last_backup_at_ms?: number;
   last_cloud_bytes?: number;
   last_snapshot_count?: number;
+  upload_bytes_total?: number;
+  upload_bytes_done?: number;
+  upload_started_at_ms?: number;
 }
 
 /** Pull just the `server` value out of a config.toml. The Python daemon does
@@ -426,6 +433,9 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     snapshotCount: stateRaw.last_snapshot_count ?? 0,
     currentStep: stateRaw.last_step ?? "",
     currentStepAtMs: stateRaw.last_step_at_ms ?? 0,
+    uploadBytesTotal: stateRaw.upload_bytes_total ?? 0,
+    uploadBytesDone: stateRaw.upload_bytes_done ?? 0,
+    uploadStartedAtMs: stateRaw.upload_started_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
     restoring,

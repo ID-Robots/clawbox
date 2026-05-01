@@ -21,6 +21,9 @@ interface ClawKeepStatus {
   currentStepAtMs: number;
   cloudBytes: number;
   snapshotCount: number;
+  uploadBytesTotal: number;
+  uploadBytesDone: number;
+  uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
   schedule: ClawKeepSchedule;
@@ -124,6 +127,10 @@ async function jsonOrError<T>(resp: Response): Promise<T> {
 }
 
 export default function ClawKeepApp() {
+  // Per-feature ClawBox-AI gating lives inside the ClawKeep app itself
+  // (e.g. the Cloud mode shows "Connect ClawBox AI first" inline). An
+  // outer full-app login gate was tried and removed — it duplicated the
+  // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "restore">("");
@@ -857,33 +864,45 @@ function PairChallengeCard({
   );
 }
 
-function formatElapsed(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
 function BackupProgressPanel({
   kind = "backup",
-  startedAtMs,
   stepLabel: explicitStepLabel,
+  uploadBytesTotal = 0,
+  uploadBytesDone = 0,
+  uploadStartedAtMs = 0,
 }: {
   kind?: "backup" | "restore";
-  /** Server-anchored start time (ms). Anchoring elapsed to the daemon's
-   *  heartbeat means a reopened window shows "1:42" instead of "0:00". */
-  startedAtMs?: number;
   /** Friendly label for the daemon's current sub-phase (backup only). */
   stepLabel?: string;
+  /** Live upload fields; non-zero only while the daemon is in the upload phase. */
+  uploadBytesTotal?: number;
+  uploadBytesDone?: number;
+  uploadStartedAtMs?: number;
 }) {
-  const [elapsed, setElapsed] = useState(0);
+  // `nowMs` is sampled by the 1s tick so render stays pure (no `Date.now()`
+  // reads at render time — the React compiler rule that flags those is on).
+  // It's the only thing the panel uses time for: deriving the upload MB/s
+  // line. The visible elapsed-time clock was removed at the user's request.
+  const [nowMs, setNowMs] = useState(0);
   useEffect(() => {
-    // All `Date.now()` reads are inside the effect so render stays pure.
-    const startMs = startedAtMs && startedAtMs > 0 ? startedAtMs : Date.now();
-    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
+    const tick = () => setNowMs(Date.now());
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [startedAtMs]);
+  }, []);
+
+  // Uploading is the only phase where we have real bytes-in-flight numbers.
+  // Other phases (archiving, checking-stats) stay on the indeterminate bar.
+  const uploading = uploadBytesTotal > 0 && uploadStartedAtMs > 0 && nowMs > 0;
+  const uploadElapsedSec = uploading
+    ? Math.max(0.001, (nowMs - uploadStartedAtMs) / 1000)
+    : 0;
+  const throughputBps = uploading ? uploadBytesDone / uploadElapsedSec : 0;
+  // Cap the rendered ratio at 1.0 — Python rounds bytes_done up to total at
+  // the end, but a slightly stale snapshot shouldn't render >100% mid-poll.
+  const uploadRatio = uploading
+    ? Math.min(1, uploadBytesDone / Math.max(1, uploadBytesTotal))
+    : 0;
 
   const isBackup = kind === "backup";
   const fallback = isBackup
@@ -929,23 +948,36 @@ function BackupProgressPanel({
             {stepLabel}
           </div>
         </div>
-        <div
-          className={`shrink-0 text-2xl font-mono font-semibold ${palette.text} tabular-nums`}
-          aria-label="Elapsed time"
-        >
-          {formatElapsed(elapsed)}
-        </div>
       </div>
       <div
         className={`mt-4 h-1.5 rounded-full ${palette.track} overflow-hidden`}
         role="progressbar"
         aria-label={palette.ariaLabel}
+        aria-valuemin={0}
+        aria-valuemax={uploading ? 100 : undefined}
+        aria-valuenow={uploading ? Math.round(uploadRatio * 100) : undefined}
       >
-        <div
-          className={`h-full rounded-full ${palette.bar}`}
-          style={{ animation: "indeterminate 1.6s ease-in-out infinite" }}
-        />
+        {uploading ? (
+          <div
+            className={`h-full rounded-full ${palette.bar} transition-[width] duration-300 ease-out`}
+            style={{ width: `${(uploadRatio * 100).toFixed(1)}%` }}
+          />
+        ) : (
+          <div
+            className={`h-full rounded-full ${palette.bar}`}
+            style={{ animation: "indeterminate 1.6s ease-in-out infinite" }}
+          />
+        )}
       </div>
+      {uploading && (
+        <div className={`mt-2 flex items-center justify-between text-xs ${palette.text} tabular-nums`}>
+          <span>
+            {formatBytes(uploadBytesDone)} / {formatBytes(uploadBytesTotal)}
+            <span className="text-[var(--text-muted)]"> · {(uploadRatio * 100).toFixed(1)}%</span>
+          </span>
+          <span>{formatBytes(Math.round(throughputBps))}/s</span>
+        </div>
+      )}
       <p className="mt-3 text-xs text-[var(--text-muted)]">
         {isBackup
           ? "Safe to close — the backup keeps running on the device. Reopen ClawKeep any time to see the result."
@@ -1031,20 +1063,13 @@ function DashboardCard({
   busyKind: "backup" | "restore" | null;
 }) {
   if (busyKind) {
-    // Only anchor the elapsed counter to the daemon's heartbeat when the
-    // status is *currently* "running" — otherwise we'd read the previous
-    // run's "ok" timestamp (which can be hours old) and show 84:00 the
-    // instant the user clicks Back up now, before the new run has
-    // published its first "running" heartbeat.
-    const startedAtMs =
-      busyKind === "backup" && status.lastHeartbeatStatus === "running"
-        ? status.lastHeartbeatAtMs
-        : undefined;
     return (
       <BackupProgressPanel
         kind={busyKind}
-        startedAtMs={startedAtMs}
         stepLabel={busyKind === "backup" ? STEP_LABELS[status.currentStep] : undefined}
+        uploadBytesTotal={busyKind === "backup" ? status.uploadBytesTotal : 0}
+        uploadBytesDone={busyKind === "backup" ? status.uploadBytesDone : 0}
+        uploadStartedAtMs={busyKind === "backup" ? status.uploadStartedAtMs : 0}
       />
     );
   }

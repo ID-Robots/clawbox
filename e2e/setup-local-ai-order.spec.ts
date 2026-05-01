@@ -1,7 +1,11 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-test("setup configures the primary AI provider before Local AI", async ({ page }) => {
+test("setup skips the Local AI step and goes straight from AI provider to Telegram", async ({ page }) => {
+  // The Local AI step was deliberately removed from the initial setup
+  // wizard (see SetupWizard.tsx — owners now reach Gemma/Ollama via
+  // Settings → Local AI on demand). This test guards that decision so a
+  // re-introduction would have to update the test along with the wizard.
   await installClawboxMocks(page);
 
   await page.goto("/setup");
@@ -24,6 +28,7 @@ test("setup configures the primary AI provider before Local AI", async ({ page }
   await expect(providerStep).toBeVisible();
   await expect(providerGroup.locator("label", { hasText: "ClawBox AI" })).toBeVisible();
   await expect(providerGroup.locator("label", { hasText: "OpenAI GPT" })).toBeVisible();
+  // Local-only providers must NOT appear in the cloud-providers radiogroup.
   await expect(providerGroup.getByText("Gemma 4")).toHaveCount(0);
   await expect(providerGroup.getByText("Ollama")).toHaveCount(0);
 
@@ -31,12 +36,8 @@ test("setup configures the primary AI provider before Local AI", async ({ page }
   await providerStep.locator("#ai-api-key").fill("sk-test-openai-key");
   await providerStep.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 
-  const localAiStep = page.getByTestId("setup-step-local-ai");
-  const localProviderGroup = localAiStep.getByRole("radiogroup", { name: "AI Provider" });
-  await expect(localAiStep).toBeVisible();
-  await expect(localProviderGroup.locator("label", { hasText: "Gemma 4" })).toBeVisible();
-  await expect(localProviderGroup.locator("label", { hasText: "Ollama" })).toBeVisible();
-  await expect(localAiStep.getByRole("button", { name: /Enable Gemma 4/i })).toBeVisible();
-  await expect(localProviderGroup.getByText("ClawBox AI")).toHaveCount(0);
-  await expect(localProviderGroup.getByText("OpenAI GPT")).toHaveCount(0);
+  // Wizard should jump straight from AI provider to Telegram, never
+  // rendering a Local AI step in the middle.
+  await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
+  await expect(page.getByTestId("setup-step-local-ai")).toHaveCount(0);
 });

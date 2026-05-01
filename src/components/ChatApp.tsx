@@ -1,6 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
+import * as kv from '@/lib/client-kv'
+import { useClawboxLogin } from '@/lib/use-clawbox-login'
+import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 
 // ── Gateway WebSocket chat app ──
 // Full-window chat component (fills parent container).
@@ -36,6 +39,42 @@ function extractText(msg: unknown): string {
   return ''
 }
 
+// Protocol sentinels the gateway/LLM sometimes emits as a standalone chat
+// reply (sibling of NO_REPLY, which we drop entirely). They have no signal
+// for the user, so we swap them for a fun mascot-style line — mix of
+// emoji and emoji-free entries so the chat doesn't feel emoji-spammy.
+//
+// Match ONLY transport-level sentinels with a clear protocol shape — i.e.
+// `HEARTBEAT` optionally followed by an underscored upper-case suffix
+// (HEARTBEAT_OK, HEARTBEAT_PONG, …). Earlier we also matched bare tokens
+// like "OK" / "DONE" / "ACK" — those are legitimate things a model might
+// reply to a user, so prettifying them was corrupting real chat history.
+const PROTOCOL_SENTINEL_RE = /^\s*HEARTBEAT(?:_[A-Z]+)?\s*$/
+const PROTOCOL_SENTINEL_REPLIES = [
+  'still here, scuttling around 🦀',
+  'all good, boss',
+  'pulse normal — claws warm',
+  '*waves a claw*',
+  'standing by 👂',
+  'reporting for duty',
+  'mhm. carry on.',
+  'box secured. crab secured.',
+  'I exist and I\'m vibing ✨',
+  'crab.exe responded successfully',
+  'you got it 👍',
+  'check, check — mic still works',
+  '*nods sagely*',
+  'I heard that, by the way 🦀',
+  'OK but make it cooler:',
+  'roger that 🛰️',
+  'yep, alive. promise.',
+  'system: somewhat caffeinated ☕',
+]
+function prettifyAssistantText(text: string): string {
+  if (!PROTOCOL_SENTINEL_RE.test(text)) return text
+  return PROTOCOL_SENTINEL_REPLIES[Math.floor(Math.random() * PROTOCOL_SENTINEL_REPLIES.length)]
+}
+
 function uuid(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID()
@@ -54,6 +93,20 @@ interface ChatAppProps {
 function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const { t } = useT()
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
+  // Welcome-to-portal banner: show in the chat empty state when the user
+  // hasn't signed in to a ClawBox account yet. Dismissible, persisted in
+  // client-kv so the nudge isn't repeated after the user explicitly closes
+  // it. The login state itself flips out of the gate as soon as the user
+  // signs in on the portal in another tab — no manual refresh needed.
+  const clawboxLogin = useClawboxLogin()
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return kv.get('clawbox-portal-welcome-dismissed') === '1'
+  })
+  const dismissWelcome = useCallback(() => {
+    setWelcomeDismissed(true)
+    kv.set('clawbox-portal-welcome-dismissed', '1')
+  }, [])
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
@@ -212,7 +265,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           } else if (state === 'final') {
             const text = extractText(msg)
             if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
-              setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
             setStreaming('')
             runIdRef.current = null
@@ -220,7 +273,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
               if (prev.trim() && !/^\s*NO_REPLY\s*$/.test(prev)) {
-                setMessages(msgs => [...msgs, { role: 'assistant', text: prev, timestamp: Date.now() }])
+                setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(prev), timestamp: Date.now() }])
               }
               return ''
             })
@@ -267,7 +320,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
         if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
-        const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
+        const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
       setMessages(chatMsgs)
@@ -454,9 +507,51 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         )}
 
         {status === 'connected' && messages.length === 0 && !streaming && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
+            {!clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
+              <div style={{
+                marginTop: 8,
+                padding: '12px 14px',
+                background: 'linear-gradient(135deg, rgba(249,115,22,0.12), rgba(249,115,22,0.04))',
+                border: '1px solid rgba(249,115,22,0.35)',
+                borderRadius: 12,
+                color: 'rgba(255,255,255,0.85)',
+                fontSize: 12.5,
+                lineHeight: 1.5,
+                maxWidth: 360,
+                position: 'relative',
+              }}>
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={dismissWelcome}
+                  style={{
+                    position: 'absolute', top: 6, right: 8,
+                    background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.4)',
+                    fontSize: 14, lineHeight: 1, cursor: 'pointer', padding: 4,
+                  }}
+                >×</button>
+                <div style={{ fontWeight: 600, color: '#fff', marginBottom: 4 }}>👋 Welcome to ClawBox</div>
+                <div style={{ marginBottom: 10 }}>
+                  Sign in to the ClawBox portal to unlock all features — Remote Control, ClawKeep cloud backups, and more.
+                </div>
+                <a
+                  href={PORTAL_LOGIN_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '6px 12px', borderRadius: 8,
+                    background: 'linear-gradient(135deg, #f97316, #ea580c)',
+                    color: '#fff', fontWeight: 600, textDecoration: 'none', fontSize: 12.5,
+                  }}
+                >
+                  Open ClawBox Portal →
+                </a>
+              </div>
+            )}
           </div>
         )}
 
