@@ -286,6 +286,18 @@ step_ensure_user() {
   fi
 }
 
+# Recover from interrupted dpkg state before any apt call.
+recover_dpkg() {
+  if ! dpkg --audit 2>/dev/null | grep -q .; then return 0; fi
+  echo "  Detected interrupted dpkg state — running 'dpkg --configure -a' to recover..."
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>&1 | tail -5
+  local rc=${PIPESTATUS[0]}
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: dpkg --configure -a failed with exit code $rc — apt operations will likely fail." >&2
+    return "$rc"
+  fi
+}
+
 wait_for_apt() {
   local max_wait="${1:-900}"
   local waited=0
@@ -300,6 +312,7 @@ wait_for_apt() {
       return 1
     fi
   done
+  recover_dpkg
 }
 
 step_apt_update() {
@@ -1576,6 +1589,7 @@ EOF
 }
 
 step_ffmpeg_install() {
+  wait_for_apt
   apt-get install -y ffmpeg
 }
 

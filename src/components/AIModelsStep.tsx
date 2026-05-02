@@ -1962,7 +1962,7 @@ export default function AIModelsStep({
                     </div>
                     {info.hasTrial && (
                       <a
-                        href={`${PORTAL_LOGIN_URL}/billing`}
+                        href={`${PORTAL_LOGIN_URL}/dashboard`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] hover:from-fuchsia-400 hover:to-pink-400 transition-colors whitespace-nowrap"

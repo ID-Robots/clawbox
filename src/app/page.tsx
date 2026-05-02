@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
-import { OPEN_APP_EVENT } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
+import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
@@ -189,6 +190,9 @@ function ChromeDesktopInner() {
     setShowClawAiOfferNotification(!!data.setup_complete && !hasClawAi);
     return data;
   }, []);
+
+  // One-shot cleanup of stale chat localStorage from older builds.
+  useEffect(() => { purgeLegacyChatCaches() }, []);
 
   // Check if setup is complete. The desktop boots either way; incomplete
   // setups get the wizard opened as a window after the UI loads.
@@ -396,11 +400,16 @@ function ChromeDesktopInner() {
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
-  // Open chat when a skill is installed/uninstalled/toggled
+  // Open chat on skill-install or fix-error events so the user can watch
+  // the agent's response.
   useEffect(() => {
     const handler = () => setChatOpen(true);
     window.addEventListener('clawbox-skill-installed', handler);
-    return () => window.removeEventListener('clawbox-skill-installed', handler);
+    window.addEventListener(FIX_ERROR_EVENT, handler);
+    return () => {
+      window.removeEventListener('clawbox-skill-installed', handler);
+      window.removeEventListener(FIX_ERROR_EVENT, handler);
+    };
   }, []);
 
   // ─── Mascot visibility ───

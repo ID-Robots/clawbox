@@ -47,17 +47,18 @@ describe("UpdateStep", () => {
     }));
   });
 
-  it("shows skip updates when an update is available and advances on click", async () => {
+  it("hides the skip button when an update is available so the user must update", async () => {
     const onNext = vi.fn();
-    const { getByRole } = render(<UpdateStep onNext={onNext} />);
+    const { queryByRole } = render(<UpdateStep onNext={onNext} />);
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/update/status", expect.any(Object));
     });
 
-    const skipButton = await waitFor(() => getByRole("button", { name: "Skip updates" }));
-    fireEvent.click(skipButton);
-
-    expect(onNext).toHaveBeenCalledTimes(1);
+    // Skip used to short-circuit the wizard's Update step; now the only way
+    // forward is to actually run the update (or, on a downgrade, click skip).
+    // Cover both copy variants — the bare "Skip" used on downgrade and the
+    // regular "Skip updates" used on the idle path.
+    expect(queryByRole("button", { name: /^(skip|skip updates)$/i })).toBeNull();
   });
 });

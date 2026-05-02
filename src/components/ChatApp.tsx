@@ -6,9 +6,6 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
   type ChatMessage,
-  loadCachedHistory,
-  saveCachedHistory,
-  mergeMessages,
   uuid,
 } from '@/lib/chat-history-cache'
 
@@ -17,7 +14,6 @@ import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
 import { prettifyAssistantText } from '@/lib/chat-sentinels'
 
-const HISTORY_CACHE_KEY = 'clawbox-chat-history-v1'
 
 function extractText(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return ''
@@ -61,10 +57,9 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     setWelcomeDismissed(true)
     kv.set('clawbox-portal-welcome-dismissed', '1')
   }, [])
-  // Hydrate from cache synchronously on first render so refresh is instant
-  // even when the gateway is busy. mergeMessages takes over once chat.history
-  // arrives.
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadCachedHistory(HISTORY_CACHE_KEY))
+  // Gateway is canonical for chat history; we render an empty list until
+  // chat.history arrives over the WS (matches the OpenClaw Control UI).
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -311,19 +306,20 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      // Merge so optimistic local messages from a queued send aren't dropped
-      // when the server snapshot doesn't yet contain them.
-      setMessages(prev => mergeMessages(chatMsgs, prev))
+      // Server is canonical for everything it knows about, but a user turn
+      // typed between connect-ack and history-arrival ("optimistic local")
+      // hasn't reached the server yet — preserve it by appending any prev
+      // user messages whose timestamp is newer than the last server message.
+      setMessages(prev => {
+        if (prev.length === 0) return chatMsgs
+        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
+        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
+        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+      })
     } catch (err) {
       console.error('Failed to load history:', err)
     }
   }, [wsRequest])
-
-  // Persist transcript to localStorage whenever it changes. Cheap because
-  // saveCachedHistory trims to last 50 and strips images before serializing.
-  useEffect(() => {
-    saveCachedHistory(HISTORY_CACHE_KEY, messages)
-  }, [messages])
 
   // Handle file/image selection
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
