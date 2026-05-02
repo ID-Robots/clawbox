@@ -59,10 +59,18 @@ interface PortalCacheEntry {
 const portalTierCache = new Map<string, PortalCacheEntry>();
 const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 
+/**
+ * Writes a token's resolved tier into the in-memory cache, sweeping
+ * expired entries and enforcing the size cap before insertion. Map
+ * iteration order is insertion order, so the first key returned by
+ * `keys()` is the oldest.
+ *
+ * @param token Portal token (`claw_*`) used as the cache key.
+ * @param tier Resolved tier (or `null` for Free / no entitlement).
+ * @param now Current epoch ms; used both for expiry comparison and to
+ *   set the new entry's `expiresAt`.
+ */
 function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
-  // Sweep expired entries, then enforce the size cap by dropping the
-  // oldest (insertion-order) entries until we're under the limit. Map
-  // iteration order is insertion order, so the first key is the oldest.
   for (const [key, entry] of portalTierCache) {
     if (entry.expiresAt <= now) portalTierCache.delete(key);
   }
@@ -74,10 +82,17 @@ function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
   portalTierCache.set(token, { tier, expiresAt: now + PORTAL_TIER_CACHE_TTL_MS });
 }
 
-// Map portal's plan name + device-pair stamp to the local
-// ClawboxAiTier enum the UI badges already understand. The local enum
-// is "flash" (Pro plan / V4 Flash model) and "pro" (Max plan / V4 Pro
-// model); Free is `null` (no paid badge).
+/**
+ * Maps the portal's `device-info` response to the local `ClawboxAiTier`
+ * enum the UI badges already understand. Prefers the device-pair stamp
+ * (`deviceTier`) when present; otherwise translates the user's plan
+ * name (`tier`) to its corresponding device-tier. The local enum is
+ * `"flash"` (Pro plan / V4 Flash model) and `"pro"` (Max plan / V4 Pro
+ * model); Free / unpaid resolves to `null` (no paid badge rendered).
+ *
+ * @param body Parsed JSON from `/api/clawbox-ai/device-info`.
+ * @returns The badge-facing tier, or `null` for Free.
+ */
 function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
   const stamped = normalizeClawboxAiTier(body.deviceTier);
   if (stamped) return stamped;
@@ -87,6 +102,22 @@ function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
   return null;
 }
 
+/**
+ * Resolves a `claw_*` token's current tier against the portal, with
+ * a short in-memory cache and concurrent-request de-duplication.
+ *
+ * Cache semantics:
+ *   - 200 OK: parsed tier is cached for `PORTAL_TIER_CACHE_TTL_MS`.
+ *   - 401 / 403: a definitive "no entitlement" verdict is also cached
+ *     so we don't re-hammer the portal for invalid tokens.
+ *   - 5xx / network error: cache untouched; caller falls back to the
+ *     locally-stored picker selection so the badge doesn't flicker
+ *     during transient portal outages.
+ *
+ * @param token The bearer token to look up.
+ * @returns Either a definitive `{ source: "portal", tier }` answer or
+ *   `{ source: "unreachable" }` when the portal couldn't respond.
+ */
 async function fetchPortalTier(token: string): Promise<PortalLookup> {
   const now = Date.now();
   const cached = portalTierCache.get(token);
@@ -129,7 +160,11 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
   }
 }
 
-// Test-only: lets vitest reset the cache between runs.
+/**
+ * Test-only escape hatch — clears both the value cache and any
+ * in-flight lookups so vitest's `beforeEach` can start each test from
+ * a clean module-state. Not for production use.
+ */
 export function _resetPortalTierCache() {
   portalTierCache.clear();
   inFlightPortalLookups.clear();
