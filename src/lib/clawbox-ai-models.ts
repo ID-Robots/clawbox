@@ -35,6 +35,13 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
   pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
 };
 
+// Device-tier label, not the subscription name. Portal's authorize card
+// renders these strings — keep in sync with clawbox-website.
+export const CLAWBOX_AI_TIER_LABEL: Record<ClawboxAiTier, string> = {
+  flash: "Standard",
+  pro: "Extended",
+};
+
 export function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();

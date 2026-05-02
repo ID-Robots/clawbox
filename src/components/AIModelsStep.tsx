@@ -23,6 +23,7 @@ import {
   isValidModelId,
 } from "@/lib/provider-models";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
+import { CLAWBOX_AI_TIER_LABEL } from "@/lib/clawbox-ai-models";
 
 type ClawaiTier = "free" | "flash" | "pro";
 const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
@@ -69,7 +70,10 @@ const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   flash: {
     planName: "Pro plan",
-    pillLabel: "Pro",
+    // Subscription name ("Pro plan") diverges from the device-tier label
+    // ("Standard") shown on the portal authorize card. Same split for `pro`
+    // (Max plan / Extended). Source of truth: CLAWBOX_AI_TIER_LABEL.
+    pillLabel: CLAWBOX_AI_TIER_LABEL.flash,
     priceEuro: 9,
     pricePeriod: "/month",
     // Pro bills from day one; flip to true if a trial returns.
@@ -89,7 +93,7 @@ const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   pro: {
     planName: "Max plan",
-    pillLabel: "Max",
+    pillLabel: CLAWBOX_AI_TIER_LABEL.pro,
     priceEuro: 49,
     pricePeriod: "/month",
     hasTrial: true,

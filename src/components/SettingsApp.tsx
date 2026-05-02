@@ -20,6 +20,7 @@ import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
+import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 
 /* ── Types ── */
 
@@ -1921,7 +1922,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                                   : "bg-orange-500/15 border-orange-400/30 text-orange-200"
                               }`}
                             >
-                              {aiProvider.clawaiTier === "pro" ? "Max" : "Pro"}
+                              {CLAWBOX_AI_TIER_LABEL[normalizeClawboxAiTier(aiProvider.clawaiTier) ?? "flash"]}
                             </span>
                           )}
                         </div>

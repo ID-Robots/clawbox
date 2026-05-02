@@ -22,6 +22,10 @@ interface UpstreamPollResponse {
   message?: string;
 }
 
+const PORTAL_ERROR_EMAIL_NOT_VERIFIED = "email_not_verified";
+const EMAIL_NOT_VERIFIED_USER_MESSAGE =
+  "Please verify your email address in the ClawBox portal before authorising this device, then request a new device code.";
+
 function formatUserFacingError(message: string) {
   const normalized = message.trim();
   if (/token limit reached/i.test(normalized)) {
@@ -134,7 +138,19 @@ export async function POST() {
   }
 
   // 202/403/404 are common "user hasn't entered the code yet" responses.
-  if (upstreamRes.status === 202 || upstreamRes.status === 403 || upstreamRes.status === 404) {
+  // Exception: a 403 carrying `error: "email_not_verified"` is a terminal
+  // refusal — the portal keeps returning it until the user verifies
+  // their email, so the UI must surface the actionable instruction
+  // instead of polling forever.
+  if (upstreamRes.status === 403) {
+    const errCode = (await readErrorBody(upstreamRes)).trim().toLowerCase();
+    if (errCode === PORTAL_ERROR_EMAIL_NOT_VERIFIED) {
+      await writeClawAiSession({ ...session, status: "error", error: EMAIL_NOT_VERIFIED_USER_MESSAGE });
+      return NextResponse.json({ status: "error", error: EMAIL_NOT_VERIFIED_USER_MESSAGE }, { status: 403 });
+    }
+    return NextResponse.json({ status: "pending" });
+  }
+  if (upstreamRes.status === 202 || upstreamRes.status === 404) {
     return NextResponse.json({ status: "pending" });
   }
 
