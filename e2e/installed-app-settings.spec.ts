@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: regressed under the larger e2e suite. The post-install desktop
-// icon never materialises (`[data-desktop-icon-id="home-assistant"]`),
-// likely a timing race in the install→icon-add path that becomes visible
-// when CI is under load. Tracked as a follow-up to PR #113.
-test.fixme("installed app settings can save configuration and toggle enablement", async ({ page }) => {
+test("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,

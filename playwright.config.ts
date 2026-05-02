@@ -10,6 +10,13 @@ export default defineConfig({
   // a real regression (which would fail twice in a row).
   retries: process.env.CI ? 2 : 1,
   workers: process.env.CI ? 1 : undefined,
+  // 30s default per-test timeout was tight when ~40 tests run sequentially
+  // against one `bun run dev` server. Five tests reliably hit 30s on first
+  // action despite passing in 7-18s when run in isolation on the Jetson.
+  // Doubling buys headroom without masking real bugs (a real hang would
+  // still fail at 60s).
+  timeout: 60_000,
+  expect: { timeout: 15_000 },
   reporter: "html",
   use: {
     baseURL: "http://localhost:3000",

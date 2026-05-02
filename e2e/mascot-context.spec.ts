@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: regressed under the larger e2e suite. The pointer-event
-// dispatch on the mascot crab img reliably opens the chat popup on
-// small suites but times out under load. Likely a layout-settle race.
-// Tracked as a follow-up to PR #113.
-test.fixme("mascot tap opens the chat popup", async ({ page }) => {
+test("mascot tap opens the chat popup", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,

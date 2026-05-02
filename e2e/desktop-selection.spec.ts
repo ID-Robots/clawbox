@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: regressed under the larger e2e suite. Right-click context menu
-// reliably mounts on small suites but times out finding the "Terminal"
-// option under the new test load. Needs investigation; tracked as a
-// follow-up to PR #113.
-test.fixme("desktop background context menu can launch the terminal", async ({ page }) => {
+test("desktop background context menu can launch the terminal", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,

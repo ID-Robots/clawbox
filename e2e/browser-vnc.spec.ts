@@ -1,12 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: regressed under the larger e2e suite — `getByTestId('app-launcher')`
-// resolves but the "Browser" button never appears within 15s. Reproducible
-// across multiple CI runs on this branch; needs investigation of how the
-// Browser app gets registered in the launcher under the current mocks.
-// Tracked as a follow-up to PR #113.
-test.fixme("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
+test("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
