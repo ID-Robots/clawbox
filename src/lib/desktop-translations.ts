@@ -82,6 +82,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.connectionFailed": "Connection failed",
     "chat.saySomething": "Say something!",
     "chat.running": "running…",
+    "chat.fixMyError": "Fix My Error",
     "chat.attachImage": "Attach image",
     "chat.takePhoto": "Take photo",
     "chat.messagePlaceholder": "Type a message...",

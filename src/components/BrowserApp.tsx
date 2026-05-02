@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import ErrorWithFix from "./ErrorWithFix";
 
 const BRAND_ORANGE = "#fe6e00";
 const BRAND_ORANGE_LIGHT = "#ff8b1a";
@@ -148,12 +149,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
       <div className="flex-1 p-6 space-y-6">
         {/* Status messages */}
-        {error && (
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
-            <span className="material-symbols-rounded text-red-400" style={{ fontSize: 18 }}>error</span>
-            <span className="text-sm text-red-400">{error}</span>
-          </div>
-        )}
+        {error && <ErrorWithFix source="browser" message={error} />}
         {successMsg && (
           <div className="flex items-center gap-2 p-3 rounded-lg border" style={{ backgroundColor: `${BRAND_ORANGE}0d`, borderColor: `${BRAND_ORANGE}33` }}>
             <span className="material-symbols-rounded" style={{ fontSize: 18, color: BRAND_ORANGE_LIGHT }}>check_circle</span>

@@ -61,4 +61,6 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get update *
 clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get install *
+# Allow the Browser-app installer to recover from interrupted dpkg state.
+clawbox ALL=(root) NOPASSWD: /usr/bin/dpkg --configure -a
 clawbox ALL=(root) NOPASSWD: /usr/bin/snap install chromium

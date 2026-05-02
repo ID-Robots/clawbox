@@ -9,7 +9,6 @@ import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { dispatchOpenApp } from "@/lib/ui-events";
-import { clearAllChatCaches } from "@/lib/chat-history-cache";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -1123,11 +1122,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
-
-    // Clear browser-side chat caches BEFORE the POST. localStorage isn't
-    // touched by the server-side wipe, so without this the post-reboot
-    // chat would re-render the pre-reset transcript via mergeMessages.
-    clearAllChatCaches();
 
     try {
       await fetch("/setup-api/setup/reset", { method: "POST" });

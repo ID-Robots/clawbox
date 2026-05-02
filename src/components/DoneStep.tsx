@@ -8,7 +8,6 @@ import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import { useOllamaModels } from "@/hooks/useOllamaModels";
-import { clearAllChatCaches } from "@/lib/chat-history-cache";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
@@ -863,10 +862,6 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         setResetProgress(Math.round((currentStep / RESET_STEPS.length) * 100));
       }
     }, stepDuration);
-
-    // localStorage chat caches survive the server-side wipe, so purge them
-    // before the POST so the post-reboot chat doesn't re-render old history.
-    clearAllChatCaches();
 
     try {
       const res = await fetch("/setup-api/setup/reset", { method: "POST" });

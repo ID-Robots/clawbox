@@ -8,17 +8,14 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from '
 // Save short assistant snippets for mascot speech lines via client-kv
 import * as kv from '@/lib/client-kv'
 import {
-  loadCachedHistory,
-  saveCachedHistory,
-  mergeMessages,
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { isSentinel } from '@/lib/chat-sentinels'
 
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
-const HISTORY_CACHE_KEY = 'clawbox-chatpopup-history-v1'
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
 // During a skill install the gateway restarts to load the new skill, so
@@ -163,10 +160,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const panelMode = panelWidth !== null
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  // Hydrate from localStorage synchronously so a refresh paints the prior
-  // conversation immediately. mergeMessages takes over once chat.history
-  // arrives over the WS, so optimistic queued sends aren't dropped.
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadCachedHistory(HISTORY_CACHE_KEY))
+  // Gateway is canonical; render an empty list until chat.history arrives.
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -738,9 +733,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      // Merge so optimistic local messages from a queued send aren't dropped
-      // when the server snapshot doesn't yet contain them.
-      setMessages(prev => mergeMessages(chatMsgs, prev))
+      setMessages(chatMsgs)
 
       // Auto-send a greeting if no history exists (first conversation)
       if (chatMsgs.length === 0 && !greetedRef.current) {
@@ -858,12 +851,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setQueuedSends(prev => prev.filter(q => q.id !== id))
   }, [])
 
-  // Persist transcript to localStorage on every change so refresh paints
-  // the prior conversation in <100ms. Cheap — saveCachedHistory trims
-  // and strips before serializing.
+  // Fix-My-Error: queue an investigation prompt for the agent.
   useEffect(() => {
-    saveCachedHistory(HISTORY_CACHE_KEY, messages)
-  }, [messages])
+    const handler = (e: Event) => {
+      const ctx = (e as CustomEvent<FixErrorContext>).detail
+      if (!ctx?.message) return
+      setQueuedSends(prev => [...prev, { id: uuid(), text: buildFixErrorPrompt(ctx), attachments: [] }])
+    }
+    window.addEventListener(FIX_ERROR_EVENT, handler)
+    return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
+  }, [])
 
   // Drain queued sends on connect; flush them as system errors on error
   // so messages don't sit forever in a ref the user has no way to see.

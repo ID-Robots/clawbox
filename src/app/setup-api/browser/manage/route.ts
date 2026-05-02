@@ -187,6 +187,8 @@ export async function POST(req: Request) {
       case "install-chromium": {
         let installError: Error | null = null;
         try {
+          // Recover from any interrupted dpkg state before apt.
+          await exec("/usr/bin/sudo", ["dpkg", "--configure", "-a"], { timeout: 60000 }).catch(() => {});
           await exec("/usr/bin/sudo", ["apt-get", "update", "-qq"], { timeout: 30000 });
           await exec("/usr/bin/sudo", ["apt-get", "install", "-y", "-qq", "chromium-browser"], { timeout: 120000 });
         } catch {
