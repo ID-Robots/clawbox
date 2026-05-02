@@ -223,11 +223,16 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
     baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey,
+    // `reasoning: true` on both entries is what tells the OpenClaw
+    // gateway to forward `reasoning_effort` (and `thinking: { type:
+    // "disabled" }` for off) to DeepSeek. Both V4 surfaces are
+    // thinking-capable per OpenClaw's built-in catalog; flipping
+    // either to false silently makes the chat's Effort picker a no-op.
     models: [
       {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
-        reasoning: false,
+        reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       },
       {
