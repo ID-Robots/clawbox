@@ -78,6 +78,22 @@ export function mergeMessages(
   return result.map((r) => r.msg);
 }
 
+// Cache keys both ChatPopup and ChatApp own. Listed centrally so the
+// factory-reset path can purge them in one call without each component
+// re-implementing its own clear.
+export const CHAT_CACHE_KEYS = [
+  "clawbox-chatpopup-history-v1",
+  "clawbox-chat-history-v1",
+  "clawbox-mascot-convo-lines",
+] as const;
+
+export function clearAllChatCaches(): void {
+  if (typeof window === "undefined") return;
+  for (const key of CHAT_CACHE_KEYS) {
+    try { window.localStorage.removeItem(key); } catch { /* private mode / quota — silent */ }
+  }
+}
+
 export function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
