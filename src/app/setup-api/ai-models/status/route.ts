@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue } from "@/lib/config-store";
-import { normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +16,124 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
+
+// Portal endpoint that maps a `claw_*` token to its current subscription
+// state. Authoritative source for the device's tier badge — local config
+// only ever stored the user's wizard *selection*, which can drift from
+// what the portal actually grants (Free user pastes a token + clicks Max
+// pill → local says "pro" but token entitles only Free).
+const PORTAL_DEVICE_INFO_URL =
+  process.env.CLAWBOX_AI_DEVICE_INFO_URL?.trim()
+  || "https://openclawhardware.dev/api/clawbox-ai/device-info";
+
+// 120s TTL > 30s poll cadence so most polls land on a warm cache. The
+// portal's reconcile-tier already self-heals on its end inside its own
+// 60s window, so 120s here is still bounded by Stripe truth on the
+// far side.
+const PORTAL_TIER_CACHE_TTL_MS = 120_000;
+// 4s timeout — this fetch sits on the render path of the chat header
+// and Settings card. Anything longer stacks behind the 30s poll cadence
+// and stalls the badge update. On timeout we treat the portal as
+// unreachable and fall back to the picker selection.
+const PORTAL_FETCH_TIMEOUT_MS = 4_000;
+// Bound for the in-memory token cache. A single device only has one
+// active claw_ token at a time, so this only matters under factory-
+// reset / multi-account dev churn — but a long-running process would
+// otherwise leak entries forever.
+const PORTAL_TIER_CACHE_MAX_ENTRIES = 64;
+
+interface DeviceInfoResponse {
+  tier?: string;
+  deviceTier?: string | null;
+}
+
+type PortalLookup =
+  | { source: "portal"; tier: ClawboxAiTier | null }
+  | { source: "unreachable" };
+
+interface PortalCacheEntry {
+  tier: ClawboxAiTier | null;
+  expiresAt: number;
+}
+
+const portalTierCache = new Map<string, PortalCacheEntry>();
+const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
+
+function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
+  // Sweep expired entries, then enforce the size cap by dropping the
+  // oldest (insertion-order) entries until we're under the limit. Map
+  // iteration order is insertion order, so the first key is the oldest.
+  for (const [key, entry] of portalTierCache) {
+    if (entry.expiresAt <= now) portalTierCache.delete(key);
+  }
+  while (portalTierCache.size >= PORTAL_TIER_CACHE_MAX_ENTRIES) {
+    const oldest = portalTierCache.keys().next().value;
+    if (oldest === undefined) break;
+    portalTierCache.delete(oldest);
+  }
+  portalTierCache.set(token, { tier, expiresAt: now + PORTAL_TIER_CACHE_TTL_MS });
+}
+
+// Map portal's plan name + device-pair stamp to the local
+// ClawboxAiTier enum the UI badges already understand. The local enum
+// is "flash" (Pro plan / V4 Flash model) and "pro" (Max plan / V4 Pro
+// model); Free is `null` (no paid badge).
+function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
+  const stamped = normalizeClawboxAiTier(body.deviceTier);
+  if (stamped) return stamped;
+  const plan = (body.tier ?? "").trim().toLowerCase();
+  if (plan === "max") return "pro";
+  if (plan === "pro") return "flash";
+  return null;
+}
+
+async function fetchPortalTier(token: string): Promise<PortalLookup> {
+  const now = Date.now();
+  const cached = portalTierCache.get(token);
+  if (cached && cached.expiresAt > now) return { source: "portal", tier: cached.tier };
+
+  const existing = inFlightPortalLookups.get(token);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<PortalLookup> => {
+    try {
+      const res = await fetch(PORTAL_DEVICE_INFO_URL, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(PORTAL_FETCH_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const body = await res.json() as DeviceInfoResponse;
+        const tier = mapPortalTier(body);
+        rememberTier(token, tier, now);
+        return { source: "portal", tier };
+      }
+      // 401/403 are definitive — the portal *did* answer, the token just
+      // doesn't entitle anything. Cache so we don't re-hammer for the
+      // TTL. 5xx and network errors leave the cache untouched and let
+      // callers fall back to the locally-stored picker selection.
+      if (res.status === 401 || res.status === 403) {
+        rememberTier(token, null, now);
+        return { source: "portal", tier: null };
+      }
+      return { source: "unreachable" };
+    } catch {
+      return { source: "unreachable" };
+    }
+  })();
+
+  inFlightPortalLookups.set(token, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightPortalLookups.delete(token);
+  }
+}
+
+// Test-only: lets vitest reset the cache between runs.
+export function _resetPortalTierCache() {
+  portalTierCache.clear();
+  inFlightPortalLookups.clear();
+}
 
 function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
@@ -61,9 +179,25 @@ export async function GET() {
     }
     const normalizedProvider = normalizeProvider(provider);
 
-    const clawaiTier = normalizedProvider === "clawai"
-      ? normalizeClawboxAiTier(await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null))
-      : null;
+    let clawaiTier: ClawboxAiTier | null = null;
+    let tierSource: "portal" | "picker" = "picker";
+    if (normalizedProvider === "clawai") {
+      // Default to the wizard's picker selection; the portal call below
+      // overwrites both fields when it gets a definitive answer.
+      // Falling back to the picker on transient portal outages keeps
+      // the badge from blinking off during network blips.
+      clawaiTier = normalizeClawboxAiTier(
+        await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
+      );
+      const token = config.models?.providers?.deepseek?.apiKey;
+      if (typeof token === "string" && token.startsWith("claw_")) {
+        const lookup = await fetchPortalTier(token);
+        if (lookup.source === "portal") {
+          clawaiTier = lookup.tier;
+          tierSource = "portal";
+        }
+      }
+    }
 
     return NextResponse.json({
       connected: !!normalizedProvider,
@@ -72,6 +206,7 @@ export async function GET() {
       mode,
       model,
       clawaiTier,
+      tierSource,
     }, {
       headers: {
         "Cache-Control": "no-store",
@@ -79,7 +214,7 @@ export async function GET() {
     });
   } catch {
     return NextResponse.json(
-      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null },
+      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, tierSource: "picker" },
       {
         headers: {
           "Cache-Control": "no-store",
