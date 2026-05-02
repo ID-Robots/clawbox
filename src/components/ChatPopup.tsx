@@ -333,7 +333,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
   }, [])
 
-  useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
+  useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
   useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
 
 

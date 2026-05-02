@@ -42,7 +42,7 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "clawbox", name: "ClawBox", color: "#0a0f1a", type: "chat", pinned: true },
+  { id: "clawbox", name: "Claw", color: "#0a0f1a", type: "chat", pinned: true },
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
@@ -2144,12 +2144,16 @@ function ChromeDesktopInner() {
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
-              <button onClick={() => {
-                if (ctxMenu.appId) requestUninstallApp(ctxMenu.appId);
-              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
-              </button>
-              <div className="border-t border-white/10 my-1" />
+              {!ctxMenu.appId!.startsWith("desktop-") && (
+                <>
+                  <button onClick={() => {
+                    if (ctxMenu.appId) requestUninstallApp(ctxMenu.appId);
+                  }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
+                  </button>
+                  <div className="border-t border-white/10 my-1" />
+                </>
+              )}
               <button onClick={() => {
                 if (ctxMenu.appId) setIconPositions(prev => {
                   const next = { ...prev };
