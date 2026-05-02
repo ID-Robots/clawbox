@@ -16,11 +16,15 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway
 # Mask/unmask: factory reset masks the gateway before wiping ~/.openclaw
 # so systemd's `Restart=always` can't race-restart it mid-wipe and let the
-# gateway recreate plugin-runtime-deps. Unmasked again before reboot.
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl mask    clawbox-gateway.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl mask    clawbox-gateway
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl unmask  clawbox-gateway.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl unmask  clawbox-gateway
+# gateway recreate plugin-runtime-deps. `--runtime` mask writes the symlink
+# to /run/systemd/system/ (auto-clears on reboot) and takes precedence over
+# the real unit file at /etc/systemd/system/clawbox-gateway.service — plain
+# `mask` refuses with "File … already exists." against an /etc/-installed
+# unit. Unmasked again on the success and error paths.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gateway
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup.service

@@ -112,8 +112,11 @@ async function removeDirectoryContents(dir: string): Promise<string[]> {
 // Mask blocks the auto-restart for the rest of this boot. Unmasked before
 // reboot so the next boot brings the gateway back cleanly.
 async function maskAndStopGateway(): Promise<void> {
+  // `--runtime` writes the mask symlink to /run/systemd/system/, which takes
+  // precedence over the real unit file at /etc/systemd/system/. Plain `mask`
+  // would refuse with "File … already exists." for /etc/-installed units.
   try {
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "mask", "clawbox-gateway.service"], { timeout: 10_000 });
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "--runtime", "mask", "clawbox-gateway.service"], { timeout: 10_000 });
   } catch (err) {
     console.warn("[Reset] Failed to mask gateway:", err instanceof Error ? err.message : err);
   }
@@ -126,7 +129,7 @@ async function maskAndStopGateway(): Promise<void> {
 
 async function unmaskGateway(): Promise<void> {
   try {
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
   } catch (err) {
     console.warn("[Reset] Failed to unmask gateway:", err instanceof Error ? err.message : err);
   }
