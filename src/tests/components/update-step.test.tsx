@@ -57,6 +57,8 @@ describe("UpdateStep", () => {
 
     // Skip used to short-circuit the wizard's Update step; now the only way
     // forward is to actually run the update (or, on a downgrade, click skip).
-    expect(queryByRole("button", { name: "Skip updates" })).toBeNull();
+    // Cover both copy variants — the bare "Skip" used on downgrade and the
+    // regular "Skip updates" used on the idle path.
+    expect(queryByRole("button", { name: /^(skip|skip updates)$/i })).toBeNull();
   });
 });

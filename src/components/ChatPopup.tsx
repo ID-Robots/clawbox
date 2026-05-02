@@ -733,7 +733,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      setMessages(chatMsgs)
+      // Preserve any optimistic user turns appended after this load was
+      // dispatched but before chat.history responded — they haven't reached
+      // the server yet so chatMsgs doesn't include them.
+      setMessages(prev => {
+        if (prev.length === 0) return chatMsgs
+        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
+        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
+        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+      })
 
       // Auto-send a greeting if no history exists (first conversation)
       if (chatMsgs.length === 0 && !greetedRef.current) {
@@ -851,11 +859,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setQueuedSends(prev => prev.filter(q => q.id !== id))
   }, [])
 
-  // Fix-My-Error: queue an investigation prompt for the agent.
+  // Fix-My-Error: queue an investigation prompt for the agent. Mark the
+  // auto-greet as already done so loadHistory doesn't race the user's
+  // fix-error prompt with a stray "hi".
   useEffect(() => {
     const handler = (e: Event) => {
       const ctx = (e as CustomEvent<FixErrorContext>).detail
       if (!ctx?.message) return
+      greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: buildFixErrorPrompt(ctx), attachments: [] }])
     }
     window.addEventListener(FIX_ERROR_EVENT, handler)

@@ -306,7 +306,16 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
-      setMessages(chatMsgs)
+      // Server is canonical for everything it knows about, but a user turn
+      // typed between connect-ack and history-arrival ("optimistic local")
+      // hasn't reached the server yet — preserve it by appending any prev
+      // user messages whose timestamp is newer than the last server message.
+      setMessages(prev => {
+        if (prev.length === 0) return chatMsgs
+        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
+        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
+        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+      })
     } catch (err) {
       console.error('Failed to load history:', err)
     }

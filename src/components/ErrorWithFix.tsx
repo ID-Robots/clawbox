@@ -53,6 +53,7 @@ export default function ErrorWithFix({ message, source, details, variant = "bann
 function FixButton({ onClick, label }: { onClick: () => void; label: string }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0a0f1a] border border-orange-500/30 text-xs font-medium text-orange-300 hover:bg-orange-500/10 hover:border-orange-500/50 transition-colors cursor-pointer"
       title={label}
