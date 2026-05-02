@@ -35,11 +35,13 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
   pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
 };
 
-// Device-tier label, not the subscription name. Portal's authorize card
-// renders these strings — keep in sync with clawbox-website.
+// Device-tier badge label rendered in the chat header / Settings. Mirrors
+// the subscription plan names ("Pro plan" / "Max plan") so users don't see
+// a different word on the device than they paid for. Keep in sync with
+// clawbox-website's authorize card.
 export const CLAWBOX_AI_TIER_LABEL: Record<ClawboxAiTier, string> = {
-  flash: "Standard",
-  pro: "Extended",
+  flash: "Pro",
+  pro: "Max",
 };
 
 export function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
