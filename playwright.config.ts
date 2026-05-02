@@ -14,6 +14,13 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:3000",
     trace: "on-first-retry",
+    // CI runners share one `bun run dev` server across all sequential
+    // tests (workers: 1). After ~35 tests the dev server gets sluggish
+    // and later-in-suite waits hit the default 5s action timeout. The
+    // 15s bump absorbs that variance without rewriting tests; mirrors
+    // the explicit 15s overrides already in mascot-context and chat-popup.
+    actionTimeout: 15_000,
+    navigationTimeout: 30_000,
   },
   projects: [
     {
