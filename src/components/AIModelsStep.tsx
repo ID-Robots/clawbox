@@ -72,10 +72,7 @@ const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     pillLabel: "Pro",
     priceEuro: 9,
     pricePeriod: "/month",
-    // Pro plan bills from day one — only Max plan ships with a trial.
-    // Keep the field on the type so the picker / plan-card components
-    // stay tier-agnostic; flipping this back to true here is the only
-    // change needed if Pro re-acquires a trial later.
+    // Pro bills from day one; flip to true if a trial returns.
     hasTrial: false,
     features: [
       "5× more usage than Free",
@@ -1914,10 +1911,6 @@ export default function AIModelsStep({
                 {CLAWAI_TIER_ORDER.map((tier) => {
                   const info = CLAWAI_TIER_INFO[tier];
                   const isActive = clawaiTier === tier;
-                  // Trial chip is shown for any tier with `hasTrial: true`.
-                  // Currently only Max — Pro now bills from day one, Free
-                  // never had a trial. The chip floats above the pill so it
-                  // doesn't add height to the radiogroup row.
                   const showPickerTrial = info.hasTrial;
                   const ariaLabel = showPickerTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
                   return (
