@@ -211,7 +211,7 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockExecFile).toHaveBeenCalled();
   });
 
-  it("returns 500 when file deletion has failures", async () => {
+  it("still succeeds and reboots on partial file-deletion failure", async () => {
     mockFs.readdir.mockResolvedValueOnce(
       ["file1.json", "file2.json"] as unknown as ReaddirResult,
     );
@@ -222,9 +222,12 @@ describe("POST /setup-api/setup/reset", () => {
     const res = await resetPost();
     const body = await res.json();
 
-    expect(res.status).toBe(500);
-    expect(body.error).toContain("incomplete");
-    expect(body.failures).toBeDefined();
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.partialFailures).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mockExecFile).toHaveBeenCalled();
   });
 
   it("returns 500 on unexpected error", async () => {

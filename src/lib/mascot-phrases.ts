@@ -20,6 +20,8 @@ export interface MascotPhraseSet {
   nameGreetings: string[]
   /** Single-word friendly placeholders used when `ui_user_name` is unset. */
   nameFallbacks: string[]
+  /** Shouted while the crab perches on top of the box in power stance. */
+  power: string[]
 }
 
 export const INSPIRATION_PHRASES: MascotPhraseSet = {
@@ -77,6 +79,28 @@ export const INSPIRATION_PHRASES: MascotPhraseSet = {
     '*nudges {name}*',
   ],
   nameFallbacks: ['boss', 'captain', 'friend', 'human', 'partner', 'buddy', 'шефе', 'capitão'],
+  power: [
+    '⚡ UNLIMITED POWER!',
+    '🔥 SUPER CLAW!',
+    '💪 MAXIMUM POWER!',
+    '⚡ I AM THE BOX!',
+    '🦀👑 KING CRAB!',
+    '✨ LEVEL UP!',
+    '🔱 THIS IS MY THRONE!',
+    "⚡ WHO'S THE BOSS?!",
+    '👑 BOW BEFORE ME!',
+    '🦀 CRAB SUPREMACY!',
+    '⚡ ULTRA INSTINCT!',
+    '💎 DIAMOND CLAWS ACTIVATED!',
+    '🔥 FIRE AND FURY!',
+    '⚡ PLUS ULTRA!',
+    '🦀 KING OF THE DASHBOARD!',
+    '☢️ NUCLEAR LAUNCH DETECTED!',
+    '👑 KING OF ALL BOXES!',
+    '⚡ FINAL FORM ACHIEVED!',
+    '🔱 POSEIDON MODE!',
+    '💪 TRAINED FOR THIS!',
+  ],
 }
 
 export const PHRASE_CATEGORIES = Object.keys(INSPIRATION_PHRASES) as (keyof MascotPhraseSet)[]
@@ -112,6 +136,7 @@ export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undef
     facepalm: [...INSPIRATION_PHRASES.facepalm],
     nameGreetings: [...INSPIRATION_PHRASES.nameGreetings],
     nameFallbacks: [...INSPIRATION_PHRASES.nameFallbacks],
+    power: [...INSPIRATION_PHRASES.power],
   }
   if (!set) return merged
   for (const key of PHRASE_CATEGORIES) {

@@ -77,30 +77,64 @@ async function deleteWifiConnections(): Promise<void> {
 }
 
 async function removeDirectoryContents(dir: string): Promise<string[]> {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(dir);
-  } catch (err: unknown) {
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
-    throw err;
-  }
-  const results = await Promise.allSettled(
-    entries.map(entry => fs.rm(path.join(dir, entry), { recursive: true, force: true }))
-  );
-  const failures = results
-    .map((r, i) => r.status === "rejected" ? `${entries[i]}: ${r.reason}` : null)
-    .filter((f): f is string => f !== null);
-  if (failures.length > 0) {
+  // Background processes (npm install, plugin runtimes) can recreate files
+  // between readdir and rm; one retry catches that.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
+      throw err;
+    }
+    if (entries.length === 0) return [];
+    const results = await Promise.allSettled(
+      entries.map(entry => fs.rm(path.join(dir, entry), { recursive: true, force: true }))
+    );
+    const failures = results
+      .map((r, i) => r.status === "rejected" ? `${entries[i]}: ${r.reason}` : null)
+      .filter((f): f is string => f !== null);
+    if (failures.length === 0) return [];
+    if (attempt === 0) {
+      console.warn(`[Reset] ${failures.length} item(s) in ${dir} survived first pass — retrying:`, failures);
+      continue;
+    }
     console.warn(`[Reset] Failed to remove ${failures.length} item(s) in ${dir}:`, failures);
+    return failures;
   }
-  return failures;
+  return [];
 }
 
+
+async function stopGateway(): Promise<void> {
+  // Stop the gateway before the wipe so it can't race-write into ~/.openclaw.
+  try {
+    await execFile(
+      "/usr/bin/sudo",
+      ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
+      { timeout: 15_000 },
+    );
+  } catch (err) {
+    console.warn("[Reset] Failed to stop gateway before wipe:", err instanceof Error ? err.message : err);
+  }
+}
+
+function scheduleReboot(): void {
+  setTimeout(async () => {
+    try {
+      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
+    } catch (err) {
+      console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
+    }
+  }, 1_000);
+}
 
 export async function POST() {
   try {
     // 1. Reset in-memory update state
     resetUpdateState();
+
+    await stopGateway();
 
     // 2. Wipe data directory (config.json, OAuth state, etc.) — preserve hardware-specific files
     const dataFailures: string[] = [];
@@ -186,24 +220,10 @@ export async function POST() {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
     }
 
-    // 7. Return error if file cleanup had failures
-    if (allFailures.length > 0) {
-      return NextResponse.json(
-        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
-        { status: 500 },
-      );
-    }
+    // Reboot recovers cleanly even on partial-wipe failures.
+    scheduleReboot();
 
-    // 8. Schedule a full system reboot (short delay so the response reaches the client)
-    setTimeout(async () => {
-      try {
-        await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
-      } catch (err) {
-        console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
-      }
-    }, 1_000);
-
-    const response = NextResponse.json({ success: true });
+    const response = NextResponse.json({ success: true, ...(allFailures.length > 0 ? { partialFailures: allFailures } : {}) });
     response.cookies.set("clawbox_session", "", {
       httpOnly: true,
       sameSite: "lax",
@@ -213,6 +233,8 @@ export async function POST() {
     });
     return response;
   } catch (err) {
+    // Reboot to recover from whatever broken state we're in.
+    scheduleReboot();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Factory reset failed" },
       { status: 500 },

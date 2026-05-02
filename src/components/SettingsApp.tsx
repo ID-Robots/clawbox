@@ -8,6 +8,7 @@ import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
+import { dispatchOpenApp } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -2325,16 +2326,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
-            {/* Info card */}
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>info</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.howItWorks")}</label>
-              </div>
-              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                {t("settings.telegramDescription")}
-              </p>
-            </div>
           </div>
         )}
 
@@ -2689,7 +2680,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             <div className="flex gap-2">
               <button
-                onClick={() => triggerUpdate()}
+                onClick={() => dispatchOpenApp("system_update")}
                 className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer text-left"
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>system_update</span>
@@ -2704,7 +2695,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               </button>
               <button
-                onClick={() => triggerOpenclawUpdate()}
+                onClick={() => dispatchOpenApp("system_update")}
                 className="flex items-center gap-3 flex-1 bg-blue-500/10 rounded-xl px-4 py-3 text-sm text-blue-400/80 hover:text-blue-400 border border-blue-500/20 hover:bg-blue-500/15 transition-colors cursor-pointer text-left"
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>cloud_download</span>

@@ -20,6 +20,7 @@ import { isSentinel } from '@/lib/chat-sentinels'
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const HISTORY_CACHE_KEY = 'clawbox-chatpopup-history-v1'
 const MAX_RETRIES = 8
+const MAX_QUEUED_SENDS = 20
 // During a skill install the gateway restarts to load the new skill, so
 // extend the retry budget to quadruple so the chat reconnects automatically
 // once it comes back instead of forcing the user to click Try again.
@@ -169,6 +170,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
+  // Queued while a run is in flight; drained one at a time on `final`.
+  const [queuedSends, setQueuedSends] = useState<{ id: string; text: string; attachments: { name: string; path: string; type: string }[] }[]>([])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
@@ -812,36 +815,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
-  // Send a message
-  const sendMessage = useCallback(async () => {
-    const text = input.trim()
-    if (!text && attachments.length === 0) return
-    if (sending) return
-
-    const currentAttachments = [...attachments]
-    setInput('')
-    setAttachments([])
-
-    // Build display text for user message
-    const fileNames = currentAttachments.map(a => `📎 ${a.name}`).join('\n')
+  const startRun = useCallback((text: string, sendAttachments: { name: string; path: string; type: string }[]) => {
+    const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
     setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now() }])
     setSending(true)
     setStreaming('')
-
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
-
-    // If the WS handshake hasn't completed yet, queue the send instead of
-    // failing fast. The optimistic user message is already on screen, so the
-    // chat looks responsive while the gateway finishes its agent prep.
     if (status !== 'connected') {
-      pendingSendsRef.current.push({ text, attachments: currentAttachments, idempotencyKey })
+      pendingSendsRef.current.push({ text, attachments: sendAttachments, idempotencyKey })
       return
     }
+    void dispatchSend(text, sendAttachments, idempotencyKey)
+  }, [status, dispatchSend])
 
-    await dispatchSend(text, currentAttachments, idempotencyKey)
-  }, [input, sending, attachments, status, dispatchSend])
+  const sendMessage = useCallback(() => {
+    const text = input.trim()
+    if (!text && attachments.length === 0) return
+    const currentAttachments = [...attachments]
+    setInput('')
+    setAttachments([])
+    if (sending) {
+      // Cap to bound memory; dropping the oldest matches "newest is freshest".
+      setQueuedSends(prev => {
+        const next = [...prev, { id: uuid(), text, attachments: currentAttachments }]
+        return next.length > MAX_QUEUED_SENDS ? next.slice(next.length - MAX_QUEUED_SENDS) : next
+      })
+      return
+    }
+    startRun(text, currentAttachments)
+  }, [input, sending, attachments, startRun])
+
+  useEffect(() => {
+    if (sending || queuedSends.length === 0) return
+    const [next, ...rest] = queuedSends
+    setQueuedSends(rest)
+    startRun(next.text, next.attachments)
+  }, [sending, queuedSends, startRun])
+
+  const cancelQueuedSend = useCallback((id: string) => {
+    setQueuedSends(prev => prev.filter(q => q.id !== id))
+  }, [])
 
   // Persist transcript to localStorage on every change so refresh paints
   // the prior conversation in <100ms. Cheap — saveCachedHistory trims
@@ -1535,6 +1550,32 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </div>
           </div>
         )}
+
+        {queuedSends.map((q) => (
+          <div key={q.id} style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <div style={{
+              maxWidth: '85%', padding: '7px 12px',
+              borderRadius: '14px 14px 4px 14px',
+              background: 'rgba(249,115,22,0.25)',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: 13, lineHeight: 1.4, wordBreak: 'break-word',
+              display: 'flex', alignItems: 'center', gap: 8,
+              border: '1px dashed rgba(249,115,22,0.4)',
+            }}>
+              <span style={{ flex: 1 }}>{q.text}</span>
+              <button
+                onClick={() => cancelQueuedSend(q.id)}
+                title={t("cancel")}
+                aria-label={t("cancel")}
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.5)', padding: 0, lineHeight: 1,
+                  fontSize: 14, fontWeight: 700,
+                }}
+              >×</button>
+            </div>
+          </div>
+        ))}
 
         <div ref={messagesEndRef} />
       </div>

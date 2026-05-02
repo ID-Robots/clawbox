@@ -315,25 +315,6 @@ export default function SystemUpdateApp() {
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => { void fetchVersions(); }}
-          disabled={refreshing || status === "updating"}
-          className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer inline-flex items-center gap-1.5"
-          title="Re-fetch versions from the update server"
-        >
-          <span
-            className={`material-symbols-rounded ${refreshing ? "animate-spin" : ""}`}
-            style={{ fontSize: 14 }}
-            aria-hidden="true"
-          >
-            refresh
-          </span>
-          {refreshing ? "Checking…" : "Check now"}
-        </button>
-      </div>
-
       <div className="min-h-full w-full flex items-start justify-center p-6 pt-10">
         <div className="w-full max-w-2xl space-y-4">
           {/* HERO */}

@@ -689,15 +689,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       xRef.current = bx
       setX(bx)
       setFacingDirect(Math.random() > 0.5 ? 'left' : 'right')
-      const powerLines = [
-        '⚡ UNLIMITED POWER!', '🔥 SUPER CLAW!', '💪 МАКСИМАЛНА СИЛА!', '⚡ I AM THE BOX!',
-        '🦀👑 KING CRAB!', '✨ LEVEL UP!', '🔱 THIS IS MY THRONE!', '⚡ КОЙ Е ШЕФЪТ?!',
-        '👑 BOW BEFORE ME!', '🦀 CRAB SUPREMACY!', '⚡ УЛТРА ИНСТИНКТ!',
-        '💎 DIAMOND CLAWS ACTIVATED!', '🔥 ОГЪН И ЯРОСТ!', '⚡ PLUS ULTRA!',
-        '🦀 KING OF THE DASHBOARD!', '☢️ NUCLEAR LAUNCH DETECTED!',
-        '👑 АЗ СЪМ КРАЛЯТ НА КУТИИТЕ!', '⚡ FINAL FORM ACHIEVED!',
-        '🔱 POSEIDON MODE!', '💪 ТРЕНИРАХ ЗА ТОВА!',
-      ]
+      const powerLines = phrasesRef.current.power.length > 0
+        ? phrasesRef.current.power
+        : INSPIRATION_PHRASES.power
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
       const line = getSpeech('idle')

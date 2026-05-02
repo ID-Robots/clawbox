@@ -479,34 +479,6 @@ export default function ClawKeepApp() {
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      {status.paired && (
-        <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
-          <a
-            href={`${status.server}/portal/clawkeep`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer"
-            title={t("clawkeep.portalTitle")}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
-              dashboard
-            </span>
-            {t("clawkeep.portal")}
-            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">
-              open_in_new
-            </span>
-          </a>
-          <button
-            type="button"
-            disabled={busy === "unpair"}
-            onClick={onUnpair}
-            className="px-2.5 py-1 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
-          >
-            {busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}
-          </button>
-        </div>
-      )}
-
       <div className="min-h-full w-full flex items-center justify-center p-6">
         <div className="w-full max-w-2xl space-y-4">
           {error && (
@@ -549,6 +521,28 @@ export default function ClawKeepApp() {
                 }}
                 onError={setError}
               />
+              <div className="flex gap-2">
+                <a
+                  href={`${status.server}/portal/clawkeep`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-white/10 bg-white/[0.03] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-white/20 transition-colors cursor-pointer"
+                  title={t("clawkeep.portalTitle")}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">dashboard</span>
+                  <span className="font-medium">{t("clawkeep.portal")}</span>
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+                </a>
+                <button
+                  type="button"
+                  disabled={busy === "unpair"}
+                  onClick={onUnpair}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] text-sm text-red-300/80 hover:text-red-200 hover:bg-red-500/10 hover:border-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">link_off</span>
+                  <span className="font-medium">{busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}</span>
+                </button>
+              </div>
             </>
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />

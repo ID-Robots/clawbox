@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
+import { OPEN_APP_EVENT } from "@/lib/ui-events";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
@@ -1054,6 +1055,15 @@ function ChromeDesktopInner() {
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);
   openAppRef.current = openApp;
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ appId?: string }>).detail;
+      if (detail?.appId) openAppRef.current(detail.appId);
+    };
+    window.addEventListener(OPEN_APP_EVENT, handler);
+    return () => window.removeEventListener(OPEN_APP_EVENT, handler);
+  }, []);
 
   useEffect(() => {
     let active = true;
