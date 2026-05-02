@@ -106,16 +106,29 @@ async function removeDirectoryContents(dir: string): Promise<string[]> {
 }
 
 
-async function stopGateway(): Promise<void> {
-  // Stop the gateway before the wipe so it can't race-write into ~/.openclaw.
+// Mask + stop is mandatory: with just `stop`, systemd's `Restart=always`
+// auto-restarts the gateway within milliseconds, so the gateway then
+// recreates plugin-runtime-deps mid-`fs.rm` and the wipe leaves stragglers.
+// Mask blocks the auto-restart for the rest of this boot. Unmasked before
+// reboot so the next boot brings the gateway back cleanly.
+async function maskAndStopGateway(): Promise<void> {
   try {
-    await execFile(
-      "/usr/bin/sudo",
-      ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
-      { timeout: 15_000 },
-    );
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "mask", "clawbox-gateway.service"], { timeout: 10_000 });
+  } catch (err) {
+    console.warn("[Reset] Failed to mask gateway:", err instanceof Error ? err.message : err);
+  }
+  try {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], { timeout: 15_000 });
   } catch (err) {
     console.warn("[Reset] Failed to stop gateway before wipe:", err instanceof Error ? err.message : err);
+  }
+}
+
+async function unmaskGateway(): Promise<void> {
+  try {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
+  } catch (err) {
+    console.warn("[Reset] Failed to unmask gateway:", err instanceof Error ? err.message : err);
   }
 }
 
@@ -131,12 +144,10 @@ function scheduleReboot(): void {
 
 export async function POST() {
   try {
-    // 1. Reset in-memory update state
     resetUpdateState();
 
-    await stopGateway();
+    await maskAndStopGateway();
 
-    // 2. Wipe data directory (config.json, OAuth state, etc.) — preserve hardware-specific files
     const dataFailures: string[] = [];
     try {
       const entries = await fs.readdir(DATA_DIR);
@@ -152,12 +163,8 @@ export async function POST() {
       if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
     }
 
-    // 3. Wipe entire OpenClaw directory (config, agents, sessions, credentials, logs, workspace)
     const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
     const allFailures = [...dataFailures, ...openclawFailures];
-    if (allFailures.length > 0) {
-      console.warn(`[Reset] ${allFailures.length} file deletion(s) failed — continuing with reboot`);
-    }
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly
@@ -220,10 +227,25 @@ export async function POST() {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
     }
 
-    // Reboot recovers cleanly even on partial-wipe failures.
+    // Always unmask before either reboot or returning a failure — leaving the
+    // unit masked would block the gateway from coming back on the next boot.
+    await unmaskGateway();
+
+    // Surface partial-wipe failures explicitly: returning an error here
+    // (instead of rebooting silently) keeps the user on the reset screen so
+    // they can retry or escalate. The masked-then-unmasked gateway is fine
+    // either way; mask only persists until the next reboot.
+    if (allFailures.length > 0) {
+      console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
+      return NextResponse.json(
+        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
+        { status: 500 },
+      );
+    }
+
     scheduleReboot();
 
-    const response = NextResponse.json({ success: true, ...(allFailures.length > 0 ? { partialFailures: allFailures } : {}) });
+    const response = NextResponse.json({ success: true });
     response.cookies.set("clawbox_session", "", {
       httpOnly: true,
       sameSite: "lax",
@@ -233,8 +255,7 @@ export async function POST() {
     });
     return response;
   } catch (err) {
-    // Reboot to recover from whatever broken state we're in.
-    scheduleReboot();
+    await unmaskGateway();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Factory reset failed" },
       { status: 500 },

@@ -14,6 +14,13 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway
+# Mask/unmask: factory reset masks the gateway before wiping ~/.openclaw
+# so systemd's `Restart=always` can't race-restart it mid-wipe and let the
+# gateway recreate plugin-runtime-deps. Unmasked again before reboot.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl mask    clawbox-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl mask    clawbox-gateway
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl unmask  clawbox-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl unmask  clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup.service

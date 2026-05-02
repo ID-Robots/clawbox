@@ -211,10 +211,13 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockExecFile).toHaveBeenCalled();
   });
 
-  it("still succeeds and reboots on partial file-deletion failure", async () => {
-    mockFs.readdir.mockResolvedValueOnce(
-      ["file1.json", "file2.json"] as unknown as ReaddirResult,
-    );
+  it("returns 500 and skips reboot on partial file-deletion failure", async () => {
+    // First readdir = DATA_DIR, then OPENCLAW_DIR. Make DATA_DIR's rm reject
+    // so we hit the partial-failure path; OPENCLAW_DIR returns empty so we
+    // don't recurse into the retry pass.
+    mockFs.readdir
+      .mockResolvedValueOnce(["file1.json", "file2.json"] as unknown as ReaddirResult)
+      .mockResolvedValue([] as unknown as ReaddirResult);
     mockFs.rm
       .mockResolvedValueOnce()
       .mockRejectedValueOnce(new Error("Permission denied"));
@@ -222,12 +225,10 @@ describe("POST /setup-api/setup/reset", () => {
     const res = await resetPost();
     const body = await res.json();
 
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(body.partialFailures).toBeDefined();
-
-    await vi.advanceTimersByTimeAsync(1500);
-    expect(mockExecFile).toHaveBeenCalled();
+    // No silent reboot — surface the failure so the user can retry or escalate.
+    expect(res.status).toBe(500);
+    expect(body.error).toContain("incomplete");
+    expect(body.failures).toBeDefined();
   });
 
   it("returns 500 on unexpected error", async () => {
