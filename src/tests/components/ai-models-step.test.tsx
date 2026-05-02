@@ -268,7 +268,7 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
-    fireEvent.click(getByRole("radio", { name: /^Extended tier/ }));
+    fireEvent.click(getByRole("radio", { name: /^Max tier/ }));
     fireEvent.click(getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {
