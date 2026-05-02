@@ -72,7 +72,8 @@ const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     pillLabel: "Pro",
     priceEuro: 9,
     pricePeriod: "/month",
-    hasTrial: true,
+    // Pro bills from day one; flip to true if a trial returns.
+    hasTrial: false,
     features: [
       "5× more usage than Free",
       "DeepSeek V4 Flash",
@@ -1910,10 +1911,7 @@ export default function AIModelsStep({
                 {CLAWAI_TIER_ORDER.map((tier) => {
                   const info = CLAWAI_TIER_INFO[tier];
                   const isActive = clawaiTier === tier;
-                  // Trial chip lives on the picker only for the Max tier;
-                  // Pro's chip moves into the orange plan card below so the
-                  // CTA reads as part of the plan body instead of a floater.
-                  const showPickerTrial = info.hasTrial && tier !== "flash";
+                  const showPickerTrial = info.hasTrial;
                   const ariaLabel = showPickerTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
                   return (
                     <button
