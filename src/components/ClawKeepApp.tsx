@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
+import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -181,6 +182,13 @@ export default function ClawKeepApp() {
     danger?: boolean;
     onConfirm: () => void;
   } | null>(null);
+  // ClawBox-AI tier — read from /setup-api/ai-models/status, drives the
+  // upgrade-required card when the user is on Free. Portal also gates the
+  // upload/repo endpoints with `clawkeepQuotaBytes <= 0 → 403`, but
+  // showing the gate up front avoids a click that would silently bounce.
+  // Undefined = not yet loaded (don't render either branch); null = Free;
+  // string = paid tier.
+  const [clawaiTier, setClawaiTier] = useState<"flash" | "pro" | null | undefined>(undefined);
   const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -198,6 +206,21 @@ export default function ClawKeepApp() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/setup-api/ai-models/status", { cache: "no-store" });
+        if (!r.ok) { if (!cancelled) setClawaiTier(null); return; }
+        const body = (await r.json()) as { clawaiTier?: "flash" | "pro" | null };
+        if (!cancelled) setClawaiTier(body.clawaiTier ?? null);
+      } catch {
+        if (!cancelled) setClawaiTier(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Poll the dashboard every 3s while a backup is in progress. The server
   // is the source of truth, so reopening the window mid-run still picks up
@@ -544,6 +567,11 @@ export default function ClawKeepApp() {
                 </button>
               </div>
             </>
+          ) : clawaiTier === undefined ? null : clawaiTier === null ? (
+            <FreeTierUpgradeCard
+              featureName="ClawKeep cloud backups"
+              description="ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB."
+            />
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}

@@ -12,6 +12,7 @@ import { dispatchOpenApp } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
@@ -890,7 +891,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
   useEffect(() => {
-    if (section !== "ai" && !isMobile) return;
+    // Fetch when AI section opens (badge), Remote section opens (paid-tier
+    // gate), or on mobile where the badge is always visible. Other sections
+    // don't need the data.
+    if (section !== "ai" && section !== "remote" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section, isMobile]);
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
@@ -2581,13 +2585,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Remote Control ─── */}
-        {activeSection === "remote" && (
-          clawboxLogin.loggedIn || clawboxLogin.loading ? (
-            <RemoteControlPanel />
-          ) : (
-            <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />
-          )
-        )}
+        {activeSection === "remote" && (() => {
+          if (!clawboxLogin.loggedIn && !clawboxLogin.loading) {
+            return <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />;
+          }
+          // Free users get the upgrade CTA — the portal's heartbeat
+          // endpoint also rejects with 402 paid_plan_required, but
+          // surfacing the gate here avoids a working-looking toggle that
+          // bounces server-side. While aiProvider is loading we render
+          // nothing rather than flicker between Panel and Upgrade card.
+          if (aiProvider === null) return null;
+          if (aiProvider.clawaiTier === null) {
+            return (
+              <FreeTierUpgradeCard
+                featureName="Remote Desktop"
+                description="Remote Desktop publishes a secure tunnel from this ClawBox to your portal account so you can reach it from anywhere. Available on Pro and Max plans."
+              />
+            );
+          }
+          return <RemoteControlPanel />;
+        })()}
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
