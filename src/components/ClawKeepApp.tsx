@@ -507,8 +507,8 @@ export default function ClawKeepApp() {
             // will 403 every operation, so a working-looking PairedView
             // would just lead to silent backup failures.
             <FreeTierUpgradeCard
-              featureName="ClawKeep cloud backups"
-              description="ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB."
+              featureName={t("clawkeep.upgrade.featureName")}
+              description={t("clawkeep.upgrade.description")}
             />
           ) : status.paired ? (
             <>

@@ -159,8 +159,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (clawboxLogin.tier === null) {
       return (
         <FreeTierUpgradeCard
-          featureName="Remote Desktop"
-          description="Remote Desktop publishes a secure tunnel from this ClawBox to your portal account so you can reach it from anywhere. Available on Pro and Max plans."
+          featureName={t("remote.upgrade.featureName")}
+          description={t("remote.upgrade.description")}
         />
       );
     }

@@ -125,8 +125,7 @@ export default function ChromeShelf({
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
     : !clawkeepEntitled
-    // TODO i18n: add `shelf.clawkeepNeedsPaid` to all 10 desktop-translations files.
-    ? "ClawKeep needs a Pro or Max plan"
+    ? t("shelf.clawkeepNeedsPaid")
     : stale
     ? t("shelf.clawkeepStale")
     : t("shelf.openClawKeep");
