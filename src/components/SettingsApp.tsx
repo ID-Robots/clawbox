@@ -159,8 +159,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (clawboxLogin.tier === null) {
       return (
         <FreeTierUpgradeCard
-          featureName={t("remote.upgrade.featureName")}
-          description={t("remote.upgrade.description")}
+          featureName={t("remoteControl.upgrade.featureName")}
+          description={t("remoteControl.upgrade.description")}
         />
       );
     }
