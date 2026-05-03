@@ -100,6 +100,13 @@ import {
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { CLAWBOX_AI_PRO_MODEL_ID } from '@/lib/clawbox-ai-models'
+import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
+
+const PORTAL_DASHBOARD_URL = `${PORTAL_LOGIN_URL}/dashboard`
+function modelRequiresMax(model: string): boolean {
+  return model === `clawai/${CLAWBOX_AI_PRO_MODEL_ID}`
+    || model === `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}`
+}
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -914,6 +921,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
     if (switchingModel || chatModelState?.activeModel === target.model) return
+    // Intercept clawai Pro picks from non-Max users. The portal's
+    // /api/ai gateway silently downgrades these requests to flash
+    // (Mike's live-tier reconcile), which previously left the user
+    // staring at a "Switched chat to deepseek-v4-pro" success toast
+    // while every reply came from flash. Surface the gate here with
+    // an actionable upgrade prompt and skip the network call entirely.
+    if (modelRequiresMax(target.model) && clawboxLogin.tier !== 'pro') {
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `${target.label} requires a Max subscription. Upgrade at ${PORTAL_DASHBOARD_URL} to unlock it. Staying on the current model.`,
+        timestamp: Date.now(),
+        variant: 'error',
+      }])
+      return
+    }
     setSwitchingModel(true)
     setErrorMsg('')
     try {
@@ -1183,27 +1205,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   cursor: switchingModel ? 'default' : 'pointer',
                 }}
               >
-                {chatModelState.options
-                  .filter((option) => {
-                    // Same gate as the model-variant picker below: hide
-                    // clawai's pro option from non-Max users so they
-                    // can't pick "ClawBox AI Pro" and see a fake-success
-                    // toast while the gateway silently downgrades to flash.
-                    if (
-                      option.provider === 'clawai' &&
-                      typeof option.model === 'string' &&
-                      option.model.endsWith(`/${CLAWBOX_AI_PRO_MODEL_ID}`) &&
-                      clawboxLogin.tier !== 'pro'
-                    ) {
-                      return false
-                    }
-                    return true
-                  })
-                  .map((option) => (
-                    <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
-                      {getChatModelOptionText(option)}
-                    </option>
-                  ))}
+                {chatModelState.options.map((option) => (
+                  <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
+                    {getChatModelOptionText(option)}
+                  </option>
+                ))}
               </select>
               <span
                 className="material-symbols-rounded"
@@ -1241,30 +1247,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             )
             if (!activeOption?.provider) return null
             const catalog = chatProviderCatalog
-            if (!catalog) return null
-            // ClawBox AI: filter the deepseek-v4-pro option for users
-            // who aren't on Max. Without this gate, picking pro looks
-            // successful in the UI but the gateway silently maps every
-            // request back to flash, leaving the user thinking they're
-            // on the better model. Only "pro" tier (Max subscription)
-            // is entitled to the V4 Pro frontier weights.
-            const filteredModels = activeOption.provider === 'clawai' && clawboxLogin.tier !== 'pro'
-              ? catalog.models.filter((m) => m.id !== CLAWBOX_AI_PRO_MODEL_ID)
-              : catalog.models
-            if (filteredModels.length < 2) return null
+            if (!catalog || catalog.models.length < 2) return null
             const activeModelId = extractProviderModelId(
               chatModelState.activeModel,
               activeOption.provider,
             )
             if (!activeModelId) return null
-            const curatedHasActive = filteredModels.some(
+            const curatedHasActive = catalog.models.some(
               (option) => option.id === activeModelId,
             )
             const modelOptions = curatedHasActive
-              ? filteredModels
+              ? catalog.models
               : [
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
-                  ...filteredModels,
+                  ...catalog.models,
                 ]
             return (
               <div
