@@ -961,7 +961,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
