@@ -1183,11 +1183,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   cursor: switchingModel ? 'default' : 'pointer',
                 }}
               >
-                {chatModelState.options.map((option) => (
-                  <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
-                    {getChatModelOptionText(option)}
-                  </option>
-                ))}
+                {chatModelState.options
+                  .filter((option) => {
+                    // Same gate as the model-variant picker below: hide
+                    // clawai's pro option from non-Max users so they
+                    // can't pick "ClawBox AI Pro" and see a fake-success
+                    // toast while the gateway silently downgrades to flash.
+                    if (
+                      option.provider === 'clawai' &&
+                      typeof option.model === 'string' &&
+                      option.model.endsWith(`/${CLAWBOX_AI_PRO_MODEL_ID}`) &&
+                      clawboxLogin.tier !== 'pro'
+                    ) {
+                      return false
+                    }
+                    return true
+                  })
+                  .map((option) => (
+                    <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
+                      {getChatModelOptionText(option)}
+                    </option>
+                  ))}
               </select>
               <span
                 className="material-symbols-rounded"
