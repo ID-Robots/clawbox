@@ -1914,17 +1914,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
-                          {isClawai && aiProvider.clawaiTier && (
-                            <span
-                              className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
-                                aiProvider.clawaiTier === "pro"
-                                  ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
-                                  : "bg-orange-500/15 border-orange-400/30 text-orange-200"
-                              }`}
-                            >
-                              {CLAWBOX_AI_TIER_LABEL[normalizeClawboxAiTier(aiProvider.clawaiTier) ?? "flash"]}
-                            </span>
-                          )}
+                          {(() => {
+                            const tier = isClawai ? normalizeClawboxAiTier(aiProvider.clawaiTier) : null;
+                            if (!tier) return null;
+                            return (
+                              <span
+                                className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
+                                  tier === "pro"
+                                    ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
+                                    : "bg-orange-500/15 border-orange-400/30 text-orange-200"
+                                }`}
+                              >
+                                {CLAWBOX_AI_TIER_LABEL[tier]}
+                              </span>
+                            );
+                          })()}
                         </div>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />

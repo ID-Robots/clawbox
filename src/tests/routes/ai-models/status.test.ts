@@ -177,23 +177,21 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("portal");
     });
 
-    it("returns clawaiTier=null when local picker is unset, even if the portal stamps a paid tier", async () => {
+    it("returns clawaiTier=null and skips the portal call when local picker is unset", async () => {
       // Defence-in-depth against a portal-side upgrade bug: a Free user
-      // who never picked a paid pill should never see a paid badge,
-      // even if the portal incorrectly returns deviceTier="flash". The
-      // local picker selection acts as a ceiling.
+      // who never picked a paid pill should never see a paid badge.
+      // We short-circuit the portal call too — saves the 4 s timeout
+      // on cold cache and avoids depending on portal correctness for
+      // the Free path.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue(null);
-      fetchSpy.mockResolvedValue(new Response(
-        JSON.stringify({ tier: "free", deviceTier: "flash", allowedModels: ["deepseek-v4-flash"] }),
-        { status: 200 },
-      ));
 
       const res = await GET();
       const body = await res.json();
 
       expect(body.clawaiTier).toBeNull();
-      expect(body.tierSource).toBe("portal");
+      expect(body.tierSource).toBe("picker");
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
     it("returns clawaiTier=null on portal 403 (invalid token) and caches the verdict", async () => {

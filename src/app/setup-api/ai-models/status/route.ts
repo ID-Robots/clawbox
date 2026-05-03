@@ -225,18 +225,18 @@ export async function GET() {
         await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
       );
       clawaiTier = localTier;
+      // Treat the local picker selection as a ceiling: if the user never
+      // authorised a paid tier locally (localTier === null), the badge
+      // stays hidden regardless of the portal stamp. Skip the portal
+      // call entirely in that case — saves a 4 s timeout on the render
+      // path during cold-cache fetches and avoids the portal-upgrade
+      // bug where a Free user gets deviceTier="flash" stamped. Drop
+      // this guard once the portal gates deviceTier by subscription.
       const token = config.models?.providers?.deepseek?.apiKey;
-      if (typeof token === "string" && token.startsWith("claw_")) {
+      if (localTier !== null && typeof token === "string" && token.startsWith("claw_")) {
         const lookup = await fetchPortalTier(token);
         if (lookup.source === "portal") {
-          // Treat the local picker selection as a ceiling: if the user
-          // never authorised a paid tier locally (localTier === null),
-          // refuse to render a paid badge even when the portal stamps
-          // one. This is a defence against the portal upgrading Free
-          // subscribers to flash/pro on the device-info response.
-          // Tracked upstream — remove this guard once the portal gates
-          // deviceTier stamping by subscription.
-          clawaiTier = localTier === null ? null : lookup.tier;
+          clawaiTier = lookup.tier;
           tierSource = "portal";
         }
       }
