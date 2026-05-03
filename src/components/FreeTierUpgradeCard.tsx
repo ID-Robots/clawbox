@@ -1,4 +1,9 @@
-import { PORTAL_SUBSCRIBE_URL } from "@/lib/max-subscription";
+import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
+
+// Subscribe page lives under /portal/dashboard (the portal's logged-in
+// landing — same place Mike's auto-tier 400 message points users for
+// the manual-token flow). /portal/subscribe doesn't exist.
+const PORTAL_DASHBOARD_URL = `${PORTAL_LOGIN_URL}/dashboard`;
 
 interface FreeTierUpgradeCardProps {
   /** Feature being gated, used in the headline ("X needs a paid plan"). */
@@ -33,7 +38,7 @@ export default function FreeTierUpgradeCard({ featureName, description }: FreeTi
           </p>
         </div>
         <a
-          href={PORTAL_SUBSCRIBE_URL}
+          href={PORTAL_DASHBOARD_URL}
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer no-underline"
