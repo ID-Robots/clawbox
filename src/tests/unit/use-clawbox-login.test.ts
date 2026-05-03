@@ -57,7 +57,14 @@ describe("useClawboxLogin", () => {
     expect(result.current.tier).toBeNull();
   });
 
-  it("treats provider 'clawai' with null tier as logged-out", async () => {
+  it("treats provider 'clawai' with null tier as logged-in (Free user)", async () => {
+    // Free users have a paired clawai token but `tier === null` because
+    // the portal doesn't stamp a paid deviceTier. Pre-auto-tier the hook
+    // collapsed both "no token" and "Free token" into loggedIn=false, but
+    // that broke after auto-tier shipped: Free users started seeing
+    // "Sign in" prompts despite already being signed in. loggedIn now
+    // means "active provider is ClawBox AI" — callers that need a paid
+    // gate should check `tier !== null` themselves.
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
       connected: true,
       provider: "clawai",
@@ -66,7 +73,7 @@ describe("useClawboxLogin", () => {
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.loggedIn).toBe(false);
+    expect(result.current.loggedIn).toBe(true);
     expect(result.current.tier).toBeNull();
   });
 
