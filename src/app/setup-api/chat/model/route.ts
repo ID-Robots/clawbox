@@ -416,25 +416,18 @@ export async function POST(request: Request) {
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
 
     // 2. Sweep existing sessions' per-session overrides to the new
-    //    target — but only the ones tagged `auto` (or untagged). Sessions
-    //    whose `modelOverrideSource === "user"` AND whose existing
-    //    override differs from the target are LEFT ALONE: the user
-    //    explicitly picked a model on those sessions and we treat that
-    //    as sticky intent (e.g. parallel chats deliberately running
-    //    Sonnet for code review + Haiku for casual chat).
-    //
-    //    Without the sweep at all, changing the chat dropdown only
-    //    affected newly-opened sessions, which felt broken. With a full
-    //    sweep, one click homogenised every parallel chat. The middle
-    //    ground — sweep auto-tagged, preserve user-tagged — is what the
-    //    chat-header dropdown wants. The wizard / Settings configure
-    //    flow does a full sweep separately (see configure/route.ts) when
-    //    the user changes the primary provider entirely.
-    //
-    //    NB: "manual" *looks* like the right sticky tag but isn't
-    //    recognised anywhere in the OpenClaw dist; only "user" is
-    //    sticky. See the docstring on
-    //    `applyModelOverrideToAllAgentSessions`.
+    //    target. Full sweep — including sessions that already carry a
+    //    `modelOverrideSource === "user"` tag from a previous dropdown
+    //    pick. The chat-header dropdown click *is* the user's current
+    //    pick; keeping a previous pick sticky meant clicking the
+    //    dropdown a second time silently no-op'd (the openclaw config
+    //    primary updated but the open session's per-session override
+    //    held the old model). The "parallel chats deliberately running
+    //    different models" use case the soft sweep was originally
+    //    written for has no UI today and isn't worth breaking the
+    //    common path. The wizard / Settings configure flow already
+    //    does a full sweep when the primary provider changes
+    //    entirely (see configure/route.ts).
     const parsed = parseFullyQualifiedModel(targetModel);
     if (parsed) {
       try {
@@ -444,7 +437,7 @@ export async function POST(request: Request) {
             modelId: parsed.modelId,
             source: "user",
           },
-          { skipUserTagged: true },
+          { skipUserTagged: false },
         );
       } catch (err) {
         // Non-fatal: the default change (step 1) still takes effect
