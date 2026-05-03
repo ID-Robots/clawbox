@@ -26,6 +26,10 @@ const PORTAL_ERROR_EMAIL_NOT_VERIFIED = "email_not_verified";
 const EMAIL_NOT_VERIFIED_USER_MESSAGE =
   "Please verify your email address in the ClawBox portal before authorising this device, then request a new device code.";
 
+const PORTAL_ERROR_PAID_PLAN_REQUIRED = "paid_plan_required";
+const PAID_PLAN_REQUIRED_USER_MESSAGE =
+  "This tier needs a paid subscription. Subscribe to Pro or Max in the ClawBox portal, then request a new device code.";
+
 function formatUserFacingError(message: string) {
   const normalized = message.trim();
   if (/token limit reached/i.test(normalized)) {
@@ -147,6 +151,18 @@ export async function POST() {
     if (errCode === PORTAL_ERROR_EMAIL_NOT_VERIFIED) {
       await writeClawAiSession({ ...session, status: "error", error: EMAIL_NOT_VERIFIED_USER_MESSAGE });
       return NextResponse.json({ status: "error", error: EMAIL_NOT_VERIFIED_USER_MESSAGE }, { status: 403 });
+    }
+    return NextResponse.json({ status: "pending" });
+  }
+  // 402 paid_plan_required — Free user tried to authorise a flash/pro
+  // device tier. Same shape as the email_not_verified branch: write
+  // the terminal error so the UI stops polling and renders the upgrade
+  // CTA instead of stalling on the device-code page.
+  if (upstreamRes.status === 402) {
+    const errCode = (await readErrorBody(upstreamRes)).trim().toLowerCase();
+    if (errCode === PORTAL_ERROR_PAID_PLAN_REQUIRED) {
+      await writeClawAiSession({ ...session, status: "error", error: PAID_PLAN_REQUIRED_USER_MESSAGE });
+      return NextResponse.json({ status: "error", error: PAID_PLAN_REQUIRED_USER_MESSAGE }, { status: 402 });
     }
     return NextResponse.json({ status: "pending" });
   }
