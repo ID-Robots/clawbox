@@ -98,6 +98,8 @@ import {
   extractProviderModelId,
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
+import { useClawboxLogin } from '@/lib/use-clawbox-login'
+import { CLAWBOX_AI_PRO_MODEL_ID } from '@/lib/clawbox-ai-models'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -201,6 +203,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return activeOption?.provider ?? null
   }, [chatModelState])
   const chatProviderCatalog = useProviderCatalog(headerProvider)
+  // Pull live tier so the chat-model picker can filter ClawBox AI options
+  // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
+  // see a "Switched chat to deepseek/deepseek-v4-pro" success message,
+  // then watch every reply silently downgrade to flash because Mike's
+  // gateway gates by user.tier — UI says one thing, gateway does another.
+  const clawboxLogin = useClawboxLogin()
 
   // Sync panel width from parent (handles async preferences load after mount)
   useEffect(() => {
@@ -1217,20 +1225,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             )
             if (!activeOption?.provider) return null
             const catalog = chatProviderCatalog
-            if (!catalog || catalog.models.length < 2) return null
+            if (!catalog) return null
+            // ClawBox AI: filter the deepseek-v4-pro option for users
+            // who aren't on Max. Without this gate, picking pro looks
+            // successful in the UI but the gateway silently maps every
+            // request back to flash, leaving the user thinking they're
+            // on the better model. Only "pro" tier (Max subscription)
+            // is entitled to the V4 Pro frontier weights.
+            const filteredModels = activeOption.provider === 'clawai' && clawboxLogin.tier !== 'pro'
+              ? catalog.models.filter((m) => m.id !== CLAWBOX_AI_PRO_MODEL_ID)
+              : catalog.models
+            if (filteredModels.length < 2) return null
             const activeModelId = extractProviderModelId(
               chatModelState.activeModel,
               activeOption.provider,
             )
             if (!activeModelId) return null
-            const curatedHasActive = catalog.models.some(
+            const curatedHasActive = filteredModels.some(
               (option) => option.id === activeModelId,
             )
             const modelOptions = curatedHasActive
-              ? catalog.models
+              ? filteredModels
               : [
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
-                  ...catalog.models,
+                  ...filteredModels,
                 ]
             return (
               <div
