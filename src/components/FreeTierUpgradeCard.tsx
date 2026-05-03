@@ -1,9 +1,4 @@
-import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
-
-// Subscribe page lives under /portal/dashboard (the portal's logged-in
-// landing — same place Mike's auto-tier 400 message points users for
-// the manual-token flow). /portal/subscribe doesn't exist.
-const PORTAL_DASHBOARD_URL = `${PORTAL_LOGIN_URL}/dashboard`;
+import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 
 interface FreeTierUpgradeCardProps {
   /** Feature being gated, used in the headline ("X needs a paid plan"). */

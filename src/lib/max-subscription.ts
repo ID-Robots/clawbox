@@ -1,6 +1,10 @@
 export const PORTAL_LOGIN_URL = "https://openclawhardware.dev/portal";
 export const PORTAL_REGISTER_URL = `${PORTAL_LOGIN_URL}/register`;
 export const PORTAL_SUBSCRIBE_URL = `${PORTAL_LOGIN_URL}/subscribe`;
+// Logged-in landing where Free users generate manual ClawBox AI tokens
+// and where the device-side upgrade CTAs send users. Same URL the
+// portal's auto-tier 400 message points at.
+export const PORTAL_DASHBOARD_URL = `${PORTAL_LOGIN_URL}/dashboard`;
 
 export const FREE_PLAN_FEATURES = [
   "Standard daily usage",

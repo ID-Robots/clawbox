@@ -22,6 +22,7 @@ import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 
 /* ── Types ── */
 
@@ -1964,7 +1965,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                   return isClawai ? (
                     <a
-                      href="https://openclawhardware.dev/portal/dashboard"
+                      href={PORTAL_DASHBOARD_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className={cardClass}
