@@ -149,13 +149,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [clawboxLogin.loading, clawboxLogin.loggedIn]);
 
   // Three-state pick for the Remote Control section: needs portal sign-in,
-  // needs paid plan, or shows the panel. While `clawboxLogin.loading` we
-  // render nothing rather than flicker between states.
+  // needs paid plan, or shows the panel. A bare loading spinner stands in
+  // while `clawboxLogin.loading` so we don't flicker between states or
+  // leave the pane visibly empty for the ~30 s first-poll window.
   const renderRemoteSection = () => {
-    if (!clawboxLogin.loggedIn && !clawboxLogin.loading) {
+    if (clawboxLogin.loading) {
+      return (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Loading Remote Control"
+          className="max-w-xl flex items-center justify-center py-12 text-[var(--text-muted)]"
+        >
+          <span
+            className="material-symbols-rounded animate-spin"
+            style={{ fontSize: 24 }}
+            aria-hidden="true"
+          >
+            progress_activity
+          </span>
+        </div>
+      );
+    }
+    if (!clawboxLogin.loggedIn) {
       return <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />;
     }
-    if (clawboxLogin.loading) return null;
     if (clawboxLogin.tier === null) {
       return (
         <FreeTierUpgradeCard
