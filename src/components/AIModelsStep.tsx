@@ -15,7 +15,7 @@ import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
-import { PORTAL_LOGIN_URL, PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 import { copyToClipboard } from "@/lib/clipboard";
 import {
   extractProviderModelId,
@@ -1403,13 +1403,6 @@ export default function AIModelsStep({
       // subscription flow needs configured OAuth client credentials.
       return availableOAuth.includes(selected.id);
     }
-    // Free clawai users can't use device-pair (portal returns 402
-    // paid_plan_required). Hide the Subscription tab for them so they
-    // don't waste a pair attempt on a flow that always rejects — they
-    // paste a manually-generated token via the API key tab instead.
-    if (opt.mode === "subscription" && selected?.id === "clawai" && clawaiTier === "free") {
-      return false;
-    }
     return true;
   }) ?? [];
   const activeAuth =
@@ -2100,30 +2093,12 @@ export default function AIModelsStep({
               </div>
             )}
 
-            {/* API Key tab — direct token paste, same UX as other providers. */}
+            {/* API Key tab — direct token paste, same UX as other providers.
+                Power-user fallback: under auto-tier the device-code flow
+                works for everyone, but pasting a manually-generated token
+                stays available for users who already have one. */}
             {currentAuthMode === "token" && (
               <div className="mt-4">
-                {/* Free pill: device-pair is portal-rejected, so the user
-                    has to generate a manual token from /portal/dashboard.
-                    Promote the destination from a small footer link to a
-                    prominent CTA so the path is obvious — same one-click
-                    feel as "Get device code" for Pro/Max users. */}
-                {clawaiTier === "free" && (
-                  <div className="mb-3 p-3 bg-orange-500/[0.05] border border-orange-400/20 rounded-lg">
-                    <p className="text-xs text-[var(--text-secondary)] mb-2 leading-relaxed">
-                      Free accounts use a manually-generated token. Open the portal, sign in, and copy your token below.
-                    </p>
-                    <a
-                      href={PORTAL_DASHBOARD_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
-                    >
-                      Generate token at portal
-                      <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
-                    </a>
-                  </div>
-                )}
                 <label htmlFor="clawai-portal-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
                   Portal token
                 </label>

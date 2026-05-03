@@ -1,10 +1,6 @@
 export const PORTAL_LOGIN_URL = "https://openclawhardware.dev/portal";
 export const PORTAL_REGISTER_URL = `${PORTAL_LOGIN_URL}/register`;
 export const PORTAL_SUBSCRIBE_URL = `${PORTAL_LOGIN_URL}/subscribe`;
-// Where Free users generate a manual ClawBox AI token. Surfaced from the
-// 400 free_users_use_manual_token response Mike's portal returns when
-// the device tries to pair as Free.
-export const PORTAL_DASHBOARD_URL = `${PORTAL_LOGIN_URL}/dashboard`;
 
 export const FREE_PLAN_FEATURES = [
   "Standard daily usage",

@@ -94,24 +94,6 @@ export async function POST(request: NextRequest) {
       }
     } else {
       const errText = await upstreamRes.text().catch(() => "");
-      // 400 free_users_use_manual_token is a terminal refusal: the
-      // portal won't issue a code for tier=free, so falling through to
-      // a local code would leave the user staring at a code that never
-      // resolves. Surface the message verbatim so the UI can point at
-      // /portal/dashboard for the manual-token path.
-      if (upstreamRes.status === 400) {
-        try {
-          const parsed = JSON.parse(errText) as { error?: string; message?: string };
-          if (parsed.error === "free_users_use_manual_token") {
-            return NextResponse.json(
-              { error: parsed.error, message: parsed.message ?? "Device pairing requires a Pro or Max plan." },
-              { status: 400 },
-            );
-          }
-        } catch {
-          /* fall through to local fallback */
-        }
-      }
       console.warn("[clawai/start] Upstream device-start failed", upstreamRes.status, errText.slice(0, 200));
     }
   } catch (err) {
