@@ -1403,6 +1403,13 @@ export default function AIModelsStep({
       // subscription flow needs configured OAuth client credentials.
       return availableOAuth.includes(selected.id);
     }
+    // Free clawai users can't use device-pair (portal returns 402
+    // paid_plan_required). Hide the Subscription tab for them so they
+    // don't waste a pair attempt on a flow that always rejects — they
+    // paste a manually-generated token via the API key tab instead.
+    if (opt.mode === "subscription" && selected?.id === "clawai" && clawaiTier === "free") {
+      return false;
+    }
     return true;
   }) ?? [];
   const activeAuth =
