@@ -501,6 +501,15 @@ export default function ClawKeepApp() {
               phase={pairPhase}
               onCancel={onCancelPair}
             />
+          ) : clawaiLoading ? null : clawaiTier === null ? (
+            // Free user (or downgraded Pro/Max): show upgrade card even
+            // when status.paired is true — the portal /clawkeep/* endpoints
+            // will 403 every operation, so a working-looking PairedView
+            // would just lead to silent backup failures.
+            <FreeTierUpgradeCard
+              featureName="ClawKeep cloud backups"
+              description="ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB."
+            />
           ) : status.paired ? (
             <>
               <DashboardCard
@@ -552,11 +561,6 @@ export default function ClawKeepApp() {
                 </button>
               </div>
             </>
-          ) : clawaiLoading ? null : clawaiTier === null ? (
-            <FreeTierUpgradeCard
-              featureName="ClawKeep cloud backups"
-              description="ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB."
-            />
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}
