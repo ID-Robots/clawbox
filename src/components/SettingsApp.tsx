@@ -12,6 +12,7 @@ import { dispatchOpenApp } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
@@ -20,6 +21,8 @@ import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
+import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 
 /* ── Types ── */
 
@@ -144,6 +147,43 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setLoginModal({ open: true, feature });
     return true;
   }, [clawboxLogin.loading, clawboxLogin.loggedIn]);
+
+  // Three-state pick for the Remote Control section: needs portal sign-in,
+  // needs paid plan, or shows the panel. A bare loading spinner stands in
+  // while `clawboxLogin.loading` so we don't flicker between states or
+  // leave the pane visibly empty for the ~30 s first-poll window.
+  const renderRemoteSection = () => {
+    if (clawboxLogin.loading) {
+      return (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Loading Remote Control"
+          className="max-w-xl flex items-center justify-center py-12 text-[var(--text-muted)]"
+        >
+          <span
+            className="material-symbols-rounded animate-spin"
+            style={{ fontSize: 24 }}
+            aria-hidden="true"
+          >
+            progress_activity
+          </span>
+        </div>
+      );
+    }
+    if (!clawboxLogin.loggedIn) {
+      return <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />;
+    }
+    if (clawboxLogin.tier === null) {
+      return (
+        <FreeTierUpgradeCard
+          featureName={t("remoteControl.upgrade.featureName")}
+          description={t("remoteControl.upgrade.description")}
+        />
+      );
+    }
+    return <RemoteControlPanel />;
+  };
   // Section setter that intercepts gated sections. Use this everywhere a
   // user action wants to navigate; bypass it for programmatic restorations
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
@@ -1913,17 +1953,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
-                          {isClawai && aiProvider.clawaiTier && (
-                            <span
-                              className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
-                                aiProvider.clawaiTier === "pro"
-                                  ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
-                                  : "bg-orange-500/15 border-orange-400/30 text-orange-200"
-                              }`}
-                            >
-                              {aiProvider.clawaiTier === "pro" ? "Max" : "Pro"}
-                            </span>
-                          )}
+                          {(() => {
+                            const tier = isClawai ? normalizeClawboxAiTier(aiProvider.clawaiTier) : null;
+                            if (!tier) return null;
+                            return (
+                              <span
+                                className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
+                                  tier === "pro"
+                                    ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
+                                    : "bg-orange-500/15 border-orange-400/30 text-orange-200"
+                                }`}
+                              >
+                                {CLAWBOX_AI_TIER_LABEL[tier]}
+                              </span>
+                            );
+                          })()}
                         </div>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
@@ -1939,7 +1983,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                   return isClawai ? (
                     <a
-                      href="https://openclawhardware.dev/portal/dashboard"
+                      href={PORTAL_DASHBOARD_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className={cardClass}
@@ -2581,13 +2625,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Remote Control ─── */}
-        {activeSection === "remote" && (
-          clawboxLogin.loggedIn || clawboxLogin.loading ? (
-            <RemoteControlPanel />
-          ) : (
-            <RemoteLoginPlaceholder onSignIn={() => setLoginModal({ open: true, feature: "remote" })} />
-          )
-        )}
+        {activeSection === "remote" && renderRemoteSection()}
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>

@@ -186,4 +186,48 @@ describe("ClawBox AI device-auth routes", () => {
     }));
     vi.unstubAllGlobals();
   });
+
+  // Each entry: HTTP status + portal error code + the substring the
+  // device's user-facing error message should contain. Locks the
+  // TERMINAL_PORTAL_ERRORS table contract so adding a new gate or
+  // editing the user-facing copy is a deliberate change with test
+  // updates, not a silent behavioural drift.
+  for (const { httpStatus, code, expectMessageContains } of [
+    { httpStatus: 402, code: "paid_plan_required", expectMessageContains: "paid subscription" },
+    { httpStatus: 403, code: "email_not_verified", expectMessageContains: "verify your email" },
+  ]) {
+    it(`writes terminal session error and returns ${httpStatus} when upstream poll says ${code}`, async () => {
+      mockReadClawAiSession.mockResolvedValueOnce({
+        device_id: "device-id-xyz",
+        user_code: "ABCD-1234",
+        interval: 5,
+        createdAt: Date.now(),
+        status: "pending",
+        provider: "clawai",
+        scope: "primary",
+        tier: "flash",
+        error: null,
+      });
+      const fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify({ error: code }), { status: httpStatus }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
+      const response = await mod.POST();
+      const body = await response.json();
+
+      expect(response.status).toBe(httpStatus);
+      expect(body.status).toBe("error");
+      expect(typeof body.error).toBe("string");
+      expect(body.error.toLowerCase()).toContain(expectMessageContains);
+      expect(mockWriteClawAiSession).toHaveBeenCalledTimes(1);
+      expect(mockWriteClawAiSession).toHaveBeenCalledWith(expect.objectContaining({
+        status: "error",
+        error: body.error,
+      }));
+      expect(mockConfigurePost).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+  }
 });

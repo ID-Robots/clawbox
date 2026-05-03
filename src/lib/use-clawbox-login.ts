@@ -6,10 +6,10 @@ import { useEffect, useState } from "react";
 // account?". Backed by the existing /setup-api/ai-models/status endpoint
 // (already a primary truth source for the active provider + tier).
 //
-// "Logged in" here means: the active provider is ClawBox AI AND a tier was
-// resolved. The endpoint returns clawaiTier === null whenever the active
-// provider isn't clawai, so this collapses both "no token" and "different
-// provider entirely" into a single `loggedIn === false`.
+// "Logged in" here means: the active provider is ClawBox AI. Free users
+// (tier === null after auto-tier device-pair) are still considered logged
+// in — they have a paired token, just not a paid badge. Callers that
+// need to gate on a paid plan should check `tier !== null` themselves.
 //
 // Polls every 30s by default so the gate flips quickly after the user
 // signs in on the portal in another tab. Callers that need faster updates
@@ -57,7 +57,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
         if (cancelled) return;
         const tier = data.clawaiTier ?? null;
         setState({
-          loggedIn: data.provider === "clawai" && tier !== null,
+          loggedIn: data.provider === "clawai",
           tier,
           loading: false,
         });

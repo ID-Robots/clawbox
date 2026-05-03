@@ -195,13 +195,19 @@ interface ApplyModelOverrideOpts {
    * as sticky intent. Sessions tagged `auto`/`manual`/missing get the
    * normal sweep.
    *
-   * Used by the chat-popup model dropdown so switching the model in one
-   * chat doesn't homogenise parallel sessions deliberately running
-   * different models (e.g. Sonnet for code review + Haiku for chat).
-   * The wizard / Settings AI-provider configure flow does NOT pass this
-   * — when the user changes the primary provider entirely, sweeping
-   * every session is the documented intent (the provider switch tears
-   * down auth profiles too).
+   * Defaults to `false`. Routes that represent a user's *current global*
+   * model preference — the chat-popup header dropdown, the wizard, and
+   * the Settings AI-provider configure flow — all pass `false` (or omit
+   * it). Clicking those dropdowns IS the user's current pick, so prior
+   * `source: "user"` tags shouldn't make repeat clicks no-op.
+   *
+   * `true` is reserved for a future *per-session* model picker: a UI
+   * affordance that targets a specific session and intentionally
+   * preserves existing per-session user picks (e.g. parallel chats
+   * deliberately running Sonnet for code review + Haiku for casual
+   * chat). No such surface ships today, so this branch currently has
+   * no production caller — kept for the test contract and as the
+   * obvious extension point.
    */
   skipUserTagged?: boolean;
 }

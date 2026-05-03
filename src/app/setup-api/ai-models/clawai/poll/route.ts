@@ -22,6 +22,26 @@ interface UpstreamPollResponse {
   message?: string;
 }
 
+// Terminal portal errors that should stop the poll loop and surface an
+// actionable message instead of being treated as "user hasn't entered
+// the code yet". Adding a new gate is a one-row change here.
+const TERMINAL_PORTAL_ERRORS: ReadonlyArray<{
+  httpStatus: number;
+  code: string;
+  message: string;
+}> = [
+  {
+    httpStatus: 403,
+    code: "email_not_verified",
+    message: "Please verify your email address in the ClawBox portal before authorising this device, then request a new device code.",
+  },
+  {
+    httpStatus: 402,
+    code: "paid_plan_required",
+    message: "This tier needs a paid subscription. Subscribe to Pro or Max in the ClawBox portal, then request a new device code.",
+  },
+];
+
 function formatUserFacingError(message: string) {
   const normalized = message.trim();
   if (/token limit reached/i.test(normalized)) {
@@ -134,7 +154,21 @@ export async function POST() {
   }
 
   // 202/403/404 are common "user hasn't entered the code yet" responses.
-  if (upstreamRes.status === 202 || upstreamRes.status === 403 || upstreamRes.status === 404) {
+  // Exception: a status carrying a known terminal error code (e.g. 403
+  // email_not_verified, 402 paid_plan_required) means the portal will
+  // never advance — write the error to the session and surface it so
+  // the UI stops polling and renders the actionable instruction
+  // instead of stalling on the device-code page.
+  const terminal = TERMINAL_PORTAL_ERRORS.find((e) => e.httpStatus === upstreamRes.status);
+  if (terminal) {
+    const errCode = (await readErrorBody(upstreamRes)).trim().toLowerCase();
+    if (errCode === terminal.code) {
+      await writeClawAiSession({ ...session, status: "error", error: terminal.message });
+      return NextResponse.json({ status: "error", error: terminal.message }, { status: terminal.httpStatus });
+    }
+    return NextResponse.json({ status: "pending" });
+  }
+  if (upstreamRes.status === 202 || upstreamRes.status === 404) {
     return NextResponse.json({ status: "pending" });
   }
 

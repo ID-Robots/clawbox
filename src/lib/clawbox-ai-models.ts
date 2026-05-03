@@ -35,8 +35,38 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
   pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
 };
 
+// Device-tier badge label rendered in the chat header / Settings. Mirrors
+// the subscription plan names ("Pro plan" / "Max plan") so users don't see
+// a different word on the device than they paid for. Keep in sync with
+// clawbox-website's authorize card.
+export const CLAWBOX_AI_TIER_LABEL: Record<ClawboxAiTier, string> = {
+  flash: "Pro",
+  pro: "Max",
+};
+
 export function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   return normalized === "flash" || normalized === "pro" ? normalized : null;
+}
+
+/**
+ * True if `model` is a fully-qualified ClawBox AI Pro slug
+ * (`clawai/deepseek-v4-pro` or `deepseek/deepseek-v4-pro`).
+ *
+ * The Pro device-tier maps to the V4 Pro frontier weights, which the
+ * portal gateway gates to Max subscribers (`user.tier === "max"`,
+ * `deviceTier === "pro"`). Non-Max users picking it would silently
+ * have their requests downgraded to flash by the gateway's live-tier
+ * reconcile, so the device-side picker uses this helper to surface
+ * an upgrade prompt instead.
+ */
+export function isClawboxAiProModel(model: string | null | undefined): boolean {
+  if (typeof model !== "string") return false;
+  const idx = model.indexOf("/");
+  if (idx <= 0) return false;
+  const provider = model.slice(0, idx);
+  const modelId = model.slice(idx + 1);
+  if (modelId !== CLAWBOX_AI_PRO_MODEL_ID) return false;
+  return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
 }

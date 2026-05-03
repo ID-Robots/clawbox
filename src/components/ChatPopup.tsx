@@ -98,6 +98,9 @@ import {
   extractProviderModelId,
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
+import { useClawboxLogin } from '@/lib/use-clawbox-login'
+import { isClawboxAiProModel } from '@/lib/clawbox-ai-models'
+import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -201,6 +204,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return activeOption?.provider ?? null
   }, [chatModelState])
   const chatProviderCatalog = useProviderCatalog(headerProvider)
+  // Pull live tier so the chat-model picker can filter ClawBox AI options
+  // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
+  // see a "Switched chat to deepseek/deepseek-v4-pro" success message,
+  // then watch every reply silently downgrade to flash because Mike's
+  // gateway gates by user.tier — UI says one thing, gateway does another.
+  const clawboxLogin = useClawboxLogin()
 
   // Sync panel width from parent (handles async preferences load after mount)
   useEffect(() => {
@@ -906,6 +915,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
     if (switchingModel || chatModelState?.activeModel === target.model) return
+    // Intercept clawai Pro picks from non-Max users. The portal's
+    // /api/ai gateway silently downgrades these requests to flash via
+    // its live-tier reconcile, which previously left the user staring
+    // at a "Switched chat to deepseek-v4-pro" success toast while every
+    // reply came from flash. Surface the gate here with an actionable
+    // upgrade prompt and skip the network call entirely. The portal URL
+    // is wrapped as `[text](url)` so chat-markdown renders it as a
+    // clickable link instead of a bare string.
+    if (isClawboxAiProModel(target.model) && clawboxLogin.tier !== 'pro') {
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `${target.label} requires a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it. Staying on the current model.`,
+        timestamp: Date.now(),
+        variant: 'error',
+      }])
+      return
+    }
     setSwitchingModel(true)
     setErrorMsg('')
     try {
@@ -935,7 +961,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)

@@ -221,11 +221,19 @@ export async function GET() {
       // overwrites both fields when it gets a definitive answer.
       // Falling back to the picker on transient portal outages keeps
       // the badge from blinking off during network blips.
-      clawaiTier = normalizeClawboxAiTier(
+      const localTier = normalizeClawboxAiTier(
         await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
       );
+      clawaiTier = localTier;
+      // Treat the local picker selection as a ceiling: if the user never
+      // authorised a paid tier locally (localTier === null), the badge
+      // stays hidden regardless of the portal stamp. Skip the portal
+      // call entirely in that case — saves a 4 s timeout on the render
+      // path during cold-cache fetches and avoids the portal-upgrade
+      // bug where a Free user gets deviceTier="flash" stamped. Drop
+      // this guard once the portal gates deviceTier by subscription.
       const token = config.models?.providers?.deepseek?.apiKey;
-      if (typeof token === "string" && token.startsWith("claw_")) {
+      if (localTier !== null && typeof token === "string" && token.startsWith("claw_")) {
         const lookup = await fetchPortalTier(token);
         if (lookup.source === "portal") {
           clawaiTier = lookup.tier;

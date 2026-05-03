@@ -2093,7 +2093,10 @@ export default function AIModelsStep({
               </div>
             )}
 
-            {/* API Key tab — direct token paste, same UX as other providers. */}
+            {/* API Key tab — direct token paste, same UX as other providers.
+                Power-user fallback: under auto-tier the device-code flow
+                works for everyone, but pasting a manually-generated token
+                stays available for users who already have one. */}
             {currentAuthMode === "token" && (
               <div className="mt-4">
                 <label htmlFor="clawai-portal-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
