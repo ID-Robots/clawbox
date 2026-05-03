@@ -415,19 +415,11 @@ export async function POST(request: Request) {
     //    gateway reloads concurrently with the write.
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
 
-    // 2. Sweep existing sessions' per-session overrides to the new
-    //    target. Full sweep — including sessions that already carry a
-    //    `modelOverrideSource === "user"` tag from a previous dropdown
-    //    pick. The chat-header dropdown click *is* the user's current
-    //    pick; keeping a previous pick sticky meant clicking the
-    //    dropdown a second time silently no-op'd (the openclaw config
-    //    primary updated but the open session's per-session override
-    //    held the old model). The "parallel chats deliberately running
-    //    different models" use case the soft sweep was originally
-    //    written for has no UI today and isn't worth breaking the
-    //    common path. The wizard / Settings configure flow already
-    //    does a full sweep when the primary provider changes
-    //    entirely (see configure/route.ts).
+    // 2. Full sweep including sessions previously tagged
+    //    `modelOverrideSource: "user"` — the dropdown click *is* the
+    //    user's current pick, so prior tags shouldn't make repeat
+    //    clicks no-op. The soft-sweep "parallel chats deliberately
+    //    running different models" use case has no UI today.
     const parsed = parseFullyQualifiedModel(targetModel);
     if (parsed) {
       try {
