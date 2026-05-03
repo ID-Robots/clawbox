@@ -31,6 +31,11 @@ interface ChromeShelfProps {
   showChatButton?: boolean;
   time: string;
   clawAiAuthenticated?: boolean;
+  // True only when the user is on a paid plan (Pro/Max). Free users have
+  // a paired clawai token but `tier === null`, which means ClawKeep is
+  // unusable (portal /clawkeep/* endpoints 403 with quota=0). The shield
+  // shows red for them so it's not misleading green when nothing works.
+  clawkeepEntitled?: boolean;
 }
 
 export default function ChromeShelf({
@@ -50,6 +55,7 @@ export default function ChromeShelf({
   showChatButton,
   time,
   clawAiAuthenticated = false,
+  clawkeepEntitled = false,
 }: ChromeShelfProps) {
   const { t } = useT();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -118,13 +124,15 @@ export default function ChromeShelf({
   const stale = clawAiAuthenticated && clawkeepStatus.stale;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
+    : !clawkeepEntitled
+    ? "ClawKeep needs a Pro or Max plan"
     : stale
     ? t("shelf.clawkeepStale")
     : t("shelf.openClawKeep");
   const mode: "restoring" | "busy" | "alert" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"
-    : !clawAiAuthenticated || clawkeepStatus.stale ? "alert"
+    : !clawAiAuthenticated || !clawkeepEntitled || clawkeepStatus.stale ? "alert"
     : "ok";
   // Tailwind JIT can only see *literal* class strings, so each variant
   // ships its full pulse/icon class names rather than composing them.

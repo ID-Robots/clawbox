@@ -13,6 +13,7 @@ import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
@@ -181,6 +182,10 @@ function ChromeDesktopInner() {
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
   const [clawAiAuthenticated, setClawAiAuthenticated] = useState(false);
+  // Live tier (Free → null, Pro → "flash", Max → "pro"). Drives the
+  // ClawKeep shield colour and any other paid-only desktop affordance.
+  const clawboxLogin = useClawboxLogin();
+  const clawkeepEntitled = clawboxLogin.tier !== null;
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
@@ -2064,6 +2069,7 @@ function ChromeDesktopInner() {
         showChatButton={mascotHidden || isMobile}
         time={time}
         clawAiAuthenticated={clawAiAuthenticated}
+        clawkeepEntitled={clawkeepEntitled}
       />
 
 
