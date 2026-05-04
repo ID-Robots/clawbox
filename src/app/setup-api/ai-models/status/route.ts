@@ -194,12 +194,17 @@ export async function GET() {
     // profiles (e.g. ClawBox AI added as a fallback alongside the user's
     // chosen provider) don't get reported as the active one.
     const profileKeys = Object.keys(profiles);
-    const primaryProviderHint = model ? model.split("/")[0] : null;
+    // Normalize both sides through normalizeProvider so the deepseek/clawai
+    // alias collapses correctly. Without this, a primary model of
+    // `clawai/deepseek-v4-pro` (canonical) would never match a profile
+    // recorded under the wire-format `deepseek` provider, and we'd silently
+    // fall back to profileKeys[0].
+    const primaryProviderHint = normalizeProvider(model ? model.split("/")[0] : null);
     let activeKey: string | undefined;
     if (primaryProviderHint) {
       activeKey = profileKeys.find((key) => {
         const entry = profiles[key];
-        const entryProvider = entry?.provider ?? key.split(":")[0];
+        const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
         return entryProvider === primaryProviderHint;
       });
     }

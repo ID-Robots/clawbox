@@ -188,13 +188,14 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
   // Provider dropdown is a custom popover (HeaderDropdown), not a
-  // native <select>, so we drive it via click-on-trigger / click-on-
-  // option instead of selectOption().
+  // native <select>. Open via click on the trigger, pick the option
+  // by accessible name. The previous Escape sanity-check was native-
+  // select-specific (to confirm the browser's built-in dropdown
+  // dismissed) — for the popover, Escape is a closer-of-popover-AND-
+  // close-of-chat-popup ambiguity since the chat panel also handles
+  // Escape, so we just exercise the open/select flow that users hit.
   const providerTrigger = page.getByRole("button", { name: "Chat provider" });
   await expect(providerTrigger).toBeVisible();
-  await providerTrigger.click();
-  await page.keyboard.press("Escape");
-
   await providerTrigger.click();
   await page.getByRole("option", { name: /Gemma 4 Local/ }).click();
   await expect(page.getByText("Switched chat to llamacpp/gemma4-e2b-it-q4_0.")).toBeVisible();
