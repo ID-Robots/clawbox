@@ -137,31 +137,25 @@ async function loadChatModelState() {
   }
 
   const primaryProvider = normalizeProvider(configStore.ai_model_provider);
-  // Keyed by *model id* (e.g. "deepseek/deepseek-v4-pro") rather than
-  // by provider so a single provider can surface multiple options —
-  // e.g. ClawBox AI Flash vs Pro both belong to the `deepseek`
-  // provider but are independent rows in the chat dropdown.
+  // Keyed by *provider* (not by model id) so each provider gets ONE
+  // row in the chat dropdown. Model variants (ClawBox AI Flash/Pro,
+  // Claude Haiku/Sonnet/Opus, GPT-5.4 / -mini, etc.) are surfaced via
+  // the secondary model picker in ChatPopup, not as independent rows.
+  // The first call wins — subsequent rememberPrimaryOption calls for
+  // a provider that already has an entry are no-ops, with the active
+  // model taking priority via the call order in loadChatModelState.
   const configuredPrimaryOptions = new Map<string, ChatModelOption>();
   const rememberPrimaryOption = (
     model: string | null | undefined,
     providerHint?: string | null,
-    labelOverride?: string | null,
   ) => {
     const trimmedModel = typeof model === "string" ? model.trim() : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
     const provider = normalizeProvider(providerHint ?? normalizeProviderFromModel(trimmedModel));
     if (!provider) return;
-    const trimmedLabelOverride = labelOverride?.trim();
-    const existing = configuredPrimaryOptions.get(trimmedModel);
-    // Allow callers that know the canonical model name (provider
-    // definition rows) to upgrade a placeholder option that an earlier
-    // pass had to fall back on labelForProvider for. Without this the
-    // first entry from `activeModel`/`primaryModel` would lock the
-    // dropdown row to the bare "ClawBox AI" label even after the
-    // provider definition told us it's actually "ClawBox AI Pro".
-    if (existing && !trimmedLabelOverride) return;
-    const label = trimmedLabelOverride || labelForProvider(provider, "AI Provider");
-    configuredPrimaryOptions.set(trimmedModel, {
+    if (configuredPrimaryOptions.has(provider)) return;
+    const label = labelForProvider(provider, "AI Provider");
+    configuredPrimaryOptions.set(provider, {
       id: trimmedModel,
       label,
       model: trimmedModel,
@@ -182,24 +176,23 @@ async function loadChatModelState() {
     const provider = normalizeProvider(rawProvider);
     if (!provider || provider === "ollama" || provider === "llamacpp") continue;
 
-    // Prefer enumerating every model registered under this provider's
-    // `models.providers.<provider>.models` block so multi-model
-    // providers (ClawBox AI Flash + Pro, future tier expansions, etc.)
-    // surface every variant in the chat dropdown. Fall back to the
-    // single hard-coded default when the provider definition has no
-    // explicit models list.
+    // Pick which model represents this provider in the dropdown:
+    //  1. activeModel if it belongs to this provider (so the row's
+    //     "model" field matches what the gateway is actually using).
+    //  2. The first model in the openclaw provider definition.
+    //  3. The hard-coded default for this provider.
     const providerDef = providerDefinitions[rawProvider];
     const definedModels = (providerDef?.models ?? []).filter((m): m is { id: string; name?: string } => typeof m?.id === "string" && m.id.trim().length > 0);
 
-    if (definedModels.length > 0) {
-      for (const def of definedModels) {
-        const fullyQualified = `${rawProvider}/${def.id}`;
-        rememberPrimaryOption(fullyQualified, rawProvider, def.name);
-      }
-      continue;
+    let model: string | null = null;
+    if (activeModel && normalizeProviderFromModel(activeModel) === provider) {
+      model = activeModel;
+    } else if (definedModels.length > 0) {
+      model = `${rawProvider}/${definedModels[0].id}`;
+    } else {
+      model = defaultModelForProvider(rawProvider);
     }
 
-    const model = defaultModelForProvider(rawProvider);
     if (model) rememberPrimaryOption(model, rawProvider);
   }
 
@@ -320,8 +313,14 @@ export async function POST(request: Request) {
         if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
         }
+        // Normalize the parsed provider so the deepseek/clawai alias
+        // comparison works — option.provider was set via normalizeProvider
+        // (deepseek → clawai), so a raw `parsed.provider === "deepseek"`
+        // would never match a `"clawai"` option even though they refer
+        // to the same auth profile.
+        const parsedProviderNormalized = normalizeProvider(parsed.provider);
         const providerConfigured = state.options.some(
-          (option) => option.provider === parsed.provider && option.available,
+          (option) => option.provider === parsedProviderNormalized && option.available,
         );
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });

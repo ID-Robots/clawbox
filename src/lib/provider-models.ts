@@ -52,26 +52,29 @@ export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Most capable." },
 ] as const;
 
+// OpenAI API key models. Curated to the 5.4 + 5.5 generations only —
+// older gens (4.1, 5.0, 5.1, 5.2, 5.3) are filtered out at the catalog
+// route via ALLOWED_MODEL_RE_BY_PROVIDER. Power users can still hit
+// older models via the "custom" toggle.
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "gpt-5", label: "GPT-5", hint: "Flagship." },
-  { id: "gpt-5-mini", label: "GPT-5 Mini", hint: "Cheap, very fast." },
-  { id: "gpt-5-nano", label: "GPT-5 Nano", hint: "Cheapest, lightweight." },
+  { id: "gpt-5.5-pro", label: "GPT-5.5 Pro", hint: "Latest, max reasoning." },
+  { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
+  { id: "gpt-5.4-pro", label: "GPT-5.4 Pro", hint: "Max reasoning, 1M context." },
+  { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. 1M context." },
+  { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
 // OpenAI ChatGPT subscription (Codex) models. Available when the user
-// authenticates via OAuth instead of pasting an API key. The ChatGPT
-// backend uses its own internal versioning separate from the platform
-// API (e.g. `gpt-5.4` exists here but not on api.openai.com).
-//
-// Trimmed to the last two generations — the live catalog shows the
-// rest. Earlier we shipped a long list including gpt-5.1-codex-max,
-// which "blew up" in chat for at least one user; the catalog route
-// (which checks tags="deprecated") and the gateway's own model-resolution
-// catch it now.
+// authenticates via OAuth instead of pasting an API key. NO -pro
+// variants — those are API-key only (they 400 with "model not
+// supported when using Codex with a ChatGPT account" on the OAuth
+// path). Per developers.openai.com/codex/models the supported set
+// via ChatGPT-account auth is gpt-5.5, gpt-5.4, gpt-5.4-mini.
+// Filter lives in ALLOWED_MODEL_RE_BY_PROVIDER (catalog route).
 export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
-  { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. ChatGPT flagship." },
+  { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
+  { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
-  { id: "gpt-5.4-pro", label: "GPT-5.4 Pro", hint: "Max reasoning." },
 ] as const;
 
 export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
@@ -80,12 +83,23 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", hint: "Complex reasoning." },
 ] as const;
 
+// ClawBox AI tiers — surfaced via the secondary model picker after
+// consolidating Flash/Pro into one "ClawBox AI" provider row in the
+// chat dropdown. Model ids are the upstream DeepSeek slugs since
+// Mike's gateway forwards via the deepseek provider; the UI labels
+// match the subscription plans (Flash → "Pro plan", Pro → "Max plan")
+// so users see the same word on the device that they paid for.
+export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
+  { id: "deepseek-v4-flash", label: "Pro Tier", hint: "Default. Faster, lower cost." },
+  { id: "deepseek-v4-pro", label: "Max Tier", hint: "1.6T frontier model. Max plan only." },
+] as const;
+
 // Provider IDs the live-catalog route knows how to fetch from upstream
 // (`openclaw models list --provider <p>` for the first four; OpenRouter's
 // own /api/v1/models for the last). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
-export const CATALOG_PROVIDERS = ["anthropic", "openai", "openai-codex", "google", "openrouter"] as const;
+export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "openai-codex", "google", "openrouter"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
 export function isCatalogProvider(provider: string | null | undefined): provider is CatalogProvider {
@@ -94,6 +108,12 @@ export function isCatalogProvider(provider: string | null | undefined): provider
 }
 
 export const PROVIDER_CATALOGS = Object.freeze({
+  clawai: {
+    provider: "clawai",
+    models: CLAWAI_MODELS,
+    defaultModelId: "deepseek-v4-flash",
+    allowCustom: false,
+  },
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
@@ -103,7 +123,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   openai: {
     provider: "openai",
     models: OPENAI_MODELS,
-    defaultModelId: "gpt-5",
+    defaultModelId: "gpt-5.4",
     allowCustom: true,
   },
   "openai-codex": {

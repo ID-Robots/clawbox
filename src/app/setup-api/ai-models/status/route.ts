@@ -214,33 +214,56 @@ export async function GET() {
     }
     const normalizedProvider = normalizeProvider(provider);
 
-    let clawaiTier: ClawboxAiTier | null = null;
-    let tierSource: "portal" | "picker" = "picker";
-    if (normalizedProvider === "clawai") {
-      // Default to the wizard's picker selection; the portal call below
-      // overwrites both fields when it gets a definitive answer.
-      // Falling back to the picker on transient portal outages keeps
-      // the badge from blinking off during network blips.
-      const localTier = normalizeClawboxAiTier(
-        await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
-      );
-      clawaiTier = localTier;
-      // Treat the local picker selection as a ceiling: if the user never
-      // authorised a paid tier locally (localTier === null), the badge
-      // stays hidden regardless of the portal stamp. Skip the portal
-      // call entirely in that case — saves a 4 s timeout on the render
-      // path during cold-cache fetches and avoids the portal-upgrade
-      // bug where a Free user gets deviceTier="flash" stamped. Drop
-      // this guard once the portal gates deviceTier by subscription.
-      const token = config.models?.providers?.deepseek?.apiKey;
-      if (localTier !== null && typeof token === "string" && token.startsWith("claw_")) {
-        const lookup = await fetchPortalTier(token);
+    // ClawBox AI account entitlement is independent of which provider is
+    // currently driving the chat. A Max subscriber chatting via OpenAI
+    // still has the paid plan that unlocks ClawKeep + Remote Desktop —
+    // resolving the tier off the active profile alone (the old
+    // behaviour) falsely blocks them.
+    //
+    // Walk every profile for any clawai/deepseek entry, look up the
+    // stored claw_ token's tier on the portal, and surface that as
+    // `clawaiAccountTier`. The badge-facing `clawaiTier` field stays
+    // tied to the active chat provider so the chat-header badge keeps
+    // its current behaviour (no badge when chatting via OpenAI).
+    const localTier = normalizeClawboxAiTier(
+      await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
+    );
+    const clawaiTokenCandidate = config.models?.providers?.deepseek?.apiKey;
+    const clawaiToken = typeof clawaiTokenCandidate === "string" && clawaiTokenCandidate.startsWith("claw_")
+      ? clawaiTokenCandidate
+      : null;
+    const hasClawaiProfile = profileKeys.some((key) => {
+      const entry = profiles[key];
+      const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
+      return entryProvider === "clawai";
+    });
+
+    let clawaiAccountTier: ClawboxAiTier | null = null;
+    let accountTierSource: "portal" | "picker" = "picker";
+    if (hasClawaiProfile) {
+      clawaiAccountTier = localTier;
+      // Defence-in-depth: if the user never authorised a paid tier
+      // locally (localTier === null), keep the account tier null
+      // regardless of what the portal stamps. Skips the portal call
+      // entirely on the Free path — saves a 4 s cold-cache timeout
+      // on the render-path GET and avoids the portal-upgrade bug
+      // where a Free user gets deviceTier="flash" issued.
+      if (localTier !== null && clawaiToken) {
+        const lookup = await fetchPortalTier(clawaiToken);
         if (lookup.source === "portal") {
-          clawaiTier = lookup.tier;
-          tierSource = "portal";
+          clawaiAccountTier = lookup.tier;
+          accountTierSource = "portal";
         }
       }
     }
+
+    // The badge-facing tier mirrors the account tier *only* when
+    // ClawBox AI is the active chat provider. Switching to OpenAI in
+    // the chat dropdown should hide the chat-header tier badge — the
+    // user isn't currently chatting with ClawBox AI — without
+    // demoting their account-level entitlement.
+    const clawaiTier = normalizedProvider === "clawai" ? clawaiAccountTier : null;
+    const tierSource = normalizedProvider === "clawai" ? accountTierSource : "picker";
 
     return NextResponse.json({
       connected: !!normalizedProvider,
@@ -249,6 +272,13 @@ export async function GET() {
       mode,
       model,
       clawaiTier,
+      clawaiAccountTier,
+      // Whether *any* clawai profile is configured. Distinguishes
+      // "no ClawBox AI account at all" (false) from "Free user with
+      // a paired clawai token" (true, clawaiAccountTier=null) — the
+      // hook needs this to gate ClawKeep / Remote Desktop sign-in
+      // prompts independently of paid-tier checks.
+      clawaiConfigured: hasClawaiProfile,
       tierSource,
     }, {
       headers: {
@@ -257,7 +287,7 @@ export async function GET() {
     });
   } catch {
     return NextResponse.json(
-      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, tierSource: "picker" },
+      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker" },
       {
         headers: {
           "Cache-Control": "no-store",

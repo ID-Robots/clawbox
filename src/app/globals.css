@@ -130,6 +130,146 @@ h6 {
   box-shadow: 0 8px 30px rgba(249, 115, 22, 0.35);
 }
 
+/* Chat-header pills row — three independent rounded pills with a small
+ * gap between them. Each pill has its own background + border so they
+ * read as separate controls, not as one segmented bar. The rounded-bar
+ * variant felt heavy and pinched the labels on narrow chat panels. */
+.chat-header-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Custom popover dropdown — replaces native <select> for the chat
+ * header pills so we can keep the trigger compact (truncating with
+ * "...") while the open menu shows full labels + hints in a wider
+ * card that floats above the chat content. */
+.header-dropdown-trigger {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #fff;
+  padding: 5px 24px 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  min-width: 0;
+  border-radius: 999px;
+}
+.header-dropdown-trigger:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.header-dropdown-trigger:focus-visible {
+  outline: 2px solid rgba(249, 115, 22, 0.6);
+  outline-offset: -2px;
+}
+.header-dropdown-trigger:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.header-dropdown-trigger-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.header-dropdown-trigger-chevron {
+  position: absolute;
+  right: 4px;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.55);
+  transition: transform 0.15s ease;
+  pointer-events: none;
+}
+
+.header-dropdown-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  background: #1a1f2e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+  /* Lock-in pop animation. */
+  animation: header-dropdown-pop 0.12s ease-out;
+}
+@keyframes header-dropdown-pop {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.header-dropdown-option {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  color: #fff;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  transition: background 0.12s ease;
+}
+.header-dropdown-option:hover:not(:disabled) {
+  background: rgba(249, 115, 22, 0.12);
+}
+.header-dropdown-option:focus-visible {
+  outline: 2px solid rgba(249, 115, 22, 0.6);
+  outline-offset: -2px;
+}
+.header-dropdown-option:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.header-dropdown-option.is-active {
+  background: rgba(249, 115, 22, 0.18);
+}
+.header-dropdown-option.is-active:hover {
+  background: rgba(249, 115, 22, 0.24);
+}
+.header-dropdown-option-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+.header-dropdown-option-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-dropdown-option-check {
+  font-size: 16px;
+  color: #f97316;
+  flex-shrink: 0;
+}
+.header-dropdown-option-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 400;
+  white-space: normal;
+  line-height: 1.3;
+}
+
 /* Card surface — matching openclawhardware.dev dark sections */
 .card-surface {
   background: var(--surface-card);
