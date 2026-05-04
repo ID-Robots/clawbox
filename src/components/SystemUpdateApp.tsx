@@ -18,8 +18,13 @@ const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-5";
 
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
   if (!a || !b) return 0;
-  const pa = (cleanVersion(a) ?? a).replace(/^v/, "").split(".").map((n) => Number(n) || 0);
-  const pb = (cleanVersion(b) ?? b).replace(/^v/, "").split(".").map((n) => Number(n) || 0);
+  // Split on both "." and "-" so a re-release suffix like "2026.5.3-1" parses
+  // as [2026,5,3,1] (greater than [2026,5,3]) rather than [2026,5,NaN→0]
+  // (which would mistakenly read as older). Non-numeric segments still fall
+  // through to 0 via `Number(...) || 0`.
+  const parse = (v: string) => (cleanVersion(v) ?? v).replace(/^v/, "").split(/[.-]/).map((n) => Number(n) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const na = pa[i] ?? 0;
     const nb = pb[i] ?? 0;
@@ -91,10 +96,15 @@ export default function SystemUpdateApp() {
     }
   }, []);
 
-  const fetchVersions = useCallback(async () => {
+  const fetchVersions = useCallback(async (force = false) => {
     setRefreshing(true);
     try {
-      const res = await fetch("/setup-api/update/versions", { cache: "no-store" });
+      // `force=1` invalidates the route's 60s in-process cache so the user
+      // gets a fresh git ls-remote + npm view on open and on every explicit
+      // "Check for updates" click. Without it, a stale "Up to date" can
+      // linger for a minute after origin publishes a new tag.
+      const url = force ? "/setup-api/update/versions?force=1" : "/setup-api/update/versions";
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as VersionInfo;
       setVersions(data);
@@ -119,7 +129,7 @@ export default function SystemUpdateApp() {
   }, []);
 
   useEffect(() => {
-    void fetchVersions();
+    void fetchVersions(true);
     void fetchBranch();
   }, [fetchVersions, fetchBranch]);
 
@@ -172,7 +182,10 @@ export default function SystemUpdateApp() {
           stopPolling();
           if (data.phase === "completed") {
             // Re-fetch versions so the dashboard reflects the new ones.
-            void fetchVersions();
+            // Force a fresh lookup — the install just bumped current and
+            // we want the new state visible immediately, not after the
+            // 60s server cache expires.
+            void fetchVersions(true);
           }
         }
       } catch {
@@ -358,7 +371,7 @@ export default function SystemUpdateApp() {
                 {status === "up-to-date" && (
                   <button
                     type="button"
-                    onClick={() => void fetchVersions()}
+                    onClick={() => void fetchVersions(true)}
                     disabled={refreshing}
                     className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
                   >
@@ -371,7 +384,7 @@ export default function SystemUpdateApp() {
             {status === "fetch-error" && (
               <button
                 type="button"
-                onClick={() => void fetchVersions()}
+                onClick={() => void fetchVersions(true)}
                 disabled={refreshing}
                 className="mt-6 px-5 py-2 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-200 text-sm font-semibold hover:bg-amber-500/25 cursor-pointer disabled:opacity-50"
               >

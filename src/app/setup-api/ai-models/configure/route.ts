@@ -228,18 +228,37 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
     // "disabled" }` for off) to DeepSeek. Both V4 surfaces are
     // thinking-capable per OpenClaw's built-in catalog; flipping
     // either to false silently makes the chat's Effort picker a no-op.
+    //
+    // `compat.supportedReasoningEfforts: ["high", "xhigh"]` is what
+    // tells the gateway's `catalogSupportsXHigh()` to append xhigh to
+    // each model's allowed-level profile. Without it, sessions.patch
+    // rejects xhigh ("use off|minimal|low|medium|high") and the chat
+    // popup's "X-High" effort silently fails — even though the provider
+    // stream layer maps OpenClaw xhigh → DeepSeek upstream
+    // `reasoning_effort: "max"` perfectly. The plugin-extension JSON
+    // does NOT cover this case because configured providers in
+    // openclaw.json override the plugin's modelCatalog entirely; the
+    // compat must live on the configured entry.
     models: [
       {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        compat: {
+          supportsReasoningEffort: true,
+          supportedReasoningEfforts: ["high", "xhigh"],
+        },
       },
       {
         id: CLAWBOX_AI_PRO_MODEL_ID,
         name: "ClawBox AI Pro",
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        compat: {
+          supportsReasoningEffort: true,
+          supportedReasoningEfforts: ["high", "xhigh"],
+        },
       },
     ],
   });

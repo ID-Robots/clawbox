@@ -179,6 +179,38 @@ set_if(gateway, "mode", "local")
 set_if(auth, "mode", "token")
 set_if(auth, "token", "clawbox")
 
+# Backfill `compat.supportedReasoningEfforts: ["high", "xhigh"]` onto any
+# DeepSeek V4 models the configure route wrote before this declaration was
+# added. Without it, the gateway's catalogSupportsXHigh() returns false for
+# the configured deepseek provider and sessions.patch rejects xhigh ("use
+# off|minimal|low|medium|high"), even though the upstream translation layer
+# maps OpenClaw xhigh → DeepSeek reasoning_effort: "max" correctly. New
+# configurations get the field from configure/route.ts; this branch handles
+# devices that were configured before that landed.
+ds_models = (
+    cfg.get("models", {}).get("providers", {}).get("deepseek", {}).get("models")
+    if isinstance(cfg.get("models"), dict) else None
+)
+if isinstance(ds_models, list):
+    target_efforts = ["high", "xhigh"]
+    for model in ds_models:
+        if not isinstance(model, dict):
+            continue
+        if model.get("id") not in ("deepseek-v4-flash", "deepseek-v4-pro"):
+            continue
+        compat = model.setdefault("compat", {}) if isinstance(model.get("compat"), dict) or "compat" not in model else None
+        if compat is None:
+            # `compat` exists but isn't a dict — replace it; the gateway
+            # only reads it as an object and a stray scalar would crash.
+            compat = {}
+            model["compat"] = compat
+        if compat.get("supportedReasoningEfforts") != target_efforts:
+            compat["supportedReasoningEfforts"] = target_efforts
+            changed = True
+        if compat.get("supportsReasoningEffort") is not True:
+            compat["supportsReasoningEffort"] = True
+            changed = True
+
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.
@@ -197,6 +229,63 @@ if changed:
 else:
     print("  Gateway config already correct, skipping write")
 PY
+
+# Patch the installed openclaw deepseek plugin JSON to declare that the
+# DeepSeek V4 models accept `xhigh` reasoning effort. The shipped plugin
+# only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
+# in openclaw's thinking.ts reads the optional `supportedReasoningEfforts`
+# array — without it, sessions.patch rejects `xhigh` for deepseek-v4-pro
+# and the chat popup's effort picker errors with "use off|minimal|low|
+# medium|high". The provider-stream-shared translation layer already maps
+# OpenClaw `xhigh` → DeepSeek's upstream `reasoning_effort: "max"`, so the
+# only thing missing was the catalog declaration.
+#
+# Re-running on every gateway start is necessary because `npm install -g
+# openclaw@latest` overwrites this file and the patch needs to survive
+# system updates. Idempotent: skips the rewrite if the field already
+# matches the target.
+DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist/extensions/deepseek/openclaw.plugin.json"
+if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
+  python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+target = ["high", "xhigh"]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(0)
+
+models = cfg.get("modelCatalog", {}).get("providers", {}).get("deepseek", {}).get("models", [])
+changed = False
+for model in models:
+    if not isinstance(model, dict):
+        continue
+    if model.get("id") not in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        continue
+    compat = model.setdefault("compat", {})
+    if compat.get("supportedReasoningEfforts") != target:
+        compat["supportedReasoningEfforts"] = target
+        changed = True
+
+if changed:
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".plugin.", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+    print("  Patched deepseek plugin JSON with xhigh reasoning effort")
+else:
+    print("  Deepseek plugin JSON already declares xhigh, skipping write")
+PY
+fi
 
 # Register ClawBox MCP server (only if not already set). Kept as a CLI
 # call because MCP config has richer schema validation in the CLI path
