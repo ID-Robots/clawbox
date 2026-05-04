@@ -284,17 +284,26 @@ interface VersionInfo {
 let cachedVersionInfo: VersionInfo | null = null;
 let versionInfoCacheTime = 0;
 
-function invalidateVersionCache(): void {
+export function invalidateVersionCache(): void {
   cachedVersionInfo = null;
   versionInfoCacheTime = 0;
+  // Also drop the git ls-remote / npm view cache so a "force" refresh
+  // actually re-fetches origin tags and the npm registry, not just the
+  // memoized result of the last lookup.
+  cachedTargetVersion = null;
+  targetVersionCacheTime = 0;
 }
 
 /**
  * Compare two semver tags ("v2.2.3" vs "v2.2.2"). Returns negative if a<b,
  * positive if a>b, 0 if equal. Non-semver inputs sort as 0.
+ *
+ * Splits on both "." and "-" so a re-release suffix like "2026.5.3-1" sorts
+ * *after* "2026.5.3" — without this, "3-1" parses as NaN→0 and the newer
+ * release reads as older.
  */
 function compareSemverTags(a: string, b: string): number {
-  const parse = (t: string) => t.replace(/^v/, "").split(".").map((n) => Number(n) || 0);
+  const parse = (t: string) => t.replace(/^v/, "").split(/[.-]/).map((n) => Number(n) || 0);
   const pa = parse(a);
   const pb = parse(b);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {

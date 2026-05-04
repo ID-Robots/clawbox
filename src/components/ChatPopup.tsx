@@ -157,6 +157,22 @@ function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel
   return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'default'
 }
 
+// DeepSeek V4's stack only differentiates three real states (disabled / high
+// reasoning / max reasoning), but the OpenClaw gateway exposes them as
+// off / high / xhigh — `max` is never appended to a model's allowed-level
+// list (thinking.ts:188,201), so sessions.patch rejects it. The translation
+// layer in provider-stream-shared.ts maps OpenClaw 'xhigh' → DeepSeek's
+// reasoning_effort: "max" upstream, so users still get the strongest
+// reasoning when they pick the "X-High" option here. We relabel 'high' as
+// "Default" because that's DeepSeek's effective out-of-the-box behavior.
+const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'high', 'xhigh']
+const DEEPSEEK_THINKING_LABELS: Partial<Record<ThinkingLevel, string>> = {
+  high: 'Default',
+}
+function isDeepSeekV4Model(model: string | null | undefined): boolean {
+  return typeof model === 'string' && /deepseek-v4/i.test(model)
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -203,6 +219,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.provider ?? null
   }, [chatModelState])
+  const isDeepSeekV4Active = useMemo<boolean>(() => {
+    if (!chatModelState) return false
+    if (isDeepSeekV4Model(chatModelState.activeModel)) return true
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    return isDeepSeekV4Model(activeOption?.model)
+  }, [chatModelState])
+  const visibleThinkingLevels = isDeepSeekV4Active ? DEEPSEEK_THINKING_LEVELS : THINKING_LEVELS
+  const labelForThinkingLevel = useCallback((level: ThinkingLevel): string => {
+    if (isDeepSeekV4Active) {
+      const override = DEEPSEEK_THINKING_LABELS[level]
+      if (override) return override
+    }
+    return THINKING_LEVEL_LABELS[level] ?? level
+  }, [isDeepSeekV4Active])
+  // Snap a stale picker value (e.g. 'low' / 'medium' / 'default') to 'high'
+  // when DeepSeek is active so display, wire payload, and the picker option
+  // all agree. Without this, the select would render a value with no matching
+  // <option> and show empty.
+  const effectiveThinkingLevel: ThinkingLevel = isDeepSeekV4Active && !DEEPSEEK_THINKING_LEVELS.includes(thinkingLevel)
+    ? 'high'
+    : thinkingLevel
   const chatProviderCatalog = useProviderCatalog(headerProvider)
   // Pull live tier so the chat-model picker can filter ClawBox AI options
   // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
@@ -376,7 +415,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (status !== 'connected') return
     const key = sessionKeyRef.current
     if (!key) return
-    const wireValue = thinkingLevel === 'default' ? null : thinkingLevel
+    const wireValue = effectiveThinkingLevel === 'default' ? null : effectiveThinkingLevel
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
     void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err) => {
@@ -389,13 +428,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         variant: 'error',
       }])
     })
-  }, [status, thinkingLevel, wsRequest])
+  }, [status, effectiveThinkingLevel, wsRequest])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
     const normalized = normalizeThinkingLevel(next)
     setThinkingLevel(prev => {
       if (prev === normalized) return prev
-      const label = THINKING_LEVEL_LABELS[normalized] ?? normalized
+      const label = labelForThinkingLevel(normalized)
       setMessages(msgs => [...msgs, {
         role: 'system',
         text: `Switched effort to ${label}.`,
@@ -405,7 +444,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return normalized
     })
     try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', normalized) } catch {}
-  }, [])
+  }, [labelForThinkingLevel])
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
@@ -1336,7 +1375,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           >
             <select
               aria-label="Reasoning effort"
-              value={thinkingLevel}
+              value={effectiveThinkingLevel}
               onChange={(e) => handleThinkingLevelChange(e.target.value)}
               onPointerDown={stopHeaderDrag}
               style={{
@@ -1357,14 +1396,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             >
               {/* Mirrors the OpenClaw Control UI's effort picker: Default (=
                   use server config) plus the canonical BASE_THINKING_LEVELS
-                  + xhigh / max / adaptive. */}
-              {THINKING_LEVELS.map(level => (
+                  + xhigh / max / adaptive. Trimmed to a 3-level subset
+                  (Off / Default / X-High) when DeepSeek V4 is the active
+                  model — its provider stack only honors those three. */}
+              {visibleThinkingLevels.map(level => (
                 <option
                   key={level}
                   value={level}
                   style={{ background: '#111827', color: '#fff' }}
                 >
-                  Effort: {THINKING_LEVEL_LABELS[level]}
+                  Effort: {labelForThinkingLevel(level)}
                 </option>
               ))}
             </select>
