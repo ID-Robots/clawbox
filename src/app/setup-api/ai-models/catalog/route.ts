@@ -171,6 +171,15 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
   "openai-codex": /^gpt-5\.[45](-mini)?$/,
 };
 
+// Newest-first ordering: bigger context generally means newer model on
+// every catalog we ship today (claude 200k+, gpt-5 400k, gemini 1M).
+// Fall back to alpha when contextWindow is unknown/equal so the list
+// stays stable on re-fetch.
+function compareCatalogModels(a: CatalogModel, b: CatalogModel): number {
+  if (a.contextWindow !== b.contextWindow) return b.contextWindow - a.contextWindow;
+  return a.label.localeCompare(b.label);
+}
+
 function transformOpenclawEntries(
   provider: string,
   entries: OpenclawListResponse["models"],
@@ -193,10 +202,7 @@ function transformOpenclawEntries(
       input: typeof entry.input === "string" ? entry.input : undefined,
     });
   }
-  out.sort((a, b) => {
-    if (a.contextWindow !== b.contextWindow) return b.contextWindow - a.contextWindow;
-    return a.label.localeCompare(b.label);
-  });
+  out.sort(compareCatalogModels);
   return out;
 }
 
@@ -215,10 +221,7 @@ function transformOpenRouterEntries(entries: OpenRouterListResponse["data"]): Ca
       hint: typeof entry.description === "string" ? entry.description.slice(0, 140) : undefined,
     });
   }
-  out.sort((a, b) => {
-    if (a.contextWindow !== b.contextWindow) return b.contextWindow - a.contextWindow;
-    return a.label.localeCompare(b.label);
-  });
+  out.sort(compareCatalogModels);
   return out;
 }
 
@@ -317,11 +320,14 @@ function refreshInBackground(provider: string): void {
   if (refreshing.has(provider)) return;
   refreshing.add(provider);
 
-  const fetcher: Promise<CatalogModel[]> = provider === "openrouter"
-    ? fetchOpenRouterCatalog()
-    : provider === "clawai"
-      ? Promise.resolve(CLAWAI_STATIC_MODELS)
-      : fetchOpenclawCatalog(provider);
+  let fetcher: Promise<CatalogModel[]>;
+  if (provider === "openrouter") {
+    fetcher = fetchOpenRouterCatalog();
+  } else if (provider === "clawai") {
+    fetcher = Promise.resolve(CLAWAI_STATIC_MODELS);
+  } else {
+    fetcher = fetchOpenclawCatalog(provider);
+  }
 
   fetcher
     .then(async (models) => {
@@ -348,10 +354,9 @@ function bootWarmup(): void {
   bootWarmupStarted = true;
   // Stagger by 5s so we don't fork four openclaw bins at the exact
   // same instant. Each one is ~2 cores of CPU for ~3 minutes.
-  for (let i = 0; i < CATALOG_PROVIDERS.length; i++) {
-    const p = CATALOG_PROVIDERS[i];
+  CATALOG_PROVIDERS.forEach((p, i) => {
     setTimeout(() => refreshInBackground(p), i * 5_000);
-  }
+  });
 }
 
 export async function GET(req: NextRequest) {

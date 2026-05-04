@@ -286,9 +286,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     [headerProvider],
   )
   const visibleThinkingLevels = reasoningConfig.levels
-  const labelForThinkingLevel = useCallback((level: ThinkingLevel): string => {
-    return THINKING_LEVEL_LABELS[level] ?? level
-  }, [])
   // Snap the displayed value to a level the active provider actually
   // supports. Without this the <select> would render a value with no
   // matching <option> and show empty when the user switches from a
@@ -1336,12 +1333,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // to `clawai`. Try the canonical provider first, then fall
             // back to the deepseek alias so the picker can resolve the
             // active model id either way.
-            const activeModelId = extractProviderModelId(
+            let activeModelId = extractProviderModelId(
               chatModelState.activeModel,
               activeOption.provider,
-            ) ?? (activeOption.provider === 'clawai'
-              ? extractProviderModelId(chatModelState.activeModel, 'deepseek')
-              : null)
+            )
+            if (!activeModelId && activeOption.provider === 'clawai') {
+              activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
+            }
             if (!activeModelId) return null
             const curatedHasActive = catalog.models.some(
               (option) => option.id === activeModelId,
@@ -1392,7 +1390,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             value={effectiveThinkingLevel}
             options={visibleThinkingLevels.map(level => ({
               id: level,
-              label: labelForThinkingLevel(level),
+              label: THINKING_LEVEL_LABELS[level] ?? level,
             }))}
             onChange={handleThinkingLevelChange}
             onPointerDown={stopHeaderDrag}
