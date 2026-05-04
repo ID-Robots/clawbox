@@ -22,3 +22,6 @@ test-results/
 e2e-install/cache/
 scripts/nm-dispatcher-failover.sh
 .claude/
+
+# Local debug scripts (per-session sandbox)
+.scratch/

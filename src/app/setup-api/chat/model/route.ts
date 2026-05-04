@@ -55,7 +55,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
-  openai: "openai/gpt-5",
+  openai: "openai/gpt-5.4",
   "openai-codex": "openai-codex/gpt-5.4",
   google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,

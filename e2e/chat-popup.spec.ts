@@ -187,15 +187,16 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await page.getByRole("button", { name: "Chat" }).click();
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
-  const sourceSelect = page.getByLabel("Chat model");
-  await expect(sourceSelect).toBeVisible();
-  await expect(sourceSelect).toHaveValue("clawai/deepseek-r1");
-  await sourceSelect.click();
-  await expect(sourceSelect).toBeFocused();
+  // Provider dropdown is a custom popover (HeaderDropdown), not a
+  // native <select>, so we drive it via click-on-trigger / click-on-
+  // option instead of selectOption().
+  const providerTrigger = page.getByRole("button", { name: "Chat provider" });
+  await expect(providerTrigger).toBeVisible();
+  await providerTrigger.click();
   await page.keyboard.press("Escape");
 
-  await sourceSelect.selectOption("llamacpp/gemma4-e2b-it-q4_0");
-  await expect(sourceSelect).toHaveValue("llamacpp/gemma4-e2b-it-q4_0");
+  await providerTrigger.click();
+  await page.getByRole("option", { name: /Gemma 4 Local/ }).click();
   await expect(page.getByText("Switched chat to llamacpp/gemma4-e2b-it-q4_0.")).toBeVisible();
 });
 
@@ -225,7 +226,8 @@ test("chat popup opens Local AI settings when local AI is not configured", async
   await page.getByRole("button", { name: "Chat" }).click();
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
-  await page.getByLabel("Chat model").selectOption({ label: "Local AI - Set up in Settings" });
+  await page.getByRole("button", { name: "Chat provider" }).click();
+  await page.getByRole("option", { name: "Local AI - Set up in Settings" }).click();
 
   const settingsWindow = page.getByTestId("chrome-window-settings");
   await expect(settingsWindow).toBeVisible();

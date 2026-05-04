@@ -587,7 +587,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         })
         .catch(() => { /* transient — try again next tick */ })
         .finally(() => {
-          if (!cancelled) timer = setTimeout(tick, 5_000);
+          // Stop scheduling once the user has started typing — otherwise
+          // we'd keep firing fetches every 5s with results discarded by
+          // the userNameEditedRef guard above. Effect cleanup re-mounts
+          // (after page navigation, etc.) restart polling fresh.
+          if (!cancelled && !userNameEditedRef.current) timer = setTimeout(tick, 5_000);
         });
     };
     tick();

@@ -73,8 +73,8 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 When the user introduces themselves ("I'm Krasi", "my name is Maya", "call me Sam"), or you otherwise learn their preferred name during the conversation, persist it immediately:
 
-```
-preferences_set("ui_user_name", "<name>")
+```text
+preferences_set('{"ui_user_name": "<name>"}')
 ```
 
 The mascot reads `ui_user_name` for occasional name-greetings; the desktop's Settings → Appearance "Your name" field reads it too and refreshes within ~5 s without a manual reload.
@@ -83,5 +83,5 @@ Edge cases:
 - **Only set it for the actual person at the desk.** Don't write a name they mentioned in passing about someone else (kids, pets, colleagues) — the field is "*your* name", not "names mentioned in conversation".
 - **Don't infer from email metadata** or signatures. Wait for a direct introduction.
 - **Overwrite on rename.** If they later say "actually, call me X instead", call `preferences_set` again with the new value.
-- **Clear on anonymity request.** If they ask not to be named, or want it reset, `preferences_set("ui_user_name", "")`.
+- **Clear on anonymity request.** If they ask not to be named, or want it reset, `preferences_set('{"ui_user_name": ""}')`.
 - **Don't echo back the stored name as confirmation** unless they explicitly ask. Silently doing the right thing is the vibe.

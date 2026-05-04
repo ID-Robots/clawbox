@@ -168,7 +168,12 @@ interface OpenRouterListResponse {
 // require updating the regex.
 const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
   openai: /^gpt-5\.[45](-pro|-mini)?$/,
-  "openai-codex": /^gpt-5\.[45](-mini)?$/,
+  // Explicit alternation, not /^gpt-5\.[45](-mini)?$/ — that would also
+  // accept gpt-5.5-mini (which doesn't exist on the Codex auth path
+  // and would 400 the same way gpt-5.4-pro did). Per
+  // developers.openai.com/codex/models the supported set under
+  // ChatGPT-account auth is exactly gpt-5.4, gpt-5.4-mini, gpt-5.5.
+  "openai-codex": /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/,
 };
 
 // Newest-first ordering: bigger context generally means newer model on
@@ -225,6 +230,16 @@ function transformOpenRouterEntries(entries: OpenRouterListResponse["data"]): Ca
   return out;
 }
 
+// Per-provider override of the default `allowCustom: true`. ClawBox AI
+// is the only provider that doesn't support custom model ids today —
+// Mike's gateway only routes the two device tiers (Flash/Pro), so any
+// other slug would 404. Without this override, the live-cache payload
+// would re-enable custom entry and contradict
+// PROVIDER_CATALOGS.clawai.allowCustom = false.
+const ALLOW_CUSTOM_BY_PROVIDER: Record<string, boolean> = {
+  clawai: false,
+};
+
 function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse {
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
   const defaultModelId = models.find((m) => m.id === fallbackDefault)?.id
@@ -235,7 +250,7 @@ function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse
     provider,
     models,
     defaultModelId,
-    allowCustom: true,
+    allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
     fetchedAt: Date.now(),
   };
 }
@@ -398,7 +413,7 @@ export async function GET(req: NextRequest) {
     provider,
     models: [],
     defaultModelId: DEFAULT_MODEL_BY_PROVIDER[provider] ?? "",
-    allowCustom: true,
+    allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
     fetchedAt: 0,
     warming: true,
   };

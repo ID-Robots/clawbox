@@ -283,7 +283,13 @@ describe("/setup-api/ai-models/status", () => {
         agents: { defaults: { model: { primary: "openai/gpt-5" } } },
         models: { providers: { deepseek: { apiKey: "claw_test123" } } },
       } as never);
-      mockGetConfigValue.mockResolvedValue("pro");
+      // Distinct values from each source so the test forces the route
+      // to actually consult the portal — without this discrimination
+      // the test would still pass if a regression silently dropped the
+      // portal call and read clawaiAccountTier from the stale local
+      // picker. Local picker says "flash"; portal says "pro". A
+      // clawaiAccountTier of "pro" is only reachable via the portal.
+      mockGetConfigValue.mockResolvedValue("flash");
       fetchSpy.mockResolvedValue(new Response(
         JSON.stringify({ tier: "max", deviceTier: "pro" }),
         { status: 200 },
@@ -300,6 +306,9 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiAccountTier).toBe("pro");
       expect(body.clawaiConfigured).toBe(true);
       expect(body.tierSource).toBe("picker");
+      // Portal must be consulted whenever a clawai profile exists, so a
+      // plan downgrade upstream is reflected on next /status read.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
     it("returns clawaiConfigured=false when no clawai profile exists at all", async () => {
