@@ -94,6 +94,18 @@ const PRE_AUTH_API_PATHS = new Set([
   "/setup-api/portal/heartbeat-tick",
 ]);
 
+// Loopback proxy paths used by openclaw (a separate process with no session
+// cookie) to reach llama.cpp / Ollama through Next.js. The proxy routes
+// enforce their own service-to-service bearer-token check via
+// `verifyLocalAiBearer` in src/lib/local-ai-proxy.ts, so the session gate
+// here would only break openclaw without adding any real security: a stale
+// 401 from middleware just trips openclaw's auth-failure cooldown and
+// kills every chat turn against a local model.
+const LOOPBACK_PROXY_PREFIXES = [
+  "/setup-api/local-ai/llamacpp",
+  "/setup-api/local-ai/ollama",
+];
+
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
   "/favicon.ico",
@@ -117,6 +129,9 @@ function isPublicPath(pathname: string): boolean {
     } else if (pathname === prefix || pathname.startsWith(prefix + "/")) {
       return true;
     }
+  }
+  for (const prefix of LOOPBACK_PROXY_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(prefix + "/")) return true;
   }
   return false;
 }

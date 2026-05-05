@@ -77,10 +77,18 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   ),
 }));
 
+vi.mock("@/lib/local-ai-token", () => ({
+  // Stable 64-char hex value so tests can assert on shape without depending
+  // on filesystem state. Real impl reads/writes data/.local-ai-token.
+  getLocalAiToken: vi.fn().mockReturnValue("a".repeat(64)),
+  verifyLocalAiBearer: vi.fn().mockReturnValue(true),
+}));
+
 import { getAll, setMany } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -96,6 +104,7 @@ const mockGetLlamaCppContextWindow = vi.mocked(getLlamaCppContextWindow);
 const mockGetLlamaCppMaxTokens = vi.mocked(getLlamaCppMaxTokens);
 const mockGetLlamaCppProxyBaseUrl = vi.mocked(getLlamaCppProxyBaseUrl);
 const mockGetLocalAiProxyBaseUrl = vi.mocked(getLocalAiProxyBaseUrl);
+const mockGetLocalAiToken = vi.mocked(getLocalAiToken);
 
 // Create a mock child process that immediately succeeds
 function createSuccessfulChildProcess(): ChildProcess {
@@ -170,6 +179,7 @@ describe("POST /setup-api/ai-models/configure", () => {
         ? LLAMACPP_PROXY_BASE_URL
         : `http://127.0.0.1/setup-api/local-ai/${provider}`,
     );
+    mockGetLocalAiToken.mockReturnValue("a".repeat(64));
 
     const mod = await import("@/app/setup-api/ai-models/configure/route");
     configurePost = mod.POST;
@@ -461,7 +471,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(writtenContent.profiles["anthropic:default"].type).toBe("token");
   });
 
-  it("writes auth profile with dummy key for Ollama", async () => {
+  it("writes auth profile with the local-ai bearer for Ollama", async () => {
     await configurePost(jsonRequest({
       provider: "ollama",
       apiKey: "mistral:7b",
@@ -469,10 +479,12 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const writeCall = mockFs.writeFile.mock.calls[0];
     const writtenContent = JSON.parse(writeCall[1] as string);
-    expect(writtenContent.profiles["ollama:default"].key).toBe("ollama-local");
+    // Per-install token (>=16 chars) — the proxy validates against the same
+    // value via `verifyLocalAiBearer` in src/lib/local-ai-token.ts.
+    expect(writtenContent.profiles["ollama:default"].key).toMatch(/^[a-f0-9]{32,}$/);
   });
 
-  it("writes auth profile with dummy key for llama.cpp", async () => {
+  it("writes auth profile with the local-ai bearer for llama.cpp", async () => {
     await configurePost(jsonRequest({
       provider: "llamacpp",
       apiKey: "gemma-q4",
@@ -480,7 +492,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const writeCall = mockFs.writeFile.mock.calls[0];
     const writtenContent = JSON.parse(writeCall[1] as string);
-    expect(writtenContent.profiles["llamacpp:default"].key).toBe("llamacpp-local");
+    expect(writtenContent.profiles["llamacpp:default"].key).toMatch(/^[a-f0-9]{32,}$/);
   });
 
   it("configures ClawBox AI as a fallback model when a stored user token is present", async () => {

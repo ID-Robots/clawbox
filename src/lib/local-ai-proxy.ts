@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getLlamaCppBaseUrl } from "@/lib/llamacpp";
+import { verifyLocalAiBearer } from "@/lib/local-ai-token";
 import {
   beginLocalAiUse,
   endLocalAiUse,
@@ -67,6 +68,13 @@ export async function proxyLocalAiRequest(
 ): Promise<Response> {
   if (pathSegments.length === 0) {
     return NextResponse.json({ error: "Missing local AI proxy path" }, { status: 400 });
+  }
+
+  // Service-to-service auth: openclaw is the only intended caller. middleware.ts
+  // exempts /setup-api/local-ai/<provider>/ so openclaw (which has no session
+  // cookie) can reach this route; the bearer check enforces auth here instead.
+  if (!verifyLocalAiBearer(request.headers.get("authorization"))) {
+    return NextResponse.json({ error: "local-ai bearer token required" }, { status: 401 });
   }
 
   try {

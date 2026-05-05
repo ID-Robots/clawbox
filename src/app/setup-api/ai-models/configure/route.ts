@@ -23,6 +23,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
 import {
   CLAWBOX_AI_PROVIDER,
@@ -532,17 +533,18 @@ export async function POST(request: Request) {
           key: clawboxAiToken,
         };
       } else if (isOllama) {
-        // Ollama runs locally — use a dummy api_key entry
+        // Ollama runs locally — auth-profile key must match the per-install
+        // bearer token the local-ai proxy validates (see src/lib/local-ai-token.ts).
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
-          key: "ollama-local",
+          key: getLocalAiToken(),
         };
       } else if (isLlamaCpp) {
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
-          key: "llamacpp-local",
+          key: getLocalAiToken(),
         };
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
@@ -673,7 +675,7 @@ export async function POST(request: Request) {
       const providerDef = JSON.stringify({
         baseUrl: getLocalAiProxyBaseUrl("ollama"),
         api: "ollama",
-        apiKey: "ollama-local",
+        apiKey: getLocalAiToken(),
         models: [{
           id: modelName,
           name: modelName,
@@ -704,7 +706,7 @@ export async function POST(request: Request) {
       const providerDef = JSON.stringify({
         baseUrl: getLlamaCppProxyBaseUrl(),
         api: "openai-completions",
-        apiKey: "llamacpp-local",
+        apiKey: getLocalAiToken(),
         models: [{
           id: modelName,
           name: modelName,
