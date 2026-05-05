@@ -92,6 +92,30 @@ function getChatModelOptionText(option: ChatModelState['options'][number]) {
   return option.label || option.id
 }
 
+// Compact provider labels for the chat header pill. The chat panel
+// can be docked at ~370px wide where "OpenAI Codex" + "GPT-5.4 Mini"
+// + "Medium" combined exceeds the available width and pills truncate
+// to "OpenAI Co...". Drop the brand prefix on the provider pill so
+// users see the distinctive part ("Codex" vs "GPT" — both still
+// clearly OpenAI) without overflow. Settings page and notification
+// messages still use the full PROVIDER_LABELS values from the chat
+// model route.
+const PROVIDER_PILL_LABEL: Record<string, string> = {
+  'ClawBox AI': 'ClawBox',
+  'Anthropic Claude': 'Claude',
+  'OpenAI GPT': 'GPT',
+  'OpenAI Codex': 'Codex',
+  'Google Gemini': 'Gemini',
+  'OpenRouter': 'OpenRouter',
+  'Ollama Local': 'Ollama',
+  'Gemma 4 Local': 'Gemma 4',
+}
+function getProviderPillText(option: ChatModelState['options'][number]): string {
+  const full = getChatModelOptionText(option)
+  if (!option.available) return full
+  return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
+}
+
 import { renderText } from '@/lib/chat-markdown'
 import { useT } from '@/lib/i18n'
 import {
@@ -101,6 +125,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
+import { HeaderDropdown } from '@/components/HeaderDropdown'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -134,16 +159,12 @@ function extractText(msg: unknown): string {
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 
-// Mirrors OpenClaw's canonical thinking-level set
-// (`openclaw/dist/thinking-BW_4_Ip1.js: BASE_THINKING_LEVELS` + xhigh/max/
-// adaptive). 'default' is a UI-only sentinel meaning "don't override —
-// let the gateway use its configured default"; we map it to undefined on
-// the wire. Anything outside this set is silently coerced so a stale or
-// hand-edited localStorage value can't reach the gateway.
-type ThinkingLevel = 'default' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'adaptive'
-const THINKING_LEVELS: readonly ThinkingLevel[] = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'adaptive']
+// Reasoning effort levels accepted by the OpenClaw gateway. The wire
+// vocabulary is broader than what any single upstream API supports —
+// each provider only honors a subset, with the gateway translating
+// (e.g. DeepSeek `xhigh`→`max`, Google `adaptive`→`thinking_budget=-1`).
+type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'adaptive'
 const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
-  default: 'Default',
   off: 'Off',
   minimal: 'Minimal',
   low: 'Low',
@@ -153,24 +174,64 @@ const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
   max: 'Max',
   adaptive: 'Adaptive',
 }
-function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel {
-  return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : 'default'
+
+// Per-provider effort levels and defaults. Sourced from each upstream's
+// official API docs (see fix/clawai-account-tier branch history for the
+// research notes). Showing the universal 8-level dropdown for every
+// provider was misleading — `Max` doesn't exist on OpenAI, `Minimal`
+// was dropped from gpt-5.4+, Google has `Adaptive` (thinking_budget=-1)
+// where others have `Default`, etc. Per-provider config keeps the UI
+// honest.
+interface ProviderReasoningConfig {
+  levels: readonly ThinkingLevel[]
+  default: ThinkingLevel
 }
 
-// DeepSeek V4's stack only differentiates three real states (disabled / high
-// reasoning / max reasoning), but the OpenClaw gateway exposes them as
-// off / high / xhigh — `max` is never appended to a model's allowed-level
-// list (thinking.ts:188,201), so sessions.patch rejects it. The translation
-// layer in provider-stream-shared.ts maps OpenClaw 'xhigh' → DeepSeek's
-// reasoning_effort: "max" upstream, so users still get the strongest
-// reasoning when they pick the "X-High" option here. We relabel 'high' as
-// "Default" because that's DeepSeek's effective out-of-the-box behavior.
-const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'high', 'xhigh']
-const DEEPSEEK_THINKING_LABELS: Partial<Record<ThinkingLevel, string>> = {
-  high: 'Default',
+const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
+  openai: { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
+  'openai-codex': { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
+  // Anthropic effort docs: `low | medium | high | max` on Opus 4.6+,
+  // Sonnet 4.6, Opus 4.7, Mythos. Default per platform.claude.com is
+  // `high`. xhigh is Opus-4.7-only; we omit until we add per-model
+  // gating.
+  anthropic: { levels: ['low', 'medium', 'high', 'max'], default: 'high' },
+  // Gemini 2.5 thinking_budget: 0=off (Flash/Lite only — Pro silently
+  // ignores), -1=adaptive (auto). Picker stays provider-wide; Pro will
+  // fall back to adaptive when user picks Off.
+  google: { levels: ['off', 'low', 'medium', 'high', 'adaptive'], default: 'adaptive' },
+  // DeepSeek V4 docs accept low/medium/high/xhigh/max but compatibility
+  // layer maps low+medium→high and xhigh→max upstream, so the user-facing
+  // useful scale is just three.
+  deepseek: { levels: ['low', 'medium', 'high'], default: 'high' },
+  // ClawBox AI routes via DeepSeek today.
+  clawai: { levels: ['low', 'medium', 'high'], default: 'high' },
+  // OpenRouter normalizes per underlying model — surface the full set
+  // they document at openrouter.ai/docs/guides/best-practices/reasoning-tokens.
+  openrouter: { levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
 }
-function isDeepSeekV4Model(model: string | null | undefined): boolean {
-  return typeof model === 'string' && /deepseek-v4/i.test(model)
+
+const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {
+  levels: ['off', 'low', 'medium', 'high'],
+  default: 'medium',
+}
+
+function getProviderReasoningConfig(provider: string | null | undefined): ProviderReasoningConfig {
+  if (!provider) return FALLBACK_REASONING_CONFIG
+  return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG
+}
+
+const PERSIST_KEY_PREFIX = 'clawbox:chat:thinkingLevel'
+
+function readPersistedThinkingLevel(
+  provider: string | null | undefined,
+  cfg: ProviderReasoningConfig,
+): ThinkingLevel {
+  if (typeof window === 'undefined' || !provider) return cfg.default
+  try {
+    const raw = window.localStorage?.getItem(`${PERSIST_KEY_PREFIX}:${provider}`)
+    if (raw && cfg.levels.includes(raw as ThinkingLevel)) return raw as ThinkingLevel
+  } catch { /* localStorage unavailable */ }
+  return cfg.default
 }
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
@@ -191,10 +252,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
-    if (typeof window === 'undefined') return 'high'
-    return normalizeThinkingLevel(window.localStorage?.getItem('clawbox:chat:thinkingLevel'))
-  })
+  // Initialised to a generic placeholder; the real value is snapped to
+  // the active provider's persisted choice (or that provider's default)
+  // by the [headerProvider] effect below as soon as chatModelState
+  // resolves.
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('high')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
@@ -219,29 +281,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.provider ?? null
   }, [chatModelState])
-  const isDeepSeekV4Active = useMemo<boolean>(() => {
-    if (!chatModelState) return false
-    if (isDeepSeekV4Model(chatModelState.activeModel)) return true
-    const activeOption = chatModelState.options.find(
-      (option) => option.id === chatModelState.activeOptionId,
-    )
-    return isDeepSeekV4Model(activeOption?.model)
-  }, [chatModelState])
-  const visibleThinkingLevels = isDeepSeekV4Active ? DEEPSEEK_THINKING_LEVELS : THINKING_LEVELS
-  const labelForThinkingLevel = useCallback((level: ThinkingLevel): string => {
-    if (isDeepSeekV4Active) {
-      const override = DEEPSEEK_THINKING_LABELS[level]
-      if (override) return override
-    }
-    return THINKING_LEVEL_LABELS[level] ?? level
-  }, [isDeepSeekV4Active])
-  // Snap a stale picker value (e.g. 'low' / 'medium' / 'default') to 'high'
-  // when DeepSeek is active so display, wire payload, and the picker option
-  // all agree. Without this, the select would render a value with no matching
-  // <option> and show empty.
-  const effectiveThinkingLevel: ThinkingLevel = isDeepSeekV4Active && !DEEPSEEK_THINKING_LEVELS.includes(thinkingLevel)
-    ? 'high'
-    : thinkingLevel
+  const reasoningConfig = useMemo<ProviderReasoningConfig>(
+    () => getProviderReasoningConfig(headerProvider),
+    [headerProvider],
+  )
+  const visibleThinkingLevels = reasoningConfig.levels
+  // Snap the displayed value to a level the active provider actually
+  // supports. Without this the <select> would render a value with no
+  // matching <option> and show empty when the user switches from a
+  // provider that has e.g. `xhigh` to one that doesnt. The setter below
+  // syncs `thinkingLevel` to this value once the provider settles, so
+  // the wire payload also stays in sync.
+  const effectiveThinkingLevel: ThinkingLevel = visibleThinkingLevels.includes(thinkingLevel)
+    ? thinkingLevel
+    : reasoningConfig.default
   const chatProviderCatalog = useProviderCatalog(headerProvider)
   // Pull live tier so the chat-model picker can filter ClawBox AI options
   // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
@@ -415,10 +468,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (status !== 'connected') return
     const key = sessionKeyRef.current
     if (!key) return
-    const wireValue = effectiveThinkingLevel === 'default' ? null : effectiveThinkingLevel
+    const wireValue: string = effectiveThinkingLevel
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
-    void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err) => {
+    void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err: unknown) => {
       // Reset so a reconnect or next user change retries.
       lastSentThinkingRef.current = undefined
       setMessages(msgs => [...msgs, {
@@ -430,11 +483,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     })
   }, [status, effectiveThinkingLevel, wsRequest])
 
+  // Snap thinkingLevel to the active provider's persisted choice (or its
+  // default) whenever the active provider changes. Without this the
+  // global state would carry e.g. an OpenAI `xhigh` choice over to a
+  // DeepSeek session that doesnt support xhigh, and `effectiveThinkingLevel`
+  // would silently fall back to the provider default while the actual
+  // state still said xhigh — confusing and racey when the user then
+  // tries to change levels.
+  useEffect(() => {
+    if (!headerProvider) return
+    const cfg = getProviderReasoningConfig(headerProvider)
+    const persisted = readPersistedThinkingLevel(headerProvider, cfg)
+    setThinkingLevel(prev => (prev === persisted ? prev : persisted))
+  }, [headerProvider])
+
   const handleThinkingLevelChange = useCallback((next: string) => {
-    const normalized = normalizeThinkingLevel(next)
+    const cfg = getProviderReasoningConfig(headerProvider)
+    const normalized: ThinkingLevel = cfg.levels.includes(next as ThinkingLevel)
+      ? (next as ThinkingLevel)
+      : cfg.default
     setThinkingLevel(prev => {
       if (prev === normalized) return prev
-      const label = labelForThinkingLevel(normalized)
+      const label = THINKING_LEVEL_LABELS[normalized] ?? normalized
       setMessages(msgs => [...msgs, {
         role: 'system',
         text: `Switched effort to ${label}.`,
@@ -443,8 +513,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
       return normalized
     })
-    try { window.localStorage?.setItem('clawbox:chat:thinkingLevel', normalized) } catch {}
-  }, [labelForThinkingLevel])
+    if (headerProvider) {
+      try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
+    }
+  }, [headerProvider])
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
@@ -1212,55 +1284,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        <div style={{ display: 'flex', minWidth: 0 }}>
-          {chatModelState && (
-            <div
-              onPointerDown={stopHeaderDrag}
-              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', maxWidth: 240 }}
-            >
-              <select
-                aria-label="Chat model"
-                value={chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''}
-                onChange={(e) => handleChatSourceChange(e.target.value)}
+        <div className="chat-header-pills">
+          {chatModelState && (() => {
+            const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
+            const activeOption = chatModelState.options.find(o => o.id === activeId)
+            const triggerLabel = activeOption ? getProviderPillText(activeOption) : activeId
+            return (
+              <HeaderDropdown
+                ariaLabel="Chat provider"
+                value={activeId}
+                triggerLabel={triggerLabel}
+                options={chatModelState.options.map((option) => ({
+                  id: option.id,
+                  label: getChatModelOptionText(option),
+                }))}
+                onChange={handleChatSourceChange}
                 onPointerDown={stopHeaderDrag}
                 disabled={switchingModel}
-                style={{
-                  appearance: 'none',
-                  WebkitAppearance: 'none',
-                  MozAppearance: 'none',
-                  width: '100%',
-                  background: 'rgba(255,255,255,0.05)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  color: '#fff',
-                  borderRadius: 10,
-                  padding: '6px 28px 6px 10px',
-                  fontSize: 11,
-                  fontWeight: 600,
-                  outline: 'none',
-                  cursor: switchingModel ? 'default' : 'pointer',
-                }}
-              >
-                {chatModelState.options.map((option) => (
-                  <option key={option.id} value={option.id} style={{ background: '#111827', color: '#fff' }}>
-                    {getChatModelOptionText(option)}
-                  </option>
-                ))}
-              </select>
-              <span
-                className="material-symbols-rounded"
-                aria-hidden="true"
-                style={{
-                  position: 'absolute',
-                  right: 8,
-                  fontSize: 16,
-                  color: 'rgba(255,255,255,0.35)',
-                  pointerEvents: 'none',
-                }}
-              >
-                unfold_more
-              </span>
-            </div>
-          )}
+                triggerMaxWidth={130}
+                popoverWidth={220}
+              />
+            )
+          })()}
           {(() => {
             // Inline model switcher: renders next to the provider dropdown
             // whenever the active provider has multiple available models.
@@ -1283,10 +1328,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (!activeOption?.provider) return null
             const catalog = chatProviderCatalog
             if (!catalog || catalog.models.length < 2) return null
-            const activeModelId = extractProviderModelId(
+            // ClawBox AI's wire-format provider is `deepseek` (Mike's
+            // gateway forwards to DeepSeek's API), while the UI normalizes
+            // to `clawai`. Try the canonical provider first, then fall
+            // back to the deepseek alias so the picker can resolve the
+            // active model id either way.
+            let activeModelId = extractProviderModelId(
               chatModelState.activeModel,
               activeOption.provider,
             )
+            if (!activeModelId && activeOption.provider === 'clawai') {
+              activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
+            }
             if (!activeModelId) return null
             const curatedHasActive = catalog.models.some(
               (option) => option.id === activeModelId,
@@ -1298,131 +1351,52 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   ...catalog.models,
                 ]
             return (
-              <div
-                onPointerDown={stopHeaderDrag}
-                style={{
-                  position: 'relative',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  maxWidth: 200,
-                  marginLeft: 6,
+              <HeaderDropdown
+                ariaLabel={`${activeOption.label} model`}
+                value={activeModelId}
+                options={modelOptions.map(option => ({
+                  id: option.id,
+                  label: option.label,
+                  hint: option.hint,
+                }))}
+                onChange={(nextId) => {
+                  if (nextId === activeModelId) return
+                  // Wire-format provider for ClawBox AI is `deepseek`
+                  // (Mike's gateway routes via DeepSeek). Sending
+                  // `clawai/...` would be rejected by the gateway as
+                  // an unknown provider.
+                  const wireProvider = activeOption.provider === 'clawai'
+                    ? 'deepseek'
+                    : activeOption.provider
+                  void switchChatModel({
+                    model: `${wireProvider}/${nextId}`,
+                    label: nextId,
+                  })
                 }}
-              >
-                <select
-                  aria-label={`${activeOption.label} model`}
-                  value={activeModelId}
-                  onChange={(e) => {
-                    const nextId = e.target.value
-                    if (nextId === activeModelId) return
-                    void switchChatModel({
-                      model: `${activeOption.provider}/${nextId}`,
-                      label: nextId,
-                    })
-                  }}
-                  onPointerDown={stopHeaderDrag}
-                  disabled={switchingModel}
-                  style={{
-                    appearance: 'none',
-                    WebkitAppearance: 'none',
-                    MozAppearance: 'none',
-                    width: '100%',
-                    background: 'rgba(255,255,255,0.05)',
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    color: '#fff',
-                    borderRadius: 10,
-                    padding: '6px 28px 6px 10px',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    outline: 'none',
-                    cursor: switchingModel ? 'default' : 'pointer',
-                  }}
-                >
-                  {modelOptions.map((option) => (
-                    <option
-                      key={option.id}
-                      value={option.id}
-                      style={{ background: '#111827', color: '#fff' }}
-                    >
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <span
-                  className="material-symbols-rounded"
-                  aria-hidden="true"
-                  style={{
-                    position: 'absolute',
-                    right: 8,
-                    fontSize: 16,
-                    color: 'rgba(255,255,255,0.35)',
-                    pointerEvents: 'none',
-                  }}
-                >
-                  unfold_more
-                </span>
-              </div>
+                onPointerDown={stopHeaderDrag}
+                disabled={switchingModel}
+                triggerMaxWidth={140}
+                popoverWidth={240}
+              />
             )
           })()}
-          <div
+          {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
+              the upstream-API-accurate set per provider. The wire
+              vocabulary is the OpenClaw gateway's full union; the
+              gateway translates per-provider (DeepSeek `xhigh`→`max`,
+              Google `adaptive`→`thinking_budget=-1`, etc.). */}
+          <HeaderDropdown
+            ariaLabel="Reasoning effort"
+            value={effectiveThinkingLevel}
+            options={visibleThinkingLevels.map(level => ({
+              id: level,
+              label: THINKING_LEVEL_LABELS[level] ?? level,
+            }))}
+            onChange={handleThinkingLevelChange}
             onPointerDown={stopHeaderDrag}
-            style={{
-              position: 'relative',
-              display: 'inline-flex',
-              alignItems: 'center',
-              maxWidth: 120,
-              marginLeft: 6,
-            }}
-          >
-            <select
-              aria-label="Reasoning effort"
-              value={effectiveThinkingLevel}
-              onChange={(e) => handleThinkingLevelChange(e.target.value)}
-              onPointerDown={stopHeaderDrag}
-              style={{
-                appearance: 'none',
-                WebkitAppearance: 'none',
-                MozAppearance: 'none',
-                width: '100%',
-                background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                color: '#fff',
-                borderRadius: 10,
-                padding: '6px 28px 6px 10px',
-                fontSize: 11,
-                fontWeight: 600,
-                outline: 'none',
-                cursor: 'pointer',
-              }}
-            >
-              {/* Mirrors the OpenClaw Control UI's effort picker: Default (=
-                  use server config) plus the canonical BASE_THINKING_LEVELS
-                  + xhigh / max / adaptive. Trimmed to a 3-level subset
-                  (Off / Default / X-High) when DeepSeek V4 is the active
-                  model — its provider stack only honors those three. */}
-              {visibleThinkingLevels.map(level => (
-                <option
-                  key={level}
-                  value={level}
-                  style={{ background: '#111827', color: '#fff' }}
-                >
-                  Effort: {labelForThinkingLevel(level)}
-                </option>
-              ))}
-            </select>
-            <span
-              className="material-symbols-rounded"
-              aria-hidden="true"
-              style={{
-                position: 'absolute',
-                right: 8,
-                fontSize: 16,
-                color: 'rgba(255,255,255,0.35)',
-                pointerEvents: 'none',
-              }}
-            >
-              unfold_more
-            </span>
-          </div>
+            triggerMaxWidth={100}
+            popoverWidth={180}
+          />
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (

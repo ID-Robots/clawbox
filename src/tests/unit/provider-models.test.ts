@@ -15,7 +15,7 @@ describe("provider-models", () => {
 
   describe("getProviderCatalog", () => {
     it("returns configured provider catalogs", () => {
-      expect(getProviderCatalog("openai")?.defaultModelId).toBe("gpt-5");
+      expect(getProviderCatalog("openai")?.defaultModelId).toBe("gpt-5.4");
       expect(getProviderCatalog("openai-codex")?.defaultModelId).toBe("gpt-5.4");
     });
 

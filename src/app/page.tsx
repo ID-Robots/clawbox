@@ -169,32 +169,44 @@ function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?
   return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
 }
 
-function isClawAiProvider(provider: unknown): boolean {
-  if (typeof provider !== "string") return false;
-  const normalized = provider.trim().toLowerCase();
-  return normalized === "clawai" || normalized === "deepseek";
-}
-
 function ChromeDesktopInner() {
   const { t } = useT();
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
-  const [clawAiAuthenticated, setClawAiAuthenticated] = useState(false);
-  // Live tier (Free → null, Pro → "flash", Max → "pro"). Drives the
-  // ClawKeep shield colour and any other paid-only desktop affordance.
+  // Account-level "is ClawBox AI configured on this device?" — drives
+  // the shelf shield (colour + click target) and the offer-notification
+  // visibility. Sourced from useClawboxLogin (which now polls
+  // /setup-api/ai-models/status and exposes `clawaiConfigured` via its
+  // `loggedIn` field), not from /setup-api/setup/status's
+  // `ai_model_provider` — that's the *active chat provider* and would
+  // falsely flip to false the moment a Max subscriber switches the
+  // chat header dropdown to OpenAI, leaving them with a red shield
+  // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin();
+  const clawAiAuthenticated = clawboxLogin.loggedIn;
   const clawkeepEntitled = clawboxLogin.tier !== null;
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
     setSetupRequired(!data.setup_complete);
-    const hasClawAi = isClawAiProvider(data.ai_model_provider) && !!data.ai_model_configured;
-    setClawAiAuthenticated(hasClawAi);
-    setShowClawAiOfferNotification(!!data.setup_complete && !hasClawAi);
     return data;
   }, []);
+
+  // The "Free backup with ClawBox AI" offer-notification asks the user
+  // to add ClawBox AI as a *desktop backup provider* — that's an
+  // account-level question, not "is clawai the active chat provider
+  // right now?". Source it from useClawboxLogin so a Max subscriber
+  // chatting via OpenAI doesn't get nagged to add an account they
+  // already have. Only show after setup is complete, the hook has
+  // settled (avoid a transient pop on refresh), and no clawai
+  // profile is configured.
+  useEffect(() => {
+    if (setupRequired) { setShowClawAiOfferNotification(false); return; }
+    if (clawboxLogin.loading) return;
+    setShowClawAiOfferNotification(!clawboxLogin.loggedIn);
+  }, [setupRequired, clawboxLogin.loading, clawboxLogin.loggedIn]);
 
   // One-shot cleanup of stale chat localStorage from older builds.
   useEffect(() => { purgeLegacyChatCaches() }, []);

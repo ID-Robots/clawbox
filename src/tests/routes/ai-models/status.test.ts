@@ -266,6 +266,132 @@ describe("/setup-api/ai-models/status", () => {
     });
   });
 
+  describe("clawai account tier vs active provider", () => {
+    it("returns clawaiAccountTier=pro alongside clawaiTier=null when chatting via OpenAI but a Max clawai profile is configured", async () => {
+      // The bug we're fixing: a Max subscriber switches the chat
+      // dropdown to OpenAI. The chat-header badge should hide (no
+      // active clawai chat → clawaiTier=null) but ClawKeep + Remote
+      // Desktop should stay unlocked because the clawai account is
+      // still a paid Max plan (clawaiAccountTier=pro).
+      mockReadConfig.mockResolvedValue({
+        auth: {
+          profiles: {
+            "openai:default": { provider: "openai", mode: "token" },
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        agents: { defaults: { model: { primary: "openai/gpt-5" } } },
+        models: { providers: { deepseek: { apiKey: "claw_test123" } } },
+      } as never);
+      // Distinct values from each source so the test forces the route
+      // to actually consult the portal — without this discrimination
+      // the test would still pass if a regression silently dropped the
+      // portal call and read clawaiAccountTier from the stale local
+      // picker. Local picker says "flash"; portal says "pro". A
+      // clawaiAccountTier of "pro" is only reachable via the portal.
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      // Active chat is OpenAI — header badge should be empty.
+      expect(body.provider).toBe("openai");
+      expect(body.clawaiTier).toBeNull();
+      // But the user's clawai account is paid Max — paid features
+      // (ClawKeep + Remote Desktop) read from clawaiAccountTier.
+      expect(body.clawaiAccountTier).toBe("pro");
+      expect(body.clawaiConfigured).toBe(true);
+      expect(body.tierSource).toBe("picker");
+      // Portal must be consulted whenever a clawai profile exists, so a
+      // plan downgrade upstream is reflected on next /status read.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns clawaiConfigured=false when no clawai profile exists at all", async () => {
+      // Pure OpenAI install — never paired with ClawBox AI. The hook
+      // uses this to distinguish "Free clawai user" from "no clawai
+      // account at all" (the latter is the Sign-in case for the
+      // Remote Control panel).
+      mockReadConfig.mockResolvedValue({
+        auth: {
+          profiles: {
+            "openai:default": { provider: "openai", mode: "token" },
+          },
+        },
+        agents: { defaults: { model: { primary: "openai/gpt-5" } } },
+      } as never);
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.provider).toBe("openai");
+      expect(body.clawaiTier).toBeNull();
+      expect(body.clawaiAccountTier).toBeNull();
+      expect(body.clawaiConfigured).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns clawaiAccountTier=null but clawaiConfigured=true for a Free user chatting via OpenAI", async () => {
+      // Free user with a paired clawai token but no paid local picker
+      // → defence-in-depth keeps the portal call skipped, so
+      // clawaiAccountTier stays null. clawaiConfigured is true so the
+      // hook reports loggedIn=true (Free users have a paired account).
+      mockReadConfig.mockResolvedValue({
+        auth: {
+          profiles: {
+            "openai:default": { provider: "openai", mode: "token" },
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        agents: { defaults: { model: { primary: "openai/gpt-5" } } },
+        models: { providers: { deepseek: { apiKey: "claw_test456" } } },
+      } as never);
+      mockGetConfigValue.mockResolvedValue(null);
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTier).toBeNull();
+      expect(body.clawaiAccountTier).toBeNull();
+      expect(body.clawaiConfigured).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("emits clawaiTier=clawaiAccountTier when ClawBox AI is the active chat provider", async () => {
+      // Sanity: when chat IS clawai, both fields agree. The chat-
+      // header badge keeps using clawaiTier — this test guards
+      // against accidental drift where the two fields could
+      // disagree on the happy path.
+      mockReadConfig.mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+        models: { providers: { deepseek: { apiKey: "claw_test789" } } },
+      } as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.provider).toBe("clawai");
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.clawaiAccountTier).toBe("pro");
+      expect(body.clawaiConfigured).toBe(true);
+      expect(body.tierSource).toBe("portal");
+    });
+  });
+
   it("normalizes provider aliases like openai-codex for the UI", async () => {
     mockReadConfig.mockResolvedValue({
       auth: {

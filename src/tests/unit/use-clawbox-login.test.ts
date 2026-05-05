@@ -44,11 +44,17 @@ describe("useClawboxLogin", () => {
     );
   });
 
-  it("treats provider !== 'clawai' as logged-out even when 'connected' is true", async () => {
+  it("treats no-clawai-profile as logged-out even when chatting via another provider", async () => {
+    // Pure OpenAI install — no clawai profile configured anywhere.
+    // `clawaiConfigured: false` is the new authoritative signal; the
+    // active `provider` field doesn't tell us what's *configured*,
+    // only what's currently driving the chat.
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
       connected: true,
       provider: "openai",
       clawaiTier: null,
+      clawaiAccountTier: null,
+      clawaiConfigured: false,
     })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
@@ -57,24 +63,64 @@ describe("useClawboxLogin", () => {
     expect(result.current.tier).toBeNull();
   });
 
-  it("treats provider 'clawai' with null tier as logged-in (Free user)", async () => {
-    // Free users have a paired clawai token but `tier === null` because
-    // the portal doesn't stamp a paid deviceTier. Pre-auto-tier the hook
-    // collapsed both "no token" and "Free token" into loggedIn=false, but
-    // that broke after auto-tier shipped: Free users started seeing
-    // "Sign in" prompts despite already being signed in. loggedIn now
-    // means "active provider is ClawBox AI" — callers that need a paid
-    // gate should check `tier !== null` themselves.
+  it("stays logged-in with paid tier when chatting via OpenAI but a paid clawai account is configured", async () => {
+    // The bug we shipped: a Max subscriber who switches the chat
+    // dropdown to OpenAI used to lose ClawKeep + Remote Desktop
+    // because the hook resolved `tier` off the active chat provider.
+    // Account-level tier now comes from `clawaiAccountTier` so paid
+    // features stay unlocked regardless of the active chat provider.
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "openai",
+      clawaiTier: null,
+      clawaiAccountTier: "pro",
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBe("pro");
+  });
+
+  it("treats clawai-configured Free users as logged-in with no tier", async () => {
+    // Free users have a paired clawai token but `clawaiAccountTier` is
+    // null because the portal doesn't stamp a paid deviceTier. Pre-
+    // auto-tier the hook collapsed both "no token" and "Free token"
+    // into loggedIn=false, but that broke after auto-tier shipped:
+    // Free users started seeing "Sign in" prompts despite already
+    // being signed in. Callers that need a paid gate should check
+    // `tier !== null` themselves.
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
       connected: true,
       provider: "clawai",
       clawaiTier: null,
+      clawaiAccountTier: null,
+      clawaiConfigured: true,
     })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin());
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.loggedIn).toBe(true);
     expect(result.current.tier).toBeNull();
+  });
+
+  it("falls back to legacy provider-equality when the response omits clawaiConfigured", async () => {
+    // Zero-downtime rollout: an old server build (or stale Next.js
+    // route handler that hasn't reloaded yet) won't emit the new
+    // fields. The hook should still pick a sensible loggedIn value
+    // by falling back to the pre-rollout `provider === "clawai"`
+    // heuristic.
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "clawai",
+      clawaiTier: "flash",
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBe("flash");
   });
 
   it("does not flip out of loading on a non-2xx response, but still leaves loggedIn=false", async () => {

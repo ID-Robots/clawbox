@@ -775,11 +775,14 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     }
 
     if (path === "/setup-api/ai-models/status") {
-      // ClawKeep / Remote Desktop / chat-popup gates check `clawaiTier`
-      // for paid-plan entitlement. The shared mock now claims Pro tier
-      // (`flash`) so existing e2e tests that drive the paired ClawKeep
-      // flow or the chat dropdown don't trip the Free-user upgrade card.
-      // Tests that need the Free path can override this route inline.
+      // ClawKeep / Remote Desktop / chat-popup gates check tier-related
+      // fields for paid-plan entitlement. The shared mock claims Pro
+      // tier (flash) for both the active chat provider (`clawaiTier`)
+      // AND the account-level tier (`clawaiAccountTier`) so existing
+      // e2e tests that drive the paired ClawKeep flow or the chat
+      // dropdown don't trip the Free-user upgrade card. Tests that
+      // need the Free or no-clawai-account paths can override this
+      // route inline.
       await fulfillJson(route, setupState.ai_model_configured
         ? {
             connected: true,
@@ -787,6 +790,8 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             providerLabel: "ClawBox AI",
             model: "clawai/deepseek-r1",
             clawaiTier: "flash",
+            clawaiAccountTier: "flash",
+            clawaiConfigured: true,
           }
         : {
             connected: false,
@@ -794,6 +799,8 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             providerLabel: null,
             model: null,
             clawaiTier: null,
+            clawaiAccountTier: null,
+            clawaiConfigured: false,
           });
       return;
     }

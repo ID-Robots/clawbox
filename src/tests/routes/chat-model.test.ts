@@ -97,27 +97,23 @@ describe("/setup-api/chat/model", () => {
     POST = mod.POST;
   });
 
-  it("surfaces every model registered under the ClawBox AI provider plus Local AI", async () => {
+  it("surfaces ClawBox AI as a single provider row alongside Local AI", async () => {
     const response = await GET();
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    // After consolidating ClawBox AI into one provider row (model
+    // variants live in the secondary picker), the active option's id
+    // is the active model id and the row's label is the bare provider
+    // name — Flash/Pro distinction is no longer encoded in the option's
+    // label.
     expect(body.activeOptionId).toBe("deepseek/deepseek-v4-pro");
     expect(body.activeSource).toBe("primary");
-    expect(body.activeLabel).toBe("ClawBox AI Pro");
+    expect(body.activeLabel).toBe("ClawBox AI");
     expect(body.options).toEqual([
       {
-        id: "deepseek/deepseek-v4-flash",
-        label: "ClawBox AI Flash",
-        model: "deepseek/deepseek-v4-flash",
-        provider: "clawai",
-        available: true,
-        settingsSection: "ai",
-        isLocal: false,
-      },
-      {
         id: "deepseek/deepseek-v4-pro",
-        label: "ClawBox AI Pro",
+        label: "ClawBox AI",
         model: "deepseek/deepseek-v4-pro",
         provider: "clawai",
         available: true,
@@ -175,17 +171,19 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    // One row per provider after consolidation. ClawBox AI Flash
+    // (the active model in this fixture) carries the row's `model`
+    // field; the secondary model picker handles tier switching.
+    // OpenAI default is gpt-5.4 since the curated picker drops 4.1/5.1-5.3.
     expect(body.options.map((option: { label: string }) => option.label)).toEqual([
-      "ClawBox AI Flash",
-      "ClawBox AI Pro",
+      "ClawBox AI",
       "OpenAI GPT",
       "Anthropic Claude",
       "Gemma 4 Local",
     ]);
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-v4-flash",
-      "deepseek/deepseek-v4-pro",
-      "openai/gpt-5",
+      "openai/gpt-5.4",
       "anthropic/claude-sonnet-4-6",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);

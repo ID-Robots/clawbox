@@ -559,22 +559,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const userNameSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track whether the user has touched the field locally — without this,
   // a slow GET /preferences could resolve after the user already started
-  // typing and overwrite their input mid-keystroke.
+  // typing and overwrite their input mid-keystroke. Same flag also
+  // guards the periodic refetch below so an agent write that lands
+  // mid-edit doesn't clobber the user's in-flight typing.
   const userNameEditedRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
-    fetch("/setup-api/preferences?keys=ui_user_name")
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (cancelled || !data) return;
-        if (userNameEditedRef.current) return;
-        const initial = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
-        setUserName(initial);
-        setUserNameSaved(initial);
-      })
-      .catch(() => { /* fall back to empty — user can still type one in */ });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Refetch every 5 s so a name the agent just persisted via the
+    // `preferences_set` MCP tool ("Hey, I'm Krasi" → agent writes
+    // ui_user_name → field updates here without a manual reload).
+    // The userNameEditedRef gate keeps the user's local typing
+    // authoritative — once they touch the field, polling backs off
+    // entirely until the next mount.
+    const tick = () => {
+      fetch("/setup-api/preferences?keys=ui_user_name", { cache: "no-store" })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (cancelled || !data) return;
+          if (userNameEditedRef.current) return;
+          const next = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
+          // Avoid noisy state updates when the value didn't change —
+          // React's strict-equality bail-out covers it but the input
+          // still re-renders on parent state churn otherwise.
+          setUserName(prev => prev === next ? prev : next);
+          setUserNameSaved(prev => prev === next ? prev : next);
+        })
+        .catch(() => { /* transient — try again next tick */ })
+        .finally(() => {
+          // Stop scheduling once the user has started typing — otherwise
+          // we'd keep firing fetches every 5s with results discarded by
+          // the userNameEditedRef guard above. Effect cleanup re-mounts
+          // (after page navigation, etc.) restart polling fresh.
+          if (!cancelled && !userNameEditedRef.current) timer = setTimeout(tick, 5_000);
+        });
+    };
+    tick();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
       // Cancel any debounce-pending POST so a tab-close or section-switch
       // mid-debounce doesn't fire after the component is gone.
       if (userNameSaveTimerRef.current) {
@@ -1318,7 +1341,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 id="ui-user-name"
                 type="text"
                 value={userName}
-                placeholder={t("settings.userName.placeholder")}
                 maxLength={40}
                 onChange={e => {
                   userNameEditedRef.current = true;

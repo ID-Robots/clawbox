@@ -108,6 +108,7 @@ You control the entire OS through the **MCP server** (`mcp/clawbox-mcp.ts`). You
 ### ⚙️ Preferences
 
 - `preferences_get` / `preferences_set` — language, layout, etc.
+- **Remember the user's name.** When the user introduces themselves ("I'm Krasi", "my name is Maya", "call me Sam") or you otherwise learn their preferred name, persist it immediately with `preferences_set('{"ui_user_name": "<name>"}')`. The mascot reads this for occasional name-greetings; the Settings → Appearance "Your name" field reads it too and refreshes within ~5 s. Only set it for *the actual person at the desk* — don't write a name they mentioned in passing about someone else, and don't infer one from email metadata. If they later say "actually call me X instead", overwrite it. If they ask to be anonymous again, `preferences_set('{"ui_user_name": ""}')`. Never echo back the stored name as confirmation unless they ask — silently doing the right thing is the vibe.
 
 ### 📋 Tasks & sub-agents
 
