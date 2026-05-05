@@ -29,6 +29,9 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     // === Free-tier upgrade card ===
     "upgradeCard.needsPaidPlan": "{feature} needs a paid plan",
     "upgradeCard.subscribeButton": "Subscribe to Pro or Max",
+    "upgradeCard.trialBannerHeadline": "Try Max free for 30 days",
+    "upgradeCard.trialBannerSubtitle": "Unlocks Remote Desktop, frontier model, full backups",
+    "upgradeCard.startFreeTrial": "Start free trial",
     "clawkeep.upgrade.featureName": "ClawKeep cloud backups",
     "clawkeep.upgrade.description": "ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB.",
     "remoteControl.upgrade.featureName": "Remote Desktop",

@@ -59,6 +59,27 @@ try {
   console.warn("[production-server] Failed to set up session secret:", err.message);
 }
 
+// ─── Local-AI bearer token ───
+// Per-install token openclaw uses to call our /setup-api/local-ai/* proxy.
+// Mirrors the session secret bootstrap so middleware + the proxy route can
+// rely on `process.env.LOCAL_AI_TOKEN` being set before any request lands.
+// See src/lib/local-ai-token.ts for the verification path.
+const LOCAL_AI_TOKEN_PATH = path.join(__dirname, "data", ".local-ai-token");
+try {
+  let localAiToken;
+  try {
+    localAiToken = fs.readFileSync(LOCAL_AI_TOKEN_PATH, "utf-8").trim();
+  } catch {}
+  if (!localAiToken || localAiToken.length < 32) {
+    localAiToken = require("crypto").randomBytes(32).toString("hex");
+    fs.mkdirSync(path.dirname(LOCAL_AI_TOKEN_PATH), { recursive: true });
+    fs.writeFileSync(LOCAL_AI_TOKEN_PATH, localAiToken, { mode: 0o600 });
+  }
+  process.env.LOCAL_AI_TOKEN = localAiToken;
+} catch (err) {
+  console.warn("[production-server] Failed to set up local-ai token:", err.message);
+}
+
 // HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server).
 // Routes by path: UPGRADE_ROUTES entries (e.g. /terminal-ws) go to their
 // configured port; everything else goes to the OpenClaw gateway.

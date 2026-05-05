@@ -186,7 +186,6 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin();
   const clawAiAuthenticated = clawboxLogin.loggedIn;
-  const clawkeepEntitled = clawboxLogin.tier !== null;
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
@@ -2081,7 +2080,6 @@ function ChromeDesktopInner() {
         showChatButton={mascotHidden || isMobile}
         time={time}
         clawAiAuthenticated={clawAiAuthenticated}
-        clawkeepEntitled={clawkeepEntitled}
       />
 
 

@@ -77,10 +77,10 @@ const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
 const CLAWAI_STATIC_MODELS: CatalogModel[] = [
   {
     id: "deepseek-v4-flash",
-    label: "Pro Tier",
+    label: "Free/Pro Tier",
     contextWindow: 128_000,
     input: "text+image",
-    hint: "Default. Faster, lower cost.",
+    hint: "Default. Faster.",
   },
   {
     id: "deepseek-v4-pro",
@@ -391,8 +391,19 @@ export async function GET(req: NextRequest) {
   if (!cached) {
     const fromDisk = await readDiskCache(provider);
     if (fromDisk) {
-      memCache.set(provider, fromDisk);
-      cached = fromDisk;
+      // Re-check after the await: a concurrent refreshInBackground (e.g. the
+      // bootWarmup scheduled at module-load) can complete during the disk
+      // read and put a fresher payload in memCache. Without this guard we'd
+      // clobber it with the older disk snapshot — a real bug observed after
+      // a deploy where memCache stayed pinned to pre-restart values for the
+      // full REFRESH_INTERVAL_MS window.
+      const racedIn = memCache.get(provider);
+      if (racedIn && racedIn.fetchedAt >= fromDisk.fetchedAt) {
+        cached = racedIn;
+      } else {
+        memCache.set(provider, fromDisk);
+        cached = fromDisk;
+      }
     }
   }
 

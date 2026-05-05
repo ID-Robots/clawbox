@@ -90,7 +90,7 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
 // match the subscription plans (Flash → "Pro plan", Pro → "Max plan")
 // so users see the same word on the device that they paid for.
 export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "deepseek-v4-flash", label: "Pro Tier", hint: "Default. Faster, lower cost." },
+  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "Default. Faster." },
   { id: "deepseek-v4-pro", label: "Max Tier", hint: "1.6T frontier model. Max plan only." },
 ] as const;
 
