@@ -140,4 +140,23 @@ describe("local AI proxy routes", () => {
     expect(response.status).toBe(200);
     expect(mockFetch).toHaveBeenCalled();
   });
+
+  it("accepts the legacy ollama-local sentinel for backward compat", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
+    const response = await mod.GET(
+      new Request("http://localhost/setup-api/local-ai/ollama/api/tags", {
+        headers: { Authorization: "Bearer ollama-local" },
+      }),
+      { params: Promise.resolve({ path: ["api", "tags"] }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalled();
+  });
 });

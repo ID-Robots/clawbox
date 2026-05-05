@@ -27,12 +27,15 @@ import crypto from "crypto";
 const DATA_ROOT = process.env.CLAWBOX_ROOT
   || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 const TOKEN_PATH = path.join(DATA_ROOT, "data", ".local-ai-token");
+const MIGRATED_FLAG_PATH = path.join(DATA_ROOT, "data", ".local-ai-token-migrated");
 
 // Sentinels older builds wrote into openclaw.json. Existing installs
 // upgrading to this version still send these in `Authorization: Bearer`
-// until the user re-saves AI Models settings (which rotates the value
-// to the per-install random token). Accepting them here keeps those
-// installs working through the upgrade window.
+// until the user re-saves AI Models settings, which rotates openclaw.json's
+// apiKey to the per-install random token AND calls `markLocalAiTokenMigrated()`
+// to drop the flag file below — at which point legacy strings are rejected.
+// Without the sunset, these public string constants would authenticate to
+// the proxy indefinitely on any device they leak from.
 const LEGACY_TOKENS: ReadonlySet<string> = new Set(["llamacpp-local", "ollama-local"]);
 
 let cached: string | null = null;
@@ -73,18 +76,60 @@ export function verifyLocalAiBearer(headerValue: string | null): boolean {
   if (!presented) return false;
 
   const expected = getLocalAiToken();
-
-  if (presented.length === expected.length) {
-    let diff = 0;
-    for (let i = 0; i < presented.length; i++) {
-      diff |= presented.charCodeAt(i) ^ expected.charCodeAt(i);
-    }
-    if (diff === 0) return true;
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  if (
+    presentedBuf.byteLength === expectedBuf.byteLength
+    && crypto.timingSafeEqual(presentedBuf, expectedBuf)
+  ) {
+    return true;
   }
 
-  return LEGACY_TOKENS.has(presented);
+  // Legacy sentinels are only honored until the configure route writes
+  // `data/.local-ai-token-migrated`, which it does the first time the
+  // user re-saves AI Models post-upgrade. After that, the per-install
+  // token is the only valid credential.
+  if (legacyTokensStillAccepted() && LEGACY_TOKENS.has(presented)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Stamp the migration flag so `verifyLocalAiBearer` stops accepting the
+ * `llamacpp-local` / `ollama-local` legacy sentinels. Idempotent — the
+ * configure route calls this whenever it writes a fresh per-install
+ * token to openclaw.json.
+ */
+export function markLocalAiTokenMigrated(): void {
+  try {
+    fs.mkdirSync(path.dirname(MIGRATED_FLAG_PATH), { recursive: true });
+    fs.writeFileSync(MIGRATED_FLAG_PATH, `${new Date().toISOString()}\n`, { mode: 0o600 });
+    legacyAcceptCache = { mtimeMs: -1, accept: false };
+  } catch {
+    // Disk write failed (read-only fs, permission). Legacy acceptance
+    // stays open until the next successful configure save — not a
+    // correctness issue, just delays the sunset.
+  }
+}
+
+// Cache the flag-file stat so we don't hit the FS on every chat turn.
+let legacyAcceptCache: { mtimeMs: number; accept: boolean } | null = null;
+function legacyTokensStillAccepted(): boolean {
+  try {
+    const stat = fs.statSync(MIGRATED_FLAG_PATH);
+    if (legacyAcceptCache && legacyAcceptCache.mtimeMs === stat.mtimeMs) {
+      return legacyAcceptCache.accept;
+    }
+    legacyAcceptCache = { mtimeMs: stat.mtimeMs, accept: false };
+    return false;
+  } catch {
+    legacyAcceptCache = { mtimeMs: -1, accept: true };
+    return true;
+  }
 }
 
 export function _resetLocalAiTokenCacheForTests(): void {
   cached = null;
+  legacyAcceptCache = null;
 }

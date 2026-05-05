@@ -25,6 +25,19 @@ TARGET_BRANCH="${CLAWBOX_BRANCH:-main}"
 UPSTREAM="origin/${TARGET_BRANCH}"
 CLAWBOX_USER="clawbox"
 
+# Validate inputs — both values are interpolated into `bash -c` strings
+# downstream, and the script runs steps as root via sudo. Mirrors the
+# SAFE_BRANCH regex in src/lib/updater.ts to block command-injection
+# via a malicious CLAWBOX_BRANCH or CLAWBOX_ROOT env value.
+if ! [[ "$PROJECT_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "Error: invalid CLAWBOX_ROOT '$PROJECT_DIR' (allowed: A-Z a-z 0-9 . _ / -)" >&2
+  exit 1
+fi
+if ! [[ "$TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "Error: invalid CLAWBOX_BRANCH '$TARGET_BRANCH' (allowed: A-Z a-z 0-9 . _ / -)" >&2
+  exit 1
+fi
+
 if [ ! -d "$PROJECT_DIR/.git" ]; then
   echo "Error: $PROJECT_DIR is not a git repository" >&2
   exit 1

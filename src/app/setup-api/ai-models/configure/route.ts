@@ -23,7 +23,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
-import { getLocalAiToken } from "@/lib/local-ai-token";
+import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
 import {
   CLAWBOX_AI_PROVIDER,
@@ -540,12 +540,17 @@ export async function POST(request: Request) {
           provider: ocProvider,
           key: getLocalAiToken(),
         };
+        // Stamp the migration flag so legacy "ollama-local" / "llamacpp-local"
+        // sentinels stop authenticating on this device — the new per-install
+        // token is now the only valid credential.
+        markLocalAiTokenMigrated();
       } else if (isLlamaCpp) {
         authProfiles.profiles[config.profileKey] = {
           type: "api_key",
           provider: ocProvider,
           key: getLocalAiToken(),
         };
+        markLocalAiTokenMigrated();
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, refresh, expires, projectId? }

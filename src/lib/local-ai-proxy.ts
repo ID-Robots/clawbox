@@ -21,6 +21,11 @@ function forwardHeaders(request: Request): Headers {
   headers.delete("connection");
   headers.delete("content-length");
   headers.delete("transfer-encoding");
+  // The Bearer is the ClawBox↔openclaw service token (verified above by
+  // verifyLocalAiBearer). Don't forward it to llama.cpp / Ollama —
+  // those backends shouldn't see our internal token, and a user-
+  // configured `llama-server --api-key` would 401 it back to us.
+  headers.delete("authorization");
   return headers;
 }
 

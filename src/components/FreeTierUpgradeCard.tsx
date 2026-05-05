@@ -37,15 +37,15 @@ export default function FreeTierUpgradeCard({ featureName, description }: FreeTi
           </span>
           <div>
             <div className="text-sm font-semibold text-[var(--text-primary)]">
-              Try Max free for 30 days
+              {t("upgradeCard.trialBannerHeadline")}
             </div>
             <div className="text-xs text-[var(--text-muted)]">
-              Unlocks Remote Desktop, frontier model, full backups
+              {t("upgradeCard.trialBannerSubtitle")}
             </div>
           </div>
         </div>
         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] whitespace-nowrap">
-          Start free trial
+          {t("upgradeCard.startFreeTrial")}
           <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
         </span>
       </a>

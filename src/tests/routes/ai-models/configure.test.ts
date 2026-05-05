@@ -82,6 +82,9 @@ vi.mock("@/lib/local-ai-token", () => ({
   // on filesystem state. Real impl reads/writes data/.local-ai-token.
   getLocalAiToken: vi.fn().mockReturnValue("a".repeat(64)),
   verifyLocalAiBearer: vi.fn().mockReturnValue(true),
+  // Configure route calls this on every Ollama/llama.cpp save to stamp
+  // the legacy-sentinel sunset flag — no-op in tests.
+  markLocalAiTokenMigrated: vi.fn(),
 }));
 
 import { getAll, setMany } from "@/lib/config-store";
