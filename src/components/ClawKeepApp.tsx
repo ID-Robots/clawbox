@@ -3,8 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
-import { useClawboxLogin } from "@/lib/use-clawbox-login";
-import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -183,12 +181,6 @@ export default function ClawKeepApp() {
     danger?: boolean;
     onConfirm: () => void;
   } | null>(null);
-  // ClawBox-AI tier drives the Free-user upgrade card. Portal also gates
-  // upload/repo endpoints with `clawkeepQuotaBytes <= 0 → 403`, but
-  // surfacing it here avoids a click that would silently bounce. While
-  // `loading` is true we render nothing to prevent flicker between
-  // PairCard (paid path) and FreeTierUpgradeCard (Free path).
-  const { tier: clawaiTier, loading: clawaiLoading } = useClawboxLogin();
   const pollIntervalRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -500,15 +492,6 @@ export default function ClawKeepApp() {
               challenge={pairChallenge}
               phase={pairPhase}
               onCancel={onCancelPair}
-            />
-          ) : clawaiLoading ? null : clawaiTier === null ? (
-            // Free user (or downgraded Pro/Max): show upgrade card even
-            // when status.paired is true — the portal /clawkeep/* endpoints
-            // will 403 every operation, so a working-looking PairedView
-            // would just lead to silent backup failures.
-            <FreeTierUpgradeCard
-              featureName={t("clawkeep.upgrade.featureName")}
-              description={t("clawkeep.upgrade.description")}
             />
           ) : status.paired ? (
             <>

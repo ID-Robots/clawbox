@@ -17,7 +17,38 @@ interface FreeTierUpgradeCardProps {
 export default function FreeTierUpgradeCard({ featureName, description }: FreeTierUpgradeCardProps) {
   const { t } = useT();
   return (
-    <div className="max-w-xl">
+    <div className="max-w-xl flex flex-col gap-3">
+      {/* Trial promo banner — kept in English to match the portal's
+          "START 30-DAY FREE TRIAL" CTA wording (AIModelsStep uses the
+          same hardcoded copy on the Max plan card during setup). */}
+      <a
+        href={PORTAL_DASHBOARD_URL}
+        target="_blank"
+        rel="noreferrer"
+        className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-r from-fuchsia-500/15 to-pink-500/15 border border-fuchsia-400/30 hover:from-fuchsia-500/25 hover:to-pink-500/25 transition-colors no-underline"
+      >
+        <div className="flex items-center gap-3 text-left">
+          <span
+            aria-hidden="true"
+            className="material-symbols-rounded text-fuchsia-300"
+            style={{ fontSize: 22 }}
+          >
+            redeem
+          </span>
+          <div>
+            <div className="text-sm font-semibold text-[var(--text-primary)]">
+              Try Max free for 30 days
+            </div>
+            <div className="text-xs text-[var(--text-muted)]">
+              Unlocks Remote Desktop, frontier model, full backups
+            </div>
+          </div>
+        </div>
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] whitespace-nowrap">
+          Start free trial
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
+        </span>
+      </a>
       <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 flex flex-col items-center text-center gap-4">
         <img
           src="/clawbox-crab.png"
