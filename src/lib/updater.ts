@@ -158,15 +158,32 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
 
-  // `git reset --hard` snaps tracked files to upstream but leaves untracked
-  // junk behind (stale build artefacts checked into a release branch then
-  // dropped, partially-merged scripts from a manual fix, etc.) which can
-  // shadow new code or just rot on disk forever. Follow up with
-  // `git clean -fd` (no -x: keep gitignored data/, .env, node_modules,
-  // .next so we don't nuke user state and force a multi-minute rebuild).
+  // Hard-sync to upstream. The device is an appliance — the working tree
+  // must always match what we ship, period. Local edits made via SSH /
+  // partial earlier updates / branch flips are discarded.
+  //
+  // Order matters:
+  //   1. fetch — pull the new refs.
+  //   2. reset --hard HEAD — drop any modifications to currently-tracked
+  //      files. Without this, `git checkout` aborts with "Your local
+  //      changes to the following files would be overwritten" the moment
+  //      a tracked file diverges from the target branch's version of
+  //      that file. That was the historical update failure mode users
+  //      reported on stuck devices.
+  //   3. checkout — switch to the target branch, creating it from the
+  //      upstream ref if it doesn't yet exist locally (covers fresh
+  //      clones that only have the original branch).
+  //   4. reset --hard <upstream> — force the branch ref + working tree
+  //      to exactly match upstream.
+  //   5. clean -fd — drop untracked files (stale build artefacts, scripts
+  //      from a partial merge, etc.) so they can't shadow new code. -fd
+  //      not -fdx: gitignored dirs (data/, .env, node_modules, .next)
+  //      are preserved so we don't nuke user state or force a multi-
+  //      minute rebuild.
   await execShell(
     `${gitCmd} fetch origin` +
-    ` && ${gitCmd} checkout ${local}` +
+    ` && ${gitCmd} reset --hard HEAD` +
+    ` && (${gitCmd} checkout ${local} 2>/dev/null || ${gitCmd} checkout -b ${local} ${upstream})` +
     ` && ${gitCmd} reset --hard ${upstream}` +
     ` && ${gitCmd} clean -fd`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
