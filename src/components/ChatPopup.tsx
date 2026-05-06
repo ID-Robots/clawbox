@@ -117,6 +117,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 }
 
 import { renderText } from '@/lib/chat-markdown'
+import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import {
   extractProviderModelId,
@@ -890,23 +891,51 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
-  // Handle file selection for attachments — upload all files to server
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload one or more files to the server's /uploads dir and add them to
+  // the chat attachment list. Shared by the file-input change handler and
+  // by the textarea paste handler (Ctrl+V on a clipboard image).
+  const uploadFiles = useCallback((files: File[]) => {
+    if (files.length === 0) return
+    const stampBase = Date.now()
+    const tasks = files.map(async (rawFile, idx) => {
+      // Clipboard images come in as the generic "image.png"; stamp them so
+      // a burst of pastes in the same millisecond doesn't collide on disk.
+      // FormData's third arg sets the filename without copying the Blob.
+      const isGeneric = !rawFile.name || rawFile.name === 'image.png' || rawFile.name === 'image.jpeg'
+      const filename = isGeneric
+        ? `paste-${stampBase}-${idx}.${rawFile.type.split('/')[1] || 'png'}`
+        : rawFile.name
+      const formData = new FormData()
+      formData.append('file', rawFile, filename)
+      try {
+        const res = await fetch('/setup-api/files?dir=uploads', { method: 'POST', body: formData })
+        if (!res.ok) return
+        const json = await res.json().catch(() => ({} as { name?: string; path?: string }))
+        const name = json.name || filename
+        const absPath = json.path
+        if (!absPath) return
+        setAttachments(prev => [...prev, { name, path: absPath, type: rawFile.type }])
+      } catch (err) {
+        console.error('[chat] upload failed:', err)
+      }
+    })
+    void Promise.all(tasks)
+  }, [])
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files || files.length === 0) return
-    for (const file of Array.from(files)) {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('path', 'uploads')
-      try {
-        const res = await fetch('/setup-api/files', { method: 'POST', body: formData })
-        if (res.ok) {
-          setAttachments(prev => [...prev, { name: file.name, path: `/home/clawbox/uploads/${file.name}`, type: file.type }])
-        }
-      } catch { /* upload failed */ }
-    }
+    uploadFiles(Array.from(files))
     e.target.value = ''
-  }, [])
+  }, [uploadFiles])
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (status !== 'connected') return
+    const imageFiles = extractImageFilesFromClipboard(e)
+    if (imageFiles.length === 0) return
+    e.preventDefault()
+    uploadFiles(imageFiles)
+  }, [status, uploadFiles])
 
   const removeAttachment = useCallback((idx: number) => {
     setAttachments(prev => prev.filter((_, i) => i !== idx))
@@ -1675,6 +1704,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={
             status !== 'connected'
               ? t("chat.connectingPlaceholder")

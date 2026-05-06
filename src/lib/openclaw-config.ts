@@ -91,8 +91,8 @@ function spawnOpenclawConfigSet(
 ): Promise<void> {
   const bin = findOpenclawBin();
   const { timeoutMs, uid, gid } = options;
-  const cwd = options.cwd ?? "/home/clawbox";
-  const env = { ...process.env, HOME: "/home/clawbox", ...(options.env ?? {}) };
+  const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
+  const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
 
   return new Promise((resolve, reject) => {
     let settled = false;

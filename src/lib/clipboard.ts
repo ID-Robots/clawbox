@@ -67,3 +67,19 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     if (ta.parentNode) ta.parentNode.removeChild(ta);
   }
 }
+
+/**
+ * Pull image File entries off a paste event's DataTransferItemList.
+ * Returns [] for non-image clipboard contents (text, etc.) so callers can
+ * fall through to the browser's default paste behavior.
+ */
+export function extractImageFilesFromClipboard(
+  e: React.ClipboardEvent<HTMLElement>,
+): File[] {
+  const items = e.clipboardData?.items;
+  if (!items) return [];
+  return Array.from(items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((f): f is File => f !== null);
+}
