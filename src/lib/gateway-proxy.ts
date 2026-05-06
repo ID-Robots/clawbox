@@ -5,7 +5,9 @@ import net from "net";
 import crypto from "crypto";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
-const OPENCLAW_CONFIG_PATH = "/home/clawbox/.openclaw/openclaw.json";
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_HOME
+  ? `${process.env.OPENCLAW_HOME}/openclaw.json`
+  : `${process.env.HOME ?? "/home/clawbox"}/.openclaw/openclaw.json`;
 
 const ALLOWED_PROTOS = new Set(["http", "https"]);
 const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
