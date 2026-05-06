@@ -630,6 +630,38 @@ step_start_gateway() {
   fi
 }
 
+step_clawkeep_install() {
+  if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
+    echo "  ClawKeep source missing; skipping"
+    return 0
+  fi
+  if as_user_login "command -v clawkeepd" &>/dev/null; then
+    echo "  ClawKeep CLI already installed"
+    return 0
+  fi
+  if ! as_user_login "command -v pipx" &>/dev/null; then
+    echo "  Warning: pipx not found, skipping ClawKeep install" >&2
+    return 0
+  fi
+  echo "  Installing ClawKeep via pipx..."
+  # PEP 517 build via pipx — sidesteps PEP 668 and ensures a clean venv,
+  # avoiding the Jetson-style UNKNOWN-0.0.0 wheel failure the install.sh
+  # workaround was written for.
+  if ! as_user_login "pipx install --force '$PROJECT_DIR/clawkeep'"; then
+    echo "  Warning: clawkeep pipx install failed (non-fatal — restore/scheduler unavailable)" >&2
+    return 0
+  fi
+  # boto3 isn't pulled in by clawkeep's [project.dependencies]; inject it
+  # so cloud uploads work.
+  as_user_login "pipx inject clawkeep 'boto3>=1.34'" \
+    || echo "  Warning: boto3 inject failed (cloud backups unavailable)" >&2
+  if as_user_login "command -v clawkeepd" &>/dev/null; then
+    echo "  ClawKeep CLI installed"
+  else
+    echo "  Warning: clawkeepd still not on PATH after install" >&2
+  fi
+}
+
 step_start_ui() {
   fuser -k "$PORT/tcp" 2>/dev/null || true
   sleep 1
@@ -650,7 +682,7 @@ DISPATCH_STEPS=(
   openclaw_setup openclaw_install openclaw_patch openclaw_config
   directories_permissions
   ollama_install llamacpp_install chromium_install ai_tools_install
-  vnc_install ffmpeg_install fix_git_perms
+  vnc_install ffmpeg_install fix_git_perms clawkeep_install
   start_gateway start_ui
 )
 
@@ -674,7 +706,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=16
+TOTAL_STEPS=17
 step=0
 log() {
   step=$((step + 1))
@@ -724,6 +756,9 @@ step_vnc_install
 
 log "Installing ffmpeg..."
 step_ffmpeg_install
+
+log "Installing ClawKeep CLI..."
+step_clawkeep_install
 
 log "Starting OpenClaw gateway..."
 step_start_gateway
