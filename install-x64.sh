@@ -165,7 +165,7 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl python3-pip build-essential cmake ninja-build
+  apt-get install -y -qq git curl python3-pip pipx build-essential cmake ninja-build
   # Node.js 22 (required for production server — bun doesn't fire upgrade events)
   if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
     echo "  Node.js $(node --version) already installed"
@@ -487,13 +487,29 @@ step_llamacpp_install() {
     echo "  Installing llama.cpp build prerequisites..."
     wait_for_apt
     apt-get update -qq
-    apt-get install -y -qq git curl python3 python3-pip build-essential cmake ninja-build pkg-config
+    apt-get install -y -qq git curl python3 python3-pip pipx build-essential cmake ninja-build pkg-config
   fi
 
   if ! as_user_login "command -v hf" &>/dev/null; then
     echo "  Installing Hugging Face CLI..."
-    if ! as_user_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"; then
-      echo "Error: failed to install Hugging Face CLI" >&2
+    # Prefer pipx — pip --user is blocked by PEP 668 on Ubuntu 24.04+
+    # (externally-managed-environment). pipx isolates into its own venv
+    # and works regardless of distro Python policy.
+    if as_user_login "command -v pipx" &>/dev/null; then
+      # Wipe any stale user-pip-installed `hf` so pipx's symlink can win
+      # (pipx skips overwriting non-pipx files).
+      as_user rm -f "$CLAWBOX_HOME/.local/bin/hf" "$CLAWBOX_HOME/.local/bin/huggingface-cli" 2>/dev/null || true
+      if ! as_user_login "pipx install --force 'huggingface_hub[cli]'"; then
+        echo "Error: pipx install of huggingface_hub failed" >&2
+        return 1
+      fi
+      # Symlink into ~/.npm-global/bin — that dir is explicitly on the
+      # PATH that as_user_login exports, so the next `command -v hf`
+      # check finds it without depending on .profile sourcing ~/.local/bin.
+      as_user ln -sf "$CLAWBOX_HOME/.local/bin/hf" "$NPM_PREFIX/bin/hf"
+      as_user ln -sf "$CLAWBOX_HOME/.local/bin/huggingface-cli" "$NPM_PREFIX/bin/huggingface-cli"
+    elif ! as_user_login "python3 -m pip install --user --upgrade --break-system-packages 'huggingface_hub[cli]' 2>/dev/null || python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"; then
+      echo "Error: failed to install Hugging Face CLI (pipx not available, pip blocked by PEP 668)" >&2
       return 1
     fi
   else

@@ -38,8 +38,16 @@ import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/op
 import { isValidModelId } from "@/lib/provider-models";
 
 const OPENCLAW_BIN = findOpenclawBin();
-const AUTH_PROFILES_PATH =
-  "/home/clawbox/.openclaw/agents/main/agent/auth-profiles.json";
+const OPENCLAW_HOME_DIR =
+  process.env.OPENCLAW_HOME || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
+const AUTH_PROFILES_PATH = path.join(
+  OPENCLAW_HOME_DIR,
+  "agents",
+  "main",
+  "agent",
+  "auth-profiles.json",
+);
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
@@ -131,10 +139,10 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
     let settled = false;
     const child = spawn(cmd, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: "/home/clawbox",
+      cwd: CLAWBOX_HOME_DIR,
       uid: CLAWBOX_UID,
       gid: CLAWBOX_GID,
-      env: { ...process.env, HOME: "/home/clawbox" },
+      env: { HOME: "/home/clawbox", ...process.env },
     });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
@@ -640,7 +648,7 @@ export async function POST(request: Request) {
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
       ["openclaw.json", "openclaw.json.bak", "openclaw.json.bak.1", "openclaw.json.bak.2"]
-        .map(name => fs.chown(path.join("/home/clawbox/.openclaw", name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
+        .map(name => fs.chown(path.join(OPENCLAW_HOME_DIR, name), CLAWBOX_UID, CLAWBOX_GID).catch(() => {}))
     );
 
     // 6. Persist to ClawBox config store. Re-uses `resolvedClawboxTier`
