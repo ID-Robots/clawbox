@@ -1720,7 +1720,10 @@ log "Installing Ollama..."
 step_ollama_install
 
 log "Installing llama.cpp runtime..."
-step_llamacpp_install
+# TEMP: skip llama.cpp + Gemma download during flash to speed up install.
+# User installs from Settings UI → Install llama.cpp (or: bash install.sh --step llamacpp_install)
+echo "  SKIPPED — install from Settings UI post-install"
+# step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
