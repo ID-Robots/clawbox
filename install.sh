@@ -354,8 +354,27 @@ step_apt_update() {
     echo "  Node.js $(node --version) already installed"
   else
     echo "  Installing Node.js 22..."
+    # NodeSource's setup script will silently exit 0 even when its inner
+    # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
+    # first boot), and apt-get install nodejs then falls back to Ubuntu's
+    # libnode72 / nodejs 12. That breaks the build at step 8/23 with a
+    # confusing optional-chaining parse error inside node-gyp. Wait for the
+    # lock first, then validate the installed version.
+    wait_for_apt
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+    if ! node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
+      local got
+      got=$(node --version 2>/dev/null || echo "missing")
+      echo "Error: Node.js 22 install failed — \`node --version\` reports $got." >&2
+      echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
+      echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
+      echo "       and apt fell back to Ubuntu's Node 12. flash.sh's Phase 0 should" >&2
+      echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
+      echo "       rootfs to prevent this." >&2
+      exit 1
+    fi
     echo "  Node.js $(node --version) installed"
   fi
 }
