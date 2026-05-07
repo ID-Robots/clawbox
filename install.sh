@@ -219,12 +219,12 @@ print_native_build_preflight() {
     gpp_version="g++ missing"
   fi
 
-  if [ -d /usr/include/nodejs ]; then
+  if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
     node_header_dir="/usr/include/nodejs"
-  elif [ -d /usr/include/node ]; then
+  elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
     node_header_dir="/usr/include/node"
   else
-    node_header_dir="not found"
+    node_header_dir="auto (node-gyp will fetch into ~/.cache/node-gyp/<version>/)"
   fi
 
   echo "  Native build preflight:"
@@ -254,13 +254,20 @@ ensure_node_pty() {
     "$CLAWBOX_HOME/.cache/node-gyp" \
     "$PROJECT_DIR/node_modules" 2>/dev/null || true
 
+  # Only point node-gyp at system headers if they actually contain node_api.h
+  # for the running Node ABI. Ubuntu's libnode-dev / nodejs packages can leave
+  # a /usr/include/node directory that's missing node_api.h or holds headers
+  # for a Node version different from the one installed via NodeSource — both
+  # break the node-addon-api include chain. When neither path is usable, leave
+  # npm_config_nodedir unset so node-gyp auto-fetches matching headers into
+  # ~/.cache/node-gyp/<version>/.
   local rebuild_cmd="
     cd $PROJECT_DIR &&
     export npm_config_python=/usr/bin/python3 &&
     export npm_config_build_from_source=true &&
-    if [ -d /usr/include/nodejs ]; then
+    if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
       export npm_config_nodedir=/usr/include/nodejs
-    elif [ -d /usr/include/node ]; then
+    elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
       export npm_config_nodedir=/usr/include/node
     fi &&
     npm rebuild node-pty --foreground-scripts
