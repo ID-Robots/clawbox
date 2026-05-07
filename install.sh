@@ -1663,6 +1663,18 @@ step_validate_services() {
   # check fails by the deadline, after printing a per-failure table with a
   # systemctl status snippet for unit failures and a one-line reason for
   # probe failures.
+
+  # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
+  # export it, so on a fresh install our process still has it unset. Reload
+  # the file before probing.
+  if [ -f "$IFACE_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$IFACE_ENV"
+  elif [ -f /etc/clawbox/network.env ]; then
+    # shellcheck disable=SC1091
+    source /etc/clawbox/network.env
+  fi
+
   local deadline=$(( $(date +%s) + 30 ))
   local -a failed_active=() failed_installed=() failed_probe=()
 
