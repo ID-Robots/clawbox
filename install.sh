@@ -1013,8 +1013,10 @@ step_systemd_services() {
       if [ "$svc" = "$basename" ]; then registered=1; break; fi
     done
     if [ "$registered" = "0" ]; then
-      echo "Error: $basename exists in config/ but is not in ALL_SERVICES." >&2
-      echo "       Add it to step_systemd_services in install.sh so fresh installs pick it up." >&2
+      echo "Error: $basename exists in config/ but is not registered." >&2
+      echo "       Add it to EXPECTED_ACTIVE_SERVICES or EXPECTED_INSTALLED_SERVICES" >&2
+      echo "       (the module-level constants near the top of install.sh that feed ALL_SERVICES)" >&2
+      echo "       so fresh installs pick it up." >&2
       exit 1
     fi
   done
@@ -1675,6 +1677,19 @@ step_validate_services() {
     source /etc/clawbox/network.env
   fi
 
+  # In test mode, step_start_services skips clawbox-ap and clawbox-performance
+  # (no WiFi radio, no nvpmodel), so they will never come active here either.
+  # Filter them out of the expected set and skip the WiFi AP probe so CI runs
+  # don't fail on hardware that doesn't exist in the container.
+  local -a active_services=()
+  local s
+  for s in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
+    if is_test_mode && [[ "$s" == "clawbox-ap.service" || "$s" == "clawbox-performance.service" ]]; then
+      continue
+    fi
+    active_services+=("$s")
+  done
+
   local deadline=$(( $(date +%s) + 30 ))
   local -a failed_active=() failed_installed=() failed_probe=()
 
@@ -1684,7 +1699,7 @@ step_validate_services() {
     failed_probe=()
 
     local svc enabled active
-    for svc in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
+    for svc in "${active_services[@]}"; do
       if ! systemctl cat "$svc" >/dev/null 2>&1; then
         failed_active+=("$svc (unit file missing)")
         continue
@@ -1705,11 +1720,15 @@ step_validate_services() {
     done
 
     # Probe 1: Wi-Fi AP is broadcasting on $NETWORK_INTERFACE.
-    local iface="${NETWORK_INTERFACE:-}"
-    if [ -z "$iface" ]; then
-      failed_probe+=("WiFi: NETWORK_INTERFACE not set (check /etc/clawbox/network.env)")
-    elif ! iw dev "$iface" info 2>/dev/null | grep -qE '^[[:space:]]*type AP[[:space:]]*$'; then
-      failed_probe+=("WiFi: $iface is not in AP mode (clawbox-ap.service running but radio not broadcasting)")
+    # Skip in test mode — clawbox-ap.service was skipped above and the stub
+    # interface (eth0) isn't a wireless radio.
+    if ! is_test_mode; then
+      local iface="${NETWORK_INTERFACE:-}"
+      if [ -z "$iface" ]; then
+        failed_probe+=("WiFi: NETWORK_INTERFACE not set (check /etc/clawbox/network.env)")
+      elif ! iw dev "$iface" info 2>/dev/null | grep -qE '^[[:space:]]*type AP[[:space:]]*$'; then
+        failed_probe+=("WiFi: $iface is not in AP mode (clawbox-ap.service running but radio not broadcasting)")
+      fi
     fi
 
     # Probe 2: OpenClaw dashboard answers HTTP on localhost:80.
@@ -1726,7 +1745,8 @@ step_validate_services() {
   done
 
   local probe_count=2
-  local total=$(( ${#EXPECTED_ACTIVE_SERVICES[@]} + ${#EXPECTED_INSTALLED_SERVICES[@]} + probe_count ))
+  is_test_mode && probe_count=1
+  local total=$(( ${#active_services[@]} + ${#EXPECTED_INSTALLED_SERVICES[@]} + probe_count ))
   local fails=$(( ${#failed_active[@]} + ${#failed_installed[@]} + ${#failed_probe[@]} ))
   if [ "$fails" -eq 0 ]; then
     echo "  ✓ All $total checks healthy (services + WiFi AP + OpenClaw dashboard)"
