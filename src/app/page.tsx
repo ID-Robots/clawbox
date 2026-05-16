@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
+import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -1533,6 +1534,7 @@ function ChromeDesktopInner() {
       onDragLeave={handleDesktopDragLeave}
       onDrop={handleDesktopDrop}
     >
+      <TierUpgradeCelebration />
       {/* Drop overlay */}
       {desktopDragOver && (
         <div className="fixed inset-0 z-[99998] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">

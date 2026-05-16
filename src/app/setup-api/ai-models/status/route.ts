@@ -94,12 +94,15 @@ function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
  * @returns The badge-facing tier, or `null` for Free.
  */
 function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
+  const plan = (body.tier ?? "").trim().toLowerCase();
+  // Subscription plan is the source of truth — a stale or bogus
+  // deviceTier stamp on a Free account must never grant a paid badge.
+  if (plan !== "pro" && plan !== "max") return null;
+  // Paid: prefer the explicit device-pair stamp (lets Max subs run
+  // flash); otherwise map plan → device tier.
   const stamped = normalizeClawboxAiTier(body.deviceTier);
   if (stamped) return stamped;
-  const plan = (body.tier ?? "").trim().toLowerCase();
-  if (plan === "max") return "pro";
-  if (plan === "pro") return "flash";
-  return null;
+  return plan === "max" ? "pro" : "flash";
 }
 
 /**
@@ -247,13 +250,12 @@ export async function GET() {
     let accountTierSource: "portal" | "picker" = "picker";
     if (hasClawaiProfile) {
       clawaiAccountTier = localTier;
-      // Defence-in-depth: if the user never authorised a paid tier
-      // locally (localTier === null), keep the account tier null
-      // regardless of what the portal stamps. Skips the portal call
-      // entirely on the Free path — saves a 4 s cold-cache timeout
-      // on the render-path GET and avoids the portal-upgrade bug
-      // where a Free user gets deviceTier="flash" issued.
-      if (localTier !== null && clawaiToken) {
+      // Ask the portal whenever a clawai token is paired, regardless
+      // of whether we have a local tier yet. This is what makes
+      // Free → Paid upgrades visible without forcing a re-login.
+      // mapPortalTier now gates non-null returns on a paid plan, so
+      // a bogus deviceTier stamp can no longer promote a Free user.
+      if (clawaiToken) {
         const lookup = await fetchPortalTier(clawaiToken);
         if (lookup.source === "portal") {
           clawaiAccountTier = lookup.tier;
