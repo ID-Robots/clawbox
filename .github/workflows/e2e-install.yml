@@ -62,10 +62,20 @@ jobs:
             || (github.event_name == 'pull_request' && github.head_ref)
             || 'beta' }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR head
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@v4
         with:
-          # We need the `beta` branch reachable from the working tree so the
-          # updater can `git fetch origin beta`. Fetch tags too since the
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Checkout repository
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/checkout@v4
+        with:
+          # We need the target branch reachable from the working tree so the
+          # updater can `git fetch origin <branch>`. Fetch tags too since the
           # version check polls `git ls-remote --tags`.
           fetch-depth: 0
 
