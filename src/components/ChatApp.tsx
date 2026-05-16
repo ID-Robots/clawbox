@@ -10,6 +10,7 @@ import {
 } from '@/lib/chat-history-cache'
 
 import { renderText } from '@/lib/chat-markdown'
+import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
 import { prettifyAssistantText } from '@/lib/chat-sentinels'
@@ -321,11 +322,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
   }, [wsRequest])
 
-  // Handle file/image selection
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files) return
-    Array.from(files).forEach(file => {
+  // Read each image File as base64 and stage it as a pending attachment.
+  // Shared by the file-input change handler and the textarea paste handler.
+  const stageImageFiles = useCallback((files: File[]) => {
+    files.forEach(file => {
       if (!file.type.startsWith('image/')) return
       const reader = new FileReader()
       reader.onload = () => {
@@ -335,8 +335,22 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       }
       reader.readAsDataURL(file)
     })
-    e.target.value = ''
   }, [])
+
+  // <input type=file> change handler.
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files) return
+    stageImageFiles(Array.from(files))
+    e.target.value = ''
+  }, [stageImageFiles])
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = extractImageFilesFromClipboard(e)
+    if (imageFiles.length === 0) return
+    e.preventDefault()
+    stageImageFiles(imageFiles)
+  }, [stageImageFiles])
 
   const removePendingImage = useCallback((index: number) => {
     setPendingImages(prev => prev.filter((_, i) => i !== index))
@@ -738,6 +752,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
           disabled={status !== 'connected'}
           rows={1}

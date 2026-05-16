@@ -104,9 +104,10 @@ export async function POST(req: NextRequest) {
     if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
 
     try {
-      const result = await new Promise<{ name: string }>((resolve, reject) => {
+      const result = await new Promise<{ name: string; path: string }>((resolve, reject) => {
         const busboy = Busboy({ headers: { "content-type": contentType } });
         let fileName = "";
+        let absPath = "";
         const fileWrites: Promise<void>[] = [];
         let settled = false;
 
@@ -119,7 +120,7 @@ export async function POST(req: NextRequest) {
         const resolveOnce = () => {
           if (settled) return;
           settled = true;
-          resolve({ name: fileName });
+          resolve({ name: fileName, path: absPath });
         };
 
         busboy.on("file", (_field, fileStream, info) => {
@@ -130,6 +131,7 @@ export async function POST(req: NextRequest) {
             rejectOnce(new Error("Invalid destination"));
             return;
           }
+          absPath = destPath;
           const ws = fs.createWriteStream(destPath);
           const writePromise = pipeline(fileStream, ws).then(() => {});
           fileWrites.push(writePromise);
@@ -143,7 +145,7 @@ export async function POST(req: NextRequest) {
         const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
         nodeStream.pipe(busboy);
       });
-      return NextResponse.json({ ok: true, name: result.name });
+      return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
       return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
     }

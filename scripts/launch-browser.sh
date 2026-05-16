@@ -101,12 +101,16 @@ fi
 
 mkdir -p "$PROFILE"
 
-# In the e2e test container Chromium's namespace sandbox can't initialize
-# because AppArmor disables unprivileged user namespaces. The sandbox is
-# fine on real Jetson — so we only pass --no-sandbox when explicitly in
-# test mode, never in production.
+# Chromium's namespace sandbox can't initialize when the kernel restricts
+# unprivileged user namespaces — this is the default on Ubuntu 23.10+ via
+# AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`), and also
+# how the e2e test container is configured. In both cases there's no
+# meaningful additional security from the sandbox here (single-user
+# AI-controlled browser on an isolated profile, not a multi-tenant
+# browsing session), so disable it. Real Jetson keeps the sandbox.
 SANDBOX_FLAGS=()
-if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ]; then
+if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ] \
+   || [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
   SANDBOX_FLAGS=(--no-sandbox --disable-setuid-sandbox)
 fi
 
