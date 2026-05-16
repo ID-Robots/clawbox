@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const port = Number(process.env.PLAYWRIGHT_PORT || process.env.PORT || 3100);
+const baseURL = `http://localhost:${port}`;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -19,7 +22,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: "html",
   use: {
-    baseURL: "http://localhost:3000",
+    baseURL,
     trace: "on-first-retry",
     // CI runners share one `bun run dev` server across all sequential
     // tests (workers: 1). After ~35 tests the dev server gets sluggish
@@ -36,8 +39,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "bun run dev",
-    url: "http://localhost:3000",
+    command: `PORT=${port} bun run dev`,
+    url: baseURL,
     reuseExistingServer: !process.env.CI,
   },
 });

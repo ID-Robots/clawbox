@@ -674,8 +674,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       ws.send(JSON.stringify({
         type: 'req', id, method: 'connect',
         params: {
-          minProtocol: 3,
-          maxProtocol: 3,
+          minProtocol: 4,
+          maxProtocol: 4,
           client: {
             id: 'openclaw-control-ui',
             version: 'clawbox-chat',
