@@ -17,6 +17,7 @@ import * as kv from "@/lib/client-kv";
 // flow *does* re-celebrate, because the downgrade resets the seen marker.
 
 const SEEN_KEY = "clawai_tier_seen";
+const FREE_SEEN_VALUE = "free";
 
 // Tier ordering. Keep aligned with normalizeClawboxAiTier on the server
 // (flash = Pro plan, pro = Max plan).
@@ -77,7 +78,17 @@ export default function TierUpgradeCelebration() {
 
   useEffect(() => {
     if (loading) return;
-    const seen = kv.get(SEEN_KEY) || "";
+    const seen = kv.get(SEEN_KEY);
+    const currentSeenValue = tier ?? FREE_SEEN_VALUE;
+
+    // First observation on this browser/device is a baseline, not a
+    // transition. Without this guard, already-paid accounts see the
+    // celebration every time this feature reaches a fresh client cache.
+    if (seen === null) {
+      kv.set(SEEN_KEY, currentSeenValue);
+      return;
+    }
+
     const currentRank = rankOf(tier);
     const seenRank = rankOf(seen);
 
@@ -94,7 +105,7 @@ export default function TierUpgradeCelebration() {
     // Intermediate downgrade (Max → Pro) or no-change tick: silently
     // sync `seen` so a later climb back to the same tier doesn't re-fire
     // the celebration the user already saw.
-    if (seen !== (tier ?? "")) kv.set(SEEN_KEY, tier ?? "");
+    if (seen !== currentSeenValue) kv.set(SEEN_KEY, currentSeenValue);
   }, [tier, loading]);
 
   if (!dialog) return null;
@@ -103,7 +114,7 @@ export default function TierUpgradeCelebration() {
     if (dialog.kind === "upgrade") {
       kv.set(SEEN_KEY, dialog.tier);
     } else {
-      kv.set(SEEN_KEY, "");
+      kv.set(SEEN_KEY, FREE_SEEN_VALUE);
     }
     setDialog(null);
   };

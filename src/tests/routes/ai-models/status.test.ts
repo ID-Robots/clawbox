@@ -381,8 +381,9 @@ describe("/setup-api/ai-models/status", () => {
 
     it("returns clawaiAccountTier=null but clawaiConfigured=true for a Free user chatting via OpenAI", async () => {
       // Free user with a paired clawai token but no paid local picker
-      // → defence-in-depth keeps the portal call skipped, so
-      // clawaiAccountTier stays null. clawaiConfigured is true so the
+      // → the portal is still consulted so a later Free → Paid upgrade
+      // is visible without forcing a re-login. The Free portal verdict
+      // keeps clawaiAccountTier null. clawaiConfigured is true so the
       // hook reports loggedIn=true (Free users have a paired account).
       mockReadConfig.mockResolvedValue({
         auth: {
@@ -395,6 +396,10 @@ describe("/setup-api/ai-models/status", () => {
         models: { providers: { deepseek: { apiKey: "claw_test456" } } },
       } as never);
       mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
 
       const res = await GET();
       const body = await res.json();
@@ -402,7 +407,7 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiTier).toBeNull();
       expect(body.clawaiAccountTier).toBeNull();
       expect(body.clawaiConfigured).toBe(true);
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
     it("emits clawaiTier=clawaiAccountTier when ClawBox AI is the active chat provider", async () => {
