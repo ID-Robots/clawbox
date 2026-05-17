@@ -298,7 +298,13 @@ fi
 # every chat attempt. Detect the codex provider in config and install
 # the plugin idempotently here — mirrors OpenClaw's own
 # `modelSelectionShouldEnsureCodexPlugin` detection logic.
-CODEX_PLUGIN_DIR="/home/clawbox/.openclaw/npm/node_modules/@openclaw/codex"
+# Derive the plugin directory from $OPENCLAW_CONFIG instead of hard-
+# coding `/home/clawbox/...` so the script works for non-default
+# clawbox users / per-user installs. `dirname $OPENCLAW_CONFIG`
+# resolves to `~/.openclaw`, the same root OpenClaw's own plugin
+# installer writes under (`<openclaw-home>/npm/node_modules/...`).
+OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
+CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -307,7 +313,13 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     print("0"); sys.exit(0)
 primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary") or ""
-profiles = cfg.get("auth", {}).get("profiles", {}) or {}
+# Defensive: `cfg["auth"]` may be missing, `None`, or a corrupted
+# scalar on a hand-edited config. Match the same isinstance pattern
+# used at line 131 for openrouter so a malformed auth block doesn't
+# crash pre-start and silently skip the codex install.
+auth = cfg.get("auth")
+profiles_raw = auth.get("profiles", {}) if isinstance(auth, dict) else {}
+profiles = profiles_raw if isinstance(profiles_raw, dict) else {}
 uses_codex = (
     isinstance(primary, str) and primary.lower().startswith("openai-codex/")
 ) or any(
