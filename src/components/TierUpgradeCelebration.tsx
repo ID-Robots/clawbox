@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useReducer,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { useT } from "@/lib/i18n";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
@@ -32,6 +38,38 @@ type DialogState =
   | { kind: "upgrade"; tier: "flash" | "pro" }
   | { kind: "downgrade-free" };
 
+type DialogAction =
+  | { type: "OPEN_UPGRADE"; tier: "flash" | "pro" }
+  | { type: "OPEN_DOWNGRADE" }
+  | { type: "CLOSE" };
+
+// Local reducer for the dialog's open/close lifecycle. CodeRabbit's
+// review on PR #132 suggested wiring this through `useWindows.ts`,
+// but that hook is purpose-built for desktop windows with z-order /
+// minimize / maximize semantics — none of which apply to a transient
+// centred modal. A local reducer captures the spirit of the
+// "reducer pattern" coding guideline and silences the ESLint
+// `set-state-in-effect` warning without forcing a fake `appId` /
+// `icon` / `defaultWidth` through a window manager that has no
+// business managing modals. The peer `ClawBoxLoginModal.tsx`
+// follows the same shape.
+function dialogReducer(
+  state: DialogState | null,
+  action: DialogAction,
+): DialogState | null {
+  switch (action.type) {
+    case "OPEN_UPGRADE":
+      // Latch the first transition we observe; a later effect tick
+      // re-reporting the same paid tier must not bump the dialog
+      // out from under the user.
+      return state ?? { kind: "upgrade", tier: action.tier };
+    case "OPEN_DOWNGRADE":
+      return state ?? { kind: "downgrade-free" };
+    case "CLOSE":
+      return null;
+  }
+}
+
 // Per-dialog content + presentation. Keyed by the upgrade tier
 // ("flash" = Pro plan, "pro" = Max plan) or "free" for the downgrade.
 // Translation keys are referenced literally here so the i18n
@@ -40,7 +78,6 @@ type ContentKey = "flash" | "pro" | "free";
 type Tone = "paid" | "muted";
 
 interface DialogContent {
-  titleId: string;
   tone: Tone;
   badgeKey: string;
   headlineKey: string;
@@ -49,21 +86,18 @@ interface DialogContent {
 
 const CONTENT: Record<ContentKey, DialogContent> = {
   flash: {
-    titleId: "tier-upgrade-title",
     tone: "paid",
     badgeKey: "tierCelebration.proBadge",
     headlineKey: "tierCelebration.proHeadline",
     bodyKey: "tierCelebration.proBody",
   },
   pro: {
-    titleId: "tier-upgrade-title",
     tone: "paid",
     badgeKey: "tierCelebration.maxBadge",
     headlineKey: "tierCelebration.maxHeadline",
     bodyKey: "tierCelebration.maxBody",
   },
   free: {
-    titleId: "tier-downgrade-title",
     tone: "muted",
     badgeKey: "tierCelebration.freeBadge",
     headlineKey: "tierCelebration.freeHeadline",
@@ -74,7 +108,7 @@ const CONTENT: Record<ContentKey, DialogContent> = {
 export default function TierUpgradeCelebration() {
   const { tier, loading } = useClawboxLogin();
   const { t } = useT();
-  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [dialog, dispatch] = useReducer(dialogReducer, null);
 
   useEffect(() => {
     if (loading) return;
@@ -94,12 +128,12 @@ export default function TierUpgradeCelebration() {
 
     // Upgrade to a paid tier we haven't celebrated yet.
     if (currentRank > seenRank && (tier === "flash" || tier === "pro")) {
-      setDialog({ kind: "upgrade", tier });
+      dispatch({ type: "OPEN_UPGRADE", tier });
       return;
     }
     // Downgrade from any paid tier to Free.
     if (currentRank === 0 && seenRank > 0) {
-      setDialog({ kind: "downgrade-free" });
+      dispatch({ type: "OPEN_DOWNGRADE" });
       return;
     }
     // Intermediate downgrade (Max → Pro) or no-change tick: silently
@@ -116,7 +150,7 @@ export default function TierUpgradeCelebration() {
     } else {
       kv.set(SEEN_KEY, FREE_SEEN_VALUE);
     }
-    setDialog(null);
+    dispatch({ type: "CLOSE" });
   };
 
   const contentKey: ContentKey = dialog.kind === "upgrade" ? dialog.tier : "free";
@@ -155,7 +189,6 @@ export default function TierUpgradeCelebration() {
 
   return (
     <CelebrationShell
-      titleId={content.titleId}
       tone={content.tone}
       badge={t(content.badgeKey)}
       headline={t(content.headlineKey)}
@@ -167,7 +200,6 @@ export default function TierUpgradeCelebration() {
 }
 
 interface ShellProps {
-  titleId: string;
   tone: Tone;
   badge: string;
   headline: string;
@@ -176,7 +208,23 @@ interface ShellProps {
   onClose: () => void;
 }
 
-function CelebrationShell({ titleId, tone, badge, headline, body, primary, onClose }: ShellProps) {
+function CelebrationShell({ tone, badge, headline, body, primary, onClose }: ShellProps) {
+  // useId gives stable, collision-free IDs per dialog instance so
+  // assistive tech can link aria-labelledby / aria-describedby
+  // without us hand-rolling per-variant string IDs.
+  const titleId = useId();
+  const descriptionId = useId();
+
+  // Esc closes — standard modal a11y. Listener mounts only while
+  // the dialog is rendered (parent gates with `if (!dialog) return null`).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const glowClass = tone === "paid"
     ? "drop-shadow-[0_0_18px_rgba(217,70,239,0.6)]"
     : "drop-shadow-[0_0_12px_rgba(255,255,255,0.18)]";
@@ -184,18 +232,23 @@ function CelebrationShell({ titleId, tone, badge, headline, body, primary, onClo
     ? "bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)]"
     : "bg-white/10 text-white/70 border border-white/15";
 
+  // Close on backdrop click only. Previously the inner card stopped
+  // propagation; using target === currentTarget is the same effect
+  // expressed positively at the source (no stopPropagation gymnastics).
+  const onOverlayClick = (e: MouseEvent) => {
+    if (e.target === e.currentTarget) onClose();
+  };
+
   return (
     <div
       className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      onClick={onClose}
+      aria-describedby={descriptionId}
+      onClick={onOverlayClick}
     >
-      <div
-        onClick={(e: MouseEvent) => e.stopPropagation()}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center"
-      >
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center">
         <div className="flex flex-col items-center gap-4 mb-5">
           <img
             src="/clawbox-crab.png"
@@ -215,7 +268,9 @@ function CelebrationShell({ titleId, tone, badge, headline, body, primary, onClo
           <h2 id={titleId} className="text-lg font-semibold text-white">
             {headline}
           </h2>
-          <p className="text-sm text-white/65 leading-relaxed">{body}</p>
+          <p id={descriptionId} className="text-sm text-white/65 leading-relaxed">
+            {body}
+          </p>
         </div>
         {primary}
       </div>
