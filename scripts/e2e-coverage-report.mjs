@@ -5,7 +5,8 @@ const ROOT = process.cwd();
 const TEST_RESULTS_DIR = path.join(ROOT, "test-results");
 const SUMMARY_PATH = path.join(ROOT, "coverage", "e2e-summary.json");
 const BUNDLES_PATH = path.join(ROOT, "coverage", "e2e-bundles.json");
-const BASE_ORIGIN = "http://localhost:3000";
+const coveragePort = Number(process.env.PLAYWRIGHT_PORT || process.env.PORT || 3100);
+const BASE_ORIGIN = process.env.PLAYWRIGHT_BASE_URL || `http://localhost:${coveragePort}`;
 // Baseline for current e2e suite. Raise this as new tests land — but never
 // drop it without explicit reason, since this is the regression backstop.
 //

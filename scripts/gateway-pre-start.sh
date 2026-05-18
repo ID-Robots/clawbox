@@ -287,6 +287,56 @@ else:
 PY
 fi
 
+# Ensure @openclaw/codex runtime plugin is installed if any agent uses
+# the openai-codex provider. OpenClaw 2026.5.12 split the codex harness
+# out of the core gateway into a separate npm package and only auto-
+# installs it during `openclaw onboard --auth-choice openai-codex…`.
+# Our configure route writes openclaw.json directly (see the schema-
+# drift note in src/app/setup-api/ai-models/configure/route.ts), so
+# devices that pick a Codex model never trigger the install and the
+# gateway logs `Requested agent harness "codex" is not registered` on
+# every chat attempt. Detect the codex provider in config and install
+# the plugin idempotently here — mirrors OpenClaw's own
+# `modelSelectionShouldEnsureCodexPlugin` detection logic.
+# Derive the plugin directory from $OPENCLAW_CONFIG instead of hard-
+# coding `/home/clawbox/...` so the script works for non-default
+# clawbox users / per-user installs. `dirname $OPENCLAW_CONFIG`
+# resolves to `~/.openclaw`, the same root OpenClaw's own plugin
+# installer writes under (`<openclaw-home>/npm/node_modules/...`).
+OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
+CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
+NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    print("0"); sys.exit(0)
+primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary") or ""
+# Defensive: `cfg["auth"]` may be missing, `None`, or a corrupted
+# scalar on a hand-edited config. Match the same isinstance pattern
+# used at line 131 for openrouter so a malformed auth block doesn't
+# crash pre-start and silently skip the codex install.
+auth = cfg.get("auth")
+profiles_raw = auth.get("profiles", {}) if isinstance(auth, dict) else {}
+profiles = profiles_raw if isinstance(profiles_raw, dict) else {}
+uses_codex = (
+    isinstance(primary, str) and primary.lower().startswith("openai-codex/")
+) or any(
+    (isinstance(k, str) and k.lower().startswith("openai-codex:")) or
+    (isinstance(v, dict) and isinstance(v.get("provider"), str)
+     and v["provider"].lower() == "openai-codex")
+    for k, v in profiles.items()
+)
+print("1" if uses_codex else "0")
+PY
+)"
+if [ "$NEEDS_CODEX_PLUGIN" = "1" ] && [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  echo "  Installing @openclaw/codex runtime plugin (codex model selected)…"
+  "$OPENCLAW_BIN" plugins install codex >/dev/null 2>&1 \
+    || echo "  WARN: openclaw plugins install codex failed; Codex chats will fail until resolved"
+fi
+
 # Register ClawBox MCP server (only if not already set). Kept as a CLI
 # call because MCP config has richer schema validation in the CLI path
 # and we only hit this branch on fresh installs / factory resets.

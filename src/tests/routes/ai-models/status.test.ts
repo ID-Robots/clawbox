@@ -177,21 +177,65 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("portal");
     });
 
-    it("returns clawaiTier=null and skips the portal call when local picker is unset", async () => {
-      // Defence-in-depth against a portal-side upgrade bug: a Free user
-      // who never picked a paid pill should never see a paid badge.
-      // We short-circuit the portal call too — saves the 4 s timeout
-      // on cold cache and avoids depending on portal correctness for
-      // the Free path.
+    it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {
+      // Free users who paired without picking a paid pill ALSO need the
+      // portal lookup so a later upgrade is detected without forcing
+      // a re-login. mapPortalTier now guarantees a paid response —
+      // a stale deviceTier stamp on a Free plan can no longer promote
+      // the user, so we can safely query the portal regardless of the
+      // local picker state.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
 
       const res = await GET();
       const body = await res.json();
 
       expect(body.clawaiTier).toBeNull();
-      expect(body.tierSource).toBe("picker");
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(body.clawaiAccountTier).toBeNull();
+      expect(body.tierSource).toBe("portal");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("detects a Free → Pro portal upgrade without a stored local picker", async () => {
+      // The core bug this PR fixes: a user signed in as Free (no
+      // local clawai_tier stored) upgrades on the portal. The next
+      // status poll surfaces the new paid tier — no re-login required.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "pro", deviceTier: null }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTier).toBe("flash");
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.tierSource).toBe("portal");
+    });
+
+    it("ignores a stale deviceTier=flash stamp when the portal still reports Free", async () => {
+      // mapPortalTier defends against a portal-side bug where a Free
+      // user could receive a paid deviceTier stamp. Without this
+      // guard the badge would falsely promote a Free user.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTier).toBeNull();
+      expect(body.clawaiAccountTier).toBeNull();
+      expect(body.tierSource).toBe("portal");
     });
 
     it("returns clawaiTier=null on portal 403 (invalid token) and caches the verdict", async () => {
@@ -337,8 +381,9 @@ describe("/setup-api/ai-models/status", () => {
 
     it("returns clawaiAccountTier=null but clawaiConfigured=true for a Free user chatting via OpenAI", async () => {
       // Free user with a paired clawai token but no paid local picker
-      // → defence-in-depth keeps the portal call skipped, so
-      // clawaiAccountTier stays null. clawaiConfigured is true so the
+      // → the portal is still consulted so a later Free → Paid upgrade
+      // is visible without forcing a re-login. The Free portal verdict
+      // keeps clawaiAccountTier null. clawaiConfigured is true so the
       // hook reports loggedIn=true (Free users have a paired account).
       mockReadConfig.mockResolvedValue({
         auth: {
@@ -351,6 +396,10 @@ describe("/setup-api/ai-models/status", () => {
         models: { providers: { deepseek: { apiKey: "claw_test456" } } },
       } as never);
       mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
 
       const res = await GET();
       const body = await res.json();
@@ -358,7 +407,7 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiTier).toBeNull();
       expect(body.clawaiAccountTier).toBeNull();
       expect(body.clawaiConfigured).toBe(true);
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
     it("emits clawaiTier=clawaiAccountTier when ClawBox AI is the active chat provider", async () => {

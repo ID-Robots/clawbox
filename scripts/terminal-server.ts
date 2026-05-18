@@ -33,9 +33,11 @@ wss.on("connection", (ws: WebSocket, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[terminal-server] New connection from ${remote}`);
 
-  // Spawn a PTY as the clawbox user (not root)
-  const targetUser = "clawbox";
-  const targetHome = `/home/${targetUser}`;
+  // Spawn a PTY as the user running the ClawBox UI (clawbox on Jetson,
+  // whatever user installed on x64). Derive from $USER/$HOME with the
+  // historical clawbox/clawbox values as a final fallback.
+  const targetUser = process.env.USER || process.env.LOGNAME || os.userInfo().username || "clawbox";
+  const targetHome = process.env.HOME || os.homedir() || `/home/${targetUser}`;
   const shell = "/bin/bash";
   const cleanEnv: Record<string, string> = {
     HOME: targetHome,
