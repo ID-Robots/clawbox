@@ -59,6 +59,32 @@ try {
   console.warn("[production-server] Failed to set up session secret:", err.message);
 }
 
+// ─── MCP bearer token ───
+// Per-install token the ClawBox MCP server (mcp/clawbox-mcp.ts) uses to
+// authenticate back to /setup-api/* — see src/lib/mcp-token.ts. The MCP
+// runs as a stdio subprocess of openclaw and has no session cookie, so
+// without this every tool call from a Codex / Claude agent gets 307'd
+// to /login (POSTs surface as 405, GETs receive the login HTML page).
+// Seeded here so middleware.ts can resolve the same value via env on
+// the very first request, before src/lib/mcp-token.ts would lazily mint
+// one. gateway-pre-start.sh reads the same file to inject the value
+// into the MCP server's env when registering it with openclaw.
+const MCP_TOKEN_PATH = path.join(__dirname, "data", ".mcp-token");
+try {
+  let mcpToken;
+  try {
+    mcpToken = fs.readFileSync(MCP_TOKEN_PATH, "utf-8").trim();
+  } catch {}
+  if (!mcpToken || mcpToken.length < 32) {
+    mcpToken = require("crypto").randomBytes(32).toString("hex");
+    fs.mkdirSync(path.dirname(MCP_TOKEN_PATH), { recursive: true });
+    fs.writeFileSync(MCP_TOKEN_PATH, mcpToken, { mode: 0o600 });
+  }
+  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
+} catch (err) {
+  console.warn("[production-server] Failed to set up MCP token:", err.message);
+}
+
 // ─── Local-AI bearer token ───
 // Per-install token openclaw uses to call our /setup-api/local-ai/* proxy.
 // Mirrors the session secret bootstrap so middleware + the proxy route can

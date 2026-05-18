@@ -23,6 +23,14 @@ import { resolve, relative, dirname, extname, join, basename } from "path";
 // ══════════════════════════════════════════════════════════════════════
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
+// Per-install bearer token gateway-pre-start.sh injects into our env so
+// we can authenticate to /setup-api/* (which is session-cookie-gated by
+// src/middleware.ts after setup completes). Without this, every API
+// call from the MCP — GET or POST — gets 307'd to /login: POSTs
+// surface as 405 (login is GET-only), GETs return the login HTML page
+// that JSON.parse chokes on with "Failed to parse JSON". See
+// src/lib/mcp-token.ts for the matching verifier.
+const API_TOKEN = process.env.CLAWBOX_MCP_TOKEN || "";
 const HOME = process.env.HOME || "/home/clawbox";
 const DEFAULT_CWD = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const COMMAND_TIMEOUT = 30_000;
@@ -67,7 +75,14 @@ const CLAWBOX_MCP_INSTRUCTIONS = `${CLAWBOX_STUB}\n\n${BROWSER_ROUTING_INSTRUCTI
 // ══════════════════════════════════════════════════════════════════════
 
 async function api(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, options);
+  // Inject the MCP bearer on every call. middleware.ts accepts this for
+  // /setup-api/* paths in lieu of a session cookie; without it we hit
+  // the 307→/login redirect described at the API_TOKEN definition.
+  const headers = new Headers(options?.headers);
+  if (API_TOKEN && !headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${API_TOKEN}`);
+  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`API ${res.status}: ${body}`);
