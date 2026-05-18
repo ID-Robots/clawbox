@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
+import { verifyMcpBearer } from "@/lib/mcp-token";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -223,6 +224,21 @@ export async function middleware(request: NextRequest) {
   // boots under CLAWBOX_TEST_MODE.
   if (process.env.CLAWBOX_TEST_MODE === "1" && pathname.startsWith("/setup-api/")) {
     return NextResponse.next();
+  }
+
+  // 3c. MCP server bearer-token bypass. The ClawBox MCP runs as a stdio
+  // subprocess of openclaw (mcp/clawbox-mcp.ts) and has no session
+  // cookie, so every /setup-api/* fetch it makes would be 307'd to
+  // /login without this carve-out — POSTs surface as 405, GETs return
+  // HTML that JSON.parse chokes on. Mirrors the local-ai-proxy pattern:
+  // service-to-service auth via a per-install bearer (see
+  // src/lib/mcp-token.ts), scoped to /setup-api/* only so the dashboard
+  // and login flow still go through the normal session gate.
+  if (pathname.startsWith("/setup-api/")) {
+    const authHeader = request.headers.get("authorization");
+    if (authHeader && verifyMcpBearer(authHeader)) {
+      return NextResponse.next();
+    }
   }
 
   // 4. Check session cookie
