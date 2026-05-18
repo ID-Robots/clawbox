@@ -1,17 +1,18 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
-// Each test gets its own temp directory + module cache reset so the
-// module-level `cached` value and file-system state don't leak across
-// cases. The module reads CLAWBOX_ROOT once at import time to derive
-// the token path, so we set it before dynamic import.
+// The module reads CLAWBOX_ROOT once at import time to derive the
+// token path, so every test that needs a different root has to load
+// a fresh copy of the module. `vi.resetModules()` clears Vitest's
+// registry so the next dynamic import re-runs the module's top-level
+// code with the current env.
 async function loadModule(tmpDir: string) {
   process.env.CLAWBOX_ROOT = tmpDir;
   delete process.env.CLAWBOX_MCP_TOKEN;
-  // Bust the import cache so the new CLAWBOX_ROOT is picked up.
-  const mod = await import(`@/lib/mcp-token?cachebust=${Date.now()}-${Math.random()}`);
+  vi.resetModules();
+  const mod = await import("@/lib/mcp-token");
   mod._resetMcpTokenCacheForTests();
   return mod;
 }
@@ -52,7 +53,8 @@ describe("mcp-token", () => {
 
     process.env.CLAWBOX_ROOT = tmpDir;
     process.env.CLAWBOX_MCP_TOKEN = "env-override-token-must-be-long-enough";
-    const mod = await import(`@/lib/mcp-token?cachebust=${Date.now()}-${Math.random()}`);
+    vi.resetModules();
+    const mod = await import("@/lib/mcp-token");
     mod._resetMcpTokenCacheForTests();
 
     expect(mod.getMcpToken()).toBe("env-override-token-must-be-long-enough");
