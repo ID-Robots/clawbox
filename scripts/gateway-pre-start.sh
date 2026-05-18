@@ -368,11 +368,23 @@ chmod 600 "$MCP_TOKEN_FILE"
 # update (token already current) without paying the ~10 s cost of
 # `openclaw config set`.
 #
-# Split the assignment from the export so `set -euo pipefail` catches
-# a failed `cat` (e.g. permission drift, mount issue). The combined
-# `export VAR="$(cmd)"` form swallows command-substitution failures
-# and the Python block would silently exit 0 with an empty token.
+# Validate explicitly before exporting. `set -euo pipefail` doesn't
+# catch a non-failing-but-empty `cat` (the file exists but is empty,
+# or the read returned no bytes), and `export VAR="$(cmd)"` masks
+# command-substitution exit codes entirely. Without this guard the
+# Python block would `sys.exit(0)` on an empty token and silently
+# skip the openclaw.json reconcile — leaving the MCP subprocess
+# with a stale or missing CLAWBOX_MCP_TOKEN and every tool call
+# 307'd to /login again.
+if [ ! -r "$MCP_TOKEN_FILE" ]; then
+  echo "  ERROR: MCP token file is not readable: $MCP_TOKEN_FILE" >&2
+  exit 1
+fi
 CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
+if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
+  echo "  ERROR: MCP token file is empty: $MCP_TOKEN_FILE" >&2
+  exit 1
+fi
 export CLAWBOX_MCP_TOKEN_VAL
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
