@@ -80,6 +80,12 @@ try {
     fs.mkdirSync(path.dirname(MCP_TOKEN_PATH), { recursive: true });
     fs.writeFileSync(MCP_TOKEN_PATH, mcpToken, { mode: 0o600 });
   }
+  // Re-harden mode on every boot. fs.writeFileSync only applies mode
+  // when creating; an existing file from an older install (or one
+  // that drifted to broader perms via manual edit) would otherwise
+  // stay readable to other local users. The bearer is the sole
+  // /setup-api/* credential, so don't trust a reused file's perms.
+  fs.chmodSync(MCP_TOKEN_PATH, 0o600);
   process.env.CLAWBOX_MCP_TOKEN = mcpToken;
 } catch (err) {
   console.warn("[production-server] Failed to set up MCP token:", err.message);

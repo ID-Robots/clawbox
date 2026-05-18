@@ -355,15 +355,25 @@ if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || e
   else
     head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
   fi
-  chmod 600 "$MCP_TOKEN_FILE"
 fi
+# Re-harden mode unconditionally: chmod only ran on the regeneration
+# path before, so a file with drifted permissions (manual edit, upgrade
+# from a pre-0600 build) would keep being trusted as-is. The bearer
+# is the sole /setup-api/* credential.
+chmod 600 "$MCP_TOKEN_FILE"
 
 # Always reconcile the MCP server registration in openclaw.json with
 # the current token. Done in Python so the atomic-rename pattern used
 # elsewhere in this script applies — and so we can detect a no-op
 # update (token already current) without paying the ~10 s cost of
 # `openclaw config set`.
-export CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
+#
+# Split the assignment from the export so `set -euo pipefail` catches
+# a failed `cat` (e.g. permission drift, mount issue). The combined
+# `export VAR="$(cmd)"` form swallows command-substitution failures
+# and the Python block would silently exit 0 with an empty token.
+CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
+export CLAWBOX_MCP_TOKEN_VAL
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
