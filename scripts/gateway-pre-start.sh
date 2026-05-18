@@ -337,12 +337,95 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ] && [ ! -f "$CODEX_PLUGIN_DIR/package.json" ];
     || echo "  WARN: openclaw plugins install codex failed; Codex chats will fail until resolved"
 fi
 
-# Register ClawBox MCP server (only if not already set). Kept as a CLI
-# call because MCP config has richer schema validation in the CLI path
-# and we only hit this branch on fresh installs / factory resets.
-if ! python3 -c "import json; c=json.load(open('$OPENCLAW_CONFIG')); assert c.get('mcp',{}).get('servers',{}).get('clawbox',{}).get('command')" 2>/dev/null; then
-  "$OPENCLAW_BIN" config set mcp.servers.clawbox '{"command":"/home/clawbox/.bun/bin/bun","args":["run","/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],"env":{"CLAWBOX_API_BASE":"http://127.0.0.1:80"}}' --json 2>/dev/null || true
+# Ensure the per-install MCP bearer token exists and is wired into the
+# openclaw MCP server registration. The token lets the MCP subprocess
+# (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
+# without it, middleware.ts 307s every tool call to /login: POSTs
+# surface as 405 ("Method Not Allowed" on the GET-only login route)
+# and GETs receive the login HTML page that JSON.parse chokes on
+# ("Failed to parse JSON"). See src/lib/mcp-token.ts for the matching
+# verifier. production-server.js also seeds this file at Next.js boot;
+# we mirror that here so the gateway can register the MCP server even
+# if it comes up before clawbox-setup on a fresh boot.
+MCP_TOKEN_FILE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/.mcp-token"
+if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
+  mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$MCP_TOKEN_FILE"
+  else
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
+  fi
 fi
+# Re-harden mode unconditionally: chmod only ran on the regeneration
+# path before, so a file with drifted permissions (manual edit, upgrade
+# from a pre-0600 build) would keep being trusted as-is. The bearer
+# is the sole /setup-api/* credential.
+chmod 600 "$MCP_TOKEN_FILE"
+
+# Always reconcile the MCP server registration in openclaw.json with
+# the current token. Done in Python so the atomic-rename pattern used
+# elsewhere in this script applies — and so we can detect a no-op
+# update (token already current) without paying the ~10 s cost of
+# `openclaw config set`.
+#
+# Validate explicitly before exporting. `set -euo pipefail` doesn't
+# catch a non-failing-but-empty `cat` (the file exists but is empty,
+# or the read returned no bytes), and `export VAR="$(cmd)"` masks
+# command-substitution exit codes entirely. Without this guard the
+# Python block would `sys.exit(0)` on an empty token and silently
+# skip the openclaw.json reconcile — leaving the MCP subprocess
+# with a stale or missing CLAWBOX_MCP_TOKEN and every tool call
+# 307'd to /login again.
+if [ ! -r "$MCP_TOKEN_FILE" ]; then
+  echo "  ERROR: MCP token file is not readable: $MCP_TOKEN_FILE" >&2
+  exit 1
+fi
+CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
+if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
+  echo "  ERROR: MCP token file is empty: $MCP_TOKEN_FILE" >&2
+  exit 1
+fi
+export CLAWBOX_MCP_TOKEN_VAL
+python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys, tempfile
+
+cfg_path = sys.argv[1]
+token = os.environ.get("CLAWBOX_MCP_TOKEN_VAL", "")
+if not token:
+    sys.exit(0)
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(0)
+
+desired = {
+    "command": "/home/clawbox/.bun/bin/bun",
+    "args": ["run", "/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],
+    "env": {
+        "CLAWBOX_API_BASE": "http://127.0.0.1:80",
+        "CLAWBOX_MCP_TOKEN": token,
+    },
+}
+mcp_servers = cfg.setdefault("mcp", {}).setdefault("servers", {})
+if mcp_servers.get("clawbox") == desired:
+    print("  MCP server registration already current, skipping write")
+    sys.exit(0)
+mcp_servers["clawbox"] = desired
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp_path, cfg_path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except Exception:
+        pass
+    raise
+print("  Updated MCP server registration with bearer token")
+PY
+unset CLAWBOX_MCP_TOKEN_VAL
 
 # Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
 # context includes ClawBox-specific guidance (where user-installed skills
