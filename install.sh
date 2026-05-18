@@ -39,6 +39,29 @@ GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 
+# ── Service registry ─────────────────────────────────────────────────────────
+# Authoritative list of clawbox systemd units. Used by step_systemd_services
+# (install/enable) and step_validate_services (post-install health check).
+#
+# ACTIVE: must be enabled and active after install.
+# INSTALLED: unit file must exist on disk but the unit is not required to be
+# active because it is opt-in (clawbox-tunnel, clawbox-browser), one-shot
+# driven by a timer (clawbox-heartbeat.service), or a template that is never
+# activated standalone (clawbox-root-update@.service).
+EXPECTED_ACTIVE_SERVICES=(
+  clawbox-ap.service
+  clawbox-setup.service
+  clawbox-gateway.service
+  clawbox-performance.service
+  clawbox-heartbeat.timer
+)
+EXPECTED_INSTALLED_SERVICES=(
+  clawbox-heartbeat.service
+  clawbox-browser.service
+  clawbox-tunnel.service
+  "clawbox-root-update@.service"
+)
+
 # Load persisted WiFi interface if available
 IFACE_ENV="$PROJECT_DIR/data/network.env"
 if [ -f "$IFACE_ENV" ]; then
@@ -196,12 +219,12 @@ print_native_build_preflight() {
     gpp_version="g++ missing"
   fi
 
-  if [ -d /usr/include/nodejs ]; then
+  if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
     node_header_dir="/usr/include/nodejs"
-  elif [ -d /usr/include/node ]; then
+  elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
     node_header_dir="/usr/include/node"
   else
-    node_header_dir="not found"
+    node_header_dir="auto (node-gyp will fetch into ~/.cache/node-gyp/<version>/)"
   fi
 
   echo "  Native build preflight:"
@@ -231,13 +254,20 @@ ensure_node_pty() {
     "$CLAWBOX_HOME/.cache/node-gyp" \
     "$PROJECT_DIR/node_modules" 2>/dev/null || true
 
+  # Only point node-gyp at system headers if they actually contain node_api.h
+  # for the running Node ABI. Ubuntu's libnode-dev / nodejs packages can leave
+  # a /usr/include/node directory that's missing node_api.h or holds headers
+  # for a Node version different from the one installed via NodeSource — both
+  # break the node-addon-api include chain. When neither path is usable, leave
+  # npm_config_nodedir unset so node-gyp auto-fetches matching headers into
+  # ~/.cache/node-gyp/<version>/.
   local rebuild_cmd="
     cd $PROJECT_DIR &&
     export npm_config_python=/usr/bin/python3 &&
     export npm_config_build_from_source=true &&
-    if [ -d /usr/include/nodejs ]; then
+    if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
       export npm_config_nodedir=/usr/include/nodejs
-    elif [ -d /usr/include/node ]; then
+    elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
       export npm_config_nodedir=/usr/include/node
     fi &&
     npm rebuild node-pty --foreground-scripts
@@ -324,8 +354,27 @@ step_apt_update() {
     echo "  Node.js $(node --version) already installed"
   else
     echo "  Installing Node.js 22..."
+    # NodeSource's setup script will silently exit 0 even when its inner
+    # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
+    # first boot), and apt-get install nodejs then falls back to Ubuntu's
+    # libnode72 / nodejs 12. That breaks the build at step 8/23 with a
+    # confusing optional-chaining parse error inside node-gyp. Wait for the
+    # lock first, then validate the installed version.
+    wait_for_apt
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+    if ! node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
+      local got
+      got=$(node --version 2>/dev/null || echo "missing")
+      echo "Error: Node.js 22 install failed — \`node --version\` reports $got." >&2
+      echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
+      echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
+      echo "       and apt fell back to Ubuntu's Node 12. flash.sh's Phase 0 should" >&2
+      echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
+      echo "       rootfs to prevent this." >&2
+      exit 1
+    fi
     echo "  Node.js $(node --version) installed"
   fi
 }
@@ -963,7 +1012,7 @@ step_system_config() {
 }
 
 step_systemd_services() {
-  local ALL_SERVICES=(clawbox-ap.service clawbox-setup.service clawbox-gateway.service clawbox-performance.service "clawbox-root-update@.service" clawbox-browser.service clawbox-tunnel.service clawbox-heartbeat.service clawbox-heartbeat.timer)
+  local ALL_SERVICES=("${EXPECTED_ACTIVE_SERVICES[@]}" "${EXPECTED_INSTALLED_SERVICES[@]}")
   # Drift guard: every *.service / *.timer in config/ must be in
   # ALL_SERVICES, otherwise a new unit added to the repo would silently
   # not get installed on fresh devices. The opposite direction (units
@@ -983,8 +1032,10 @@ step_systemd_services() {
       if [ "$svc" = "$basename" ]; then registered=1; break; fi
     done
     if [ "$registered" = "0" ]; then
-      echo "Error: $basename exists in config/ but is not in ALL_SERVICES." >&2
-      echo "       Add it to step_systemd_services in install.sh so fresh installs pick it up." >&2
+      echo "Error: $basename exists in config/ but is not registered." >&2
+      echo "       Add it to EXPECTED_ACTIVE_SERVICES or EXPECTED_INSTALLED_SERVICES" >&2
+      echo "       (the module-level constants near the top of install.sh that feed ALL_SERVICES)" >&2
+      echo "       so fresh installs pick it up." >&2
       exit 1
     fi
   done
@@ -1628,6 +1679,113 @@ step_browser_launch() {
   DISPLAY=:99 bash "$PROJECT_DIR/scripts/launch-browser.sh"
 }
 
+step_validate_services() {
+  # Polls expected units + functional probes for up to 30 s. Exits 1 if any
+  # check fails by the deadline, after printing a per-failure table with a
+  # systemctl status snippet for unit failures and a one-line reason for
+  # probe failures.
+
+  # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
+  # export it, so on a fresh install our process still has it unset. Reload
+  # the file before probing.
+  if [ -f "$IFACE_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$IFACE_ENV"
+  elif [ -f /etc/clawbox/network.env ]; then
+    # shellcheck disable=SC1091
+    source /etc/clawbox/network.env
+  fi
+
+  # In test mode, step_start_services skips clawbox-ap and clawbox-performance
+  # (no WiFi radio, no nvpmodel), so they will never come active here either.
+  # Filter them out of the expected set and skip the WiFi AP probe so CI runs
+  # don't fail on hardware that doesn't exist in the container.
+  local -a active_services=()
+  local s
+  for s in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
+    if is_test_mode && [[ "$s" == "clawbox-ap.service" || "$s" == "clawbox-performance.service" ]]; then
+      continue
+    fi
+    active_services+=("$s")
+  done
+
+  local deadline=$(( $(date +%s) + 30 ))
+  local -a failed_active=() failed_installed=() failed_probe=()
+
+  while :; do
+    failed_active=()
+    failed_installed=()
+    failed_probe=()
+
+    local svc enabled active
+    for svc in "${active_services[@]}"; do
+      if ! systemctl cat "$svc" >/dev/null 2>&1; then
+        failed_active+=("$svc (unit file missing)")
+        continue
+      fi
+      enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+      active=$(systemctl is-active "$svc" 2>/dev/null || true)
+      [ -z "$enabled" ] && enabled="unknown"
+      [ -z "$active" ] && active="unknown"
+      case "$enabled" in
+        enabled|enabled-runtime|alias|static) ;;
+        *) failed_active+=("$svc enabled=$enabled active=$active"); continue ;;
+      esac
+      [ "$active" = "active" ] || failed_active+=("$svc enabled=$enabled active=$active")
+    done
+
+    for svc in "${EXPECTED_INSTALLED_SERVICES[@]}"; do
+      systemctl cat "$svc" >/dev/null 2>&1 || failed_installed+=("$svc (unit file missing)")
+    done
+
+    # Probe 1: Wi-Fi AP is broadcasting on $NETWORK_INTERFACE.
+    # Skip in test mode — clawbox-ap.service was skipped above and the stub
+    # interface (eth0) isn't a wireless radio.
+    if ! is_test_mode; then
+      local iface="${NETWORK_INTERFACE:-}"
+      if [ -z "$iface" ]; then
+        failed_probe+=("WiFi: NETWORK_INTERFACE not set (check /etc/clawbox/network.env)")
+      elif ! iw dev "$iface" info 2>/dev/null | grep -qE '^[[:space:]]*type AP[[:space:]]*$'; then
+        failed_probe+=("WiFi: $iface is not in AP mode (clawbox-ap.service running but radio not broadcasting)")
+      fi
+    fi
+
+    # Probe 2: OpenClaw dashboard answers HTTP on localhost:80.
+    local http_code
+    http_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null) || http_code="000"
+    case "$http_code" in
+      2*|3*) ;;
+      *) failed_probe+=("OpenClaw: dashboard at http://localhost/ returned HTTP $http_code (expected 2xx or 3xx)") ;;
+    esac
+
+    [ ${#failed_active[@]} -eq 0 ] && [ ${#failed_installed[@]} -eq 0 ] && [ ${#failed_probe[@]} -eq 0 ] && break
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 2
+  done
+
+  local probe_count=2
+  is_test_mode && probe_count=1
+  local total=$(( ${#active_services[@]} + ${#EXPECTED_INSTALLED_SERVICES[@]} + probe_count ))
+  local fails=$(( ${#failed_active[@]} + ${#failed_installed[@]} + ${#failed_probe[@]} ))
+  if [ "$fails" -eq 0 ]; then
+    echo "  ✓ All $total checks healthy (services + WiFi AP + OpenClaw dashboard)"
+    return 0
+  fi
+
+  echo "  ✗ $fails of $total checks failed:"
+  local entry unit_name
+  for entry in "${failed_active[@]}" "${failed_installed[@]}"; do
+    echo "    - $entry"
+    unit_name="${entry%% *}"
+    systemctl status "$unit_name" --no-pager -n 5 2>&1 | sed 's/^/        /' || true
+    echo
+  done
+  for entry in "${failed_probe[@]}"; do
+    echo "    - $entry"
+  done
+  return 1
+}
+
 # ── Single-step mode (used by clawbox-root-update@.service) ──────────────────
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
@@ -1640,7 +1798,7 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown post_update
+  nm_dispatcher sysctl_linkdown post_update validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then
@@ -1664,7 +1822,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=22
+TOTAL_STEPS=23
 step=0
 log() {
   step=$((step + 1))
@@ -1720,7 +1878,10 @@ log "Installing Ollama..."
 step_ollama_install
 
 log "Installing llama.cpp runtime..."
-step_llamacpp_install
+# TEMP: skip llama.cpp + Gemma download during flash to speed up install.
+# User installs from Settings UI → Install llama.cpp (or: bash install.sh --step llamacpp_install)
+echo "  SKIPPED — install from Settings UI post-install"
+# step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
@@ -1747,6 +1908,9 @@ ensure_clawbox_bashrc_path
 
 log "Starting services..."
 step_start_services
+
+log "Validating services..."
+step_validate_services
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
