@@ -520,18 +520,26 @@ export default function VNCApp() {
   }, []);
 
   const sendPaste = useCallback(async () => {
+    // Rapid Ctrl+Enter / double-click can re-enter this callback before the
+    // `disabled` flag from setPasteBusy lands. Hard-guard so we never double-
+    // post the clipboard or double-inject Ctrl+V into the focused field.
+    if (pasteBusy) return;
     const text = pasteText;
     if (!text) return;
     setPasteBusy(true);
     setPasteError(null);
-    const ok = await writeAndPaste(text);
-    setPasteBusy(false);
+    let ok = false;
+    try {
+      ok = await writeAndPaste(text);
+    } finally {
+      setPasteBusy(false);
+    }
     if (!ok) return;
     pasteOpenRef.current = false;
     setPasteOpen(false);
     setPasteText("");
     focusVncSurface();
-  }, [focusVncSurface, pasteText, writeAndPaste]);
+  }, [focusVncSurface, pasteBusy, pasteText, writeAndPaste]);
 
   // Reads the *real* UTF-8 selection from the guest X CLIPBOARD via xclip,
   // ignoring the Latin-1-mangled payload that noVNC's `clipboard` event
@@ -734,7 +742,12 @@ export default function VNCApp() {
         </div>
       )}
       {copyToast && status === "connected" && (
-        <div className="absolute top-3 right-3 z-30 flex items-start gap-2 p-3 rounded-lg bg-black/85 backdrop-blur-sm border border-white/15 shadow-xl max-w-xs">
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="absolute top-3 right-3 z-30 flex items-start gap-2 p-3 rounded-lg bg-black/85 backdrop-blur-sm border border-white/15 shadow-xl max-w-xs"
+        >
           <span className="material-symbols-rounded text-orange-300 mt-0.5" style={{ fontSize: 18 }}>content_copy</span>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-white mb-1">

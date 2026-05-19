@@ -1005,8 +1005,15 @@ function PairChallengeCard({
       </div>
 
       {phase && (
-        <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-          <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+        <div
+          className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            aria-hidden="true"
+            className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin"
+          />
           {phase === "configuring"
             ? t("clawkeep.pair.savingToken")
             : t("clawkeep.pair.waitingAuthorization")}

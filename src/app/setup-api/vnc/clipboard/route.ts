@@ -46,6 +46,8 @@ function runXclip(args: string[], display: string, input?: string): Promise<Xcli
     });
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let outputTooLarge = false;
     let settled = false;
     const settle = (result: XclipResult) => {
       if (settled) return;
@@ -58,7 +60,17 @@ function runXclip(args: string[], display: string, input?: string): Promise<Xcli
       settle({ stdout, stderr: `${stderr}\n[xclip] timed out`, code: -1 });
     }, XCLIP_TIMEOUT_MS);
     if (proc.stdout) {
-      proc.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
+      // Cap the buffer so a giant guest selection can't spike Jetson RAM
+      // and force a 1 MiB+ JSON serialisation hop into the browser.
+      proc.stdout.on("data", (d: Buffer) => {
+        stdoutBytes += d.byteLength;
+        if (stdoutBytes > MAX_CLIPBOARD_BYTES) {
+          outputTooLarge = true;
+          proc.kill("SIGTERM");
+          return;
+        }
+        stdout += d.toString("utf8");
+      });
     }
     if (proc.stderr) {
       proc.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
@@ -71,7 +83,11 @@ function runXclip(args: string[], display: string, input?: string): Promise<Xcli
     });
     proc.on("close", (code) => {
       clearTimeout(timer);
-      settle({ stdout, stderr, code: code ?? -1 });
+      settle({
+        stdout,
+        stderr: outputTooLarge ? `${stderr}\n[xclip] clipboard exceeds 1 MiB cap` : stderr,
+        code: outputTooLarge ? 413 : (code ?? -1),
+      });
     });
     if (isWrite && proc.stdin) {
       proc.stdin.end(input, "utf8");
@@ -108,6 +124,15 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  // Reject oversized requests before buffering — on the Jetson, an attacker
+  // (or just a paste-happy user) could otherwise force the device to read
+  // a multi-MB body into RAM only to 413 it after the fact. +32 bytes is
+  // headroom for the `{"text":"..."}` JSON wrapper.
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(contentLength) && contentLength > MAX_CLIPBOARD_BYTES + 32) {
+    return NextResponse.json({ error: "text exceeds 1 MiB cap" }, { status: 413 });
+  }
+
   let parsed: unknown;
   try {
     parsed = await request.json();
