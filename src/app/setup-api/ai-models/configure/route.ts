@@ -35,7 +35,8 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId } from "@/lib/provider-models";
+import { isValidModelId, isCatalogProvider } from "@/lib/provider-models";
+import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -837,6 +838,25 @@ export async function POST(request: Request) {
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
       const primaryProvider = config.defaultModel.split("/", 1)[0];
       await setProviderPlugins(primaryProvider);
+    }
+
+    // 8c. Kick off a catalog refresh for the just-configured provider so
+    //     the picker shows the full live model list instead of whatever
+    //     the boot-time warmup found before the user added their API key.
+    //     Without this, a device that adds Anthropic / OpenAI / etc. credentials
+    //     after first boot stays stuck on the pre-auth snapshot — which is
+    //     often a single fallback entry or empty — until the next service
+    //     restart. The refresh runs out-of-band; we don't await it. Single-
+    //     flight guarded inside refreshInBackground, so concurrent configure
+    //     calls collapse to one openclaw fork.
+    //
+    //     `ocProvider` is the openclaw-side provider id (e.g. "anthropic",
+    //     "openai", "openai-codex", "google", "deepseek"). The catalog uses
+    //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
+    //     Skip providers that aren't part of the catalog (local-only, llamacpp).
+    const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
+    if (isCatalogProvider(catalogProvider)) {
+      refreshCatalogInBackground(catalogProvider);
     }
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model

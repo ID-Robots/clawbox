@@ -276,7 +276,9 @@ export default function ClawKeepApp() {
       );
       setPairChallenge(start);
       setPairPhase("pending");
-      window.open(start.verification_url, "_blank", "noopener,noreferrer");
+      // No auto-open — the modal shows the code + an "Open authorization
+      // page" button so the user reads the code before focus shifts to the
+      // portal tab. Mirrors the ClawAI subscription-tab UX.
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -492,6 +494,8 @@ export default function ClawKeepApp() {
               challenge={pairChallenge}
               phase={pairPhase}
               onCancel={onCancelPair}
+              onGetNewCode={onPair}
+              busy={busy === "pair"}
             />
           ) : status.paired ? (
             <>
@@ -918,10 +922,14 @@ function PairChallengeCard({
   challenge,
   phase,
   onCancel,
+  onGetNewCode,
+  busy,
 }: {
   challenge: PairStartResponse;
   phase: "" | "pending" | "configuring";
   onCancel: () => void;
+  onGetNewCode: () => void;
+  busy: boolean;
 }) {
   const { t } = useT();
   const code = challenge.user_code;
@@ -956,54 +964,80 @@ function PairChallengeCard({
   }, [code, flashCopied]);
 
   return (
-    <div className={`${CARD} space-y-4`}>
-      <h2 className="font-semibold">
-        {phase === "configuring"
-          ? t("clawkeep.pair.configuring")
-          : t("clawkeep.pair.enterCode")}
-      </h2>
-      <div className="flex items-center justify-center gap-2 py-2">
-        <span
-          className="select-all cursor-text px-4 py-2 rounded-lg bg-black/40 border border-white/10 font-mono text-2xl tracking-[0.2em] text-orange-200"
-          aria-label={t("clawkeep.pair.codeAriaLabel")}
-        >
-          {code}
-        </span>
-        <button
-          type="button"
-          onClick={onCopyClick}
-          aria-label={copied ? t("clawkeep.pair.codeCopied") : t("clawkeep.pair.copyCode")}
-          className="px-2.5 py-2 rounded-md text-xs font-medium text-orange-300 bg-black/30 border border-white/10 hover:bg-black/50 cursor-pointer transition-colors"
-        >
-          {copied ? t("clawkeep.pair.copied") : t("clawkeep.pair.copy")}
-        </button>
-      </div>
-      <p className="text-sm text-[var(--text-muted)] text-center">
-        {t("clawkeep.pair.typeCodeOnPortal")}
+    <div className={`${CARD} space-y-3`}>
+      <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+        {t("clawkeep.pair.intro")}
       </p>
-      <div className="flex justify-center gap-2">
+      <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
         <a
           href={challenge.verification_url}
           target="_blank"
-          rel="noreferrer"
-          className="text-xs text-orange-300 hover:text-orange-200 underline"
+          rel="noopener noreferrer"
+          className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
         >
-          {t("clawkeep.pair.reopenPortal")}
+          {t("ai.openAuthPage")}
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>
+            open_in_new
+          </span>
         </a>
+        <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">
+          {t("clawkeep.pair.thenEnterCode")}
+        </p>
+        <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
+          <span
+            className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all"
+            aria-label={t("clawkeep.pair.codeAriaLabel")}
+          >
+            {code}
+          </span>
+          <button
+            type="button"
+            onClick={onCopyClick}
+            aria-label={copied ? t("clawkeep.pair.codeCopied") : t("clawkeep.pair.copyCode")}
+            className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
+          >
+            {copied ? t("clawkeep.pair.copied") : t("clawkeep.pair.copy")}
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-[var(--text-muted)]">
+          {t("clawkeep.pair.codeExpires")}
+        </p>
+      </div>
+
+      {phase && (
+        <div
+          className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            aria-hidden="true"
+            className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin"
+          />
+          {phase === "configuring"
+            ? t("clawkeep.pair.savingToken")
+            : t("clawkeep.pair.waitingAuthorization")}
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onGetNewCode}
+          disabled={busy}
+          className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {t("clawkeep.pair.getNewCode")}
+        </button>
         <span className="text-xs text-[var(--text-muted)]">·</span>
         <button
           type="button"
           onClick={onCancel}
-          className="text-xs text-[var(--text-muted)] hover:text-gray-200"
+          className="bg-transparent border-none text-xs text-[var(--text-muted)] hover:text-gray-200 cursor-pointer p-0"
         >
           {t("clawkeep.cancel")}
         </button>
       </div>
-      <p className="text-xs text-[var(--text-muted)] text-center">
-        {phase === "configuring"
-          ? t("clawkeep.pair.savingToken")
-          : t("clawkeep.pair.waitingApproval")}
-      </p>
     </div>
   );
 }

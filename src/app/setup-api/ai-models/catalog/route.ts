@@ -4,7 +4,7 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
-import { CATALOG_PROVIDERS, isCatalogProvider } from "@/lib/provider-models";
+import { CATALOG_PROVIDERS, isCatalogProvider, PROVIDER_CATALOGS } from "@/lib/provider-models";
 
 export const dynamic = "force-dynamic";
 
@@ -148,6 +148,21 @@ interface OpenRouterListResponse {
   }>;
 }
 
+// Deprecated model ids we filter out of the catalog regardless of
+// whether the upstream tagged them as such. Anthropic's
+// `openclaw models list --provider anthropic` returns
+// `claude-sonnet-4-20250514` without a `deprecated` tag on
+// Claude.ai OAuth scopes, but Anthropic's own docs
+// (https://platform.claude.com/docs/en/about-claude/models) list
+// it (and the matching opus-4 snapshot) as retiring 2026-06-15.
+// Surfacing them in the picker just sets users up to pick a model
+// that will stop working. Add new ids here when Anthropic ships
+// the next deprecation notice.
+const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
+  "claude-sonnet-4-20250514",
+  "claude-opus-4-20250514",
+]);
+
 // Per-provider allowlist regex. When set, only model ids matching the
 // pattern survive the catalog filter. Used to curate noisy upstream
 // catalogs down to a useful set without the picker exploding to 40+
@@ -199,6 +214,7 @@ function transformOpenclawEntries(
       : entry.key;
     if (!id) continue;
     if (entry.tags?.includes("deprecated")) continue;
+    if (DEPRECATED_MODEL_IDS.has(id)) continue;
     if (allowed && !allowed.test(id)) continue;
     out.push({
       id,
@@ -240,15 +256,60 @@ const ALLOW_CUSTOM_BY_PROVIDER: Record<string, boolean> = {
   clawai: false,
 };
 
+// Context-window lookup for static-catalog entries we know about but the
+// live upstream enumeration didn't return. Values from each provider's
+// official model docs. Used only as a fallback for `augmentWithStaticCatalog`;
+// when the live catalog includes the same id its real contextWindow wins.
+const STATIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  // Anthropic — https://platform.claude.com/docs/en/about-claude/models
+  "claude-opus-4-7": 1_000_000,
+  "claude-opus-4-6": 1_000_000,
+  "claude-sonnet-4-6": 1_000_000,
+  "claude-sonnet-4-5": 200_000,
+  "claude-opus-4-5": 200_000,
+  "claude-haiku-4-5": 200_000,
+};
+
+// Merge the curated static list from PROVIDER_CATALOGS into the live
+// upstream models. Live entries take precedence (their contextWindow /
+// input / label reflect what the gateway actually negotiated). Static
+// entries with ids the live list doesn't include get appended — this
+// covers the case where a provider's OAuth scope returns a single
+// deprecated model (Anthropic Claude.ai consumer OAuth is the live
+// example: 2025-11 docs list claude-opus-4-7 / claude-sonnet-4-6 /
+// claude-haiku-4-5 as current, but `openclaw models list --provider
+// anthropic` on a Claude.ai-OAuth device only returns the deprecated
+// claude-sonnet-4-20250514). The picker would otherwise force the
+// user to type custom model ids by hand.
+function augmentWithStaticCatalog(provider: string, live: CatalogModel[]): CatalogModel[] {
+  if (!isCatalogProvider(provider)) return live;
+  const staticEntry = PROVIDER_CATALOGS[provider];
+  if (!staticEntry) return live;
+  const liveIds = new Set(live.map((m) => m.id));
+  const augmented: CatalogModel[] = [...live];
+  for (const sm of staticEntry.models) {
+    if (liveIds.has(sm.id)) continue;
+    augmented.push({
+      id: sm.id,
+      label: sm.label,
+      contextWindow: STATIC_MODEL_CONTEXT_WINDOWS[sm.id] ?? 200_000,
+      hint: sm.hint,
+    });
+  }
+  augmented.sort(compareCatalogModels);
+  return augmented;
+}
+
 function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse {
+  const merged = augmentWithStaticCatalog(provider, models);
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
-  const defaultModelId = models.find((m) => m.id === fallbackDefault)?.id
-    ?? models[0]?.id
+  const defaultModelId = merged.find((m) => m.id === fallbackDefault)?.id
+    ?? merged[0]?.id
     ?? fallbackDefault
     ?? "";
   return {
     provider,
-    models,
+    models: merged,
     defaultModelId,
     allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
     fetchedAt: Date.now(),
@@ -330,8 +391,11 @@ async function fetchOpenRouterCatalog(): Promise<CatalogModel[]> {
 // Refresh the catalog for `provider` in the background. Returns
 // immediately; the actual openclaw spawn / openrouter fetch runs out
 // of band. Single-flight via `refreshing` so concurrent requests
-// collapse to one fork.
-function refreshInBackground(provider: string): void {
+// collapse to one fork. Exported so configure/route.ts can trigger a
+// refresh right after the user adds an API key — otherwise the
+// catalog stays on the pre-auth snapshot from boot warmup until the
+// next service restart.
+export function refreshInBackground(provider: string): void {
   if (refreshing.has(provider)) return;
   refreshing.add(provider);
 
