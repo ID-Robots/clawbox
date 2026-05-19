@@ -41,6 +41,16 @@ const PORTAL_FETCH_TIMEOUT_MS = 4_000;
 // reset / multi-account dev churn — but a long-running process would
 // otherwise leak entries forever.
 const PORTAL_TIER_CACHE_MAX_ENTRIES = 64;
+// Short negative-cache window for tokens whose last portal lookup
+// resolved to `unreachable` (4xx auth failure, 5xx, or network
+// error). With useClawboxLogin polling every 30s, this caps the
+// per-device portal load during a sustained auth-failure or
+// outage at ~1 request per 30s (down from 1-per-poll). Smaller
+// than PORTAL_TIER_CACHE_TTL_MS because the positive cache is
+// safe to hold longer; an unreachable verdict needs to clear
+// quickly enough that recovery (token re-pair, portal recovers)
+// shows up on the next poll, not minutes later.
+const PORTAL_UNREACHABLE_TTL_MS = 30_000;
 
 interface DeviceInfoResponse {
   tier?: string;
@@ -57,6 +67,10 @@ interface PortalCacheEntry {
 }
 
 const portalTierCache = new Map<string, PortalCacheEntry>();
+// token → epoch-ms timestamp when its unreachable verdict expires.
+// Separate from portalTierCache because the value is "we tried and
+// it failed, don't try again yet" rather than "the answer is null".
+const portalUnreachableCache = new Map<string, number>();
 const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 
 /**
@@ -111,11 +125,15 @@ function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
  *
  * Cache semantics:
  *   - 200 OK: parsed tier is cached for `PORTAL_TIER_CACHE_TTL_MS`.
- *   - 401 / 403: a definitive "no entitlement" verdict is also cached
- *     so we don't re-hammer the portal for invalid tokens.
- *   - 5xx / network error: cache untouched; caller falls back to the
- *     locally-stored picker selection so the badge doesn't flicker
- *     during transient portal outages.
+ *   - Non-200 / network error: token is marked unreachable for
+ *     `PORTAL_UNREACHABLE_TTL_MS` so we don't hit the portal every
+ *     30 s status poll during a sustained auth failure or outage.
+ *     A successful 200 clears the unreachable mark so recovery is
+ *     responsive.
+ *
+ * 401/403 are deliberately treated the same as 5xx/network errors
+ * (unreachable) rather than as a definitive "Free" verdict — see
+ * the non-200 branch in the body for the rationale.
  *
  * @param token The bearer token to look up.
  * @returns Either a definitive `{ source: "portal", tier }` answer or
@@ -126,10 +144,19 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
   const cached = portalTierCache.get(token);
   if (cached && cached.expiresAt > now) return { source: "portal", tier: cached.tier };
 
+  const unreachableUntil = portalUnreachableCache.get(token);
+  if (unreachableUntil !== undefined && unreachableUntil > now) {
+    return { source: "unreachable" };
+  }
+
   const existing = inFlightPortalLookups.get(token);
   if (existing) return existing;
 
   const promise = (async (): Promise<PortalLookup> => {
+    const markUnreachable = (): PortalLookup => {
+      portalUnreachableCache.set(token, now + PORTAL_UNREACHABLE_TTL_MS);
+      return { source: "unreachable" };
+    };
     try {
       const res = await fetch(PORTAL_DEVICE_INFO_URL, {
         headers: { Authorization: `Bearer ${token}` },
@@ -139,26 +166,18 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
         rememberTier(token, tier, now);
+        portalUnreachableCache.delete(token);
         return { source: "portal", tier };
       }
-      // 401/403 is ambiguous: it can mean "user is genuinely Free"
-      // OR "token was revoked / migrated / corrupted on a still-paid
-      // account" (e.g. portal admin revoke, account merge, backend
-      // cleanup). We can't tell from the response alone — both are
-      // status codes the portal returns when the bearer can't be
-      // resolved to a paid entitlement. Treating these as a
-      // definitive Free verdict silently downgrades paid users whose
-      // auth happens to be broken, and also fires the
-      // downgrade-to-Free celebration popup. Fall through to the
-      // unreachable branch instead: badge stays on `localTier` (last
-      // known good), no celebration triggers, and the next
-      // successful poll re-establishes truth. Also: deliberately
-      // *not* cached, so a token that recovers (re-pair, portal
-      // recovers from a transient state) is picked up on the next
-      // poll instead of waiting out the 120 s TTL on the stale null.
-      return { source: "unreachable" };
+      // 401/403 is ambiguous: it can mean genuinely Free OR token
+      // revoked / migrated / corrupted on a still-paid account. We
+      // can't tell from the response alone, and treating it as
+      // "Free" silently downgrades paid users with broken auth (and
+      // fires the downgrade-celebration popup). Mark unreachable
+      // instead so callers preserve localTier.
+      return markUnreachable();
     } catch {
-      return { source: "unreachable" };
+      return markUnreachable();
     }
   })();
 
@@ -176,6 +195,7 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
  * a clean module-state. Not for production use.
  */
 export function _resetPortalTierCache() {
+  portalUnreachableCache.clear();
   portalTierCache.clear();
   inFlightPortalLookups.clear();
 }

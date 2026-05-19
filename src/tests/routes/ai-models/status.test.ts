@@ -239,12 +239,6 @@ describe("/setup-api/ai-models/status", () => {
     });
 
     it("preserves localTier on portal 401/403 (auth lost, might still be paid)", async () => {
-      // Portal 401/403 is ambiguous: it can mean "user is genuinely
-      // Free" OR "token was revoked / migrated / corrupted on a still-
-      // paid account". We can't tell which from the response alone,
-      // so we fall back to localTier — the device keeps showing the
-      // user's last-known tier instead of silently downgrading to
-      // Free (which would also fire the downgrade-celebration popup).
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");
       fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 403 }));
@@ -256,21 +250,10 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
-    it("does not cache the auth-failure verdict — recovers on next poll", async () => {
-      // Old behaviour cached the 401/403 as a definitive null for the
-      // full 120 s TTL, so a token that recovered (re-pair, portal
-      // un-revoke, transient backend issue) couldn't be picked up
-      // until the cache expired. Now the auth-lost path returns
-      // `unreachable` which is uncached — the second poll re-tries
-      // the portal immediately and sees the fresh tier.
+    it("negative-caches an unreachable verdict so back-to-back polls don't hammer the portal", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");
-      fetchSpy
-        .mockResolvedValueOnce(new Response("invalid_token", { status: 401 }))
-        .mockResolvedValueOnce(new Response(
-          JSON.stringify({ tier: "max", deviceTier: "pro" }),
-          { status: 200 },
-        ));
+      fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 401 }));
 
       const first = await (await GET()).json();
       const second = await (await GET()).json();
@@ -278,8 +261,10 @@ describe("/setup-api/ai-models/status", () => {
       expect(first.clawaiTier).toBe("pro");
       expect(first.tierSource).toBe("picker");
       expect(second.clawaiTier).toBe("pro");
-      expect(second.tierSource).toBe("portal");
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(second.tierSource).toBe("picker");
+      // Second call inside the unreachable TTL must hit the negative
+      // cache instead of re-fetching from the portal.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
     it("falls back to the locally-stored tier when the portal is unreachable", async () => {
