@@ -331,9 +331,22 @@ uses_codex = (
 print("1" if uses_codex else "0")
 PY
 )"
-if [ "$NEEDS_CODEX_PLUGIN" = "1" ] && [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
-  echo "  Installing @openclaw/codex runtime plugin (codex model selected)…"
-  "$OPENCLAW_BIN" plugins install codex >/dev/null 2>&1 \
+# Also check the nested peer-dep symlink. `openclaw plugins install
+# codex` writes `<codex>/node_modules/openclaw -> <global openclaw>`
+# alongside the package.json; if that symlink is missing or dangling
+# (partial install, openclaw upgrade that cleared the nested
+# node_modules, manual cleanup) the codex plugin loads but its
+# top-level imports fail at runtime with:
+#   Error: Cannot find package 'openclaw' imported from
+#   .../@openclaw/codex/dist/shared-client-…js
+# Checking only the package.json misses that broken state. `-e`
+# follows symlinks, so it catches both "missing" and "dangling".
+# `--force` on install rebuilds the symlink without reinstalling
+# unnecessary content when the package directory is already there.
+CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
+if [ "$NEEDS_CODEX_PLUGIN" = "1" ] && { [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; }; then
+  echo "  Installing/repairing @openclaw/codex runtime plugin (codex model selected)…"
+  "$OPENCLAW_BIN" plugins install codex --force >/dev/null 2>&1 \
     || echo "  WARN: openclaw plugins install codex failed; Codex chats will fail until resolved"
 fi
 

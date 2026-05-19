@@ -141,14 +141,21 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
         rememberTier(token, tier, now);
         return { source: "portal", tier };
       }
-      // 401/403 are definitive — the portal *did* answer, the token just
-      // doesn't entitle anything. Cache so we don't re-hammer for the
-      // TTL. 5xx and network errors leave the cache untouched and let
-      // callers fall back to the locally-stored picker selection.
-      if (res.status === 401 || res.status === 403) {
-        rememberTier(token, null, now);
-        return { source: "portal", tier: null };
-      }
+      // 401/403 is ambiguous: it can mean "user is genuinely Free"
+      // OR "token was revoked / migrated / corrupted on a still-paid
+      // account" (e.g. portal admin revoke, account merge, backend
+      // cleanup). We can't tell from the response alone — both are
+      // status codes the portal returns when the bearer can't be
+      // resolved to a paid entitlement. Treating these as a
+      // definitive Free verdict silently downgrades paid users whose
+      // auth happens to be broken, and also fires the
+      // downgrade-to-Free celebration popup. Fall through to the
+      // unreachable branch instead: badge stays on `localTier` (last
+      // known good), no celebration triggers, and the next
+      // successful poll re-establishes truth. Also: deliberately
+      // *not* cached, so a token that recovers (re-pair, portal
+      // recovers from a transient state) is picked up on the next
+      // poll instead of waiting out the 120 s TTL on the stale null.
       return { source: "unreachable" };
     } catch {
       return { source: "unreachable" };
