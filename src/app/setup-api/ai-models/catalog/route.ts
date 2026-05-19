@@ -330,8 +330,11 @@ async function fetchOpenRouterCatalog(): Promise<CatalogModel[]> {
 // Refresh the catalog for `provider` in the background. Returns
 // immediately; the actual openclaw spawn / openrouter fetch runs out
 // of band. Single-flight via `refreshing` so concurrent requests
-// collapse to one fork.
-function refreshInBackground(provider: string): void {
+// collapse to one fork. Exported so configure/route.ts can trigger a
+// refresh right after the user adds an API key — otherwise the
+// catalog stays on the pre-auth snapshot from boot warmup until the
+// next service restart.
+export function refreshInBackground(provider: string): void {
   if (refreshing.has(provider)) return;
   refreshing.add(provider);
 
