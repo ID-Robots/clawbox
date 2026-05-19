@@ -238,19 +238,33 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("portal");
     });
 
-    it("returns clawaiTier=null on portal 403 (invalid token) and caches the verdict", async () => {
+    it("preserves localTier on portal 401/403 (auth lost, might still be paid)", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");
       fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 403 }));
 
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.tierSource).toBe("picker");
+    });
+
+    it("negative-caches an unreachable verdict so back-to-back polls don't hammer the portal", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 401 }));
+
       const first = await (await GET()).json();
       const second = await (await GET()).json();
 
-      expect(first.clawaiTier).toBeNull();
-      expect(first.tierSource).toBe("portal");
-      // 403 caches; the second request must not hit the network again.
+      expect(first.clawaiTier).toBe("pro");
+      expect(first.tierSource).toBe("picker");
+      expect(second.clawaiTier).toBe("pro");
+      expect(second.tierSource).toBe("picker");
+      // Second call inside the unreachable TTL must hit the negative
+      // cache instead of re-fetching from the portal.
       expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(second.clawaiTier).toBeNull();
     });
 
     it("falls back to the locally-stored tier when the portal is unreachable", async () => {

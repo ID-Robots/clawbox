@@ -61,14 +61,29 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Transient-failure handler: preserve the last-known loggedIn/tier so
+    // a momentary fetch failure (gateway WS drop, portal timeout, etc.)
+    // doesn't flip the state to "free" and re-fire the downgrade modal
+    // on every disconnect–reconnect cycle. The server-side /status route
+    // already caches portal responses with proper TTLs, so a 2xx body is
+    // the authoritative signal — anything else is "I don't know right
+    // now", not "you've been downgraded".
+    const preserveOnTransient = () => {
+      if (cancelled) return;
+      // Return the same ref when nothing logical has changed so React bails
+      // out and downstream consumers don't re-render on every failed poll.
+      setState((prev) => (
+        prev.loading
+          ? { loggedIn: prev.loggedIn, tier: prev.tier, loading: false }
+          : prev
+      ));
+    };
+
     const tick = async () => {
       try {
         const res = await fetch("/setup-api/ai-models/status", { cache: "no-store" });
         if (!res.ok) {
-          // A non-2xx response means the device can't currently confirm the
-          // session — clear stale loggedIn/tier so callers don't keep gating
-          // open after a previously-good poll.
-          if (!cancelled) setState({ loggedIn: false, tier: null, loading: false });
+          preserveOnTransient();
           return;
         }
         const data = (await res.json()) as AiStatusResponse;
@@ -89,8 +104,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
           loading: false,
         });
       } catch {
-        // Network failure → fall closed, same reasoning as the !res.ok branch.
-        if (!cancelled) setState({ loggedIn: false, tier: null, loading: false });
+        preserveOnTransient();
       } finally {
         if (!cancelled) {
           timer = setTimeout(tick, intervalMs);

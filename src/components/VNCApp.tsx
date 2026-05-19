@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
+import { copyToClipboard } from "@/lib/clipboard";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
@@ -40,11 +41,35 @@ export default function VNCApp() {
   const [repairError, setRepairError] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
   const pasteTextareaRef = useRef<HTMLTextAreaElement>(null);
   // Mirrors pasteOpen so the focus/keyboard handlers (which live in effect
   // closures and can't see React state updates directly) can short-circuit
   // when the paste modal is open.
   const pasteOpenRef = useRef(false);
+
+  // Toast surfaced when the guest copies but the host clipboard API was
+  // blocked (HTTP origin, no permission). Lets the user click "Copy" with
+  // a real user gesture so `document.execCommand('copy')` succeeds.
+  const [copyToast, setCopyToast] = useState<{ text: string; copied: boolean } | null>(null);
+  const copyToastTimerRef = useRef<number | null>(null);
+  // Guards rapid-fire reads of the guest CLIPBOARD — noVNC emits the
+  // `clipboard` event on every RFB ServerCutText message, which can stack
+  // when an X clipboard manager re-asserts ownership. The inflight flag
+  // collapses duplicate fetches; the `pending` flag remembers that another
+  // change arrived while we were mid-fetch so we re-fetch exactly once.
+  const remoteClipboardInflightRef = useRef(false);
+  const remoteClipboardPendingRef = useRef(false);
+  // Late-bound refs so the Ctrl+V handler (which lives inside a useEffect
+  // closure declared before openPasteModal / writeAndPaste exist) can call
+  // them. Filled in via a `useEffect` further down.
+  const openPasteModalRef = useRef<(() => void) | null>(null);
+  const writeAndPasteRef = useRef<((text: string) => Promise<boolean>) | null>(null);
+  // Same trick for the noVNC `clipboard` event handler — it fires when the
+  // guest copies, but the payload is Latin-1-mangled; we use the event as a
+  // change signal and read the real UTF-8 via xclip on the server.
+  const fetchRemoteClipboardRef = useRef<(() => Promise<void>) | null>(null);
 
   const checkVnc = useCallback(async () => {
     try {
@@ -154,16 +179,15 @@ export default function VNCApp() {
           if (e.detail?.clean === false) setError("Connection lost unexpectedly");
         });
 
-        // Remote → local: when the guest copies, push the text into the
-        // host browser's clipboard so the user can paste it elsewhere.
-        rfb.addEventListener("clipboard", (e: CustomEvent) => {
-          const text = e.detail?.text;
-          if (typeof text !== "string" || !text) return;
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(text).catch(() => {
-              // Host browser blocked the write (permissions / focus). Non-fatal.
-            });
-          }
+        // Remote → local: when the guest copies, the noVNC `clipboard`
+        // event delivers a *Latin-1-mangled* payload (basic RFB ClientCutText
+        // only supports ISO-8859-1, so Cyrillic / CJK / emoji arrive as
+        // double-byte garbage like "Ð¾Ð¸Ñ"). We ignore that payload and use
+        // the event purely as a change signal — then GET our own endpoint,
+        // which reads the *real* UTF-8 selection from the guest X CLIPBOARD
+        // via xclip. Same trick as the paste direction, in reverse.
+        rfb.addEventListener("clipboard", () => {
+          fetchRemoteClipboardRef.current?.();
         });
 
         rfbRef.current = rfb;
@@ -219,16 +243,16 @@ export default function VNCApp() {
 
     // Local → remote: the `paste` event only fires on editable elements,
     // and the VNC canvas is not editable — so we listen for Ctrl/Cmd+V
-    // directly. On each shortcut we read the host clipboard via the async
-    // Clipboard API and push it into the guest's X CLIPBOARD selection via
-    // RFB (x11vnc turns that message into an X selection). noVNC continues
-    // to forward the V keystroke itself, so Chromium / terminals on the
-    // guest see "Ctrl+V pressed" and paste from the freshly-updated CLIPBOARD.
+    // directly. We push the host clipboard into the guest's X CLIPBOARD
+    // via the /setup-api/vnc/clipboard endpoint (xclip), then forward
+    // Ctrl+V to the guest so Chromium pastes from the freshly-updated
+    // CLIPBOARD. Going through xclip avoids the basic-RFB Latin-1
+    // limitation that mangles Cyrillic / CJK / emoji.
     //
-    // navigator.clipboard.readText() requires a secure context (HTTPS or
-    // localhost). On LAN-served HTTP (http://clawbox.local, http://192.168.x.x)
-    // the browser rejects the read and we silently no-op — the user can still
-    // paste manually via the guest's context menu.
+    // navigator.clipboard.readText() requires a secure context. On LAN-
+    // served HTTP the browser rejects the read — we fall back to opening
+    // the paste modal so the user can paste into a textarea (which works
+    // on any origin) and submit from there.
     const onKeyDown = (event: KeyboardEvent) => {
       if (pasteOpenRef.current) return;
       if (!vncFocusedRef.current) return;
@@ -238,14 +262,21 @@ export default function VNCApp() {
         !event.altKey &&
         event.key.toLowerCase() === "v";
       if (!isPasteShortcut) return;
-      if (!navigator.clipboard?.readText) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!navigator.clipboard?.readText) {
+        openPasteModalRef.current?.();
+        return;
+      }
       navigator.clipboard
         .readText()
         .then((text) => {
-          if (text) rfbRef.current?.clipboardPasteFrom(text);
+          if (!text) return;
+          void writeAndPasteRef.current?.(text);
         })
         .catch(() => {
-          // Non-secure origin or clipboard permission denied — silently skip.
+          // Non-secure origin / permission denied — fall back to the modal.
+          openPasteModalRef.current?.();
         });
     };
 
@@ -438,6 +469,7 @@ export default function VNCApp() {
 
   const openPasteModal = useCallback(() => {
     setPasteText("");
+    setPasteError(null);
     pasteOpenRef.current = true;
     setPasteOpen(true);
     // Stop the VNC-input handlers from grabbing focus back onto the canvas
@@ -451,19 +483,137 @@ export default function VNCApp() {
     pasteOpenRef.current = false;
     setPasteOpen(false);
     setPasteText("");
+    setPasteError(null);
     focusVncSurface();
   }, [focusVncSurface]);
 
-  const sendPaste = useCallback(() => {
-    const text = pasteText;
-    if (text.length > 0) {
-      rfbRef.current?.clipboardPasteFrom(text);
+  // Push `text` into the guest's X CLIPBOARD via xclip on the device, then
+  // send a Ctrl+V keystroke so the focused window inside Chromium pastes
+  // from the freshly-updated selection. xclip preserves UTF-8 (Cyrillic,
+  // CJK, emoji); the basic-RFB clientCutText path mangles those.
+  const writeAndPaste = useCallback(async (text: string): Promise<boolean> => {
+    if (!text) return false;
+    try {
+      const res = await fetch("/setup-api/vnc/clipboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setPasteError(body.error || `Clipboard write failed (HTTP ${res.status})`);
+        return false;
+      }
+    } catch (err) {
+      setPasteError(err instanceof Error ? err.message : "Clipboard write failed");
+      return false;
     }
+    const rfb = rfbRef.current;
+    if (!rfb) return false;
+    // XK_Control_L = 0xffe3, "v" lowercase = 0x76. press → press → release →
+    // release pattern is what noVNC's own send-ctrl-alt-del helper uses.
+    rfb.sendKey(0xffe3, "ControlLeft", true);
+    rfb.sendKey(0x76, "KeyV", true);
+    rfb.sendKey(0x76, "KeyV", false);
+    rfb.sendKey(0xffe3, "ControlLeft", false);
+    return true;
+  }, []);
+
+  const sendPaste = useCallback(async () => {
+    // Rapid Ctrl+Enter / double-click can re-enter this callback before the
+    // `disabled` flag from setPasteBusy lands. Hard-guard so we never double-
+    // post the clipboard or double-inject Ctrl+V into the focused field.
+    if (pasteBusy) return;
+    const text = pasteText;
+    if (!text) return;
+    setPasteBusy(true);
+    setPasteError(null);
+    let ok = false;
+    try {
+      ok = await writeAndPaste(text);
+    } finally {
+      setPasteBusy(false);
+    }
+    if (!ok) return;
     pasteOpenRef.current = false;
     setPasteOpen(false);
     setPasteText("");
     focusVncSurface();
-  }, [focusVncSurface, pasteText]);
+  }, [focusVncSurface, pasteBusy, pasteText, writeAndPaste]);
+
+  // Reads the *real* UTF-8 selection from the guest X CLIPBOARD via xclip,
+  // ignoring the Latin-1-mangled payload that noVNC's `clipboard` event
+  // delivers. Tries the modern Clipboard API first (HTTPS / localhost), and
+  // falls back to the manual-copy toast on insecure origins.
+  const fetchRemoteClipboard = useCallback(async () => {
+    if (remoteClipboardInflightRef.current) {
+      // Another fetch is already in flight — record that we need a second
+      // pass once it resolves so we don't miss the latest selection.
+      remoteClipboardPendingRef.current = true;
+      return;
+    }
+    remoteClipboardInflightRef.current = true;
+    try {
+      let text = "";
+      try {
+        const res = await fetch("/setup-api/vnc/clipboard", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json().catch(() => ({}))) as { text?: string };
+        text = typeof body.text === "string" ? body.text : "";
+      } catch {
+        return;
+      }
+      if (!text) return;
+      const ok = await copyToClipboard(text);
+      if (copyToastTimerRef.current) window.clearTimeout(copyToastTimerRef.current);
+      setCopyToast({ text, copied: ok });
+      copyToastTimerRef.current = window.setTimeout(() => setCopyToast(null), ok ? 5_000 : 30_000);
+    } finally {
+      remoteClipboardInflightRef.current = false;
+      if (remoteClipboardPendingRef.current) {
+        remoteClipboardPendingRef.current = false;
+        // Re-run on next tick so React's scheduler gets a turn between calls.
+        setTimeout(() => { void fetchRemoteClipboard(); }, 0);
+      }
+    }
+  }, []);
+
+  // Keep the late-bound refs pointing at the current callbacks so the
+  // Ctrl+V handler (in a useEffect closure declared earlier) can invoke
+  // them without forcing the whole effect to re-subscribe.
+  useEffect(() => {
+    openPasteModalRef.current = openPasteModal;
+    writeAndPasteRef.current = writeAndPaste;
+    fetchRemoteClipboardRef.current = fetchRemoteClipboard;
+  }, [openPasteModal, writeAndPaste, fetchRemoteClipboard]);
+
+  // Manual-copy fallback for the toast — delegates to the shared helper in
+  // `src/lib/clipboard.ts` which tries the async Clipboard API first and
+  // falls back to a hidden-textarea `execCommand('copy')` (works on HTTP
+  // because we're inside a real user-gesture event handler).
+  const copyToastTextToHost = useCallback(async () => {
+    if (!copyToast) return;
+    const text = copyToast.text;
+    const success = await copyToClipboard(text);
+    if (copyToastTimerRef.current) window.clearTimeout(copyToastTimerRef.current);
+    setCopyToast({ text, copied: success });
+    copyToastTimerRef.current = window.setTimeout(() => setCopyToast(null), success ? 3_000 : 8_000);
+  }, [copyToast]);
+
+  const dismissCopyToast = useCallback(() => {
+    if (copyToastTimerRef.current) window.clearTimeout(copyToastTimerRef.current);
+    setCopyToast(null);
+  }, []);
+
+  // Cancel the toast auto-dismiss timer on unmount so it can't fire on an
+  // unmounted component (React 18 makes this a no-op, but it's a dangling
+  // handle either way).
+  useEffect(() => () => {
+    if (copyToastTimerRef.current) {
+      window.clearTimeout(copyToastTimerRef.current);
+      copyToastTimerRef.current = null;
+    }
+  }, []);
 
   if (status === "error" && !vncInfo) {
     const repairing = repairState === "repairing";
@@ -564,24 +714,82 @@ export default function VNCApp() {
               aria-describedby="vnc-paste-dialog-desc"
               className="w-full px-3 py-2 bg-white/[0.04] border border-white/10 rounded-lg text-sm text-white outline-none focus:border-orange-400/60 focus:bg-white/[0.06] placeholder-white/25 resize-y"
             />
+            {pasteError && (
+              <p role="alert" className="mt-2 text-xs text-red-400/90">{pasteError}</p>
+            )}
             <div className="flex items-center justify-end gap-2 mt-4">
               <button
                 type="button"
                 onClick={closePasteModal}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer"
+                disabled={pasteBusy}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer disabled:opacity-50"
               >
                 {t("cancel")}
               </button>
               <button
                 type="button"
                 onClick={sendPaste}
-                disabled={pasteText.length === 0}
-                className="px-4 py-1.5 rounded-lg text-xs font-medium text-white bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 cursor-pointer"
+                disabled={pasteText.length === 0 || pasteBusy}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium text-white bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 cursor-pointer flex items-center gap-1.5"
               >
+                {pasteBusy && (
+                  <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                )}
                 {t("vnc.sendPaste")}
               </button>
             </div>
           </div>
+        </div>
+      )}
+      {copyToast && status === "connected" && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="absolute top-3 right-3 z-30 flex items-start gap-2 p-3 rounded-lg bg-black/85 backdrop-blur-sm border border-white/15 shadow-xl max-w-xs"
+        >
+          <span className="material-symbols-rounded text-orange-300 mt-0.5" style={{ fontSize: 18 }}>content_copy</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-white mb-1">
+              {copyToast.copied ? t("copied") : t("vnc.copyToast.fromRemote")}
+            </p>
+            <p
+              className="text-[11px] text-white/60 break-all line-clamp-2"
+              title={copyToast.text}
+            >
+              {copyToast.text.slice(0, 120)}
+              {copyToast.text.length > 120 ? "…" : ""}
+            </p>
+            {!copyToast.copied && (
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={copyToastTextToHost}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium text-white bg-[#fe6e00] hover:bg-[#ff8b1a] cursor-pointer"
+                >
+                  {t("copy")}
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissCopyToast}
+                  className="px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 cursor-pointer"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </div>
+          {copyToast.copied && (
+            <button
+              type="button"
+              onClick={dismissCopyToast}
+              aria-label={t("dismiss")}
+              className="text-white/50 hover:text-white/90 cursor-pointer"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>close</span>
+            </button>
+          )}
         </div>
       )}
       {(status === "connecting" || status === "disconnected") && (

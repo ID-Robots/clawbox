@@ -64,17 +64,22 @@ export default function RemoteControlPanel() {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Continuous loop: always reschedule, just adjust cadence by current
+    // state. 2 s while the tunnel is mid-startup (active/activating with
+    // no URL yet), 15 s otherwise (URL is showing, OR the tunnel is in a
+    // terminal non-running state where nothing will change without user
+    // action). The previous version exited polling whenever the service
+    // wasn't already active — so if you opened Remote Access *before*
+    // clicking Start, the loop stopped, then clicking Start transitioned
+    // the service to active+no-URL without re-arming polling, and the
+    // URL never appeared in the UI until manual page reload.
     const loop = async () => {
       const s = await fetchStatus();
       if (!alive) return;
       setLoading(false);
       const svc = s?.tunnel.service;
-      const needsPoll = !s?.tunnel.url && (svc === "active" || svc === "activating");
-      if (needsPoll) {
-        timer = setTimeout(loop, POLL_INTERVAL_MS);
-      } else if (svc === "active") {
-        timer = setTimeout(loop, 15_000);
-      }
+      const stillNegotiating = !s?.tunnel.url && (svc === "active" || svc === "activating");
+      timer = setTimeout(loop, stillNegotiating ? POLL_INTERVAL_MS : 15_000);
     };
     loop();
     return () => { alive = false; if (timer) clearTimeout(timer); };
