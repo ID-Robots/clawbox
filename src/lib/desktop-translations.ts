@@ -187,6 +187,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "vnc.pasteHelp": "Paste your text below (Ctrl+V works here) and click Send. The text lands on the remote clipboard so you can paste it into Chromium or any app inside the VNC.",
     "vnc.pastePlaceholder": "Paste here (Ctrl+V)…",
     "vnc.sendPaste": "Send to VNC",
+    "vnc.copyToast.fromRemote": "Copied from VNC",
 
 
     // === AppStore ===
