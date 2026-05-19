@@ -1356,7 +1356,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             )
             if (!activeOption?.provider) return null
             const catalog = chatProviderCatalog
-            if (!catalog || catalog.models.length < 2) return null
+            if (!catalog) return null
+            // Show the dropdown when there are multiple models to pick OR
+            // the catalog permits a custom model id (then the picker
+            // surfaces a "type your own" affordance, which is the only way
+            // to switch to a different Claude variant when Anthropic's
+            // OAuth scope returned a single canonical model).
+            if (catalog.models.length < 2 && !catalog.allowCustom) return null
             // ClawBox AI's wire-format provider is `deepseek` (Mike's
             // gateway forwards to DeepSeek's API), while the UI normalizes
             // to `clawai`. Try the canonical provider first, then fall
