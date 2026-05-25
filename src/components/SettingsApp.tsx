@@ -2738,6 +2738,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               )}
             </div>
 
+            {/* Only the ClawBox System Update tile is exposed. OpenClaw is
+                pinned by ClawBox (config/openclaw-target.txt) and travels
+                with the full release, so a standalone "OpenClaw Update"
+                button would just confuse customers and let them bypass
+                the pin. The current OpenClaw version is still displayed
+                in the version-info section above. */}
             <div className="flex gap-2">
               <button
                 onClick={() => dispatchOpenApp("system_update")}
@@ -2750,21 +2756,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="text-[11px] text-green-400/60 font-mono truncate">
                       {cleanVersion(versionInfo?.clawbox.current)}
                       {versionInfo?.clawbox.target && <> → <span className="text-green-300">{cleanVersion(versionInfo.clawbox.target)}</span></>}
-                    </span>
-                  )}
-                </div>
-              </button>
-              <button
-                onClick={() => dispatchOpenApp("system_update")}
-                className="flex items-center gap-3 flex-1 bg-blue-500/10 rounded-xl px-4 py-3 text-sm text-blue-400/80 hover:text-blue-400 border border-blue-500/20 hover:bg-blue-500/15 transition-colors cursor-pointer text-left"
-              >
-                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>cloud_download</span>
-                <div className="flex flex-col min-w-0">
-                  <span>{t("settings.openclawUpdate")}</span>
-                  {cleanVersion(versionInfo?.openclaw.current) && (
-                    <span className="text-[11px] text-blue-400/60 font-mono truncate">
-                      {cleanVersion(versionInfo?.openclaw.current)}
-                      {versionInfo?.openclaw.target && <> → <span className="text-blue-300">{cleanVersion(versionInfo.openclaw.target)}</span></>}
                     </span>
                   )}
                 </div>
