@@ -7,6 +7,11 @@ import { findOpenclawBin, restartGateway } from "./openclaw-config";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
+// Pinned OpenClaw version — single source of truth shared with install.sh
+// so the in-UI "Latest" column reflects the ClawBox-approved release, not
+// whatever npm last published. Bump the file in a PR → beta → main and the
+// fleet follows. See install.sh::step_openclaw_install for the matching read.
+const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.txt");
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -345,9 +350,19 @@ export async function getVersionInfo(): Promise<VersionInfo> {
           .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
           .catch(() => null)
       ),
-    execShell("bun pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org", { timeout: 10_000 })
-      .then(({ stdout }) => stdout.trim() || null)
-      .catch(() => null),
+    // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
+    // the canonical source for which OpenClaw the fleet should converge on.
+    // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
+    (async (): Promise<string | null> => {
+      const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
+      if (envPin) return envPin;
+      try {
+        const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
+        return raw.trim().split(/\s+/)[0] || null;
+      } catch {
+        return null;
+      }
+    })(),
   ]);
 
   // git describe gives "v2.2.0-3-gad4bf5a" for commits after a tag;
