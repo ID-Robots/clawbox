@@ -118,6 +118,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
+import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useT } from '@/lib/i18n'
 import {
   extractProviderModelId,
@@ -425,9 +426,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     attachments: { name: string; path: string; type: string }[]
     idempotencyKey: string
   }>>([])
-  // Auto-scroll to bottom — instant jump, no smooth animation
+  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
+  // behind the double-rAF wait.
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    scrollToBottomAfterLayout(messagesEndRef.current)
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
@@ -760,6 +762,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
+            // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
+            // pipeline / internal-source-reply) while the real reply is
+            // generated server-side a moment later — persisted but never
+            // streamed via WS. Only refetch history in that ack-only case,
+            // detected by an empty / "Sent."-only `final`. Normal streamed
+            // replies arrive via delta+final and don't need the extra
+            // round-trip every turn.
+            if (!text || /^\s*Sent\.\s*$/.test(text)) {
+              window.setTimeout(() => { void loadHistory() }, 3_000)
+            }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
               if (prev.trim() && !isSentinel(prev)) {

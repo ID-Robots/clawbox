@@ -8,6 +8,7 @@ import {
   type ChatMessage,
   uuid,
 } from '@/lib/chat-history-cache'
+import { scrollToBottomAfterLayout } from '@/lib/scroll'
 
 import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
@@ -87,8 +88,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     idempotencyKey: string
   }>>([])
 
+  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
+  // behind the double-rAF wait.
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    scrollToBottomAfterLayout(messagesEndRef.current)
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
@@ -253,6 +256,16 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
+            // Mirror the ChatPopup fallback: OpenClaw can ack a turn with
+            // "Sent." while the real reply is generated server-side a
+            // moment later (delivery-mirror persona pipeline). That reply
+            // is persisted but never streamed via WS — re-pull chat.history
+            // a few seconds later so the deferred message surfaces without
+            // a page refresh. Only fires on the ack-only case so normal
+            // streamed replies don't pay an extra round-trip.
+            if (!text || /^\s*Sent\.\s*$/.test(text)) {
+              window.setTimeout(() => { void loadHistory() }, 3_000)
+            }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
               if (prev.trim() && !/^\s*NO_REPLY\s*$/.test(prev)) {
