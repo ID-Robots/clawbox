@@ -758,7 +758,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           } else if (state === 'final') {
             const text = extractText(msg)
-            if (text && !isSentinel(text)) {
+            // Suppress sentinel and "Sent." (delivery-mirror ack) from the
+            // rendered transcript — the latter is just a server-side
+            // acknowledgement that the real reply will follow via the
+            // chat.history refetch scheduled below. Skipping the append
+            // avoids a brief "Sent." bubble flashing on the screen before
+            // the real reply replaces it.
+            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            if (text && !isAckOnly) {
               setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
               saveMascotSnippet(text)
             }
@@ -773,7 +780,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // detected by an empty / "Sent."-only `final`. Normal streamed
             // replies arrive via delta+final and don't need the extra
             // round-trip every turn.
-            if (!text || /^\s*Sent\.\s*$/.test(text)) {
+            if (isAckOnly) {
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }

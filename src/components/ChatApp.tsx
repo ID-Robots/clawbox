@@ -253,7 +253,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             if (text) setStreaming(text)
           } else if (state === 'final') {
             const text = extractText(msg)
-            if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
+            // Suppress NO_REPLY (protocol sentinel) and "Sent." (delivery-
+            // mirror ack) from the rendered transcript — the former is a
+            // protocol marker users shouldn't see, the latter is just a
+            // server-side acknowledgement that the real reply will follow
+            // via the chat.history refetch scheduled below. Skipping the
+            // append avoids a brief "Sent." bubble flashing on the screen
+            // before the real reply replaces it.
+            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || /^\s*NO_REPLY\s*$/.test(text)
+            if (text && !isAckOnly) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
             setStreaming('')
@@ -267,7 +275,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // a few seconds later so the deferred message surfaces without
             // a page refresh. Only fires on the ack-only case so normal
             // streamed replies don't pay an extra round-trip.
-            if (!text || /^\s*Sent\.\s*$/.test(text)) {
+            if (isAckOnly) {
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
