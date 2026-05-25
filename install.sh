@@ -693,7 +693,12 @@ step_openclaw_install() {
     PINNED="${OPENCLAW_PIN_VERSION}"
     echo "  Using OPENCLAW_PIN_VERSION env override: $PINNED"
   elif [ -f "$PIN_FILE" ]; then
-    PINNED=$(head -1 "$PIN_FILE" | tr -d '[:space:]')
+    # awk '{print $1}' extracts the first whitespace-delimited token, matching
+    # updater.ts::getVersionInfo `raw.trim().split(/\s+/)[0]`. tr -d '[:space:]'
+    # would concat tokens on a hypothetical multi-field line — keeping the
+    # two parsers identical avoids subtle UI ↔ install.sh desync if the file
+    # format ever grows.
+    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}')
     echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2

@@ -75,6 +75,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  // Timer for the ack-only `chat.history` refetch — see ChatPopup.tsx for
+  // the deferred-reply rationale. Single-flight + cleared on unmount so
+  // a burst of acked turns doesn't pile up overlapping fetches.
+  const ackOnlyHistoryTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -264,7 +268,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // a page refresh. Only fires on the ack-only case so normal
             // streamed replies don't pay an extra round-trip.
             if (!text || /^\s*Sent\.\s*$/.test(text)) {
-              window.setTimeout(() => { void loadHistory() }, 3_000)
+              if (ackOnlyHistoryTimerRef.current !== null) {
+                window.clearTimeout(ackOnlyHistoryTimerRef.current)
+              }
+              ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
+                ackOnlyHistoryTimerRef.current = null
+                void loadHistory()
+              }, 3_000)
             }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
@@ -466,6 +476,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     return () => {
       wsRef.current?.close()
       wsRef.current = null
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
     }
   }, [connect])
 

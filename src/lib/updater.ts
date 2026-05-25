@@ -12,6 +12,13 @@ const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 // whatever npm last published. Bump the file in a PR → beta → main and the
 // fleet follows. See install.sh::step_openclaw_install for the matching read.
 const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.txt");
+// Hardcoded fallback used only when the pin file is missing or unreadable.
+// MUST stay in sync with install.sh::OPENCLAW_VERSION so the UI's "Latest"
+// column reports the same version that `install.sh --step openclaw_install`
+// would actually deploy. Without this both sides diverged: the UI returned
+// null and reported "no update", while install.sh would still install
+// 2026.5.3-1 — confusing.
+const OPENCLAW_VERSION_FALLBACK = "2026.5.3-1";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -358,9 +365,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       if (envPin) return envPin;
       try {
         const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
-        return raw.trim().split(/\s+/)[0] || null;
+        return raw.trim().split(/\s+/)[0] || OPENCLAW_VERSION_FALLBACK;
       } catch {
-        return null;
+        return OPENCLAW_VERSION_FALLBACK;
       }
     })(),
   ]);

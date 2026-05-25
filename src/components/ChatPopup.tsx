@@ -415,6 +415,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  // Timer for the ack-only `chat.history` refetch — single-flight so a
+  // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
+  // cancellable on unmount.
+  const ackOnlyHistoryTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -770,7 +774,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // replies arrive via delta+final and don't need the extra
             // round-trip every turn.
             if (!text || /^\s*Sent\.\s*$/.test(text)) {
-              window.setTimeout(() => { void loadHistory() }, 3_000)
+              if (ackOnlyHistoryTimerRef.current !== null) {
+                window.clearTimeout(ackOnlyHistoryTimerRef.current)
+              }
+              ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
+                ackOnlyHistoryTimerRef.current = null
+                void loadHistory()
+              }, 3_000)
             }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
@@ -1154,6 +1164,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       wsRef.current?.close()
       wsRef.current = null
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
     }
   }, [])
 
