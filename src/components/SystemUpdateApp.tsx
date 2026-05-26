@@ -198,16 +198,21 @@ export default function SystemUpdateApp() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
-  const triggerUpdate = useCallback(async (mode: "full" | "openclaw") => {
+  // Only the "full" ClawBox update path is exposed from the UI now —
+  // OpenClaw is pinned by ClawBox (config/openclaw-target.txt) and rides
+  // along inside the full update. The "openclaw" mode remains as a
+  // server-side endpoint for SSH/MCP/admin triggers but no UI button
+  // reaches it, so the type stays narrow to reflect actual call sites.
+  const triggerUpdate = useCallback(async () => {
     setUpdateStarted(true);
     setUpdateError(null);
     setUpdateState(null);
     try {
-      const url = mode === "full" ? "/setup-api/update/run" : "/setup-api/update/openclaw";
-      const init: RequestInit = mode === "full"
-        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) }
-        : { method: "POST" };
-      const res = await fetch(url, init);
+      const res = await fetch("/setup-api/update/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setUpdateError(typeof data.error === "string" ? data.error : `Failed to start update (HTTP ${res.status})`);
@@ -254,9 +259,13 @@ export default function SystemUpdateApp() {
     }
     if (versionsError && !versions) return "fetch-error";
     if (!versions) return "loading";
-    const clawboxAvail = isUpdateAvailable(versions.clawbox.current, versions.clawbox.target);
-    const openclawAvail = isUpdateAvailable(versions.openclaw.current, versions.openclaw.target);
-    return clawboxAvail || openclawAvail ? "available" : "up-to-date";
+    // Only ClawBox drives availability now — OpenClaw is bumped as part
+    // of the ClawBox update, so an OpenClaw-pin delta without a ClawBox
+    // delta means a ClawBox release hasn't been cut yet and there's
+    // nothing for the user to install.
+    return isUpdateAvailable(versions.clawbox.current, versions.clawbox.target)
+      ? "available"
+      : "up-to-date";
   }, [updateStarted, updateError, updateState, versions, versionsError]);
 
   // ─── HERO ────────────────────────────────────────────────────────────
@@ -324,7 +333,6 @@ export default function SystemUpdateApp() {
   }[hero.tone];
 
   const clawboxAvail = !!versions && isUpdateAvailable(versions.clawbox.current, versions.clawbox.target);
-  const openclawAvail = !!versions && isUpdateAvailable(versions.openclaw.current, versions.openclaw.target);
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
@@ -362,7 +370,7 @@ export default function SystemUpdateApp() {
                 {status === "available" && (
                   <button
                     type="button"
-                    onClick={() => void triggerUpdate("full")}
+                    onClick={() => void triggerUpdate()}
                     className="px-6 py-2.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black text-sm font-semibold shadow-lg cursor-pointer"
                   >
                     Update everything
@@ -393,24 +401,24 @@ export default function SystemUpdateApp() {
             )}
           </div>
 
-          {/* COMPONENTS */}
+          {/* COMPONENTS
+              Only ClawBox is exposed as a standalone update target. OpenClaw
+              is pinned by ClawBox (config/openclaw-target.txt) and bumped
+              automatically inside the full ClawBox update — see
+              install.sh::step_openclaw_install. Surfacing a separate
+              OpenClaw card would let customers bypass the pin and pick
+              whatever was last published to npm, which is what we just
+              moved away from. The OpenClaw version is still shown in the
+              ClawBox card's release notes / version-info section. */}
           {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3">
               <ComponentCard
                 name="ClawBox"
                 description="Device OS and built-in apps"
                 current={versions.clawbox.current}
                 target={versions.clawbox.target}
                 available={clawboxAvail}
-                onUpdate={() => void triggerUpdate("full")}
-              />
-              <ComponentCard
-                name="OpenClaw"
-                description="AI agent runtime"
-                current={versions.openclaw.current}
-                target={versions.openclaw.target}
-                available={openclawAvail}
-                onUpdate={() => void triggerUpdate("openclaw")}
+                onUpdate={() => void triggerUpdate()}
               />
             </div>
           )}

@@ -678,9 +678,33 @@ step_openclaw_install() {
   # regression in the in-UI terminal after update runs.
   ensure_clawbox_bashrc_path
 
-  local LATEST
-  LATEST=$(npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
-  local TARGET="${LATEST:-$OPENCLAW_VERSION}"
+  # Pinned OpenClaw version comes from config/openclaw-target.txt — ClawBox
+  # controls which OpenClaw release the fleet runs, instead of every device
+  # racing to whatever npm last published. Bump the pin in a PR, ship it
+  # through beta → main, and the fleet follows on next update.
+  #
+  # `OPENCLAW_PIN_VERSION` env var lets QA/dev override without editing the
+  # pin file (e.g. `OPENCLAW_PIN_VERSION=2026.5.24-beta.2 sudo bash install.sh`).
+  # Falls back to the hardcoded $OPENCLAW_VERSION if the pin file is missing,
+  # so a corrupted/partial install still has something to install.
+  local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"
+  local PINNED=""
+  if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
+    PINNED="${OPENCLAW_PIN_VERSION}"
+    echo "  Using OPENCLAW_PIN_VERSION env override: $PINNED"
+  elif [ -f "$PIN_FILE" ]; then
+    # awk '{print $1}' extracts the first whitespace-delimited token, matching
+    # updater.ts::getVersionInfo `raw.trim().split(/\s+/)[0]`. tr -d '[:space:]'
+    # would concat tokens on a hypothetical multi-field line — keeping the
+    # two parsers identical avoids subtle UI ↔ install.sh desync if the file
+    # format ever grows.
+    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}')
+    echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+  else
+    echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2
+  fi
+  local TARGET="${PINNED:-$OPENCLAW_VERSION}"
+  local CORE_NEEDS_INSTALL=1
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
@@ -690,19 +714,61 @@ step_openclaw_install() {
     INSTALLED_VER=$(echo "$INSTALLED" | awk '{print $2}')
     echo "  Installed: $INSTALLED, Target: $TARGET"
     if [ "$INSTALLED_VER" = "$TARGET" ]; then
-      echo "  OpenClaw is already up to date"
-      return 0
+      echo "  OpenClaw core is already at $TARGET; skipping npm install"
+      CORE_NEEDS_INSTALL=0
     fi
   fi
-  mkdir -p "$NPM_PREFIX"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-  as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
-  if [ ! -x "$OPENCLAW_BIN" ]; then
-    echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
-    exit 1
+  if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
+    mkdir -p "$NPM_PREFIX"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
+    as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
+    if [ ! -x "$OPENCLAW_BIN" ]; then
+      echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
+      exit 1
+    fi
+    echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
   fi
-  echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
+
+  # Force-reinstall every externally-installed plugin so they're bumped
+  # alongside the core. Without this, a core 5.12→5.22 bump leaves
+  # @openclaw/codex stuck at whatever was first installed by
+  # gateway-pre-start.sh's peer-dep heal — and the in-UI updater silently
+  # reports "Up to date" because it only checks the core package. The new
+  # protocol bits introduced by the core (e.g. 5.22's deferred history
+  # replay) sit unused until the plugins also move.
+  #
+  # Runs even when the core was already at target, because plugins drift
+  # independently. Bundled plugins (origin: bundled) come with the core
+  # npm install and don't need a separate refresh — only external/global
+  # plugins do. Failures are non-fatal: a missing-from-npm plugin
+  # shouldn't roll back the whole update; gateway-pre-start.sh will retry
+  # on next boot. Gateway restart happens later in step_gateway_setup.
+  local INSTALLED_PLUGINS
+  INSTALLED_PLUGINS=$(as_clawbox -H "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in d.get("plugins", []):
+    pid = p.get("id")
+    if pid and p.get("origin") != "bundled":
+        print(pid)
+' 2>/dev/null)
+  if [ -n "$INSTALLED_PLUGINS" ]; then
+    echo "  Refreshing OpenClaw plugins to match core $TARGET:"
+    while IFS= read -r plugin; do
+      [ -z "$plugin" ] && continue
+      echo "    - $plugin"
+      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$plugin" --force >/dev/null 2>&1; then
+        echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
+      fi
+    done <<< "$INSTALLED_PLUGINS"
+  else
+    echo "  No external plugins to refresh"
+  fi
 }
 
 step_clawkeep_install() {
@@ -1371,6 +1437,23 @@ step_recover() {
 
 step_gateway_setup() {
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
+
+  # IPv4-first DNS for the gateway. Without this, on networks where the
+  # ISP advertises an IPv6 prefix but doesn't actually route public v6
+  # traffic (common on home/SMB networks), every Node `fetch` to a
+  # dual-stack host (Telegram polling, OAuth callbacks, npm registry,
+  # model providers) hangs ~2 minutes hitting the dead AAAA before
+  # falling back. The hung socket starves Node's event loop and makes
+  # every WS request slow — surfacing to the user as "Failed to change
+  # effort: Request timeout" and similar 120s timeouts. The flag is a
+  # no-op on networks with working IPv6 (v4 is tried first, succeeds,
+  # never falls back to v6).
+  mkdir -p /etc/systemd/system/clawbox-gateway.service.d
+  cat > /etc/systemd/system/clawbox-gateway.service.d/dns-ipv4first.conf <<'CONF'
+[Service]
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first"
+CONF
+
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
   systemctl restart clawbox-gateway.service
