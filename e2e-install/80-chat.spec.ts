@@ -165,6 +165,18 @@ test.describe("chat round trip", () => {
 
     await input.fill("Say the word 'pong' and nothing else.");
 
+    // Dismiss the tier-celebration modal if it appears. The upstream
+    // ClawAI proxy can report a paid tier on first dashboard load, which
+    // pops a "Welcome to ClawBox <plan>" dialog (z-[100001]) that
+    // intercepts pointer events and blocks the Send button click. The
+    // modal has a single dismiss button labelled "Let's go" (smart
+    // apostrophe in en, plain in some locales) — short-timeout so it's
+    // a no-op when the celebration isn't shown.
+    await page
+      .getByRole("button", { name: /Let.s go/i })
+      .click({ timeout: 3_000 })
+      .catch(() => {});
+
     // Submit via the Send button — pressing Enter sometimes inserts a
     // newline instead of submitting, depending on the textarea component.
     const sendButton = page.getByRole("button", { name: /^Send$/ });
