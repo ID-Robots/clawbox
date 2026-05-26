@@ -297,6 +297,10 @@ interface SetupWizardProps {
 
 function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const { t } = useT();
+  // Hold a live reference to t so the completion effect can translate without
+  // re-running (and re-POSTing) on every locale change.
+  const tRef = useRef(t);
+  tRef.current = t;
   const [currentStep, setCurrentStep] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -387,9 +391,31 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       return false;
     }
 
+    async function postCompleteWithRetry(): Promise<Response> {
+      // The POST can fail transiently if the gateway restart from the AI
+      // step is still settling, or the browser's connection is briefly
+      // degraded after the hotspot reconfig in step 3.
+      const backoffs = [0, 2_000, 4_000];
+      let lastErr: unknown = null;
+      for (const delayMs of backoffs) {
+        if (cancelled) throw new Error("cancelled");
+        if (delayMs > 0) await delay(delayMs);
+        if (cancelled) throw new Error("cancelled");
+        try {
+          return await fetch("/setup-api/setup/complete", {
+            method: "POST",
+            signal: AbortSignal.timeout(15_000),
+          });
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error("Failed to complete setup");
+    }
+
     async function runCompletion() {
       try {
-        const res = await fetch("/setup-api/setup/complete", { method: "POST" });
+        const res = await postCompleteWithRetry();
         if (!res.ok) {
           throw new Error(await extractErrorMessage(res, `Failed to complete setup (${res.status})`));
         }
@@ -417,7 +443,11 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         setCompletionStarted(false);
         setCompletionComplete(false);
         setCompletionPhase(0);
-        setCompletionError(err instanceof Error ? err.message : "Failed to finish setup");
+        const fallback = tRef.current("wizard.completionUnreachable");
+        const isNetworkError = err instanceof TypeError;
+        setCompletionError(
+          isNetworkError || !(err instanceof Error) ? fallback : err.message
+        );
       }
     }
 
@@ -466,12 +496,12 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             className="w-8 h-8 sm:w-9 sm:h-9 object-contain"
             priority
           />
-          <div className="hidden sm:flex flex-col leading-tight">
+          <div className="hidden sm:flex items-baseline gap-1.5">
             <span className="text-xl font-bold font-display title-gradient">
               ClawBox
             </span>
-            <span className="text-[10px] text-green-400 -mt-1">
-              {process.env.NEXT_PUBLIC_APP_VERSION}
+            <span className="font-mono text-xs text-[var(--text-secondary)] tabular-nums">
+              <span className="text-[var(--text-muted)] opacity-60 mx-1">/</span>{process.env.NEXT_PUBLIC_APP_VERSION}
             </span>
           </div>
         </Link>
@@ -513,6 +543,13 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             {completionError && currentStep === 5 && (
               <div className="w-full max-w-[520px] mb-4">
                 <StatusMessage type="error" message={completionError} />
+                <button
+                  type="button"
+                  onClick={startCompletion}
+                  className="mt-3 px-5 py-2 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105"
+                >
+                  {t("retry")}
+                </button>
               </div>
             )}
             {currentStep === 1 && (

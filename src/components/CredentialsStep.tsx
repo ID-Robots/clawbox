@@ -8,6 +8,11 @@ interface CredentialsStepProps {
   onNext: () => void;
 }
 
+// Cumulative ~52 s covers the Jetson recovery window (10–20 s) plus
+// headroom for DHCP-rotated IPs after a hostname change.
+const MDNS_PROBE_BACKOFF_MS = [3_000, 5_000, 7_000, 10_000, 12_000, 15_000] as const;
+const MDNS_PROBE_TIMEOUT_MS = 10_000;
+
 export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const { t } = useT();
   const [password, setPassword] = useState("");
@@ -191,23 +196,42 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof TypeError && err.message.includes("fetch") && isAllowedRedirect) {
-        // Connection dropped mid-save — most likely the hostname just changed
-        // and mDNS is pointing at the new name. Probe the new URL before
-        // redirecting so we don't strand the user on a dead hostname.
-        try {
-          await fetch(newSetupUrl.toString(), {
-            method: "HEAD",
-            signal: AbortSignal.timeout(5000),
+        // Settings are saved server-side; the hotspot reconfig or hostname
+        // change just dropped this tab. Show a soft "reconnecting" toast
+        // and probe the new URL until it answers — only flip to red after
+        // the full backoff exhausts.
+        setStatus({
+          type: "success",
+          message: `Settings saved. Reconnecting to ${newSetupUrl.toString()}…`,
+        });
+        for (const delayMs of MDNS_PROBE_BACKOFF_MS) {
+          if (controller.signal.aborted) return;
+          await new Promise<void>((resolve) => {
+            if (controller.signal.aborted) { resolve(); return; }
+            const timer = setTimeout(resolve, delayMs);
+            controller.signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            }, { once: true });
           });
-          window.location.replace(newSetupUrl.toString());
-          return;
-        } catch {
-          setStatus({
-            type: "error",
-            message: `Could not reach ${newSetupUrl.toString()} — settings were saved, but mDNS may not be ready. Try opening the URL manually.`,
-          });
-          return;
+          if (controller.signal.aborted) return;
+          try {
+            await fetch(newSetupUrl.toString(), {
+              method: "HEAD",
+              cache: "no-store",
+              signal: AbortSignal.timeout(MDNS_PROBE_TIMEOUT_MS),
+            });
+            window.location.replace(newSetupUrl.toString());
+            return;
+          } catch {
+            // continue backoff
+          }
         }
+        setStatus({
+          type: "error",
+          message: `Settings were saved, but ${newSetupUrl.toString()} is still unreachable after ~1 minute. Open the URL manually to continue setup.`,
+        });
+        return;
       }
       setStatus({
         type: "error",

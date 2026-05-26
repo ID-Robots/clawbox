@@ -233,6 +233,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Restarting...",
     "wizard.shutdownConfirm": "Shut down device?",
     "wizard.restartConfirm": "Restart device?",
+    "wizard.completionUnreachable": "Couldn't reach the device. Please check your connection and try again.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -615,6 +616,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Рестартиране...",
     "wizard.shutdownConfirm": "Изключване на устройството?",
     "wizard.restartConfirm": "Рестартиране на устройството?",
+    "wizard.completionUnreachable": "Не може да се свърже с устройството. Проверете връзката и опитайте отново.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -996,6 +998,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Wird neu gestartet...",
     "wizard.shutdownConfirm": "Gerät ausschalten?",
     "wizard.restartConfirm": "Gerät neu starten?",
+    "wizard.completionUnreachable": "Gerät konnte nicht erreicht werden. Bitte überprüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
 
     // === ProgressBar ===
     "progress.wifi": "WLAN",
@@ -1377,6 +1380,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Reiniciando...",
     "wizard.shutdownConfirm": "¿Apagar el dispositivo?",
     "wizard.restartConfirm": "¿Reiniciar el dispositivo?",
+    "wizard.completionUnreachable": "No se pudo conectar con el dispositivo. Comprueba tu conexión e inténtalo de nuevo.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -1758,6 +1762,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Redémarrage...",
     "wizard.shutdownConfirm": "Éteindre l'appareil ?",
     "wizard.restartConfirm": "Redémarrer l'appareil ?",
+    "wizard.completionUnreachable": "Impossible de joindre l'appareil. Veuillez vérifier votre connexion et réessayer.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2139,6 +2144,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Riavvio...",
     "wizard.shutdownConfirm": "Spegnere il dispositivo?",
     "wizard.restartConfirm": "Riavviare il dispositivo?",
+    "wizard.completionUnreachable": "Impossibile raggiungere il dispositivo. Controlla la connessione e riprova.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2520,6 +2526,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "再起動中...",
     "wizard.shutdownConfirm": "デバイスをシャットダウンしますか？",
     "wizard.restartConfirm": "デバイスを再起動しますか？",
+    "wizard.completionUnreachable": "デバイスに接続できませんでした。接続を確認してもう一度お試しください。",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2901,6 +2908,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Herstarten...",
     "wizard.shutdownConfirm": "Apparaat uitschakelen?",
     "wizard.restartConfirm": "Apparaat herstarten?",
+    "wizard.completionUnreachable": "Kan het apparaat niet bereiken. Controleer uw verbinding en probeer opnieuw.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3282,6 +3290,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Startar om...",
     "wizard.shutdownConfirm": "Stänga av enheten?",
     "wizard.restartConfirm": "Starta om enheten?",
+    "wizard.completionUnreachable": "Det gick inte att nå enheten. Kontrollera anslutningen och försök igen.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3663,6 +3672,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "正在重启...",
     "wizard.shutdownConfirm": "确定关机吗？",
     "wizard.restartConfirm": "确定重启吗？",
+    "wizard.completionUnreachable": "无法连接到设备。请检查您的连接并重试。",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
