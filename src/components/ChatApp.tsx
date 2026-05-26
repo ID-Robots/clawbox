@@ -14,7 +14,7 @@ import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
-import { prettifyAssistantText } from '@/lib/chat-sentinels'
+import { prettifyAssistantText, isSentinel } from '@/lib/chat-sentinels'
 
 
 function extractText(msg: unknown): string {
@@ -253,14 +253,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             if (text) setStreaming(text)
           } else if (state === 'final') {
             const text = extractText(msg)
-            // Suppress NO_REPLY (protocol sentinel) and "Sent." (delivery-
-            // mirror ack) from the rendered transcript — the former is a
-            // protocol marker users shouldn't see, the latter is just a
-            // server-side acknowledgement that the real reply will follow
-            // via the chat.history refetch scheduled below. Skipping the
-            // append avoids a brief "Sent." bubble flashing on the screen
-            // before the real reply replaces it.
-            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || /^\s*NO_REPLY\s*$/.test(text)
+            // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
+            // from the rendered transcript — the former are markers users
+            // shouldn't see, the latter is just a server-side ack that the
+            // real reply will follow via the chat.history refetch scheduled
+            // below. `isSentinel` covers NO_REPLY plus any other protocol
+            // sentinel `chat-sentinels.ts` catalogues — same shared check
+            // ChatPopup uses, so the two components can't drift on which
+            // finals count as ack-only.
+            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
             if (text && !isAckOnly) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
@@ -286,7 +287,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
-              if (prev.trim() && !/^\s*NO_REPLY\s*$/.test(prev)) {
+              if (prev.trim() && !isSentinel(prev)) {
                 setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(prev), timestamp: Date.now() }])
               }
               return ''
@@ -334,7 +335,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const role = (m.role as string)?.toLowerCase()
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
-        if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
+        if (!text || isSentinel(text)) continue
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
