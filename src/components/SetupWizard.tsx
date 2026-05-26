@@ -394,21 +394,28 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     async function postCompleteWithRetry(): Promise<Response> {
       // The POST can fail transiently if the gateway restart from the AI
       // step is still settling, or the browser's connection is briefly
-      // degraded after the hotspot reconfig in step 3.
+      // degraded after the hotspot reconfig in step 3. Retry on both
+      // network errors and non-OK HTTP responses.
       const backoffs = [0, 2_000, 4_000];
       let lastErr: unknown = null;
+      let lastRes: Response | null = null;
       for (const delayMs of backoffs) {
         if (cancelled) throw new Error("cancelled");
         if (delayMs > 0) await delay(delayMs);
         if (cancelled) throw new Error("cancelled");
         try {
-          return await fetch("/setup-api/setup/complete", {
+          const res = await fetch("/setup-api/setup/complete", {
             method: "POST",
             signal: AbortSignal.timeout(15_000),
           });
+          if (res.ok) return res;
+          lastRes = res;
         } catch (err) {
           lastErr = err;
         }
+      }
+      if (lastRes) {
+        throw new Error(await extractErrorMessage(lastRes, `Failed to complete setup (${lastRes.status})`));
       }
       throw lastErr instanceof Error ? lastErr : new Error("Failed to complete setup");
     }

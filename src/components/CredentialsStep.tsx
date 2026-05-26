@@ -202,7 +202,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         // the full backoff exhausts.
         setStatus({
           type: "success",
-          message: `Settings saved. Reconnecting to ${newSetupUrl.toString()}…`,
+          message: t("credentials.reconnecting", { url: newSetupUrl.toString() }),
         });
         for (const delayMs of MDNS_PROBE_BACKOFF_MS) {
           if (controller.signal.aborted) return;
@@ -219,17 +219,24 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             await fetch(newSetupUrl.toString(), {
               method: "HEAD",
               cache: "no-store",
-              signal: AbortSignal.timeout(MDNS_PROBE_TIMEOUT_MS),
+              // Combine the save/unmount controller with a per-attempt
+              // timeout so the probe aborts on either signal.
+              signal: AbortSignal.any([
+                controller.signal,
+                AbortSignal.timeout(MDNS_PROBE_TIMEOUT_MS),
+              ]),
             });
+            if (controller.signal.aborted) return;
             window.location.replace(newSetupUrl.toString());
             return;
           } catch {
+            if (controller.signal.aborted) return;
             // continue backoff
           }
         }
         setStatus({
           type: "error",
-          message: `Settings were saved, but ${newSetupUrl.toString()} is still unreachable after ~1 minute. Open the URL manually to continue setup.`,
+          message: t("credentials.reconnectFailed", { url: newSetupUrl.toString() }),
         });
         return;
       }
