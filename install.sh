@@ -1459,6 +1459,18 @@ step_gateway_setup() {
       echo "  User-level openclaw-gateway.service already masked"
     else
       echo "  Masking conflicting user-level openclaw-gateway.service"
+      # Stop a running user-level instance first so port 18789 is freed
+      # immediately — otherwise the old process keeps holding the port
+      # until the user's next login session, defeating this run.
+      # Non-fatal: no active session yet, or the unit isn't running, both
+      # are fine and the on-disk mask still takes effect.
+      local CLAWBOX_UID
+      CLAWBOX_UID=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
+      if [ -n "$CLAWBOX_UID" ]; then
+        sudo -u "$CLAWBOX_USER" \
+          XDG_RUNTIME_DIR="/run/user/$CLAWBOX_UID" \
+          systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+      fi
       mkdir -p "$USER_SYSTEMD_DIR"
       chown "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_SYSTEMD_DIR"
       rm -f "$USER_GATEWAY_UNIT"
