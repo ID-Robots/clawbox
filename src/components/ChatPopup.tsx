@@ -118,6 +118,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
+import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useT } from '@/lib/i18n'
 import {
   extractProviderModelId,
@@ -414,6 +415,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  // Timer for the ack-only `chat.history` refetch — single-flight so a
+  // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
+  // cancellable on unmount.
+  const ackOnlyHistoryTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -425,9 +430,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     attachments: { name: string; path: string; type: string }[]
     idempotencyKey: string
   }>>([])
-  // Auto-scroll to bottom — instant jump, no smooth animation
+  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
+  // behind the double-rAF wait.
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    scrollToBottomAfterLayout(messagesEndRef.current)
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
@@ -752,7 +758,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           } else if (state === 'final') {
             const text = extractText(msg)
-            if (text && !isSentinel(text)) {
+            // Suppress sentinel and "Sent." (delivery-mirror ack) from the
+            // rendered transcript — the latter is just a server-side
+            // acknowledgement that the real reply will follow via the
+            // chat.history refetch scheduled below. Skipping the append
+            // avoids a brief "Sent." bubble flashing on the screen before
+            // the real reply replaces it.
+            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            if (text && !isAckOnly) {
               setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
               saveMascotSnippet(text)
             }
@@ -760,6 +773,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
+            // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
+            // pipeline / internal-source-reply) while the real reply is
+            // generated server-side a moment later — persisted but never
+            // streamed via WS. Only refetch history in that ack-only case,
+            // detected by an empty / "Sent."-only `final`. Normal streamed
+            // replies arrive via delta+final and don't need the extra
+            // round-trip every turn.
+            if (isAckOnly) {
+              if (ackOnlyHistoryTimerRef.current !== null) {
+                window.clearTimeout(ackOnlyHistoryTimerRef.current)
+              }
+              ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
+                ackOnlyHistoryTimerRef.current = null
+                void loadHistory()
+              }, 3_000)
+            }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
               if (prev.trim() && !isSentinel(prev)) {
@@ -1142,6 +1171,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       wsRef.current?.close()
       wsRef.current = null
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
     }
   }, [])
 

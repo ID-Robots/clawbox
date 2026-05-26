@@ -8,12 +8,13 @@ import {
   type ChatMessage,
   uuid,
 } from '@/lib/chat-history-cache'
+import { scrollToBottomAfterLayout } from '@/lib/scroll'
 
 import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
-import { prettifyAssistantText } from '@/lib/chat-sentinels'
+import { prettifyAssistantText, isSentinel } from '@/lib/chat-sentinels'
 
 
 function extractText(msg: unknown): string {
@@ -74,6 +75,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  // Timer for the ack-only `chat.history` refetch — see ChatPopup.tsx for
+  // the deferred-reply rationale. Single-flight + cleared on unmount so
+  // a burst of acked turns doesn't pile up overlapping fetches.
+  const ackOnlyHistoryTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -87,8 +92,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     idempotencyKey: string
   }>>([])
 
+  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
+  // behind the double-rAF wait.
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    scrollToBottomAfterLayout(messagesEndRef.current)
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
@@ -246,16 +253,41 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             if (text) setStreaming(text)
           } else if (state === 'final') {
             const text = extractText(msg)
-            if (text && !/^\s*NO_REPLY\s*$/.test(text)) {
+            // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
+            // from the rendered transcript — the former are markers users
+            // shouldn't see, the latter is just a server-side ack that the
+            // real reply will follow via the chat.history refetch scheduled
+            // below. `isSentinel` covers NO_REPLY plus any other protocol
+            // sentinel `chat-sentinels.ts` catalogues — same shared check
+            // ChatPopup uses, so the two components can't drift on which
+            // finals count as ack-only.
+            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            if (text && !isAckOnly) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
             setStreaming('')
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
+            // Mirror the ChatPopup fallback: OpenClaw can ack a turn with
+            // "Sent." while the real reply is generated server-side a
+            // moment later (delivery-mirror persona pipeline). That reply
+            // is persisted but never streamed via WS — re-pull chat.history
+            // a few seconds later so the deferred message surfaces without
+            // a page refresh. Only fires on the ack-only case so normal
+            // streamed replies don't pay an extra round-trip.
+            if (isAckOnly) {
+              if (ackOnlyHistoryTimerRef.current !== null) {
+                window.clearTimeout(ackOnlyHistoryTimerRef.current)
+              }
+              ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
+                ackOnlyHistoryTimerRef.current = null
+                void loadHistory()
+              }, 3_000)
+            }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
-              if (prev.trim() && !/^\s*NO_REPLY\s*$/.test(prev)) {
+              if (prev.trim() && !isSentinel(prev)) {
                 setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(prev), timestamp: Date.now() }])
               }
               return ''
@@ -303,7 +335,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const role = (m.role as string)?.toLowerCase()
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
-        if (!text || /^\s*NO_REPLY\s*$/.test(text)) continue
+        if (!text || isSentinel(text)) continue
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
@@ -453,6 +485,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     return () => {
       wsRef.current?.close()
       wsRef.current = null
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
     }
   }, [connect])
 
