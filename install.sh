@@ -1438,6 +1438,47 @@ step_recover() {
 step_gateway_setup() {
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
+  # Mask any leftover user-level openclaw-gateway.service. Standalone
+  # OpenClaw (and some older `openclaw gateway install` paths) dropped a
+  # unit file at ~/.config/systemd/user/openclaw-gateway.service that
+  # competes with our system unit for port 18789. When both wake up,
+  # operators get port-ownership conflicts, restart churn, and misleading
+  # failed-status messages on the wrong unit. ClawBox owns
+  # `clawbox-gateway.service` as the single source of truth; the user
+  # variant has no role on an appliance install. Replacing the unit file
+  # with a symlink to /dev/null is the on-disk equivalent of
+  # `systemctl --user mask` — works without needing a live user session.
+  # Idempotent: if it's already masked we leave it alone. Reported via
+  # ID-Robots/clawbox#141.
+  local USER_SYSTEMD_DIR="$CLAWBOX_HOME/.config/systemd/user"
+  local USER_GATEWAY_UNIT="$USER_SYSTEMD_DIR/openclaw-gateway.service"
+  if [ -e "$USER_GATEWAY_UNIT" ] || [ -L "$USER_GATEWAY_UNIT" ]; then
+    local CURRENT_TARGET
+    CURRENT_TARGET=$(readlink "$USER_GATEWAY_UNIT" 2>/dev/null || echo "")
+    if [ "$CURRENT_TARGET" = "/dev/null" ]; then
+      echo "  User-level openclaw-gateway.service already masked"
+    else
+      echo "  Masking conflicting user-level openclaw-gateway.service"
+      # Stop a running user-level instance first so port 18789 is freed
+      # immediately — otherwise the old process keeps holding the port
+      # until the user's next login session, defeating this run.
+      # Non-fatal: no active session yet, or the unit isn't running, both
+      # are fine and the on-disk mask still takes effect.
+      local CLAWBOX_UID
+      CLAWBOX_UID=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
+      if [ -n "$CLAWBOX_UID" ]; then
+        sudo -u "$CLAWBOX_USER" \
+          XDG_RUNTIME_DIR="/run/user/$CLAWBOX_UID" \
+          systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+      fi
+      mkdir -p "$USER_SYSTEMD_DIR"
+      chown "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_SYSTEMD_DIR"
+      rm -f "$USER_GATEWAY_UNIT"
+      ln -s /dev/null "$USER_GATEWAY_UNIT"
+      chown -h "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_GATEWAY_UNIT" 2>/dev/null || true
+    fi
+  fi
+
   # IPv4-first DNS for the gateway. Without this, on networks where the
   # ISP advertises an IPv6 prefix but doesn't actually route public v6
   # traffic (common on home/SMB networks), every Node `fetch` to a

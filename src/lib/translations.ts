@@ -105,6 +105,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Confirm Hotspot Password",
     "credentials.reenterHotspot": "Re-enter hotspot password",
     "credentials.settingsSaved": "Settings saved! Continuing...",
+    "credentials.reconnecting": "Settings saved. Reconnecting to {url}…",
+    "credentials.reconnectFailed": "Settings were saved, but {url} is still unreachable after ~1 minute. Open the URL manually to continue setup.",
     "credentials.passwordRequired": "System password is required",
     "credentials.passwordMinLength": "System password must be at least 8 characters",
     "credentials.passwordsDontMatch": "System passwords do not match",
@@ -233,6 +235,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Restarting...",
     "wizard.shutdownConfirm": "Shut down device?",
     "wizard.restartConfirm": "Restart device?",
+    "wizard.completionUnreachable": "Couldn't reach the device. Please check your connection and try again.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -487,6 +490,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Потвърдете паролата на точката за достъп",
     "credentials.reenterHotspot": "Въведете отново паролата на точката за достъп",
     "credentials.settingsSaved": "Настройките са запазени! Продължаване...",
+    "credentials.reconnecting": "Настройките са запазени. Свързване отново с {url}…",
+    "credentials.reconnectFailed": "Настройките са запазени, но {url} все още е недостъпен след около 1 минута. Отворете адреса ръчно, за да продължите настройката.",
     "credentials.passwordRequired": "Системната парола е задължителна",
     "credentials.passwordMinLength": "Системната парола трябва да е поне 8 символа",
     "credentials.passwordsDontMatch": "Системните пароли не съвпадат",
@@ -615,6 +620,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Рестартиране...",
     "wizard.shutdownConfirm": "Изключване на устройството?",
     "wizard.restartConfirm": "Рестартиране на устройството?",
+    "wizard.completionUnreachable": "Не може да се свърже с устройството. Проверете връзката и опитайте отново.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -868,6 +874,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Hotspot-Passwort bestätigen",
     "credentials.reenterHotspot": "Hotspot-Passwort erneut eingeben",
     "credentials.settingsSaved": "Einstellungen gespeichert! Weiter...",
+    "credentials.reconnecting": "Einstellungen gespeichert. Verbindung zu {url} wird wiederhergestellt…",
+    "credentials.reconnectFailed": "Einstellungen wurden gespeichert, aber {url} ist nach ~1 Minute immer noch nicht erreichbar. Öffnen Sie die URL manuell, um die Einrichtung fortzusetzen.",
     "credentials.passwordRequired": "Systempasswort ist erforderlich",
     "credentials.passwordMinLength": "Systempasswort muss mindestens 8 Zeichen lang sein",
     "credentials.passwordsDontMatch": "Systempasswörter stimmen nicht überein",
@@ -996,6 +1004,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Wird neu gestartet...",
     "wizard.shutdownConfirm": "Gerät ausschalten?",
     "wizard.restartConfirm": "Gerät neu starten?",
+    "wizard.completionUnreachable": "Gerät konnte nicht erreicht werden. Bitte überprüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
 
     // === ProgressBar ===
     "progress.wifi": "WLAN",
@@ -1249,6 +1258,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Confirmar contraseña del punto de acceso",
     "credentials.reenterHotspot": "Vuelve a introducir la contraseña del punto de acceso",
     "credentials.settingsSaved": "¡Configuración guardada! Continuando...",
+    "credentials.reconnecting": "Configuración guardada. Reconectando a {url}…",
+    "credentials.reconnectFailed": "La configuración se guardó, pero {url} sigue sin estar disponible después de ~1 minuto. Abre la URL manualmente para continuar la configuración.",
     "credentials.passwordRequired": "La contraseña del sistema es obligatoria",
     "credentials.passwordMinLength": "La contraseña del sistema debe tener al menos 8 caracteres",
     "credentials.passwordsDontMatch": "Las contraseñas del sistema no coinciden",
@@ -1377,6 +1388,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Reiniciando...",
     "wizard.shutdownConfirm": "¿Apagar el dispositivo?",
     "wizard.restartConfirm": "¿Reiniciar el dispositivo?",
+    "wizard.completionUnreachable": "No se pudo conectar con el dispositivo. Comprueba tu conexión e inténtalo de nuevo.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -1630,6 +1642,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Confirmer le mot de passe du point d'accès",
     "credentials.reenterHotspot": "Ressaisissez le mot de passe du point d'accès",
     "credentials.settingsSaved": "Paramètres enregistrés ! Continuation...",
+    "credentials.reconnecting": "Paramètres enregistrés. Reconnexion à {url}…",
+    "credentials.reconnectFailed": "Les paramètres ont été enregistrés, mais {url} reste injoignable après environ 1 minute. Ouvrez l'URL manuellement pour poursuivre la configuration.",
     "credentials.passwordRequired": "Le mot de passe système est requis",
     "credentials.passwordMinLength": "Le mot de passe système doit contenir au moins 8 caractères",
     "credentials.passwordsDontMatch": "Les mots de passe système ne correspondent pas",
@@ -1758,6 +1772,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Redémarrage...",
     "wizard.shutdownConfirm": "Éteindre l'appareil ?",
     "wizard.restartConfirm": "Redémarrer l'appareil ?",
+    "wizard.completionUnreachable": "Impossible de joindre l'appareil. Veuillez vérifier votre connexion et réessayer.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2011,6 +2026,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Conferma password hotspot",
     "credentials.reenterHotspot": "Reinserisci la password dell'hotspot",
     "credentials.settingsSaved": "Impostazioni salvate! Continuazione...",
+    "credentials.reconnecting": "Impostazioni salvate. Riconnessione a {url}…",
+    "credentials.reconnectFailed": "Le impostazioni sono state salvate, ma {url} è ancora irraggiungibile dopo ~1 minuto. Apri l'URL manualmente per continuare la configurazione.",
     "credentials.passwordRequired": "La password di sistema è obbligatoria",
     "credentials.passwordMinLength": "La password di sistema deve avere almeno 8 caratteri",
     "credentials.passwordsDontMatch": "Le password di sistema non corrispondono",
@@ -2139,6 +2156,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Riavvio...",
     "wizard.shutdownConfirm": "Spegnere il dispositivo?",
     "wizard.restartConfirm": "Riavviare il dispositivo?",
+    "wizard.completionUnreachable": "Impossibile raggiungere il dispositivo. Controlla la connessione e riprova.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2392,6 +2410,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "ホットスポットのパスワードを確認",
     "credentials.reenterHotspot": "ホットスポットのパスワードを再入力",
     "credentials.settingsSaved": "設定を保存しました！続行中...",
+    "credentials.reconnecting": "設定を保存しました。{url} に再接続しています…",
+    "credentials.reconnectFailed": "設定は保存されましたが、約1分経っても {url} に接続できません。URLを手動で開いてセットアップを続行してください。",
     "credentials.passwordRequired": "システムパスワードは必須です",
     "credentials.passwordMinLength": "システムパスワードは8文字以上にしてください",
     "credentials.passwordsDontMatch": "システムパスワードが一致しません",
@@ -2520,6 +2540,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "再起動中...",
     "wizard.shutdownConfirm": "デバイスをシャットダウンしますか？",
     "wizard.restartConfirm": "デバイスを再起動しますか？",
+    "wizard.completionUnreachable": "デバイスに接続できませんでした。接続を確認してもう一度お試しください。",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2773,6 +2794,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Hotspot-wachtwoord bevestigen",
     "credentials.reenterHotspot": "Hotspot-wachtwoord opnieuw invoeren",
     "credentials.settingsSaved": "Instellingen opgeslagen! Doorgaan...",
+    "credentials.reconnecting": "Instellingen opgeslagen. Opnieuw verbinden met {url}…",
+    "credentials.reconnectFailed": "Instellingen zijn opgeslagen, maar {url} is na ~1 minuut nog steeds onbereikbaar. Open de URL handmatig om de installatie voort te zetten.",
     "credentials.passwordRequired": "Systeemwachtwoord is verplicht",
     "credentials.passwordMinLength": "Systeemwachtwoord moet minimaal 8 tekens bevatten",
     "credentials.passwordsDontMatch": "Systeemwachtwoorden komen niet overeen",
@@ -2901,6 +2924,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Herstarten...",
     "wizard.shutdownConfirm": "Apparaat uitschakelen?",
     "wizard.restartConfirm": "Apparaat herstarten?",
+    "wizard.completionUnreachable": "Kan het apparaat niet bereiken. Controleer uw verbinding en probeer opnieuw.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3154,6 +3178,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "Bekräfta hotspot-lösenord",
     "credentials.reenterHotspot": "Ange hotspot-lösenordet igen",
     "credentials.settingsSaved": "Inställningar sparade! Fortsätter...",
+    "credentials.reconnecting": "Inställningar sparade. Återansluter till {url}…",
+    "credentials.reconnectFailed": "Inställningarna har sparats, men {url} är fortfarande inte tillgänglig efter ~1 minut. Öppna URL:en manuellt för att fortsätta installationen.",
     "credentials.passwordRequired": "Systemlösenord krävs",
     "credentials.passwordMinLength": "Systemlösenordet måste vara minst 8 tecken",
     "credentials.passwordsDontMatch": "Systemlösenorden matchar inte",
@@ -3282,6 +3308,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "Startar om...",
     "wizard.shutdownConfirm": "Stänga av enheten?",
     "wizard.restartConfirm": "Starta om enheten?",
+    "wizard.completionUnreachable": "Det gick inte att nå enheten. Kontrollera anslutningen och försök igen.",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3535,6 +3562,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.confirmHotspotPassword": "确认热点密码",
     "credentials.reenterHotspot": "重新输入热点密码",
     "credentials.settingsSaved": "设置已保存！继续中...",
+    "credentials.reconnecting": "设置已保存。正在重新连接到 {url}…",
+    "credentials.reconnectFailed": "设置已保存，但约 1 分钟后仍无法访问 {url}。请手动打开该网址以继续设置。",
     "credentials.passwordRequired": "系统密码为必填项",
     "credentials.passwordMinLength": "系统密码至少需要 8 个字符",
     "credentials.passwordsDontMatch": "两次输入的系统密码不一致",
@@ -3663,6 +3692,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.restarting": "正在重启...",
     "wizard.shutdownConfirm": "确定关机吗？",
     "wizard.restartConfirm": "确定重启吗？",
+    "wizard.completionUnreachable": "无法连接到设备。请检查您的连接并重试。",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
