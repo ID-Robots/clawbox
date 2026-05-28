@@ -39,20 +39,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // Run a production build + the standalone production server, not
-    // `bun run dev`. The dev server (Turbopack) recompiles routes on first
-    // hit, and under CI's single shared server (workers: 1) that
-    // recompile-under-load is what made ~6 interaction specs flake on the
-    // GH-Actions runner (tracked in #114). The production server serves
-    // pre-built routes with no per-request compile, and matches what ships
-    // on the device. Locally we reuse an already-running server so devs
-    // don't pay the build each run.
-    command: process.env.CI
-      ? `PORT=${port} bun run build && PORT=${port} HOSTNAME=127.0.0.1 node production-server.js`
-      : `PORT=${port} bun run dev`,
+    command: `PORT=${port} bun run dev`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
-    // A cold `next build` on the CI runner runs well past the 60s default.
-    timeout: process.env.CI ? 300_000 : 120_000,
   },
 });
