@@ -744,6 +744,11 @@ step_openclaw_install() {
   # plugins do. Failures are non-fatal: a missing-from-npm plugin
   # shouldn't roll back the whole update; gateway-pre-start.sh will retry
   # on next boot. Gateway restart happens later in step_gateway_setup.
+  # Emit "<id>\t<npm-package>" per external plugin. The npm package is
+  # derived from rootDir (.../node_modules/@scope/name -> @scope/name) so we
+  # can pin @openclaw/* plugins to $TARGET. Reinstalling by bare id resolves
+  # @latest, which is exactly how @openclaw/codex drifted ahead of the
+  # pinned core and crashed every Codex chat.
   local INSTALLED_PLUGINS
   INSTALLED_PLUGINS=$(as_clawbox -H "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
     | python3 -c '
@@ -754,15 +759,30 @@ except Exception:
     sys.exit(0)
 for p in d.get("plugins", []):
     pid = p.get("id")
-    if pid and p.get("origin") != "bundled":
-        print(pid)
+    if not pid or p.get("origin") == "bundled":
+        continue
+    root = p.get("rootDir") or p.get("source") or ""
+    pkg = ""
+    if "node_modules/" in root:
+        tail = root.split("node_modules/", 1)[1].split("/")
+        if tail and tail[0].startswith("@") and len(tail) >= 2:
+            pkg = tail[0] + "/" + tail[1]
+        elif tail:
+            pkg = tail[0]
+    print(pid + "\t" + pkg)
 ' 2>/dev/null)
   if [ -n "$INSTALLED_PLUGINS" ]; then
     echo "  Refreshing OpenClaw plugins to match core $TARGET:"
-    while IFS= read -r plugin; do
+    while IFS=$'\t' read -r plugin pkg; do
       [ -z "$plugin" ] && continue
-      echo "    - $plugin"
-      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$plugin" --force >/dev/null 2>&1; then
+      # Pin @openclaw/* plugins to the core target; others reinstall by id
+      # (they version independently). $TARGET is the same pin the core used.
+      local spec="$plugin"
+      case "$pkg" in
+        @openclaw/*) spec="$pkg@$TARGET" ;;
+      esac
+      echo "    - $spec"
+      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force >/dev/null 2>&1; then
         echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
       fi
     done <<< "$INSTALLED_PLUGINS"
