@@ -1,10 +1,10 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: same GH-Actions-only flake as browser-vnc. The terminal
-// WebSocket handshake races with the page-load timer on slow runners.
-// Tracked as a follow-up to PR #113.
-test.fixme("terminal can open and connect to the websocket backend", async ({ page }) => {
+// Re-enabled (#114): production-build e2e server removes the dev-server
+// recompile-under-load that starved the terminal WebSocket handshake on
+// slow runners.
+test("terminal can open and connect to the websocket backend", async ({ page }) => {
   await page.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
 
