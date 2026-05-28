@@ -981,7 +981,10 @@ step_openclaw_config() {
   # the installer don't rotate a token a device is already using.
   # Strong = a `${ENV}` interpolation or a >=32-char non-legacy string
   # (kept in lockstep with is_strong_gateway_token in gateway-pre-start.sh).
-  EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]')
+  # `|| true`: on a fresh install the token key doesn't exist yet, so
+  # `config get` exits non-zero — without this, set -euo pipefail would abort
+  # the whole installer here (caught by the e2e-install harness).
+  EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
   if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
     GW_TOKEN_STRONG=1
   elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then

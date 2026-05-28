@@ -354,7 +354,9 @@ step_openclaw_config() {
   as_user "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
   # Seed a strong per-device token only when missing/weak (see install.sh).
   # A `${ENV}` interpolation counts as strong and must not be rotated.
-  EXISTING_GW_TOKEN=$(as_user "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]')
+  # `|| true`: fresh installs have no token key yet, so `config get` exits
+  # non-zero — without this, set -euo pipefail would abort the installer.
+  EXISTING_GW_TOKEN=$(as_user "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
   if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
     GW_TOKEN_STRONG=1
   elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
