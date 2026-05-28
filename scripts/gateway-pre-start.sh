@@ -22,6 +22,19 @@ OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
 OPENCLAW_CONFIG="/home/clawbox/.openclaw/openclaw.json"
 HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
 
+# Pinned OpenClaw target — external plugins (e.g. @openclaw/codex) must stay
+# locked to the same version as the core, or they drift ahead via @latest and
+# crash at runtime against the pinned core. Read from the repo pin file, same
+# source install.sh and updater.ts use. Empty = pin unknown, fall back to the
+# unpinned alias (preserves old behaviour rather than risk skipping a repair).
+OPENCLAW_TARGET=""
+OPENCLAW_PIN_FILE="/home/clawbox/clawbox/config/openclaw-target.txt"
+if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
+  OPENCLAW_TARGET="${OPENCLAW_PIN_VERSION}"
+elif [ -f "$OPENCLAW_PIN_FILE" ]; then
+  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" | awk '{print $1}')
+fi
+
 if [ ! -x "$OPENCLAW_BIN" ]; then
   exit 0
 fi
@@ -344,10 +357,34 @@ PY
 # `--force` on install rebuilds the symlink without reinstalling
 # unnecessary content when the package directory is already there.
 CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
-if [ "$NEEDS_CODEX_PLUGIN" = "1" ] && { [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; }; then
-  echo "  Installing/repairing @openclaw/codex runtime plugin (codex model selected)…"
-  "$OPENCLAW_BIN" plugins install codex --force >/dev/null 2>&1 \
-    || echo "  WARN: openclaw plugins install codex failed; Codex chats will fail until resolved"
+CODEX_NEEDS_INSTALL=0
+CODEX_INSTALL_REASON=""
+if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
+  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; then
+    CODEX_NEEDS_INSTALL=1
+    CODEX_INSTALL_REASON="missing or peer-dep broken"
+  elif [ -n "$OPENCLAW_TARGET" ]; then
+    # Version-skew guard. Older builds ran `plugins install codex`, which
+    # resolves @latest — so the codex plugin drifts ahead of the pinned core
+    # and every Codex chat crashes with "_diagnosticRuntime.
+    # createDiagnosticTraceContextFromActiveScope is not a function" (the
+    # newer plugin calls a runtime API the pinned core doesn't expose).
+    # Reinstall at the pinned version whenever the two differ.
+    CODEX_INSTALLED_VER=$(python3 -c "import json; print(json.load(open('$CODEX_PLUGIN_DIR/package.json')).get('version',''))" 2>/dev/null || echo "")
+    if [ "$CODEX_INSTALLED_VER" != "$OPENCLAW_TARGET" ]; then
+      CODEX_NEEDS_INSTALL=1
+      CODEX_INSTALL_REASON="version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
+    fi
+  fi
+fi
+if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
+  echo "  Installing/repairing @openclaw/codex runtime plugin ($CODEX_INSTALL_REASON)…"
+  # Pin to the core target via the full scoped npm spec; fall back to the
+  # bare alias only when the pin is unknown, so a needed repair still happens.
+  CODEX_SPEC="codex"
+  [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
+  "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1 \
+    || echo "  WARN: openclaw plugins install $CODEX_SPEC failed; Codex chats will fail until resolved"
 fi
 
 # Ensure the per-install MCP bearer token exists and is wired into the
