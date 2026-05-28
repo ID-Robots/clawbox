@@ -352,7 +352,22 @@ step_openclaw_config() {
   fi
 
   as_user "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
-  as_user "$OPENCLAW_BIN" config set gateway.auth.token clawbox 2>/dev/null || true
+  # Seed a strong per-device token only when missing/weak (see install.sh).
+  # A `${ENV}` interpolation counts as strong and must not be rotated.
+  # `|| true`: fresh installs have no token key yet, so `config get` exits
+  # non-zero — without this, set -euo pipefail would abort the installer.
+  EXISTING_GW_TOKEN=$(as_user "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
+  if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
+    GW_TOKEN_STRONG=1
+  elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
+    GW_TOKEN_STRONG=1
+  else
+    GW_TOKEN_STRONG=0
+  fi
+  if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
+    GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    as_user "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN" 2>/dev/null || true
+  fi
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
 
@@ -390,7 +405,18 @@ c.agents.defaults.compaction.reserveTokensFloor=24000;
 if(!c.gateway)c.gateway={};
 if(!c.gateway.auth)c.gateway.auth={};
 c.gateway.auth.mode='token';
-c.gateway.auth.token='clawbox';
+// Preserve a strong per-device token; only generate when missing/weak. A
+// plain literal "clawbox" here would reintroduce the shared-token vuln (#149).
+{
+  // Keep this predicate in lockstep with is_strong_gateway_token() in
+  // scripts/gateway-pre-start.sh: SecretRef object with a known ref key,
+  // a non-empty ${ENV} interpolation, or a >=32-char non-legacy string.
+  const t=c.gateway.auth.token;
+  const strong =
+    (t&&typeof t==='object'&&!Array.isArray(t)&&('env' in t||'file' in t||'exec' in t)) ||
+    (typeof t==='string' && (/^\$\{.+\}$/.test(t) || (t!=='clawbox' && t.length>=32)));
+  if(!strong) c.gateway.auth.token=require('crypto').randomBytes(32).toString('hex');
+}
 if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;

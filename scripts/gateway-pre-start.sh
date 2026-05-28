@@ -84,7 +84,29 @@ fi
 export CLAWBOX_LAN_IPS
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
-import json, os, sys, tempfile
+import json, os, sys, tempfile, secrets
+
+# Gateway auth token gates LAN access to the agent's privileged tools
+# (run_command / file_write / system_power). Earlier builds wrote the public
+# literal "clawbox" — documented in the open-source history — so any device
+# carrying it is an unauthenticated-LAN-access risk. A strong per-device token
+# must be PRESERVED once set: the configure route's random hex, a `${ENV}`
+# interpolation, or a SecretRef object are all legitimate strong values we
+# must not clobber back to the literal.
+LEGACY_GATEWAY_TOKEN = "clawbox"
+MIN_GATEWAY_TOKEN_LENGTH = 32
+
+def is_strong_gateway_token(v):
+    # SecretRef object — managed externally. Require a known ref key so an
+    # empty/malformed {} isn't mistaken for a resolvable secret.
+    if isinstance(v, dict):
+        return any(k in v for k in ("env", "file", "exec"))
+    if isinstance(v, str):
+        # `${VAR}` interpolation (non-empty body) resolves from env at runtime.
+        if v.startswith("${") and v.endswith("}") and len(v) > 3:
+            return True
+        return v != LEGACY_GATEWAY_TOKEN and len(v) >= MIN_GATEWAY_TOKEN_LENGTH
+    return False
 
 cfg_path = sys.argv[1]
 hostname = os.environ.get("CLAWBOX_HOSTNAME", "clawbox")
@@ -117,6 +139,19 @@ for k in ("tools", "systemPromptSuffix"):
     if k in agents_defaults:
         del agents_defaults[k]
         changed = True
+
+# Strip orphaned per-model keys that a newer-than-pinned plugin wrote and a
+# version downgrade left behind, which fail strict config validation and
+# brick the AI provider page until `openclaw doctor --fix`. `agentRuntime`
+# is written by @openclaw/codex >= 2026.5.27 into agents.defaults.models[*];
+# when the plugin is realigned to the pinned core (< that version) the key is
+# orphaned. Drop it on every gateway start so affected devices self-heal.
+agents_models = agents_defaults.get("models")
+if isinstance(agents_models, dict):
+    for _model_key, _model_val in agents_models.items():
+        if isinstance(_model_val, dict) and "agentRuntime" in _model_val:
+            del _model_val["agentRuntime"]
+            changed = True
 
 # Security migration: older ClawBox versions silently wrote
 # channels.telegram.dmPolicy="open" + allowFrom=["*"] at bot-token setup,
@@ -190,7 +225,13 @@ if gateway.get("bind") not in valid_binds:
 
 set_if(gateway, "mode", "local")
 set_if(auth, "mode", "token")
-set_if(auth, "token", "clawbox")
+# Preserve a strong token; only (re)generate when missing or the weak legacy
+# literal. The service no longer passes --token, so the gateway resolves this
+# config value at runtime (same value gateway-proxy.ts injects into the SPA) —
+# one source of truth, no service↔UI drift (issues #149, #150).
+if not is_strong_gateway_token(auth.get("token")):
+    auth["token"] = secrets.token_hex(32)
+    changed = True
 
 # Backfill `compat.supportedReasoningEfforts: ["high", "xhigh"]` onto any
 # DeepSeek V4 models the configure route wrote before this declaration was
