@@ -81,6 +81,10 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh token policy", () => {
     });
     it("SecretRef object with a known key is strong (externally managed)", () => {
       expect(classify({ env: "OPENCLAW_GATEWAY_TOKEN" })).toBe("strong");
+      // file/exec are equally valid SecretRef shapes — assert each so a
+      // regression that drops one from the accepted-key set is caught.
+      expect(classify({ file: "/run/secrets/gateway-token" })).toBe("strong");
+      expect(classify({ exec: "cat /run/secrets/token" })).toBe("strong");
     });
     it("empty/keyless object is weak (not a resolvable secret)", () => {
       expect(classify({})).toBe("weak");

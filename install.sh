@@ -979,8 +979,17 @@ step_openclaw_config() {
   # gateway-pre-start.sh preserves it on every start; the gateway resolves it
   # from config (no --token flag). Only seed when missing/weak so re-runs of
   # the installer don't rotate a token a device is already using.
+  # Strong = a `${ENV}` interpolation or a >=32-char non-legacy string
+  # (kept in lockstep with is_strong_gateway_token in gateway-pre-start.sh).
   EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]')
-  if [ -z "$EXISTING_GW_TOKEN" ] || [ "$EXISTING_GW_TOKEN" = "clawbox" ] || [ "${#EXISTING_GW_TOKEN}" -lt 32 ]; then
+  if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
+    GW_TOKEN_STRONG=1
+  elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
+    GW_TOKEN_STRONG=1
+  else
+    GW_TOKEN_STRONG=0
+  fi
+  if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
     GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
     as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN"
     echo "  Gateway auth token generated (per-device)"
