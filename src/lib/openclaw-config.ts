@@ -341,6 +341,7 @@ export interface OpenClawConfig {
       botToken?: string;
       dmPolicy?: string;
       allowFrom?: string[];
+      streaming?: { mode?: string; [key: string]: unknown };
       [key: string]: unknown;
     };
   };
@@ -523,6 +524,37 @@ export async function setTelegramToken(botToken: string): Promise<void> {
     enabled: true,
     botToken,
   };
+  await writeConfig(config);
+}
+
+// Whether the Telegram bot streams live tool/research progress ("Bubbling…"
+// drafts) while it works. OpenClaw gates the progress draft on the channel's
+// streaming mode: `mode: "off"` suppresses all intermediate drafts (the bot
+// delivers the final answer only), and the absence of a `streaming` key falls
+// back to OpenClaw's default (progress shown). So "enabled" == not explicitly
+// turned off.
+export async function getTelegramProgressStreaming(): Promise<boolean> {
+  const config = await readConfig();
+  return config.channels?.telegram?.streaming?.mode !== "off";
+}
+
+export async function setTelegramProgressStreaming(enabled: boolean): Promise<void> {
+  const config = await readConfig();
+  if (!config.channels) {
+    config.channels = {};
+  }
+  const existing = config.channels.telegram ?? {};
+  if (enabled) {
+    // Restore OpenClaw's default by dropping our override entirely.
+    const { streaming: _streaming, ...rest } = existing;
+    config.channels.telegram = { ...rest };
+  } else {
+    // Final-answer-only: suppress the progress/preview draft.
+    config.channels.telegram = { ...existing, streaming: { mode: "off" } };
+  }
+  // Note: unlike setTelegramToken this does not strip dmPolicy/allowFrom — it's
+  // a preference toggle, not a token re-secure; gateway-pre-start.sh already
+  // strips those on every boot.
   await writeConfig(config);
 }
 

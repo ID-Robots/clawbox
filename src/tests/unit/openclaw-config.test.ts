@@ -333,6 +333,68 @@ describe("openclaw-config", () => {
     });
   });
 
+  describe("getTelegramProgressStreaming", () => {
+    it("defaults to ON (true) when no streaming override is set", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: { telegram: { enabled: true, botToken: "123:abc" } },
+      }));
+      expect(await openclawConfig.getTelegramProgressStreaming()).toBe(true);
+    });
+
+    it("returns false when streaming is explicitly disabled (mode off)", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: { telegram: { botToken: "123:abc", streaming: { mode: "off" } } },
+      }));
+      expect(await openclawConfig.getTelegramProgressStreaming()).toBe(false);
+    });
+
+    it("defaults to ON when the config is missing entirely", async () => {
+      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+      expect(await openclawConfig.getTelegramProgressStreaming()).toBe(true);
+    });
+  });
+
+  describe("setTelegramProgressStreaming", () => {
+    it("disabling writes streaming.mode=off and preserves botToken/enabled", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: { telegram: { enabled: true, botToken: "123:abc", customField: "keep-me" } },
+      }));
+
+      await openclawConfig.setTelegramProgressStreaming(false);
+
+      const writtenConfig = JSON.parse(mockFs.writeFile.mock.calls[0][1] as string);
+      expect(writtenConfig.channels.telegram.streaming).toEqual({ mode: "off" });
+      expect(writtenConfig.channels.telegram.botToken).toBe("123:abc");
+      expect(writtenConfig.channels.telegram.enabled).toBe(true);
+      expect(writtenConfig.channels.telegram.customField).toBe("keep-me");
+    });
+
+    it("enabling removes the streaming override but keeps the rest", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: { telegram: { enabled: true, botToken: "123:abc", streaming: { mode: "off" } } },
+      }));
+
+      await openclawConfig.setTelegramProgressStreaming(true);
+
+      const writtenConfig = JSON.parse(mockFs.writeFile.mock.calls[0][1] as string);
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("streaming");
+      expect(writtenConfig.channels.telegram.botToken).toBe("123:abc");
+      expect(writtenConfig.channels.telegram.enabled).toBe(true);
+    });
+
+    it("never writes dmPolicy/allowFrom", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        channels: { telegram: { botToken: "123:abc" } },
+      }));
+
+      await openclawConfig.setTelegramProgressStreaming(false);
+
+      const writtenConfig = JSON.parse(mockFs.writeFile.mock.calls[0][1] as string);
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("dmPolicy");
+      expect(writtenConfig.channels.telegram).not.toHaveProperty("allowFrom");
+    });
+  });
+
   describe("restartGateway", () => {
     it("restarts gateway service", async () => {
       await openclawConfig.restartGateway();
