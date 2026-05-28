@@ -642,32 +642,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // explicit confirmation the new provider is active.
             setTimeout(async () => {
               setReloadingSkill(false)
-              if (keepHistoryReload) {
-                // A plain restart just drops the overlay — nothing to confirm.
-                // A provider change additionally surfaces a "Switched chat to
-                // X" banner so the user knows the new provider is live.
-                if (wasProviderChange) {
-                  // Refresh chat/model state so we can label the banner with
-                  // the new active provider. Fire-and-forget — if the fetch
-                  // fails the worst case is we don't show the banner, not
-                  // that the chat is broken.
-                  try {
-                    const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
-                    const state = await res.json() as ChatModelState
-                    setChatModelState(state)
-                    const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
-                    setMessages(prev => [...prev, {
-                      role: 'system',
-                      text: `Switched chat to ${label}.`,
-                      timestamp: Date.now(),
-                      variant: 'success',
-                    }])
-                  } catch {
-                    // Ignore — banner is best-effort confirmation only.
-                  }
+              // A provider change surfaces a "Switched chat to X" banner so the
+              // user knows the new provider is live. Refresh chat/model state to
+              // label it. Fire-and-forget — if the fetch fails the worst case is
+              // we don't show the banner, not that the chat is broken.
+              if (wasProviderChange) {
+                try {
+                  const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
+                  const state = await res.json() as ChatModelState
+                  setChatModelState(state)
+                  const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
+                  setMessages(prev => [...prev, {
+                    role: 'system',
+                    text: `Switched chat to ${label}.`,
+                    timestamp: Date.now(),
+                    variant: 'success',
+                  }])
+                } catch {
+                  // Ignore — banner is best-effort confirmation only.
                 }
-                return
               }
+              // Provider changes and plain restarts keep the visible history and
+              // have nothing to auto-send — drop the overlay and hand back to the
+              // user. Only a skill install/uninstall sends a context message.
+              if (keepHistoryReload) return
               setSending(true)
               setMessages([{ role: 'user', text: contextMsg.replace(/\[System:.*?\]\s*/g, ''), timestamp: Date.now() }])
               wsRequest('chat.send', {
@@ -837,17 +835,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setReloadReason('restart')
         setReloadingSkill(true)
         setReloadProgress(0)
-        if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
-        let progress = 0
-        reloadTimerRef.current = setInterval(() => {
-          progress += (90 - progress) * 0.08
-          const rounded = Math.min(Math.round(progress), 90)
-          setReloadProgress(rounded)
-          if (rounded >= 90 && reloadTimerRef.current) {
-            clearInterval(reloadTimerRef.current)
-            reloadTimerRef.current = null
-          }
-        }, 200)
+        startReloadProgressTimer()
       }
 
       // While a reload is in-flight the gateway is restarting — use the
@@ -1245,8 +1233,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // into that frozen closure.
   const reloadReasonRef = useRef<'skill' | 'provider' | 'restart'>('skill')
   const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Drives the reload overlay's progress bar from 0 toward 90% (it parks at
+  // 90 until the gateway answers, then the resolve callback completes it to
+  // 100). Shared by the skill/provider event handlers and the onClose restart
+  // path so the easing curve stays in one place.
+  const startReloadProgressTimer = useCallback(() => {
+    if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
+    let progress = 0
+    reloadTimerRef.current = setInterval(() => {
+      progress += (90 - progress) * 0.08
+      const rounded = Math.min(Math.round(progress), 90)
+      setReloadProgress(rounded)
+      if (rounded >= 90 && reloadTimerRef.current) {
+        clearInterval(reloadTimerRef.current)
+        reloadTimerRef.current = null
+      }
+    }, 200)
+  }, [])
   useEffect(() => {
-    const makeHandler = (reason: 'skill' | 'provider' | 'restart') => (e: Event) => {
+    const makeHandler = (reason: 'skill' | 'provider') => (e: Event) => {
       const detail = (e as CustomEvent).detail || {}
       skillInstalledRef.current = true
       skillEventRef.current = detail
@@ -1255,17 +1260,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setReloadingSkill(true)
       setReloadProgress(0)
       retryCountRef.current = 0
-      if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
-      let progress = 0
-      reloadTimerRef.current = setInterval(() => {
-        progress += (90 - progress) * 0.08
-        const rounded = Math.min(Math.round(progress), 90)
-        setReloadProgress(rounded)
-        if (rounded >= 90 && reloadTimerRef.current) {
-          clearInterval(reloadTimerRef.current)
-          reloadTimerRef.current = null
-        }
-      }, 200)
+      startReloadProgressTimer()
     }
     const skillHandler = makeHandler('skill')
     // Treat a primary-AI-provider change the same as a skill install:

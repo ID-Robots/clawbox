@@ -1102,6 +1102,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [section, isMobile, refreshTelegramStatus]);
 
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
+    const prev = tgStreaming;
     setTgStreamingPending(true);
     setTgStreaming(next); // optimistic
     try {
@@ -1113,14 +1114,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // 502 = saved but gateway restart failed; the setting still persisted,
       // so keep the optimistic value rather than reverting.
       if (!res.ok && res.status !== 502) {
-        setTgStreaming(!next); // revert on a real failure
+        setTgStreaming(prev); // revert on a real failure
       }
     } catch {
-      setTgStreaming(!next);
+      setTgStreaming(prev);
     } finally {
       setTgStreamingPending(false);
     }
-  }, []);
+  }, [tgStreaming]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
