@@ -605,13 +605,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // control back to the user.
           if (skillInstalledRef.current) {
             const wasProviderChange = reloadReasonRef.current === 'provider'
+            // A plain gateway restart (e.g. a channel-config toggle) keeps
+            // the conversation intact too — nothing about the session
+            // semantics changed, the gateway just bounced.
+            const keepHistoryReload = wasProviderChange || reloadReasonRef.current === 'restart'
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
             // Only reset the transcript for skill install/uninstall/etc.
-            // Provider changes keep the visible history so the user's
-            // earlier context isn't wiped — only the backend session
-            // override changed, not the conversation semantics.
-            if (!wasProviderChange) {
+            // Provider changes and plain restarts keep the visible history so
+            // the user's earlier context isn't wiped — only the backend
+            // session override changed (provider) or nothing did (restart).
+            if (!keepHistoryReload) {
               setMessages([])
               greetedRef.current = true // prevent auto-greet
             }
@@ -638,24 +642,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // explicit confirmation the new provider is active.
             setTimeout(async () => {
               setReloadingSkill(false)
-              if (wasProviderChange) {
-                // Refresh chat/model state so we can label the banner with
-                // the new active provider. Fire-and-forget — if the fetch
-                // fails the worst case is we don't show the banner, not
-                // that the chat is broken.
-                try {
-                  const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
-                  const state = await res.json() as ChatModelState
-                  setChatModelState(state)
-                  const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
-                  setMessages(prev => [...prev, {
-                    role: 'system',
-                    text: `Switched chat to ${label}.`,
-                    timestamp: Date.now(),
-                    variant: 'success',
-                  }])
-                } catch {
-                  // Ignore — banner is best-effort confirmation only.
+              if (keepHistoryReload) {
+                // A plain restart just drops the overlay — nothing to confirm.
+                // A provider change additionally surfaces a "Switched chat to
+                // X" banner so the user knows the new provider is live.
+                if (wasProviderChange) {
+                  // Refresh chat/model state so we can label the banner with
+                  // the new active provider. Fire-and-forget — if the fetch
+                  // fails the worst case is we don't show the banner, not
+                  // that the chat is broken.
+                  try {
+                    const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
+                    const state = await res.json() as ChatModelState
+                    setChatModelState(state)
+                    const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
+                    setMessages(prev => [...prev, {
+                      role: 'system',
+                      text: `Switched chat to ${label}.`,
+                      timestamp: Date.now(),
+                      variant: 'success',
+                    }])
+                  } catch {
+                    // Ignore — banner is best-effort confirmation only.
+                  }
                 }
                 return
               }
@@ -811,12 +820,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const onClose = () => {
       wsRef.current = null
 
-      // While a skill install is in-flight the gateway is restarting to
-      // load the new skill — use the extended retry budget so the chat
-      // reconnects automatically once it comes back, instead of bailing
-      // out with 'Could not connect to gateway' and making the user click
-      // Try again manually. The normal cap still applies outside of
-      // skill-install windows.
+      // If the WS drops after we'd successfully connected, the gateway
+      // bounced under us (a restart from a skill install, AI-provider
+      // change, the Telegram progress-streaming toggle, a settings change,
+      // or a crash). Show the same reconnect overlay the skill/provider
+      // flows use so the chat doesn't just freeze — instead of the bare
+      // spinner. `connectedOnceRef` gates this to genuine restarts (an
+      // initial connection that never succeeded keeps the plain "connecting"
+      // UI). The `!skillInstalledRef` guard avoids re-tripping while an
+      // overlay reconnect is already in flight. Reason 'restart' keeps the
+      // visible history; the resolve callback clears the overlay + extends
+      // the retry budget once the gateway answers again.
+      if (connectedOnceRef.current && !skillInstalledRef.current) {
+        skillInstalledRef.current = true
+        reloadReasonRef.current = 'restart'
+        setReloadReason('restart')
+        setReloadingSkill(true)
+        setReloadProgress(0)
+        if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
+        let progress = 0
+        reloadTimerRef.current = setInterval(() => {
+          progress += (90 - progress) * 0.08
+          const rounded = Math.min(Math.round(progress), 90)
+          setReloadProgress(rounded)
+          if (rounded >= 90 && reloadTimerRef.current) {
+            clearInterval(reloadTimerRef.current)
+            reloadTimerRef.current = null
+          }
+        }, 200)
+      }
+
+      // While a reload is in-flight the gateway is restarting — use the
+      // extended retry budget so the chat reconnects automatically once it
+      // comes back, instead of bailing out with 'Could not connect to
+      // gateway' and making the user click Try again manually. The normal
+      // cap still applies outside of restart windows.
       const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
       if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
@@ -1198,17 +1236,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const skillEventRef = useRef<{ action: string; name?: string; id?: string } | null>(null)
   const [reloadingSkill, setReloadingSkill] = useState(false)
   const [reloadProgress, setReloadProgress] = useState(0)
-  const [reloadReason, setReloadReason] = useState<'skill' | 'provider'>('skill')
+  const [reloadReason, setReloadReason] = useState<'skill' | 'provider' | 'restart'>('skill')
   // Duplicate of reloadReason behind a ref because the WebSocket `hello`
   // resolve callback is created once (inside a useCallback with [] deps)
   // and captures whatever reloadReason state was at mount time —
   // without this ref, the `wasProviderChange` branch would never fire
   // because the state update from the event handler doesn't propagate
   // into that frozen closure.
-  const reloadReasonRef = useRef<'skill' | 'provider'>('skill')
+  const reloadReasonRef = useRef<'skill' | 'provider' | 'restart'>('skill')
   const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   useEffect(() => {
-    const makeHandler = (reason: 'skill' | 'provider') => (e: Event) => {
+    const makeHandler = (reason: 'skill' | 'provider' | 'restart') => (e: Event) => {
       const detail = (e as CustomEvent).detail || {}
       skillInstalledRef.current = true
       skillEventRef.current = detail
@@ -1554,7 +1592,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
-                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : 'Reloading skills...'}</span>
+                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : reloadReason === 'restart' ? 'Restarting chat...' : 'Reloading skills...'}</span>
                   <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
                     <div style={{
                       height: '100%', borderRadius: 2, background: '#f97316',
