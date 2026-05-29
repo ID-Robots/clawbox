@@ -105,6 +105,13 @@ wait_for_interface || echo "[AP] Continuing pre-scan despite interface timeout"
 # poll the list until real networks appear, up to PRE_AP_SCAN_TIMEOUT seconds.
 SCAN_OUTPUT=""
 PRE_AP_SCAN_TIMEOUT="${PRE_AP_SCAN_TIMEOUT:-20}"
+# Validate before arithmetic: a non-numeric override would make the $((...))
+# below a syntax error and abort the whole script under `set -euo pipefail`,
+# which would stop the AP from coming up at all.
+if ! [[ "$PRE_AP_SCAN_TIMEOUT" =~ ^[0-9]+$ ]]; then
+  echo "[AP] Invalid PRE_AP_SCAN_TIMEOUT='$PRE_AP_SCAN_TIMEOUT'; defaulting to 20"
+  PRE_AP_SCAN_TIMEOUT=20
+fi
 scan_deadline=$((SECONDS + PRE_AP_SCAN_TIMEOUT))
 scan_attempt=0
 while :; do

@@ -548,6 +548,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const connect = useCallback(async () => {
+    // Cancel any pending retry / auth-backoff timer so an explicit reconnect
+    // (e.g. the "Try again" button) can't race with a previously scheduled one
+    // and fire a duplicate connect later.
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
     if (wsRef.current) {
       wsRef.current.close()
