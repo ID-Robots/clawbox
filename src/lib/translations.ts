@@ -68,6 +68,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.findingNetworks": "Finding networks...",
     "wifi.connectedMessage": "Connected! Reconnect to your home WiFi and visit {url} to continue.",
     "wifi.lostConnection": "Lost connection to ClawBox. If WiFi switched successfully, reconnect to your home WiFi and visit {url} to continue.",
+    "wifi.switching": "Connecting to {ssid}… the setup hotspot closes during the switch, so this can take up to a minute.",
+    "wifi.wrongPassword": "Wrong WiFi password. Double-check it and try again.",
     "wifi.connectionFailed": "Connection failed: {error}",
 
     // === UpdateStep ===
@@ -455,6 +457,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.findingNetworks": "Търсене на мрежи...",
     "wifi.connectedMessage": "Свързано! Свържете се с домашната си WiFi мрежа и отворете {url}, за да продължите.",
     "wifi.lostConnection": "Загубена връзка с ClawBox. Ако WiFi мрежата е сменена успешно, свържете се с домашната си WiFi и отворете {url}, за да продължите.",
+    "wifi.switching": "Свързване към {ssid}… точката за достъп се изключва по време на превключването, така че това може да отнеме до минута.",
+    "wifi.wrongPassword": "Грешна WiFi парола. Проверете я и опитайте отново.",
     "wifi.connectionFailed": "Неуспешно свързване: {error}",
 
     // === UpdateStep ===
