@@ -6,6 +6,11 @@ import path from "path";
 const exec = promisify(execFile);
 const IFACE = process.env.NETWORK_INTERFACE || "wlP1p1s0";
 const NETWORK_TIMEOUT = Number(process.env.NETWORK_COMMAND_TIMEOUT) || 60000;
+// `iw scan` returns within a few seconds when it works; on single-radio adapters
+// it instead hangs while the interface is beaconing as an AP. Cap it well below
+// NETWORK_TIMEOUT so a doomed AP-mode scan fails fast and we fall back to cache
+// instead of leaving the wizard spinning for a minute.
+const IW_SCAN_TIMEOUT = Number(process.env.IW_SCAN_TIMEOUT) || 15000;
 const TEST_MODE = process.env.CLAWBOX_TEST_MODE === "1";
 const AP_RETRY_COUNT = 3;
 const AP_RETRY_DELAY = 2000;
@@ -98,7 +103,7 @@ export async function scanWifiLive(): Promise<WifiNetwork[]> {
       const proc = spawn("/usr/sbin/iw", ["dev", IFACE, "scan"]);
       let out = "";
       let err = "";
-      const timer = setTimeout(() => { proc.kill(); reject(new Error("iw scan timed out")); }, NETWORK_TIMEOUT);
+      const timer = setTimeout(() => { proc.kill(); reject(new Error("iw scan timed out")); }, IW_SCAN_TIMEOUT);
       proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
       proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
       proc.on("close", (code) => {
@@ -149,10 +154,19 @@ export async function scanWifiLive(): Promise<WifiNetwork[]> {
       });
     }
 
-    return deduplicateNetworks(networks.filter((n) => n.ssid && n.ssid !== "ClawBox-Setup"));
+    const live = deduplicateNetworks(networks.filter((n) => n.ssid && n.ssid !== "ClawBox-Setup"));
+    if (live.length > 0) return live;
+    // No live results — on single-radio adapters `iw scan` can't see neighbours
+    // while the radio is beaconing as an AP. Fall back to the pre-AP boot scan
+    // cache so the wizard still shows the networks found before the hotspot.
+    const cached = getCachedScan();
+    if (cached.length > 0) {
+      console.warn("[WiFi] iw scan returned nothing (AP mode?); serving pre-AP cache");
+    }
+    return cached;
   } catch (err) {
     console.error("[WiFi] iw scan failed:", err instanceof Error ? err.message : err);
-    return [];
+    return getCachedScan();
   }
 }
 

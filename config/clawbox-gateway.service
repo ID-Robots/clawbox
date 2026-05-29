@@ -8,7 +8,11 @@ Type=simple
 User=clawbox
 WorkingDirectory=/home/clawbox
 ExecStartPre=/home/clawbox/clawbox/scripts/gateway-pre-start.sh
-ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind lan --token clawbox
+# No --token here: the gateway resolves gateway.auth.token from openclaw.json,
+# which gateway-pre-start.sh keeps as a strong per-device value (and which
+# gateway-proxy.ts injects into the SPA). Passing a literal here would override
+# that and reintroduce the shared-token / UI-drift bug (issues #149, #150).
+ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind lan
 Restart=always
 RestartSec=5
 Environment=HOME=/home/clawbox

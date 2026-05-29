@@ -975,7 +975,30 @@ step_openclaw_config() {
   fi
 
   as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode token
-  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token clawbox
+  # Seed a strong per-device gateway token (not the public legacy literal).
+  # gateway-pre-start.sh preserves it on every start; the gateway resolves it
+  # from config (no --token flag). Only seed when missing/weak so re-runs of
+  # the installer don't rotate a token a device is already using.
+  # Strong = a `${ENV}` interpolation or a >=32-char non-legacy string
+  # (kept in lockstep with is_strong_gateway_token in gateway-pre-start.sh).
+  # `|| true`: on a fresh install the token key doesn't exist yet, so
+  # `config get` exits non-zero — without this, set -euo pipefail would abort
+  # the whole installer here (caught by the e2e-install harness).
+  EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
+  if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
+    GW_TOKEN_STRONG=1
+  elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
+    GW_TOKEN_STRONG=1
+  else
+    GW_TOKEN_STRONG=0
+  fi
+  if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
+    GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN"
+    echo "  Gateway auth token generated (per-device)"
+  else
+    echo "  Gateway auth token preserved (already strong)"
+  fi
   echo "  Gateway auth mode set to token"
 
   as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
@@ -1236,6 +1259,95 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+}
+
+step_update_smoke() {
+  # Advisory post-update smokes (#151). The rest of post_update only confirms
+  # services are *running* — these confirm two flows that can silently break
+  # across an update while health still looks green: gateway auth continuity
+  # and Telegram delivery. ALWAYS non-fatal (logged, never rolls back an
+  # update). The real-message-send smoke is gated behind
+  # CLAWBOX_SMOKE_TELEGRAM_CHAT_ID so production devices (no QA chat id) skip
+  # it gracefully; CI/QA sets it to exercise a true round trip.
+  local OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
+  local GW_PORT="${GATEWAY_PORT:-18789}"
+  echo "  Post-update smokes (advisory):"
+
+  # 1) Gateway auth continuity — reachable + a strong token in config (the
+  #    value the Control UI authenticates with; weak/missing = LAN bypass risk).
+  local gw_code
+  gw_code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://127.0.0.1:${GW_PORT}/" 2>/dev/null || echo "000")
+  if [ "$gw_code" = "200" ]; then
+    echo "    [ok] gateway reachable"
+  else
+    echo "    [WARN] gateway not reachable (HTTP $gw_code) — Control UI/chat may be down"
+  fi
+  local tok_state
+  tok_state=$(as_clawbox python3 -c '
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    print("missing"); sys.exit()
+t = ((c.get("gateway", {}) or {}).get("auth", {}) or {}).get("token")
+if isinstance(t, dict):
+    print("secretref")
+elif isinstance(t, str) and t.startswith("${") and t.endswith("}") and len(t) > 3:
+    print("interp")
+elif isinstance(t, str) and t and t != "clawbox" and len(t) >= 32:
+    print("strong")
+else:
+    print("weak")
+' "$OPENCLAW_CONFIG" 2>/dev/null || echo "missing")
+  case "$tok_state" in
+    strong|secretref|interp) echo "    [ok] gateway auth token is strong ($tok_state)" ;;
+    *) echo "    [WARN] gateway auth token is weak/missing ($tok_state) — LAN auth may be bypassable" ;;
+  esac
+
+  # 2) Telegram bot identity (getMe) — only when a bot token is configured.
+  local TG_TOKEN
+  TG_TOKEN=$(as_clawbox python3 -c '
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+    print(((c.get("channels", {}) or {}).get("telegram", {}) or {}).get("botToken", "") or "")
+except Exception:
+    print("")
+' "$OPENCLAW_CONFIG" 2>/dev/null || echo "")
+  if [ -z "$TG_TOKEN" ]; then
+    echo "    [skip] no Telegram bot configured"
+    return 0
+  fi
+  local getme
+  getme=$(curl -s -m 8 "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print("yes" if json.load(sys.stdin).get("ok") else "no")
+except Exception: print("no")' 2>/dev/null || echo "no")
+  if [ "$getme" = "yes" ]; then
+    echo "    [ok] Telegram bot identity verified (getMe)"
+  else
+    echo "    [WARN] Telegram getMe failed — bot token may be invalid/revoked, or network unavailable"
+  fi
+
+  # 3) Real delivery smoke — QA only, gated behind a chat id so production
+  #    devices skip it. Confirms the bot can actually deliver a message.
+  if [ -n "${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID:-}" ]; then
+    local msg_id
+    msg_id=$(curl -s -m 10 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=ClawBox post-update smoke" 2>/dev/null \
+      | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); print(d.get("result",{}).get("message_id","") if d.get("ok") else "")
+except Exception: print("")' 2>/dev/null || echo "")
+    if [ -n "$msg_id" ]; then
+      echo "    [ok] Telegram delivery smoke sent (message_id=$msg_id)"
+    else
+      echo "    [WARN] Telegram delivery smoke failed to send"
+    fi
+  fi
+  return 0
 }
 
 step_polkit_rules() {
@@ -1942,7 +2054,7 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown post_update validate_services
+  nm_dispatcher sysctl_linkdown post_update update_smoke validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then
