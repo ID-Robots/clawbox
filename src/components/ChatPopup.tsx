@@ -562,7 +562,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     let token: string
     let wsUrl: string
     try {
-      const res = await fetch('/setup-api/gateway/ws-config')
+      // no-store: the gateway token can be regenerated (per-device reseed, a
+      // settings change, post-update). A cached ws-config response would replay
+      // a stale token on every reconnect and the gateway would reject it with
+      // "token mismatch" forever. Always fetch the current token.
+      const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
       const config = await res.json()
       token = config.token
       wsUrl = config.wsUrl
