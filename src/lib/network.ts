@@ -441,9 +441,19 @@ export async function switchToClient(
     const AP_RESTORE_BACKOFF = 3000;
     let apRestored = false;
 
+    // The radio was just driving a failed association and needs a moment to
+    // settle before it can host the AP again — without this the first restore
+    // attempt tends to fail ("device busy").
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
     for (let attempt = 1; attempt <= AP_RESTORE_RETRIES; attempt++) {
       try {
-        await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+        // SKIP_PRESCAN: we don't need a fresh network scan just to bring the
+        // hotspot back — skip it so the wizard gets the connect verdict sooner.
+        await exec("bash", [AP_START_SCRIPT], {
+          timeout: NETWORK_TIMEOUT,
+          env: { ...process.env, SKIP_PRESCAN: "1" },
+        });
         // Verify AP is actually up
         const apUp = await isAPMode();
         if (apUp) {

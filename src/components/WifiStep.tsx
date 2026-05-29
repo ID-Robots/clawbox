@@ -148,7 +148,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     if (controller.signal.aborted) return;
 
     // Poll for the outcome, tolerating the hotspot outage during the switch.
-    const deadline = Date.now() + 80_000;
+    // The failure path is connect-attempt + AP-restore, so give it generous
+    // headroom — otherwise a slow restore would trip the deadline and we'd
+    // mis-report a wrong password as success.
+    const deadline = Date.now() + 130_000;
     const poll = async () => {
       if (controller.signal.aborted) return;
       if (Date.now() > deadline) {
