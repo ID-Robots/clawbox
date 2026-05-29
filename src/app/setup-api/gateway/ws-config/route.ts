@@ -41,9 +41,15 @@ export async function GET(request: NextRequest) {
   // upgrade proxy forwards these WS upgrades to the OpenClaw gateway on 18789,
   // which keeps the flow working on the LAN, through the Cloudflare tunnel,
   // and under HTTPS (no mixed-content, no external port exposure).
-  return NextResponse.json({
-    wsUrl: `${scheme}://${host}`,
-    token: token || "",
-    model,
-  });
+  return NextResponse.json(
+    {
+      wsUrl: `${scheme}://${host}`,
+      token: token || "",
+      model,
+    },
+    // Never cache: this response carries the live gateway auth token, which can
+    // be regenerated (per-device reseed, post-update). A cached copy would make
+    // clients replay a stale token and get rejected with "token mismatch".
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

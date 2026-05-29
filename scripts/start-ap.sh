@@ -96,9 +96,45 @@ wait_for_interface() {
 # pick their network from a list instead of typing the SSID manually.
 SCAN_CACHE="/home/clawbox/clawbox/data/wifi-scan-cache.json"
 echo "[AP] Scanning for nearby WiFi networks before starting AP..."
-nmcli device wifi rescan ifname "$IFACE" 2>/dev/null || true
-sleep 2
-SCAN_OUTPUT=$(nmcli -t -f SSID,SIGNAL,SECURITY,FREQ device wifi list ifname "$IFACE" 2>/dev/null || true)
+# Make sure the interface is actually up before scanning — early in boot it may
+# still be initializing, and scanning a down interface returns nothing.
+wait_for_interface || echo "[AP] Continuing pre-scan despite interface timeout"
+# nmcli populates scan results asynchronously after a rescan, so a fixed short
+# sleep often reads an empty list (the radio was also just used for the saved-WiFi
+# connect attempts above and needs a moment to settle). Re-trigger the rescan and
+# poll the list until real networks appear, up to PRE_AP_SCAN_TIMEOUT seconds.
+SCAN_OUTPUT=""
+PRE_AP_SCAN_TIMEOUT="${PRE_AP_SCAN_TIMEOUT:-20}"
+# Validate before arithmetic: a non-numeric override would make the $((...))
+# below a syntax error and abort the whole script under `set -euo pipefail`,
+# which would stop the AP from coming up at all.
+if ! [[ "$PRE_AP_SCAN_TIMEOUT" =~ ^[0-9]+$ ]]; then
+  echo "[AP] Invalid PRE_AP_SCAN_TIMEOUT='$PRE_AP_SCAN_TIMEOUT'; defaulting to 20"
+  PRE_AP_SCAN_TIMEOUT=20
+fi
+scan_deadline=$((SECONDS + PRE_AP_SCAN_TIMEOUT))
+scan_attempt=0
+while :; do
+  scan_attempt=$((scan_attempt + 1))
+  # rescan can fail if one ran very recently ("scanning not allowed"); ignore —
+  # the list still reflects the most recent completed scan.
+  nmcli device wifi rescan ifname "$IFACE" 2>/dev/null || true
+  sleep 3
+  SCAN_OUTPUT=$(nmcli -t -f SSID,SIGNAL,SECURITY,FREQ device wifi list ifname "$IFACE" 2>/dev/null || true)
+  # Count entries with a non-empty SSID that isn't our own AP. ($1 is an
+  # approximation when an SSID contains ':', but it's good enough to decide
+  # "did we see anything real yet".)
+  found=$(printf '%s\n' "$SCAN_OUTPUT" | awk -F: -v our="$SSID" 'NF>=4 && $1!="" && $1!=our {c++} END {print c+0}')
+  if [ "$found" -gt 0 ]; then
+    echo "[AP] Pre-scan found $found network(s) on attempt $scan_attempt"
+    break
+  fi
+  if [ "$SECONDS" -ge "$scan_deadline" ]; then
+    echo "[AP] Pre-scan found no networks after ${PRE_AP_SCAN_TIMEOUT}s ($scan_attempt attempts)"
+    break
+  fi
+  echo "[AP] Pre-scan attempt $scan_attempt empty, retrying..."
+done
 if [ -n "$SCAN_OUTPUT" ]; then
   # Parse nmcli terse output into JSON array
   echo "$SCAN_OUTPUT" | awk -F: -v our_ssid="$SSID" '
