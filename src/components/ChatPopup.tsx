@@ -850,6 +850,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
         return
       }
+      // Retries exhausted — the gateway isn't coming back on its own. Tear the
+      // reconnect overlay down so the error panel can actually render (it's
+      // hidden behind the overlay while reloadingSkill is true), stop the
+      // progress timer, and reset the reload flags so a manual "Try again"
+      // starts from a clean state with the normal retry budget.
+      if (reloadTimerRef.current) {
+        clearInterval(reloadTimerRef.current)
+        reloadTimerRef.current = null
+      }
+      skillInstalledRef.current = false
+      reloadReasonRef.current = 'skill'
+      setReloadingSkill(false)
+      setReloadProgress(0)
       setStatus('error')
       setErrorMsg('Could not connect to gateway')
     }
