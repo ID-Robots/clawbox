@@ -23,6 +23,12 @@ const MAX_QUEUED_SENDS = 20
 // once it comes back instead of forcing the user to click Try again.
 const SKILL_INSTALL_MAX_RETRIES = MAX_RETRIES * 4
 const RETRY_DELAY = 3000
+// When the gateway closes the socket with an auth rejection (it rate-limits a
+// client after too many failed auth attempts), retrying on the fast RETRY_DELAY
+// cadence just re-trips the limiter and the lockout never clears. Back off hard
+// so the cooldown can expire, then the next attempt succeeds without the user
+// having to reload.
+const AUTH_BACKOFF_DELAY = 30000
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 function saveMascotSnippet(text: string) {
   if (!text || text.length < 10) return
@@ -819,8 +825,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
     }
 
-    const onClose = () => {
+    const onClose = (event?: CloseEvent) => {
       wsRef.current = null
+
+      // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
+      // limited" — it rate-limits a client after too many failed auth
+      // attempts). Do NOT fall through to the fast RETRY_DELAY loop: hammering
+      // every 3s just re-trips the limiter so the lockout never clears. Tear
+      // down any reconnect overlay, surface the gateway's reason, and schedule
+      // a single long backoff retry so it self-heals once the cooldown expires.
+      const closeReason = event?.reason || ""
+      if (event?.code === 1008 || /unauthor|rate.?limit|too many/i.test(closeReason)) {
+        tearDownReloadOverlay()
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+        setStatus('error')
+        setErrorMsg(closeReason || 'Unauthorized — retrying shortly')
+        retryTimerRef.current = setTimeout(() => { retryCountRef.current = 0; connect() }, AUTH_BACKOFF_DELAY)
+        return
+      }
 
       // If the WS drops after we'd successfully connected, the gateway
       // bounced under us (a restart from a skill install, AI-provider
