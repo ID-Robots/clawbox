@@ -1064,6 +1064,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // the user before the new bot is live.
   const [tgConfigurePromise, setTgConfigurePromise] = useState<Promise<void> | undefined>(undefined);
   const tgSaveControllerRef = useRef<AbortController | null>(null);
+  // Telegram progress streaming (the live "Bubbling…" tool-progress drafts).
+  // null = loading; default ON when unset on the device.
+  const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
+  const [tgStreamingPending, setTgStreamingPending] = useState(false);
 
   const refreshTelegramStatus = useCallback(async () => {
     try {
@@ -1091,7 +1095,33 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   useEffect(() => {
     if (section !== "telegram" && !isMobile) return;
     refreshTelegramStatus();
+    fetch("/setup-api/telegram/streaming", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setTgStreaming(d ? d.enabled !== false : true))
+      .catch(() => setTgStreaming(true));
   }, [section, isMobile, refreshTelegramStatus]);
+
+  const toggleTelegramStreaming = useCallback(async (next: boolean) => {
+    const prev = tgStreaming;
+    setTgStreamingPending(true);
+    setTgStreaming(next); // optimistic
+    try {
+      const res = await fetch("/setup-api/telegram/streaming", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      // 502 = saved but gateway restart failed; the setting still persisted,
+      // so keep the optimistic value rather than reverting.
+      if (!res.ok && res.status !== 502) {
+        setTgStreaming(prev); // revert on a real failure
+      }
+    } catch {
+      setTgStreaming(prev);
+    } finally {
+      setTgStreamingPending(false);
+    }
+  }, [tgStreaming]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
@@ -2266,6 +2296,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("settings.openInTelegram", { name: `@${tgBotInfo.username}` })}
                     </a>
                   )}
+                  <div className="flex items-center justify-between gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 mb-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.telegramProgress")}</div>
+                      <p className="text-xs text-[var(--text-secondary)] mt-0.5">{t("settings.telegramProgressHint")}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {tgStreamingPending && (
+                        <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">progress_activity</span>
+                      )}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-label={t("settings.telegramProgress")}
+                        aria-checked={!!tgStreaming}
+                        aria-busy={tgStreamingPending}
+                        disabled={tgStreamingPending || tgStreaming === null}
+                        onClick={() => toggleTelegramStreaming(!tgStreaming)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
+                          tgStreaming ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                        }`}
+                      >
+                        <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${tgStreaming ? "translate-x-6" : "translate-x-1"}`} />
+                      </button>
+                    </div>
+                  </div>
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
