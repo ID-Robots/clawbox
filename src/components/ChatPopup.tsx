@@ -573,6 +573,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
         return
       }
+      // Same terminal-failure teardown as the onClose exhaustion path: a reboot
+      // where ws-config keeps failing exhausts here, not in onClose, so without
+      // this the overlay would stay up and the safety-net effect would loop.
+      tearDownReloadOverlay()
       setStatus('error')
       setErrorMsg('Failed to get gateway config')
       return
@@ -851,18 +855,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         return
       }
       // Retries exhausted — the gateway isn't coming back on its own. Tear the
-      // reconnect overlay down so the error panel can actually render (it's
-      // hidden behind the overlay while reloadingSkill is true), stop the
-      // progress timer, and reset the reload flags so a manual "Try again"
-      // starts from a clean state with the normal retry budget.
-      if (reloadTimerRef.current) {
-        clearInterval(reloadTimerRef.current)
-        reloadTimerRef.current = null
-      }
-      skillInstalledRef.current = false
-      reloadReasonRef.current = 'skill'
-      setReloadingSkill(false)
-      setReloadProgress(0)
+      // reconnect overlay down so the error panel can render (it's hidden while
+      // reloadingSkill is true) and a manual "Try again" starts from a clean
+      // state with the normal retry budget.
+      tearDownReloadOverlay()
       setStatus('error')
       setErrorMsg('Could not connect to gateway')
     }
@@ -1262,6 +1258,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         reloadTimerRef.current = null
       }
     }, 200)
+  }, [])
+  // Tear the reconnect overlay down and reset the reload flags. Called from
+  // every terminal-failure path (both retry-exhaustion branches) so the error
+  // panel — gated on `!reloadingSkill` — can render and the safety-net retry
+  // effect (which fires on `error && reloadingSkill`) stops looping.
+  const tearDownReloadOverlay = useCallback(() => {
+    if (reloadTimerRef.current) {
+      clearInterval(reloadTimerRef.current)
+      reloadTimerRef.current = null
+    }
+    skillInstalledRef.current = false
+    reloadReasonRef.current = 'skill'
+    setReloadingSkill(false)
+    setReloadProgress(0)
   }, [])
   useEffect(() => {
     const makeHandler = (reason: 'skill' | 'provider') => (e: Event) => {
