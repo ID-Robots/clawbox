@@ -33,16 +33,26 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   } | null>(null);
   // null = first probe in flight ("detecting…"); otherwise the live cable/connection state.
   const [eth, setEth] = useState<{ connected: boolean; cable: boolean } | null>(null);
+  // True once a cable has been plugged in but hasn't gained internet for a while
+  // (bad cable / dead port / no DHCP) — lets us nudge to Wi-Fi instead of
+  // spinning on "Connecting…" forever with the recommended button disabled.
+  const [cableStuck, setCableStuck] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
-  const ethTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Language picker state
   const [langOpen, setLangOpen] = useState(false);
   const langDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Poll ethernet so plugging a cable in is detected live — Ethernet is the
-  // recommended path, so the wizard reacts the moment a cable appears.
+  // Abort any in-flight WiFi connect/poll when the step unmounts. (Kept separate
+  // from the ethernet poll so the eth effect re-running never aborts a connect.)
+  useEffect(() => () => { controllerRef.current?.abort(); }, []);
+
+  // Poll ethernet so plugging a cable in is detected live — but ONLY on the
+  // initial choice screen and while not mid-WiFi-connect, so we don't spawn
+  // nmcli on the bus during the single-radio handoff or refresh hidden UI.
+  const onInitialScreen = !selectedNetwork && !manualMode && !showWifiList;
   useEffect(() => {
+    if (!onInitialScreen || connecting) return;
     let cancelled = false;
     const pollEth = () => {
       fetch("/setup-api/wifi/ethernet", { cache: "no-store" })
@@ -51,17 +61,27 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true });
         })
         .catch(() => {
-          if (!cancelled) setEth({ connected: false, cable: false });
+          // A transport error says nothing about the cable — keep last-known-good
+          // instead of de-gating the button on a transient hiccup.
+          if (!cancelled) setEth((prev) => prev ?? { connected: false, cable: false });
         });
     };
     pollEth();
-    ethTimerRef.current = setInterval(pollEth, 3500);
+    const id = setInterval(pollEth, 3500);
     return () => {
       cancelled = true;
-      if (ethTimerRef.current) clearInterval(ethTimerRef.current);
-      controllerRef.current?.abort();
+      clearInterval(id);
     };
-  }, []);
+  }, [onInitialScreen, connecting]);
+
+  // Cable present but no internet for ~15s → surface a nudge (see cableStuck).
+  useEffect(() => {
+    if (eth?.cable && !eth.connected) {
+      const id = setTimeout(() => setCableStuck(true), 15000);
+      return () => clearTimeout(id);
+    }
+    setCableStuck(false);
+  }, [eth?.cable, eth?.connected]);
 
   // Close language dropdown on outside click
   useEffect(() => {
@@ -293,8 +313,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 </div>
               ) : eth?.cable ? (
                 <div className="flex items-center gap-3 px-4 py-3 bg-amber-400/10 border border-amber-400/20 rounded-lg">
-                  <div className="spinner !w-4 !h-4 !border-2 shrink-0" />
-                  <span className="text-sm text-amber-300">{t("wifi.ethConnecting")}</span>
+                  {cableStuck ? (
+                    <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
+                  ) : (
+                    <div className="spinner !w-4 !h-4 !border-2 shrink-0" />
+                  )}
+                  <span className="text-sm text-amber-300">{cableStuck ? t("wifi.ethStuck") : t("wifi.ethConnecting")}</span>
                 </div>
               ) : (
                 <p className="text-xs text-amber-400/80 leading-relaxed px-1">
