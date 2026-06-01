@@ -302,23 +302,24 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 </p>
               )}
             </div>
-            <div className="flex flex-col sm:flex-row gap-3 mt-2 mb-2">
+            {/* Stacked: Ethernet is the recommended primary action (full width so
+                the label + badge stay on one line), Wi-Fi is the alternative. */}
+            <div className="flex flex-col gap-3 mt-2 mb-2">
               <button
                 type="button"
                 onClick={skipEthernet}
                 disabled={eth?.connected !== true}
-                className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
+                className="w-full py-3 px-4 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
               >
-                <span className="flex items-center gap-1.5">
-                  <span className={`inline-block w-2 h-2 rounded-full ${eth?.connected ? "bg-[#00e5cc]" : eth?.cable ? "bg-amber-400 animate-pulse" : "bg-gray-400"}`} />
+                <span className="whitespace-nowrap">
                   {eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
                 </span>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
+                <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
               <button
                 type="button"
                 onClick={() => { setShowWifiList(true); fetchNetworks(); }}
-                className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
+                className="w-full py-2.5 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
               >
                 {t("wifi.useWifiInstead")}
               </button>
