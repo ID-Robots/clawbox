@@ -25,6 +25,11 @@ function mergeTranslations(
 
 const setupTranslations: Record<Locale, Record<string, string>> = {
   en: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Applying your settings",
+    "credentials.handoffDesc": "If you're connected to the setup hotspot, rejoin it with your new password. On Ethernet or your home network this continues automatically.",
+    "credentials.handoffApplying": "Restarting the setup hotspot",
+    "credentials.handoffRejoin": "Rejoin “{ssid}” with your new password",
     // === Common ===
     "recommended": "Recommended",
     "back": "Back",
@@ -424,6 +429,11 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   bg: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Прилагане на настройките",
+    "credentials.handoffDesc": "Ако сте свързани с точката за настройка, свържете се отново с новата си парола. През Ethernet или домашната мрежа това продължава автоматично.",
+    "credentials.handoffApplying": "Рестартиране на точката за настройка",
+    "credentials.handoffRejoin": "Свържете се отново с „{ssid}“ с новата си парола",
     // === Common ===
     "recommended": "Препоръчано",
     "back": "Назад",
@@ -822,6 +832,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   de: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Einstellungen werden angewendet",
+    "credentials.handoffDesc": "Wenn du mit dem Setup-Hotspot verbunden bist, verbinde dich mit deinem neuen Passwort erneut. Über Ethernet oder dein Heimnetz geht es automatisch weiter.",
+    "credentials.handoffApplying": "Setup-Hotspot wird neu gestartet",
+    "credentials.handoffRejoin": "Mit „{ssid}“ und deinem neuen Passwort erneut verbinden",
+    "wifi.switching": "Verbindung mit {ssid}… der Setup-Hotspot wird während des Wechsels geschlossen, das kann bis zu einer Minute dauern.",
+    "wifi.wrongPassword": "Falsches WLAN-Passwort. Bitte überprüfen und erneut versuchen.",
+    "wifi.handoffTitle": "WLAN wird verbunden",
+    "wifi.handoffJoining": "Verbinde mit {ssid}",
+    "wifi.handoffReconnect": "Dieses Gerät erneut mit {ssid} verbinden",
+    "wifi.openUrl": "{url} öffnen",
     // === Common ===
     "recommended": "Empfohlen",
     "back": "Zurück",
@@ -1214,6 +1235,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   es: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Aplicando tu configuración",
+    "credentials.handoffDesc": "Si estás conectado al punto de acceso de configuración, vuelve a conectarte con tu nueva contraseña. Por Ethernet o tu red doméstica continúa automáticamente.",
+    "credentials.handoffApplying": "Reiniciando el punto de acceso de configuración",
+    "credentials.handoffRejoin": "Vuelve a conectarte a «{ssid}» con tu nueva contraseña",
+    "wifi.switching": "Conectando a {ssid}… el punto de acceso de configuración se cierra durante el cambio, así que esto puede tardar hasta un minuto.",
+    "wifi.wrongPassword": "Contraseña WiFi incorrecta. Compruébala e inténtalo de nuevo.",
+    "wifi.handoffTitle": "Conectando a tu WiFi",
+    "wifi.handoffJoining": "Conectando a {ssid}",
+    "wifi.handoffReconnect": "Vuelve a conectar este dispositivo a {ssid}",
+    "wifi.openUrl": "Abrir {url}",
     // === Common ===
     "recommended": "Recomendado",
     "back": "Atrás",
@@ -1606,6 +1638,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   fr: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Application de vos paramètres",
+    "credentials.handoffDesc": "Si vous êtes connecté au point d'accès de configuration, reconnectez-vous avec votre nouveau mot de passe. En Ethernet ou sur votre réseau domestique, cela continue automatiquement.",
+    "credentials.handoffApplying": "Redémarrage du point d'accès de configuration",
+    "credentials.handoffRejoin": "Reconnectez-vous à « {ssid} » avec votre nouveau mot de passe",
+    "wifi.switching": "Connexion à {ssid}… le point d'accès de configuration se ferme pendant le basculement, cela peut prendre jusqu'à une minute.",
+    "wifi.wrongPassword": "Mauvais mot de passe WiFi. Vérifiez-le et réessayez.",
+    "wifi.handoffTitle": "Connexion à votre WiFi",
+    "wifi.handoffJoining": "Connexion à {ssid}",
+    "wifi.handoffReconnect": "Reconnectez cet appareil à {ssid}",
+    "wifi.openUrl": "Ouvrir {url}",
     // === Common ===
     "recommended": "Recommandé",
     "back": "Retour",
@@ -1998,6 +2041,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   it: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Applicazione delle impostazioni",
+    "credentials.handoffDesc": "Se sei connesso all'hotspot di configurazione, riconnettiti con la tua nuova password. Via Ethernet o sulla tua rete domestica prosegue automaticamente.",
+    "credentials.handoffApplying": "Riavvio dell'hotspot di configurazione",
+    "credentials.handoffRejoin": "Riconnettiti a «{ssid}» con la tua nuova password",
+    "wifi.switching": "Connessione a {ssid}… l'hotspot di configurazione si chiude durante il passaggio, quindi può richiedere fino a un minuto.",
+    "wifi.wrongPassword": "Password WiFi errata. Controllala e riprova.",
+    "wifi.handoffTitle": "Connessione al tuo WiFi",
+    "wifi.handoffJoining": "Connessione a {ssid}",
+    "wifi.handoffReconnect": "Riconnetti questo dispositivo a {ssid}",
+    "wifi.openUrl": "Apri {url}",
     // === Common ===
     "recommended": "Consigliato",
     "back": "Indietro",
@@ -2390,6 +2444,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   ja: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "設定を適用しています",
+    "credentials.handoffDesc": "セットアップ用ホットスポットに接続している場合は、新しいパスワードで接続し直してください。Ethernet やご家庭のネットワークでは自動的に続行します。",
+    "credentials.handoffApplying": "セットアップ用ホットスポットを再起動しています",
+    "credentials.handoffRejoin": "新しいパスワードで「{ssid}」に接続し直してください",
+    "wifi.switching": "{ssid} に接続しています… 切り替え中はセットアップ用ホットスポットが停止するため、最大1分ほどかかることがあります。",
+    "wifi.wrongPassword": "WiFiパスワードが違います。確認してもう一度お試しください。",
+    "wifi.handoffTitle": "WiFiに接続しています",
+    "wifi.handoffJoining": "{ssid} に接続しています",
+    "wifi.handoffReconnect": "このデバイスを {ssid} に接続し直してください",
+    "wifi.openUrl": "{url} を開く",
     // === Common ===
     "recommended": "おすすめ",
     "back": "戻る",
@@ -2782,6 +2847,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   nl: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Je instellingen worden toegepast",
+    "credentials.handoffDesc": "Als je met de installatie-hotspot verbonden bent, maak dan opnieuw verbinding met je nieuwe wachtwoord. Via Ethernet of je thuisnetwerk gaat dit automatisch verder.",
+    "credentials.handoffApplying": "Installatie-hotspot opnieuw starten",
+    "credentials.handoffRejoin": "Maak opnieuw verbinding met “{ssid}” met je nieuwe wachtwoord",
+    "wifi.switching": "Verbinden met {ssid}… de installatie-hotspot wordt tijdens het overschakelen gesloten, dit kan tot een minuut duren.",
+    "wifi.wrongPassword": "Verkeerd wifi-wachtwoord. Controleer het en probeer opnieuw.",
+    "wifi.handoffTitle": "Verbinden met je wifi",
+    "wifi.handoffJoining": "Verbinden met {ssid}",
+    "wifi.handoffReconnect": "Verbind dit apparaat opnieuw met {ssid}",
+    "wifi.openUrl": "{url} openen",
     // === Common ===
     "recommended": "Aanbevolen",
     "back": "Terug",
@@ -3174,6 +3250,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   sv: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "Tillämpar dina inställningar",
+    "credentials.handoffDesc": "Om du är ansluten till installationshotspoten, återanslut med ditt nya lösenord. Via Ethernet eller ditt hemnätverk fortsätter detta automatiskt.",
+    "credentials.handoffApplying": "Startar om installationshotspoten",
+    "credentials.handoffRejoin": "Återanslut till ”{ssid}” med ditt nya lösenord",
+    "wifi.switching": "Ansluter till {ssid}… installationshotspoten stängs under bytet, så detta kan ta upp till en minut.",
+    "wifi.wrongPassword": "Fel WiFi-lösenord. Kontrollera det och försök igen.",
+    "wifi.handoffTitle": "Ansluter till ditt WiFi",
+    "wifi.handoffJoining": "Ansluter till {ssid}",
+    "wifi.handoffReconnect": "Återanslut den här enheten till {ssid}",
+    "wifi.openUrl": "Öppna {url}",
     // === Common ===
     "recommended": "Rekommenderat",
     "back": "Tillbaka",
@@ -3566,6 +3653,17 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
   },
 
   zh: {
+    // === Step 3 handoff / WiFi handoff backfill (added) ===
+    "credentials.handoffTitle": "正在应用您的设置",
+    "credentials.handoffDesc": "如果您连接的是设置热点，请使用新密码重新连接。通过以太网或家庭网络时会自动继续。",
+    "credentials.handoffApplying": "正在重启设置热点",
+    "credentials.handoffRejoin": "请使用新密码重新连接“{ssid}”",
+    "wifi.switching": "正在连接到 {ssid}…切换期间设置热点会关闭，因此这可能需要最多一分钟。",
+    "wifi.wrongPassword": "WiFi 密码错误。请核对后重试。",
+    "wifi.handoffTitle": "正在加入您的 WiFi",
+    "wifi.handoffJoining": "正在加入 {ssid}",
+    "wifi.handoffReconnect": "请将此设备重新连接到 {ssid}",
+    "wifi.openUrl": "打开 {url}",
     // === Common ===
     "recommended": "推荐",
     "back": "返回",
