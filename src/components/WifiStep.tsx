@@ -31,19 +31,34 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     type: "success" | "error" | "info";
     message: string;
   } | null>(null);
-  const [ethDetected, setEthDetected] = useState<boolean | null>(null);
+  // null = first probe in flight ("detecting…"); otherwise the live cable/connection state.
+  const [eth, setEth] = useState<{ connected: boolean; cable: boolean } | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const ethTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Language picker state
   const [langOpen, setLangOpen] = useState(false);
   const langDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Poll ethernet so plugging a cable in is detected live — Ethernet is the
+  // recommended path, so the wizard reacts the moment a cable appears.
   useEffect(() => {
-    fetch("/setup-api/wifi/ethernet")
-      .then((r) => r.json())
-      .then((data) => setEthDetected(data.connected === true))
-      .catch(() => setEthDetected(false));
+    let cancelled = false;
+    const pollEth = () => {
+      fetch("/setup-api/wifi/ethernet", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true });
+        })
+        .catch(() => {
+          if (!cancelled) setEth({ connected: false, cable: false });
+        });
+    };
+    pollEth();
+    ethTimerRef.current = setInterval(pollEth, 3500);
     return () => {
+      cancelled = true;
+      if (ethTimerRef.current) clearInterval(ethTimerRef.current);
       controllerRef.current?.abort();
     };
   }, []);
@@ -265,24 +280,38 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               )}
             </div>
 
-            {/* Ethernet auto-detection banner */}
-            {ethDetected && (
-              <div className="flex items-center gap-3 px-4 py-3 mb-6 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc] animate-pulse" />
-                </span>
-                <span className="text-sm text-[#00e5cc]">{t("wifi.ethernetDetected")}</span>
-              </div>
-            )}
+            {/* Ethernet status — recommended path, polled live so plugging a
+                cable in updates instantly. connected → ready; cable-only →
+                getting internet; no cable → recommend a cable or use Wi-Fi. */}
+            <div className="mb-5">
+              {eth?.connected ? (
+                <div className="flex items-center gap-3 px-4 py-3 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc] animate-pulse" />
+                  </span>
+                  <span className="text-sm text-[#00e5cc]">{t("wifi.ethConnected")}</span>
+                </div>
+              ) : eth?.cable ? (
+                <div className="flex items-center gap-3 px-4 py-3 bg-amber-400/10 border border-amber-400/20 rounded-lg">
+                  <div className="spinner !w-4 !h-4 !border-2 shrink-0" />
+                  <span className="text-sm text-amber-300">{t("wifi.ethConnecting")}</span>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-400/80 leading-relaxed px-1">
+                  <span className="font-semibold">{t("recommended")}:</span> {t("wifi.ethNoCable")}
+                </p>
+              )}
+            </div>
             <div className="flex flex-col sm:flex-row gap-3 mt-2 mb-2">
               <button
                 type="button"
                 onClick={skipEthernet}
-                className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2"
+                disabled={eth?.connected !== true}
+                className="w-full sm:flex-1 py-3 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
               >
                 <span className="flex items-center gap-1.5">
-                  <span className={`inline-block w-2 h-2 rounded-full ${ethDetected ? "bg-[#00e5cc]" : "bg-gray-400"}`} />
-                  {t("wifi.ethernet")}
+                  <span className={`inline-block w-2 h-2 rounded-full ${eth?.connected ? "bg-[#00e5cc]" : eth?.cable ? "bg-amber-400 animate-pulse" : "bg-gray-400"}`} />
+                  {eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
                 </span>
                 <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
@@ -291,7 +320,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 onClick={() => { setShowWifiList(true); fetchNetworks(); }}
                 className="w-full sm:flex-1 py-3 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
               >
-                {t("wifi.connectWifi")}
+                {t("wifi.useWifiInstead")}
               </button>
             </div>
           </>

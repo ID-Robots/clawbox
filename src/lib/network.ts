@@ -499,29 +499,60 @@ export async function restartAP(): Promise<void> {
   await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
 }
 
-/** Check if any Ethernet interface has a physical link (cable plugged in). */
-export async function getEthernetStatus(): Promise<{ connected: boolean; iface: string | null }> {
-  if (TEST_MODE) return { connected: true, iface: "eth0" };
+export interface EthernetStatus {
+  /** An ethernet connection is active (link up AND NetworkManager connected — i.e. usable internet). */
+  connected: boolean;
+  /** A cable is physically plugged in (carrier present), even if not yet connected/no IP. */
+  cable: boolean;
+  iface: string | null;
+}
+
+/** Read the kernel carrier flag for an interface (1 = physical link present).
+ *  The carrier file only reads while the iface is administratively up; a down
+ *  iface (cable unplugged → NM marks it unavailable) throws, which we treat as
+ *  no-cable. Synchronous: it's an instant sysfs read. */
+function hasCarrier(iface: string): boolean {
+  try {
+    return fs.readFileSync(`/sys/class/net/${iface}/carrier`, "utf-8").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Ethernet status for the setup wizard: whether a cable is physically plugged
+ *  in (poll target for "connect a cable") and whether it's actually carrying a
+ *  connection (gate for "proceed via Ethernet"). */
+export async function getEthernetStatus(): Promise<EthernetStatus> {
+  if (TEST_MODE) return { connected: true, cable: true, iface: "eth0" };
   try {
     const { stdout } = await exec("nmcli", [
       "-t", "-f", "DEVICE,TYPE,STATE",
       "device", "status",
     ], { timeout: NETWORK_TIMEOUT });
+
+    const ethDevices: string[] = [];
+    let connectedIface: string | null = null;
     for (const line of stdout.split("\n")) {
       const [dev, type, state] = line.split(":");
-      if (type === "ethernet" && state?.includes("connected")) {
-        return { connected: true, iface: dev };
-      }
+      if (type !== "ethernet" || !dev) continue;
+      ethDevices.push(dev);
+      // nmcli terse STATE is the bare word ("connected"/"disconnected"/...), so
+      // match exactly — `.includes("connected")` also matches "disconnected".
+      if (state === "connected" && !connectedIface) connectedIface = dev;
     }
-    // Check for physical link even if not connected
-    const { stdout: links } = await exec("ip", ["link", "show"], { timeout: NETWORK_TIMEOUT });
-    const ethMatch = links.match(/\d+:\s+(eth\w+|enp\w+|eno\w+).*state UP/);
-    if (ethMatch) {
-      return { connected: true, iface: ethMatch[1] };
+
+    if (connectedIface) {
+      return { connected: true, cable: true, iface: connectedIface };
     }
-    return { connected: false, iface: null };
+    // Not connected — is a cable still physically plugged in? carrier=1 means a
+    // link is present (e.g. cable in, DHCP still in flight). Lets the wizard say
+    // "cable detected, getting internet…" rather than "connect a cable".
+    for (const dev of ethDevices) {
+      if (hasCarrier(dev)) return { connected: false, cable: true, iface: dev };
+    }
+    return { connected: false, cable: false, iface: ethDevices[0] ?? null };
   } catch {
-    return { connected: false, iface: null };
+    return { connected: false, cable: false, iface: null };
   }
 }
 
