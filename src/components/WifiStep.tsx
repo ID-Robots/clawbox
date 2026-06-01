@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import SignalBars from "./SignalBars";
 import StatusMessage from "./StatusMessage";
+import WifiHandoffOverlay from "./WifiHandoffOverlay";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import { useT, LANGUAGES } from "@/lib/i18n";
@@ -27,6 +28,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  // When set, the single-radio handoff is underway: show the full-screen
+  // animated overlay that guides the user onto the home network and auto-
+  // redirects to the box's new address once it's reachable there.
+  const [handoffSsid, setHandoffSsid] = useState<string | null>(null);
   const [status, setStatus] = useState<{
     type: "success" | "error" | "info";
     message: string;
@@ -182,6 +187,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
     if (controller.signal.aborted) return;
 
+    // The switch is underway and the hotspot is dropping — surface the
+    // full-screen handoff overlay so the user gets an animated "joining…,
+    // reconnect this device, we'll auto-continue" loop instead of a frozen
+    // form. We keep polling connect-status underneath: if the box restores the
+    // AP and reports a failure (e.g. wrong password), we dismiss the overlay
+    // and show the error; otherwise the overlay carries the success path
+    // (probe the home-network address, then redirect there).
+    setHandoffSsid(activeSsid);
+
     // Poll for the outcome, tolerating the hotspot outage during the switch.
     // The failure path is connect-attempt + AP-restore, so give it generous
     // headroom — otherwise a slow restore would trip the deadline and we'd
@@ -192,15 +206,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       if (Date.now() > deadline) {
         // Never got a terminal status: almost always SUCCESS — the box joined
         // the home network and the hotspot is gone, so we can't reach it from
-        // here. Point the user at the home network.
-        setConnecting(false);
-        setStatus({ type: "success", message: t("wifi.connectedMessage", { url: localUrl }) });
+        // here. Leave the overlay up; it guides the user to the home network
+        // and redirects to the box's new address once reachable.
         return;
       }
       try {
         const r = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: controller.signal });
         const s = await r.json();
         if (s.phase === "failed") {
+          setHandoffSsid(null);
           setConnecting(false);
           setStatus(
             s.reason === "wrong-password"
@@ -210,9 +224,9 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           return;
         }
         if (s.phase === "connected") {
-          setConnecting(false);
-          setStatus({ type: "success", message: t("wifi.connectedMessage", { url: localUrl }) });
-          setTimeout(() => { if (!controller.signal.aborted) onNext(); }, 3000);
+          // Box joined the home network — leave the overlay up to detect the
+          // new address and redirect there (resumes at Step 2). No onNext():
+          // advancing this page is pointless once we've lost the box here.
           return;
         }
       } catch {
@@ -236,6 +250,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-wifi">
+      {handoffSsid && <WifiHandoffOverlay ssid={handoffSsid} targetUrl={localUrl} />}
       <div className="card-surface rounded-2xl p-5 sm:p-8">
         <div className="flex flex-col items-center gap-2 mb-5 sm:mb-6">
           <Image
