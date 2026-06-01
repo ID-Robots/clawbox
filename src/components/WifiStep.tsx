@@ -355,13 +355,19 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 </span>
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => { setShowWifiList(true); fetchNetworks(); }}
-                className="w-full py-2.5 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
-              >
-                {t("wifi.useWifiInstead")}
-              </button>
+              {/* Once ethernet is actually connected, the cable is all that's
+                  needed to finish setup — hide the Wi-Fi alternative to keep
+                  the choice clean. (While a cable is plugged but hasn't gained
+                  internet yet, keep it visible as a fallback.) */}
+              {eth?.connected !== true && (
+                <button
+                  type="button"
+                  onClick={() => { setShowWifiList(true); fetchNetworks(); }}
+                  className="w-full py-2.5 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
+                >
+                  {t("wifi.useWifiInstead")}
+                </button>
+              )}
             </div>
           </>
         )}
