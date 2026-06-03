@@ -48,6 +48,27 @@ if [ "$setup_complete" = true ] && [ "${HOTSPOT_DISABLED:-}" = "1" ]; then
   exit 0
 fi
 
+# NetworkManager being "started" (the unit's After=) does NOT mean it has
+# finished bringing the radio under management. At boot the wifi device can
+# still be initialising, and bringing the AP up against an unready NM fails —
+# which is exactly why the hotspot would only appear after a manual
+# `systemctl restart` once NM had settled. Wait for NM to report ready first.
+wait_for_nm() {
+  local elapsed=0
+  local timeout="${NM_READY_TIMEOUT:-30}"
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
+      echo "[AP] NetworkManager is ready (after ${elapsed}s)"
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "[AP] Warning: NetworkManager not ready after ${timeout}s; proceeding anyway"
+  return 1
+}
+wait_for_nm || true
+
 # After setup is complete, try to connect to saved WiFi instead of starting AP.
 # If WiFi connect fails (e.g. out of range), fall through to AP mode as fallback.
 if [ "$setup_complete" = true ]; then
@@ -88,6 +109,32 @@ wait_for_interface() {
   done
   echo "[AP] Warning: Interface $IFACE not ready after ${IFACE_TIMEOUT}s timeout"
   return 1
+}
+
+# Free the radio so the AP can own it. Any wifi *client* profile that
+# auto-connected at boot (e.g. a network saved during a failed/aborted setup
+# attempt) holds $IFACE in station mode, making `nmcli connection up
+# ClawBox-Setup` fail with "device busy" — the classic "AP only appears after a
+# manual restart" boot race. We tear those down before claiming the radio.
+release_wifi_for_ap() {
+  local con ctype
+  while IFS=: read -r con ctype; do
+    [ -z "$con" ] && continue
+    case "$ctype" in wifi|802-11-wireless) ;; *) continue ;; esac
+    [ "$con" = "$CON_NAME" ] && continue
+    # While setup is not complete the radio must be dedicated to the AP, so stop
+    # these profiles grabbing it on every boot. (Pre-setup there is no client
+    # network worth auto-joining yet; post-setup the saved-WiFi block above
+    # already had its explicit connect attempt before we reached AP mode, and it
+    # connects via an explicit `nmcli connection up` that doesn't need
+    # autoconnect — so disabling autoconnect here is safe either way.)
+    if [ "$setup_complete" != true ]; then
+      nmcli connection modify "$con" connection.autoconnect no 2>/dev/null || true
+    fi
+    nmcli connection down "$con" 2>/dev/null || true
+  done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null || true)
+  # Make sure the device itself isn't mid-association before we re-up the AP.
+  nmcli device disconnect "$IFACE" 2>/dev/null || true
 }
 
 # ─── Pre-AP WiFi scan ────────────────────────────────────────────────────────
@@ -221,10 +268,33 @@ else
 fi
 
 echo "[AP] Activating access point..."
-nmcli connection up "$CON_NAME"
+# Retry the bring-up: at boot the first attempt can lose a race with NM (radio
+# still settling, or a client profile briefly holding the device). A oneshot
+# service can't restart itself, so the resilience has to live here — free the
+# radio and retry a few times, confirming the interface actually entered AP mode
+# rather than trusting nmcli's exit code alone.
+AP_UP_RETRIES="${AP_UP_RETRIES:-5}"
+ap_up_ok=false
+for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
+  release_wifi_for_ap
+  if nmcli connection up "$CON_NAME" 2>&1; then
+    wait_for_interface || true
+    if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
+      echo "[AP] Access point active (attempt $ap_attempt)"
+      ap_up_ok=true
+      break
+    fi
+    echo "[AP] 'up' succeeded but $IFACE not in AP mode yet (attempt $ap_attempt)"
+  else
+    echo "[AP] Activation attempt $ap_attempt failed (radio may be busy with a client connection)"
+  fi
+  [ "$ap_attempt" -lt "$AP_UP_RETRIES" ] && sleep 3
+done
 
-# Wait for interface readiness instead of fixed sleep
-wait_for_interface || echo "[AP] Continuing despite interface timeout"
+if [ "$ap_up_ok" != true ]; then
+  echo "[AP] ERROR: access point did not come up after ${AP_UP_RETRIES} attempts" >&2
+  exit 1
+fi
 
 # Remove any leftover captive portal iptables redirect
 iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null || true
