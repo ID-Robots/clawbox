@@ -84,6 +84,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Joining your WiFi",
     "wifi.handoffJoining": "Joining {ssid}",
     "wifi.handoffReconnect": "Reconnect this device to {ssid}",
+    "wifi.handoffRecover": "Wrong password? If the box can't join, it reopens the \"{ap}\" Wi-Fi — reconnect to \"{ap}\" to go back and try again.",
     "wifi.openUrl": "Open {url}",
     "wifi.connectionFailed": "Connection failed: {error}",
 
@@ -488,6 +489,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Свързване с вашата WiFi мрежа",
     "wifi.handoffJoining": "Свързване с {ssid}",
     "wifi.handoffReconnect": "Свържете това устройство към {ssid}",
+    "wifi.handoffRecover": "Грешна парола? Ако кутията не може да се свърже, тя отново отваря Wi-Fi мрежата „{ap}“ — свържете се отново с „{ap}“, за да се върнете и опитате пак.",
     "wifi.openUrl": "Отвори {url}",
     "wifi.connectionFailed": "Неуспешно свързване: {error}",
 
@@ -842,6 +844,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "WLAN wird verbunden",
     "wifi.handoffJoining": "Verbinde mit {ssid}",
     "wifi.handoffReconnect": "Dieses Gerät erneut mit {ssid} verbinden",
+    "wifi.handoffRecover": "Falsches Passwort? Wenn die Box nicht beitreten kann, öffnet sie das WLAN „{ap}“ erneut — verbinde dich wieder mit „{ap}“, um zurückzukehren und es erneut zu versuchen.",
     "wifi.openUrl": "{url} öffnen",
     // === Common ===
     "recommended": "Empfohlen",
@@ -1245,6 +1248,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Conectando a tu WiFi",
     "wifi.handoffJoining": "Conectando a {ssid}",
     "wifi.handoffReconnect": "Vuelve a conectar este dispositivo a {ssid}",
+    "wifi.handoffRecover": "¿Contraseña incorrecta? Si la caja no puede conectarse, vuelve a abrir la red Wi-Fi «{ap}»: reconéctate a «{ap}» para volver e intentarlo de nuevo.",
     "wifi.openUrl": "Abrir {url}",
     // === Common ===
     "recommended": "Recomendado",
@@ -1648,6 +1652,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Connexion à votre WiFi",
     "wifi.handoffJoining": "Connexion à {ssid}",
     "wifi.handoffReconnect": "Reconnectez cet appareil à {ssid}",
+    "wifi.handoffRecover": "Mauvais mot de passe ? Si la box ne parvient pas à se connecter, elle rouvre le Wi-Fi « {ap} » — reconnectez-vous à « {ap} » pour revenir et réessayer.",
     "wifi.openUrl": "Ouvrir {url}",
     // === Common ===
     "recommended": "Recommandé",
@@ -2051,6 +2056,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Connessione al tuo WiFi",
     "wifi.handoffJoining": "Connessione a {ssid}",
     "wifi.handoffReconnect": "Riconnetti questo dispositivo a {ssid}",
+    "wifi.handoffRecover": "Password errata? Se il dispositivo non riesce a connettersi, riapre la rete Wi-Fi «{ap}»: riconnettiti a «{ap}» per tornare indietro e riprovare.",
     "wifi.openUrl": "Apri {url}",
     // === Common ===
     "recommended": "Consigliato",
@@ -2454,6 +2460,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "WiFiに接続しています",
     "wifi.handoffJoining": "{ssid} に接続しています",
     "wifi.handoffReconnect": "このデバイスを {ssid} に接続し直してください",
+    "wifi.handoffRecover": "パスワードが違いますか？接続できない場合、本体は「{ap}」Wi-Fi を再び開きます。「{ap}」に接続し直して、戻ってやり直してください。",
     "wifi.openUrl": "{url} を開く",
     // === Common ===
     "recommended": "おすすめ",
@@ -2857,6 +2864,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Verbinden met je wifi",
     "wifi.handoffJoining": "Verbinden met {ssid}",
     "wifi.handoffReconnect": "Verbind dit apparaat opnieuw met {ssid}",
+    "wifi.handoffRecover": "Verkeerd wachtwoord? Als de box geen verbinding kan maken, heropent hij het Wi-Fi-netwerk \"{ap}\" — verbind opnieuw met \"{ap}\" om terug te gaan en het opnieuw te proberen.",
     "wifi.openUrl": "{url} openen",
     // === Common ===
     "recommended": "Aanbevolen",
@@ -3260,6 +3268,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "Ansluter till ditt WiFi",
     "wifi.handoffJoining": "Ansluter till {ssid}",
     "wifi.handoffReconnect": "Återanslut den här enheten till {ssid}",
+    "wifi.handoffRecover": "Fel lösenord? Om enheten inte kan ansluta öppnar den Wi-Fi-nätverket ”{ap}” igen — återanslut till ”{ap}” för att gå tillbaka och försöka igen.",
     "wifi.openUrl": "Öppna {url}",
     // === Common ===
     "recommended": "Rekommenderat",
@@ -3663,6 +3672,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.handoffTitle": "正在加入您的 WiFi",
     "wifi.handoffJoining": "正在加入 {ssid}",
     "wifi.handoffReconnect": "请将此设备重新连接到 {ssid}",
+    "wifi.handoffRecover": "密码错误？如果设备无法连接，它会重新开启“{ap}”Wi-Fi——请重新连接到“{ap}”以返回并重试。",
     "wifi.openUrl": "打开 {url}",
     // === Common ===
     "recommended": "推荐",

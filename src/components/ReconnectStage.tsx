@@ -14,6 +14,9 @@ export interface ReconnectStageProps {
   description: string;
   /** Optional highlighted callout (e.g. "reconnect this device to <ssid>"). */
   instruction?: string;
+  /** Optional secondary callout shown beneath the primary one (e.g. the
+   *  wrong-password recovery hint pointing back to the setup hotspot). */
+  secondaryInstruction?: string;
   /** Optional manual fallback link rendered as a button. */
   action?: { label: string; href: string };
 }
@@ -32,6 +35,7 @@ export default function ReconnectStage({
   title,
   description,
   instruction,
+  secondaryInstruction,
   action,
 }: ReconnectStageProps) {
   // These overlays only render after a client-side interaction, so the portal
@@ -100,6 +104,12 @@ export default function ReconnectStage({
         {instruction && (
           <div className="w-full max-w-[320px] rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-300 reconnect-fade-in" style={{ animationDelay: "0.25s" }}>
             {instruction}
+          </div>
+        )}
+
+        {secondaryInstruction && (
+          <div className="w-full max-w-[320px] -mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)]/60 px-4 py-3 text-xs text-[var(--text-muted)] reconnect-fade-in" style={{ animationDelay: "0.3s" }}>
+            {secondaryInstruction}
           </div>
         )}
 

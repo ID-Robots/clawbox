@@ -52,6 +52,36 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   // from the ethernet poll so the eth effect re-running never aborts a connect.)
   useEffect(() => () => { controllerRef.current?.abort(); }, []);
 
+  // On mount, check whether a previous connect attempt failed. This is the
+  // recovery path for a wrong password: the box couldn't join the home network,
+  // reopened the ClawBox-Setup hotspot, and the user reconnected to it — landing
+  // back here on a fresh page load. Surface the failure (with the SSID prefilled
+  // for a quick retry) instead of silently restarting at the choice screen.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/setup-api/wifi/connect-status", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (cancelled || !s || s.phase !== "failed" || !s.ssid) return;
+        // Only act on a recent failure so a stale verdict from a much earlier
+        // session doesn't hijack a fresh setup attempt.
+        if (typeof s.at === "number" && Date.now() - s.at > 10 * 60_000) return;
+        setManualMode(true);
+        setSsid(s.ssid);
+        setStatus({
+          type: "error",
+          message: s.reason === "wrong-password"
+            ? t("wifi.wrongPassword")
+            : t("wifi.lostConnection", { url: localUrl }),
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Run once on mount; t/localUrl are stable enough that re-running would only
+    // risk clobbering user edits to the form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Poll ethernet so plugging a cable in is detected live — but ONLY on the
   // initial choice screen and while not mid-WiFi-connect, so we don't spawn
   // nmcli on the bus during the single-radio handoff or refresh hidden UI.
@@ -199,8 +229,11 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     // Poll for the outcome, tolerating the hotspot outage during the switch.
     // The failure path is connect-attempt + AP-restore, so give it generous
     // headroom — otherwise a slow restore would trip the deadline and we'd
-    // mis-report a wrong password as success.
-    const deadline = Date.now() + 130_000;
+    // mis-report a wrong password as success. The window is long because on a
+    // wrong password the box reopens ClawBox-Setup and the user must manually
+    // reconnect THIS device to it before our poll can reach the box again;
+    // give them ample time to do so rather than silently assuming success.
+    const deadline = Date.now() + 300_000;
     const poll = async () => {
       if (controller.signal.aborted) return;
       if (Date.now() > deadline) {
