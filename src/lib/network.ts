@@ -437,6 +437,15 @@ export async function switchToClient(
 
   console.error("[WiFi] All connect attempts failed, restoring AP:", lastErr instanceof Error ? lastErr.message : lastErr);
 
+    // Delete the just-attempted client profile. `nmcli device wifi connect`
+    // leaves behind a saved connection (autoconnect on by default) for the
+    // target SSID even when the association fails. NetworkManager then keeps
+    // retrying that profile in the background, repeatedly pulling the single
+    // radio out of AP mode — so the ClawBox-Setup hotspot flaps and disappears
+    // ("network could not be found") while the user is still on it. Removing it
+    // lets the radio stay dedicated to the AP until the user retries.
+    await exec("nmcli", ["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+
     const AP_RESTORE_RETRIES = 3;
     const AP_RESTORE_BACKOFF = 3000;
     let apRestored = false;
