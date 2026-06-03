@@ -76,6 +76,32 @@ const SCAN_CACHE_PATH = path.join(
   "wifi-scan-cache.json"
 );
 
+// Held while a deliberate client-connect owns the radio (the AP is down so we
+// can join the home network). The AP watchdog (scripts/ap-watchdog.sh) checks
+// for this lock and stands down while it's fresh, so it doesn't re-raise the
+// hotspot mid-handoff and fight the connect.
+const CONNECT_LOCK_PATH = path.join(
+  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+  "data",
+  "wifi-connecting.lock"
+);
+
+function writeConnectLock(): void {
+  try {
+    fs.writeFileSync(CONNECT_LOCK_PATH, String(Date.now()));
+  } catch (err) {
+    console.warn("[WiFi] Could not write connect lock:", err instanceof Error ? err.message : err);
+  }
+}
+
+function clearConnectLock(): void {
+  try {
+    fs.rmSync(CONNECT_LOCK_PATH, { force: true });
+  } catch {
+    // Best effort — a stale lock ages out via the watchdog's LOCK_MAX_AGE.
+  }
+}
+
 let cachedFileScan: { networks: WifiNetwork[]; mtime: number } | null = null;
 
 /** Read the pre-AP scan cache written by start-ap.sh */
@@ -393,6 +419,11 @@ export async function switchToClient(
     return { message: `TEST_MODE: fake connect to '${ssid}'` };
   }
 
+  // Hold the connect lock from the moment we drop the AP until we've either
+  // joined the home network or fully restored the hotspot — so the watchdog
+  // doesn't re-raise the AP underneath us mid-handoff.
+  writeConnectLock();
+  try {
   // Stop the AP
   await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
 
@@ -497,6 +528,9 @@ export async function switchToClient(
       throw new WifiAuthError(`Incorrect password for "${ssid}"`);
     }
     throw lastErr;
+  } finally {
+    clearConnectLock();
+  }
 }
 
 export async function restartAP(): Promise<void> {
