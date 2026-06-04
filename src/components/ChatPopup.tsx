@@ -131,7 +131,7 @@ import {
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel } from '@/lib/clawbox-ai-models'
+import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 
@@ -1199,6 +1199,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setSwitchingModel(false)
     }
   }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
+
+  // The dropdown gate above only catches Max-tier picks the user *clicks*. A
+  // non-Max account can also boot with the Max tier already saved as the
+  // default (picked during setup, or left over after a plan downgrade). The
+  // portal gateway then silently rejects every turn — the user only sees the
+  // opaque "[assistant turn failed]". Catch that on load: explain it with an
+  // upgrade link and drop to the Pro tier the plan supports so chat works.
+  const tierGuardRef = useRef(false)
+  useEffect(() => {
+    if (tierGuardRef.current || clawboxLogin.loading) return
+    const active = chatModelState?.activeModel
+    if (!active || !isClawboxAiProModel(active) || clawboxLogin.tier === 'pro') return
+    tierGuardRef.current = true
+    setMessages(prev => [...prev, {
+      role: 'system',
+      text: `Max Tier needs a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it — switching you to Pro Tier so chat keeps working.`,
+      timestamp: Date.now(),
+      variant: 'error',
+    }])
+    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
+  }, [chatModelState?.activeModel, clawboxLogin.tier, clawboxLogin.loading, switchChatModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
