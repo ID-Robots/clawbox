@@ -1,11 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-class FakeWifiAuthError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = "WifiAuthError";
+// vi.mock is hoisted above this file's top-level code, so the auth-error class
+// the factory returns must be built inside vi.hoisted() to exist when it runs.
+const { FakeWifiAuthError } = vi.hoisted(() => {
+  class FakeWifiAuthError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "WifiAuthError";
+    }
   }
-}
+  return { FakeWifiAuthError };
+});
 
 vi.mock("@/lib/network", () => ({
   switchToClient: vi.fn(),
