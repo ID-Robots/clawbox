@@ -534,7 +534,16 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/wifi/connect" && method === "POST") {
       setupState.wifi_configured = true;
-      await fulfillJson(route, { success: true });
+      // Single-radio handoff: the route is fire-and-forget and returns
+      // "connecting", then the wizard polls /wifi/connect-status for the
+      // real outcome (see WifiStep). The mock has no radio to lose, so the
+      // status endpoint below reports success right away.
+      await fulfillJson(route, { status: "connecting" });
+      return;
+    }
+
+    if (path === "/setup-api/wifi/connect-status") {
+      await fulfillJson(route, { phase: "connected", ssid: "Clawbox Lab", reason: null });
       return;
     }
 
