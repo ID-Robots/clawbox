@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import ReconnectStage from "./ReconnectStage";
+import { imgProbe } from "@/lib/handoff-probe";
 
 interface CredentialsHandoffOverlayProps {
   /** Full setup URL (…/setup) to probe and, when the address changed, redirect to. */
@@ -71,27 +72,6 @@ export default function CredentialsHandoffOverlay({
       }
     }
 
-    // Cross origin (device renamed) → fetch is CORS-blocked, but an <img> load
-    // from the new origin succeeds once the box answers there.
-    function imgProbe(attempt: number): Promise<boolean> {
-      return new Promise((resolve) => {
-        const img = document.createElement("img");
-        let settled = false;
-        const finish = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          img.onload = null;
-          img.onerror = null;
-          resolve(ok);
-        };
-        img.onload = () => finish(true);
-        img.onerror = () => finish(false);
-        const base = targetUrl.replace(/\/setup\/?$/, "");
-        img.src = `${base}/clawbox-icon.png?probe=${attempt}`;
-        setTimeout(() => finish(false), 4000);
-      });
-    }
-
     const graceTimer = setTimeout(() => {
       if (cancelled) return;
       setPhase("waiting");
@@ -99,7 +79,9 @@ export default function CredentialsHandoffOverlay({
       const loop = async () => {
         if (cancelled) return;
         attempt += 1;
-        const reachable = sameOrigin ? await fetchProbe() : await imgProbe(attempt);
+        const reachable = sameOrigin
+          ? await fetchProbe()
+          : await imgProbe(targetUrl.replace(/\/setup\/?$/, ""), attempt);
         if (cancelled) return;
         if (reachable) {
           setPhase("done");
