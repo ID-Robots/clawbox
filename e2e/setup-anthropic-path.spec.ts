@@ -8,19 +8,13 @@ import { installClawboxMocks } from "./helpers/clawbox";
 // Anthropic API-key flow end-to-end (mirrors setup-openai-path's
 // shape) so the bundle covers a second provider's render + submit
 // branches plus the post-submit configuring overlay.
-// test.fixme: Ethernet-first Step 1 + WiFi handoff-redirect flow now redirects
-// to the box's home-network address instead of advancing in-page, so the
-// full-wizard path can't complete in e2e. Rework tracked in #167.
-test.fixme("setup commits an Anthropic API-key flow through to the desktop", async ({ page }) => {
+test("setup commits an Anthropic API-key flow through to the desktop", async ({ page }) => {
   await installClawboxMocks(page);
 
   await page.goto("/setup");
 
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
-  await page.getByRole("button", { name: "Connect to WiFi" }).click();
-  await page.getByRole("button", { name: "Clawbox Lab" }).click();
-  await page.locator("#wifi-password").fill("wireless-pass");
-  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Continue with Ethernet" }).click();
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await page.locator("#cred-password").fill("clawbox-pass");
@@ -42,17 +36,13 @@ test.fixme("setup commits an Anthropic API-key flow through to the desktop", asy
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 });
 
-// test.fixme: same Ethernet-first + handoff-redirect reason as above (#167).
-test.fixme("setup commits a Google Gemini API-key flow after expanding more providers", async ({ page }) => {
+test("setup commits a Google Gemini API-key flow after expanding more providers", async ({ page }) => {
   await installClawboxMocks(page);
 
   await page.goto("/setup");
 
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
-  await page.getByRole("button", { name: "Connect to WiFi" }).click();
-  await page.getByRole("button", { name: "Clawbox Lab" }).click();
-  await page.locator("#wifi-password").fill("wireless-pass");
-  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Continue with Ethernet" }).click();
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await page.locator("#cred-password").fill("clawbox-pass");

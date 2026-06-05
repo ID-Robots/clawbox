@@ -523,7 +523,11 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     }
 
     if (path === "/setup-api/wifi/ethernet") {
-      await fulfillJson(route, { connected: false });
+      // Ethernet present: the setup specs drive the Ethernet-first happy path
+      // ("Continue with Ethernet"), which advances in-page. The WiFi path tears
+      // down the hotspot and redirects to the box's new address — untestable in
+      // e2e, tracked in #167.
+      await fulfillJson(route, { connected: true, cable: true });
       return;
     }
 
@@ -1107,10 +1111,9 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
 export async function completeSetupWizard(page: Page) {
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
-  await page.getByRole("button", { name: "Connect to WiFi" }).click();
-  await page.getByRole("button", { name: "Clawbox Lab" }).click();
-  await page.locator("#wifi-password").fill("wireless-pass");
-  await page.getByRole("button", { name: "Connect" }).click();
+  // Ethernet-first happy path: a wired uplink lets the wizard advance in-page.
+  // (The WiFi path redirects through the handoff overlay — untestable, see #167.)
+  await page.getByRole("button", { name: "Continue with Ethernet" }).click();
 
   // The update step auto-advances to credentials the moment it sees there's
   // nothing to install. With test timers capped (installClawboxMocks) that can
