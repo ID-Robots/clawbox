@@ -1,7 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+class FakeWifiAuthError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "WifiAuthError";
+  }
+}
+
 vi.mock("@/lib/network", () => ({
   switchToClient: vi.fn(),
+  setConnectStatus: vi.fn(),
+  WifiAuthError: FakeWifiAuthError,
 }));
 
 vi.mock("@/lib/config-store", () => ({
@@ -10,10 +19,11 @@ vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async () => "clawbox"),
 }));
 
-import { switchToClient } from "@/lib/network";
+import { switchToClient, setConnectStatus, WifiAuthError } from "@/lib/network";
 import { set, setMany } from "@/lib/config-store";
 
 const mockSwitchToClient = vi.mocked(switchToClient);
+const mockSetConnectStatus = vi.mocked(setConnectStatus);
 const mockSet = vi.mocked(set);
 const mockSetMany = vi.mocked(setMany);
 
@@ -42,25 +52,71 @@ describe("POST /setup-api/wifi/connect", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
-  it("connects to a WiFi network successfully", async () => {
+  // The single-radio handoff tears down the setup hotspot mid-connect, so the
+  // route is fire-and-forget: it records a "connecting" status, returns
+  // immediately, and a background task reports the real outcome via
+  // setConnectStatus (which the wizard polls through /wifi/connect-status).
+
+  it("returns connecting and records a connecting status", async () => {
     const res = await wifiConnectPost(jsonRequest({ ssid: "MyNetwork", password: "secret123" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(mockSwitchToClient).toHaveBeenCalledWith("MyNetwork", "secret123");
-    expect(mockSetMany).toHaveBeenCalledWith({ wifi_configured: true, hotspot_enabled: false });
+    expect(body.status).toBe("connecting");
+    expect(mockSet).toHaveBeenCalledWith("wifi_ssid", "MyNetwork");
+    expect(mockSetConnectStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "connecting", ssid: "MyNetwork", reason: null }),
+    );
   });
 
-  it("connects without password (open network)", async () => {
+  it("returns connecting for an open network (no password)", async () => {
     const res = await wifiConnectPost(jsonRequest({ ssid: "OpenNetwork" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(mockSwitchToClient).toHaveBeenCalledWith("OpenNetwork", undefined);
+    expect(body.status).toBe("connecting");
+  });
+
+  it("records connected and marks configured after a successful background switch", async () => {
+    vi.useFakeTimers();
+    mockSwitchToClient.mockResolvedValue({ message: "ok" });
+
+    await wifiConnectPost(jsonRequest({ ssid: "MyNetwork", password: "secret123" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(mockSwitchToClient).toHaveBeenCalledWith("MyNetwork", "secret123");
+    expect(mockSetMany).toHaveBeenCalledWith({ wifi_configured: true, hotspot_enabled: false });
+    expect(mockSetConnectStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: "connected", ssid: "MyNetwork" }),
+    );
+  });
+
+  it("records reason=wrong-password when the background switch throws a WifiAuthError", async () => {
+    vi.useFakeTimers();
+    mockSwitchToClient.mockRejectedValue(new WifiAuthError("bad key"));
+
+    await wifiConnectPost(jsonRequest({ ssid: "Network", password: "wrong" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(mockSet).toHaveBeenCalledWith("wifi_configured", false);
+    expect(mockSetConnectStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: "failed", reason: "wrong-password" }),
+    );
+  });
+
+  it("records reason=other when the background switch fails otherwise", async () => {
+    vi.useFakeTimers();
+    mockSwitchToClient.mockRejectedValue(new Error("Connection refused"));
+
+    await wifiConnectPost(jsonRequest({ ssid: "Network", password: "pass" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(mockSetConnectStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: "failed", reason: "other", message: "Connection refused" }),
+    );
   });
 
   it("skips WiFi setup when skip=true", async () => {
@@ -117,26 +173,5 @@ describe("POST /setup-api/wifi/connect", () => {
 
     expect(res.status).toBe(400);
     expect(body.error).toBe("Password must be a string");
-  });
-
-  it("returns 500 when connection fails", async () => {
-    mockSwitchToClient.mockRejectedValue(new Error("Connection refused"));
-
-    const res = await wifiConnectPost(jsonRequest({ ssid: "Network", password: "pass" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(500);
-    expect(body.error).toBe("Connection refused");
-    expect(mockSet).toHaveBeenCalledWith("wifi_configured", false);
-  });
-
-  it("returns generic error for non-Error throws", async () => {
-    mockSwitchToClient.mockRejectedValue("unknown error");
-
-    const res = await wifiConnectPost(jsonRequest({ ssid: "Network", password: "pass" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(500);
-    expect(body.error).toBe("Connection failed");
   });
 });
