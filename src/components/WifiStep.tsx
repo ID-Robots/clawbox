@@ -28,7 +28,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState<{
-    type: "success" | "error";
+    type: "success" | "error" | "info";
     message: string;
   } | null>(null);
   const [ethDetected, setEthDetected] = useState<boolean | null>(null);
@@ -121,7 +121,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     const controller = new AbortController();
     controllerRef.current = controller;
     setConnecting(true);
-    setStatus(null);
+    // The radio is single-band: joining the home network tears down the setup
+    // hotspot, so this connect can't return its result synchronously (we lose
+    // the box mid-switch). Kick it off, then poll /wifi/connect-status, which
+    // survives the outage and tells us "wrong password" / "connected".
+    setStatus({ type: "info", message: t("wifi.switching", { ssid: activeSsid }) });
+
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
@@ -129,35 +134,58 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         body: JSON.stringify({ ssid: activeSsid, password }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
-      if (!res.ok) {
+      // A 4xx is a validation error (bad SSID etc.) — surface it immediately.
+      if (res.status >= 400 && res.status < 500) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Connection failed (${res.status})`);
-      }
-      setConnecting(false);
-      setStatus({
-        type: "success",
-        message: t("wifi.connectedMessage", { url: primaryUrl }),
-      });
-
-      setTimeout(() => onNext(), 3000);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      if (err instanceof TypeError && err.message.includes("fetch")) {
         setConnecting(false);
-        setStatus({
-          type: "error",
-          message: t("wifi.lostConnection", { url: primaryUrl }),
-        });
+        setStatus({ type: "error", message: errData.error || `Connection failed (${res.status})` });
         return;
       }
-      setStatus({
-        type: "error",
-        message: t("wifi.connectionFailed", { error: err instanceof Error ? err.message : String(err) }),
-      });
-    } finally {
-      if (!controller.signal.aborted) setConnecting(false);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // The hotspot may already be dropping — expected; fall through to polling.
     }
+    if (controller.signal.aborted) return;
+
+    // Poll for the outcome, tolerating the hotspot outage during the switch.
+    // The failure path is connect-attempt + AP-restore, so give it generous
+    // headroom — otherwise a slow restore would trip the deadline and we'd
+    // mis-report a wrong password as success.
+    const deadline = Date.now() + 130_000;
+    const poll = async () => {
+      if (controller.signal.aborted) return;
+      if (Date.now() > deadline) {
+        // Never got a terminal status: almost always SUCCESS — the box joined
+        // the home network and the hotspot is gone, so we can't reach it from
+        // here. Point the user at the home network.
+        setConnecting(false);
+        setStatus({ type: "success", message: t("wifi.connectedMessage", { url: primaryUrl }) });
+        return;
+      }
+      try {
+        const r = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: controller.signal });
+        const s = await r.json();
+        if (s.phase === "failed") {
+          setConnecting(false);
+          setStatus(
+            s.reason === "wrong-password"
+              ? { type: "error", message: t("wifi.wrongPassword") }
+              : { type: "error", message: t("wifi.lostConnection", { url: primaryUrl }) }
+          );
+          return;
+        }
+        if (s.phase === "connected") {
+          setConnecting(false);
+          setStatus({ type: "success", message: t("wifi.connectedMessage", { url: primaryUrl }) });
+          setTimeout(() => { if (!controller.signal.aborted) onNext(); }, 3000);
+          return;
+        }
+      } catch {
+        // Hotspot down mid-switch — expected; keep polling until it returns.
+      }
+      if (!controller.signal.aborted) setTimeout(poll, 2500);
+    };
+    setTimeout(poll, 3000);
   };
 
   const skipEthernet = () => {

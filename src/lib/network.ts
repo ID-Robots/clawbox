@@ -324,6 +324,58 @@ async function doScan(): Promise<WifiNetwork[]> {
   }
 }
 
+/** Thrown when a connect fails because the WPA pre-shared key was rejected. */
+export class WifiAuthError extends Error {
+  constructor(message = "Incorrect WiFi password") {
+    super(message);
+    this.name = "WifiAuthError";
+  }
+}
+
+/** Best-effort: did the most recent association attempt fail because the
+ *  pre-shared key was wrong? wpa_supplicant logs this clearly; the clawbox
+ *  service can read its journal (member of the `adm` group). */
+async function recentWrongKeyFailure(ssid: string): Promise<boolean> {
+  if (TEST_MODE) return ssid.startsWith("__wrongpass__");
+  try {
+    const { stdout } = await exec(
+      "journalctl",
+      ["-t", "wpa_supplicant", "--no-pager", "--since", "45 seconds ago"],
+      { timeout: 10_000 },
+    );
+    return /WRONG_KEY|pre-shared key may be incorrect|4-Way Handshake failed/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+// ── Client-connect status ────────────────────────────────────────────────────
+// The wizard loses the AP the moment we switch to client mode, so a synchronous
+// connect response can never reach it. Instead we run the connect in the
+// background and record a pollable status; the wizard polls this once the AP
+// comes back (failure) or it reconnects over the home network (success).
+export type ConnectPhase = "idle" | "connecting" | "connected" | "failed";
+export type ConnectFailReason = "wrong-password" | "other";
+export interface ConnectStatus {
+  phase: ConnectPhase;
+  ssid: string | null;
+  reason: ConnectFailReason | null;
+  message: string;
+  at: number;
+}
+let connectStatus: ConnectStatus = { phase: "idle", ssid: null, reason: null, message: "", at: 0 };
+
+export function getConnectStatus(): ConnectStatus {
+  return connectStatus;
+}
+
+/** Update the pollable connect status. The wifi/connect route drives this
+ *  around its fire-and-forget switchToClient call (it owns the config-store
+ *  side effects, so the orchestration lives there rather than here). */
+export function setConnectStatus(status: ConnectStatus): void {
+  connectStatus = status;
+}
+
 export async function switchToClient(
   ssid: string,
   password?: string
@@ -344,16 +396,19 @@ export async function switchToClient(
   // Stop the AP
   await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
 
-  // Build args conditionally instead of splicing
+  // Build args conditionally instead of splicing. `--wait 20` caps each attempt
+  // so a doomed connect (e.g. wrong password) fails in ~20s instead of nmcli's
+  // 90s default — the wizard gets a quick verdict.
   const args = password
-    ? ["device", "wifi", "connect", ssid, "password", password, "ifname", IFACE]
-    : ["device", "wifi", "connect", ssid, "ifname", IFACE];
+    ? ["--wait", "20", "device", "wifi", "connect", ssid, "password", password, "ifname", IFACE]
+    : ["--wait", "20", "device", "wifi", "connect", ssid, "ifname", IFACE];
 
   // After leaving AP mode the interface needs time to discover nearby networks.
   // Retry the connect with rescans in between — the first attempt often fails
   // because the SSID hasn't been discovered yet.
   const CONNECT_RETRIES = 3;
   let lastErr: unknown;
+  let wrongKey = false;
   for (let attempt = 1; attempt <= CONNECT_RETRIES; attempt++) {
     await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -366,6 +421,13 @@ export async function switchToClient(
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[WiFi] Connect attempt ${attempt}/${CONNECT_RETRIES} failed: ${msg}`);
+      // A wrong password fails the WPA 4-way handshake — retrying with the same
+      // password is pointless, so stop early and report it precisely.
+      if (await recentWrongKeyFailure(ssid)) {
+        wrongKey = true;
+        console.warn("[WiFi] Connect failed due to incorrect pre-shared key");
+        break;
+      }
       if (attempt < CONNECT_RETRIES) {
         // Wait a bit longer before next retry
         await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -379,9 +441,19 @@ export async function switchToClient(
     const AP_RESTORE_BACKOFF = 3000;
     let apRestored = false;
 
+    // The radio was just driving a failed association and needs a moment to
+    // settle before it can host the AP again — without this the first restore
+    // attempt tends to fail ("device busy").
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
     for (let attempt = 1; attempt <= AP_RESTORE_RETRIES; attempt++) {
       try {
-        await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+        // SKIP_PRESCAN: we don't need a fresh network scan just to bring the
+        // hotspot back — skip it so the wizard gets the connect verdict sooner.
+        await exec("bash", [AP_START_SCRIPT], {
+          timeout: NETWORK_TIMEOUT,
+          env: { ...process.env, SKIP_PRESCAN: "1" },
+        });
         // Verify AP is actually up
         const apUp = await isAPMode();
         if (apUp) {
@@ -412,6 +484,9 @@ export async function switchToClient(
       }
     }
 
+    if (wrongKey) {
+      throw new WifiAuthError(`Incorrect password for "${ssid}"`);
+    }
     throw lastErr;
 }
 

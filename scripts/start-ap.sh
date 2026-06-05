@@ -95,6 +95,12 @@ wait_for_interface() {
 # and cache the results. The setup wizard uses this cached list so users can
 # pick their network from a list instead of typing the SSID manually.
 SCAN_CACHE="/home/clawbox/clawbox/data/wifi-scan-cache.json"
+# SKIP_PRESCAN=1 (set when restoring the AP after a failed client connect) skips
+# the ~20s scan poll and keeps the existing cache — the radio was just in use
+# and we only need the hotspot back up fast so the wizard can report the result.
+if [ "${SKIP_PRESCAN:-}" = "1" ]; then
+  echo "[AP] SKIP_PRESCAN=1 — fast AP restore, keeping existing scan cache"
+else
 echo "[AP] Scanning for nearby WiFi networks before starting AP..."
 # Make sure the interface is actually up before scanning — early in boot it may
 # still be initializing, and scanning a down interface returns nothing.
@@ -167,6 +173,7 @@ else
   echo "[]" > "$SCAN_CACHE"
   echo "[AP] No networks found during pre-scan"
 fi
+fi  # end SKIP_PRESCAN guard
 
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
