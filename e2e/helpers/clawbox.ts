@@ -534,7 +534,16 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/wifi/connect" && method === "POST") {
       setupState.wifi_configured = true;
-      await fulfillJson(route, { success: true });
+      // Single-radio handoff: the route is fire-and-forget and returns
+      // "connecting", then the wizard polls /wifi/connect-status for the
+      // real outcome (see WifiStep). The mock has no radio to lose, so the
+      // status endpoint below reports success right away.
+      await fulfillJson(route, { status: "connecting" });
+      return;
+    }
+
+    if (path === "/setup-api/wifi/connect-status") {
+      await fulfillJson(route, { phase: "connected", ssid: "Clawbox Lab", reason: null });
       return;
     }
 
@@ -1103,15 +1112,20 @@ export async function completeSetupWizard(page: Page) {
   await page.locator("#wifi-password").fill("wireless-pass");
   await page.getByRole("button", { name: "Connect" }).click();
 
+  // The update step auto-advances to credentials the moment it sees there's
+  // nothing to install. With test timers capped (installClawboxMocks) that can
+  // happen before Playwright catches the update step on screen, so race the two
+  // steps rather than assuming the update step lingers long enough to assert.
   const updateStep = page.getByTestId("setup-step-update");
-  await expect(updateStep).toBeVisible({ timeout: 10_000 });
-  const continueButton = updateStep.getByRole("button", { name: "Continue" });
   const credentialsStep = page.getByTestId("setup-step-credentials");
-  const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!advancedAutomatically) {
-    await continueButton.click();
+  await expect(updateStep.or(credentialsStep).first()).toBeVisible({ timeout: 10_000 });
+  if (await updateStep.isVisible().catch(() => false)) {
+    const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!advancedAutomatically) {
+      await updateStep.getByRole("button", { name: "Continue" }).click();
+    }
   }
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
