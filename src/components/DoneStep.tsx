@@ -11,7 +11,7 @@ import { useOllamaModels } from "@/hooks/useOllamaModels";
 import type { OllamaCallbacks } from "@/hooks/useOllamaModels";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
-import { useLocalUrl } from "@/hooks/useLocalUrl";
+import { useDeviceAddress } from "@/hooks/useDeviceAddress";
 
 /* ── Types ── */
 
@@ -182,7 +182,7 @@ function CollapsibleSection({
 /* ── Main component ── */
 
 export default function DoneStep({ setupComplete = false, onComplete }: DoneStepProps) {
-  const localUrl = useLocalUrl();
+  const { localUrl } = useDeviceAddress();
 
   /* ── Finish ── */
   const [finishing, setFinishing] = useState(false);
