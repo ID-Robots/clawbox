@@ -894,6 +894,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Verbinden",
     "wifi.findingNetworks": "Netzwerke werden gesucht...",
     "wifi.connectedMessage": "Verbunden! Verbinde dich mit deinem Heim-WLAN und öffne {url}, um fortzufahren.",
+    "wifi.switching": "Verbindung mit {ssid}… der Setup-Hotspot wird während des Wechsels geschlossen, das kann bis zu einer Minute dauern.",
+    "wifi.wrongPassword": "Falsches WLAN-Passwort. Überprüfe es und versuche es erneut.",
     "wifi.lostConnection": "Verbindung zu ClawBox verloren. Wenn der WLAN-Wechsel erfolgreich war, verbinde dich mit deinem Heim-WLAN und öffne {url}.",
     "wifi.connectionFailed": "Verbindung fehlgeschlagen: {error}",
 
@@ -1298,6 +1300,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Conectar",
     "wifi.findingNetworks": "Buscando redes...",
     "wifi.connectedMessage": "¡Conectado! Conéctate a tu WiFi doméstica y visita {url} para continuar.",
+    "wifi.switching": "Conectando a {ssid}… el punto de acceso de configuración se cierra durante el cambio, así que puede tardar hasta un minuto.",
+    "wifi.wrongPassword": "Contraseña de WiFi incorrecta. Verifícala e inténtalo de nuevo.",
     "wifi.lostConnection": "Se perdió la conexión con ClawBox. Si el cambio de WiFi fue exitoso, conéctate a tu WiFi doméstica y visita {url} para continuar.",
     "wifi.connectionFailed": "Error de conexión: {error}",
 
@@ -1702,6 +1706,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Se connecter",
     "wifi.findingNetworks": "Recherche de réseaux...",
     "wifi.connectedMessage": "Connecté ! Rejoignez votre WiFi domestique et rendez-vous sur {url} pour continuer.",
+    "wifi.switching": "Connexion à {ssid}… le point d'accès de configuration se ferme pendant le basculement, cela peut prendre jusqu'à une minute.",
+    "wifi.wrongPassword": "Mauvais mot de passe WiFi. Vérifiez-le et réessayez.",
     "wifi.lostConnection": "Connexion à ClawBox perdue. Si le WiFi a bien été changé, rejoignez votre WiFi domestique et rendez-vous sur {url} pour continuer.",
     "wifi.connectionFailed": "Échec de la connexion : {error}",
 
@@ -2106,6 +2112,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Connetti",
     "wifi.findingNetworks": "Ricerca reti...",
     "wifi.connectedMessage": "Connesso! Collegati al WiFi di casa e visita {url} per continuare.",
+    "wifi.switching": "Connessione a {ssid}… l'hotspot di configurazione si chiude durante il passaggio, quindi può richiedere fino a un minuto.",
+    "wifi.wrongPassword": "Password WiFi errata. Controllala e riprova.",
     "wifi.lostConnection": "Connessione a ClawBox persa. Se il cambio WiFi è andato a buon fine, collegati al WiFi di casa e visita {url} per continuare.",
     "wifi.connectionFailed": "Connessione fallita: {error}",
 
@@ -2510,6 +2518,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "接続",
     "wifi.findingNetworks": "ネットワークを検索中...",
     "wifi.connectedMessage": "接続しました！自宅のWiFiに接続し直し、{url} にアクセスして続けてください。",
+    "wifi.switching": "{ssid} に接続しています… 切り替え中はセットアップ用ホットスポットが閉じるため、最大1分ほどかかることがあります。",
+    "wifi.wrongPassword": "WiFiのパスワードが間違っています。確認してもう一度お試しください。",
     "wifi.lostConnection": "ClawBoxとの接続が切れました。WiFiの切り替えに成功した場合は、自宅のWiFiに接続し直し、{url} にアクセスしてください。",
     "wifi.connectionFailed": "接続に失敗しました: {error}",
 
@@ -2914,6 +2924,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Verbinden",
     "wifi.findingNetworks": "Netwerken zoeken...",
     "wifi.connectedMessage": "Verbonden! Maak verbinding met je thuis-WiFi en ga naar {url} om verder te gaan.",
+    "wifi.switching": "Verbinden met {ssid}… de setup-hotspot sluit tijdens het overschakelen, dus dit kan tot een minuut duren.",
+    "wifi.wrongPassword": "Verkeerd wifi-wachtwoord. Controleer het en probeer het opnieuw.",
     "wifi.lostConnection": "Verbinding met ClawBox verloren. Als het WiFi-netwerk succesvol is gewisseld, maak dan verbinding met je thuis-WiFi en ga naar {url}.",
     "wifi.connectionFailed": "Verbinding mislukt: {error}",
 
@@ -3318,6 +3330,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "Anslut",
     "wifi.findingNetworks": "Söker nätverk...",
     "wifi.connectedMessage": "Ansluten! Anslut till ditt hem-WiFi och gå till {url} för att fortsätta.",
+    "wifi.switching": "Ansluter till {ssid}… installations-hotspoten stängs under bytet, så det kan ta upp till en minut.",
+    "wifi.wrongPassword": "Fel WiFi-lösenord. Kontrollera det och försök igen.",
     "wifi.lostConnection": "Anslutningen till ClawBox bröts. Om WiFi-bytet lyckades, anslut till ditt hem-WiFi och gå till {url} för att fortsätta.",
     "wifi.connectionFailed": "Anslutningen misslyckades: {error}",
 
@@ -3722,6 +3736,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wifi.connect": "连接",
     "wifi.findingNetworks": "正在查找网络...",
     "wifi.connectedMessage": "已连接！请连接家中 WiFi 并访问 {url} 继续。",
+    "wifi.switching": "正在连接到 {ssid}… 切换期间设置热点会关闭，因此可能需要最多一分钟。",
+    "wifi.wrongPassword": "WiFi 密码错误。请检查后重试。",
     "wifi.lostConnection": "与 ClawBox 的连接已断开。如果 WiFi 切换成功，请连接家中 WiFi 并访问 {url} 继续。",
     "wifi.connectionFailed": "连接失败：{error}",
 
