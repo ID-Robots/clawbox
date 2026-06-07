@@ -69,9 +69,20 @@ wait_for_nm() {
 }
 wait_for_nm || true
 
-# After setup is complete, try to connect to saved WiFi instead of starting AP.
-# If WiFi connect fails (e.g. out of range), fall through to AP mode as fallback.
-if [ "$setup_complete" = true ]; then
+# Single WiFi radio: it can host the AP or join a WiFi network, but not both. If
+# a wired (Ethernet) uplink is present the device already has connectivity, so we
+# keep the radio for the hotspot instead of joining saved WiFi. This is what lets
+# "just plug in Ethernet" bring the hotspot up — no need to forget the network.
+ethernet_connected() {
+  nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^ethernet:connected'
+}
+
+# After setup is complete, prefer joining saved WiFi over starting the AP — UNLESS
+# an Ethernet cable provides the uplink, in which case host the hotspot and let
+# release_wifi_for_ap() (below) drop the active WiFi client to free the radio.
+if [ "$setup_complete" = true ] && ethernet_connected; then
+  echo "[AP] Ethernet uplink present — keeping the radio for the hotspot (not joining saved WiFi)"
+elif [ "$setup_complete" = true ]; then
   # Try all saved WiFi profiles (exclude the AP itself) until one connects
   while IFS= read -r profile; do
     [ -z "$profile" ] && continue
@@ -122,13 +133,12 @@ release_wifi_for_ap() {
     [ -z "$con" ] && continue
     case "$ctype" in wifi|802-11-wireless) ;; *) continue ;; esac
     [ "$con" = "$CON_NAME" ] && continue
-    # While setup is not complete the radio must be dedicated to the AP, so stop
-    # these profiles grabbing it on every boot. (Pre-setup there is no client
-    # network worth auto-joining yet; post-setup the saved-WiFi block above
-    # already had its explicit connect attempt before we reached AP mode, and it
-    # connects via an explicit `nmcli connection up` that doesn't need
-    # autoconnect — so disabling autoconnect here is safe either way.)
-    if [ "$setup_complete" != true ]; then
+    # Stop these client profiles auto-grabbing the radio back from the AP. We do
+    # this pre-setup (the radio must be dedicated to the AP), and also post-setup
+    # when an Ethernet uplink means we've deliberately chosen the hotspot over
+    # WiFi. Either way it's safe: the saved-WiFi block reconnects them via an
+    # explicit `nmcli connection up`, which doesn't depend on autoconnect.
+    if [ "$setup_complete" != true ] || ethernet_connected; then
       nmcli connection modify "$con" connection.autoconnect no 2>/dev/null || true
     fi
     nmcli connection down "$con" 2>/dev/null || true
