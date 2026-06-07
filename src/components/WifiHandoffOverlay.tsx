@@ -76,12 +76,12 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
       completed={completed}
       title={completed ? t("settings.backOnline") : t("wifi.handoffTitle")}
       description={completed ? t("ai.almostReady") : t("wifi.switching", { ssid })}
-      instruction={completed ? undefined : t("wifi.connectedMessage", { url: targetUrl })}
+      instruction={completed ? undefined : t("wifi.handoffInstruction", { url: targetUrl })}
       // Once we're actively waiting for the box to reappear, surface the
       // wrong-password recovery path: if the box couldn't join, it reopens the
       // ClawBox-Setup hotspot, so the user must reconnect THIS device to it to
       // get back into the wizard (and see the error).
-      secondaryInstruction={phase === "waiting" ? t("wifi.handoffRecover", { ap: "ClawBox-Setup" }) : undefined}
+      secondaryInstruction={!completed ? t("wifi.handoffRecover", { ap: "ClawBox-Setup" }) : undefined}
     />
   );
 }
