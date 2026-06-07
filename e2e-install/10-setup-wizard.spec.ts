@@ -57,25 +57,15 @@ test.describe("fresh-install setup wizard (UI)", () => {
     await waitForHttpReady(60_000);
     await page.goto("/setup");
 
-    // ── Step 1: WiFi ─────────────────────────────────────────────
+    // ── Step 1: WiFi / Ethernet ──────────────────────────────────
     await expect(page.getByTestId("setup-step-wifi")).toBeVisible({ timeout: 30_000 });
 
-    // Dismiss the Ethernet shortcut — we want to exercise the real WiFi
-    // flow (scan → pick SSID → password → connect) since that's the path
-    // end users hit on first boot. The Ethernet button is listed first,
-    // so target the WiFi button by its translated label.
-    const connectWifiBtn = page.getByRole("button", { name: /Connect to WiFi/i });
-    await expect(connectWifiBtn).toBeVisible();
-    await connectWifiBtn.click();
-
-    // The fixture network list comes from scanWifiLive() under
-    // CLAWBOX_TEST_MODE=1 in src/lib/network.ts.
-    const wifiNetwork = page.getByRole("button", { name: "TestNet-Home" });
-    await expect(wifiNetwork).toBeVisible({ timeout: 15_000 });
-    await wifiNetwork.click();
-
-    await page.locator("#wifi-password").fill("wireless-pass");
-    await page.getByRole("button", { name: /^Connect$/ }).click();
+    // CLAWBOX_TEST_MODE reports Ethernet connected (getEthernetStatus), so take
+    // the Ethernet-first happy path: "Continue with Ethernet" advances the
+    // wizard in-page. The WiFi path tears down the hotspot and redirects to the
+    // box's new home-network address — untestable in a container (no real box
+    // to probe), tracked in #167.
+    await page.getByRole("button", { name: /Continue with Ethernet/i }).click();
 
     // ── Step 2: Update (frequently auto-advances) ─────────────────
     const updateStep = page.getByTestId("setup-step-update");
