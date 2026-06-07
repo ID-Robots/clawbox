@@ -2,16 +2,12 @@
 
 import { useState, useEffect, useRef } from "react";
 import StatusMessage from "./StatusMessage";
+import CredentialsHandoffOverlay from "./CredentialsHandoffOverlay";
 import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
   onNext: () => void;
 }
-
-// Cumulative ~52 s covers the Jetson recovery window (10–20 s) plus
-// headroom for DHCP-rotated IPs after a hostname change.
-const MDNS_PROBE_BACKOFF_MS = [3_000, 5_000, 7_000, 10_000, 12_000, 15_000] as const;
-const MDNS_PROBE_TIMEOUT_MS = 10_000;
 
 export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const { t } = useT();
@@ -31,6 +27,13 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [status, setStatus] = useState<{
     type: "success" | "error";
     message: string;
+  } | null>(null);
+  // When a save restarts the setup AP (and/or renames the device), the connection
+  // drops; the overlay probes clawbox.local until the box answers, then continues.
+  const [handoff, setHandoff] = useState<{
+    targetUrl: string;
+    sameOrigin: boolean;
+    hotspotSsid: string | null;
   } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
@@ -173,11 +176,33 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
+      const hotspotData = await hotspotRes.json().catch(() => ({}));
       if (!hotspotRes.ok) {
-        const data = await hotspotRes.json().catch(() => ({}));
         setStatus({
           type: "error",
-          message: data.error || t("credentials.failedSaveHotspot"),
+          message: hotspotData.error || t("credentials.failedSaveHotspot"),
+        });
+        return;
+      }
+
+      // Decide whether this submit drops or moves the connection. Everything
+      // stays on clawbox.local: when the setup AP actually restarted
+      // (apRestarted) anyone on it must rejoin the renamed hotspot, and when the
+      // device name changed the box reappears at a new *.local origin. Either
+      // way the overlay probes until the box answers, then continues.
+      const apRestarted = hotspotData.apRestarted === true;
+      const currentHost = window.location.hostname.toLowerCase();
+      const hostnameChanged =
+        currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
+
+      if (apRestarted || hostnameChanged) {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        setHandoff({
+          targetUrl: hostnameChanged
+            ? newSetupUrl.toString()
+            : new URL("/setup", window.location.href).toString(),
+          sameOrigin: !hostnameChanged,
+          hotspotSsid: apRestarted && hotspotEnabled ? hotspotName.trim() : null,
         });
         return;
       }
@@ -187,56 +212,24 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         message: t("credentials.settingsSaved"),
       });
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      const currentHost = window.location.hostname.toLowerCase();
-      if (currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect) {
-        timeoutRef.current = setTimeout(() => window.location.replace(newSetupUrl.toString()), 1500);
-      } else {
-        timeoutRef.current = setTimeout(() => onNext(), 1500);
-      }
+      timeoutRef.current = setTimeout(() => onNext(), 1500);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      if (err instanceof TypeError && err.message.includes("fetch") && isAllowedRedirect) {
-        // Settings are saved server-side; the hotspot reconfig or hostname
-        // change just dropped this tab. Show a soft "reconnecting" toast
-        // and probe the new URL until it answers — only flip to red after
-        // the full backoff exhausts.
-        setStatus({
-          type: "success",
-          message: t("credentials.reconnecting", { url: newSetupUrl.toString() }),
-        });
-        for (const delayMs of MDNS_PROBE_BACKOFF_MS) {
-          if (controller.signal.aborted) return;
-          await new Promise<void>((resolve) => {
-            if (controller.signal.aborted) { resolve(); return; }
-            const timer = setTimeout(resolve, delayMs);
-            controller.signal.addEventListener("abort", () => {
-              clearTimeout(timer);
-              resolve();
-            }, { once: true });
-          });
-          if (controller.signal.aborted) return;
-          try {
-            await fetch(newSetupUrl.toString(), {
-              method: "HEAD",
-              cache: "no-store",
-              // Combine the save/unmount controller with a per-attempt
-              // timeout so the probe aborts on either signal.
-              signal: AbortSignal.any([
-                controller.signal,
-                AbortSignal.timeout(MDNS_PROBE_TIMEOUT_MS),
-              ]),
-            });
-            if (controller.signal.aborted) return;
-            window.location.replace(newSetupUrl.toString());
-            return;
-          } catch {
-            if (controller.signal.aborted) return;
-            // continue backoff
-          }
-        }
-        setStatus({
-          type: "error",
-          message: t("credentials.reconnectFailed", { url: newSetupUrl.toString() }),
+      if (err instanceof TypeError && err.message.includes("fetch")) {
+        // The save dropped this tab mid-flight — the AP restart (or device-name
+        // change) took the connection down before the response arrived. Settings
+        // are applied server-side; hand off to the reconnect overlay, which
+        // probes clawbox.local (or the new name) until the box answers.
+        const currentHost = window.location.hostname.toLowerCase();
+        const hostnameChanged =
+          currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        setHandoff({
+          targetUrl: hostnameChanged
+            ? newSetupUrl.toString()
+            : new URL("/setup", window.location.href).toString(),
+          sameOrigin: !hostnameChanged,
+          hotspotSsid: hotspotEnabled ? hotspotName.trim() : null,
         });
         return;
       }
@@ -262,6 +255,14 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
+      {handoff && (
+        <CredentialsHandoffOverlay
+          targetUrl={handoff.targetUrl}
+          sameOrigin={handoff.sameOrigin}
+          hotspotSsid={handoff.hotspotSsid}
+          onContinue={onNext}
+        />
+      )}
       <div className="card-surface rounded-2xl p-5 sm:p-8">
         <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
           {t("credentials.title")}

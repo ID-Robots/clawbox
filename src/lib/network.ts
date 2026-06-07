@@ -76,6 +76,32 @@ const SCAN_CACHE_PATH = path.join(
   "wifi-scan-cache.json"
 );
 
+// Held while a deliberate client-connect owns the radio (the AP is down so we
+// can join the home network). The AP watchdog (scripts/ap-watchdog.sh) checks
+// for this lock and stands down while it's fresh, so it doesn't re-raise the
+// hotspot mid-handoff and fight the connect.
+const CONNECT_LOCK_PATH = path.join(
+  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+  "data",
+  "wifi-connecting.lock"
+);
+
+function writeConnectLock(): void {
+  try {
+    fs.writeFileSync(CONNECT_LOCK_PATH, String(Date.now()));
+  } catch (err) {
+    console.warn("[WiFi] Could not write connect lock:", err instanceof Error ? err.message : err);
+  }
+}
+
+function clearConnectLock(): void {
+  try {
+    fs.rmSync(CONNECT_LOCK_PATH, { force: true });
+  } catch {
+    // Best effort — a stale lock ages out via the watchdog's LOCK_MAX_AGE.
+  }
+}
+
 let cachedFileScan: { networks: WifiNetwork[]; mtime: number } | null = null;
 
 /** Read the pre-AP scan cache written by start-ap.sh */
@@ -393,6 +419,11 @@ export async function switchToClient(
     return { message: `TEST_MODE: fake connect to '${ssid}'` };
   }
 
+  // Hold the connect lock from the moment we drop the AP until we've either
+  // joined the home network or fully restored the hotspot — so the watchdog
+  // doesn't re-raise the AP underneath us mid-handoff.
+  writeConnectLock();
+  try {
   // Stop the AP
   await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
 
@@ -436,6 +467,15 @@ export async function switchToClient(
   }
 
   console.error("[WiFi] All connect attempts failed, restoring AP:", lastErr instanceof Error ? lastErr.message : lastErr);
+
+    // Delete the just-attempted client profile. `nmcli device wifi connect`
+    // leaves behind a saved connection (autoconnect on by default) for the
+    // target SSID even when the association fails. NetworkManager then keeps
+    // retrying that profile in the background, repeatedly pulling the single
+    // radio out of AP mode — so the ClawBox-Setup hotspot flaps and disappears
+    // ("network could not be found") while the user is still on it. Removing it
+    // lets the radio stay dedicated to the AP until the user retries.
+    await exec("nmcli", ["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
 
     const AP_RESTORE_RETRIES = 3;
     const AP_RESTORE_BACKOFF = 3000;
@@ -488,6 +528,9 @@ export async function switchToClient(
       throw new WifiAuthError(`Incorrect password for "${ssid}"`);
     }
     throw lastErr;
+  } finally {
+    clearConnectLock();
+  }
 }
 
 export async function restartAP(): Promise<void> {
@@ -499,29 +542,60 @@ export async function restartAP(): Promise<void> {
   await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
 }
 
-/** Check if any Ethernet interface has a physical link (cable plugged in). */
-export async function getEthernetStatus(): Promise<{ connected: boolean; iface: string | null }> {
-  if (TEST_MODE) return { connected: true, iface: "eth0" };
+export interface EthernetStatus {
+  /** An ethernet connection is active (link up AND NetworkManager connected — i.e. usable internet). */
+  connected: boolean;
+  /** A cable is physically plugged in (carrier present), even if not yet connected/no IP. */
+  cable: boolean;
+  iface: string | null;
+}
+
+/** Read the kernel carrier flag for an interface (1 = physical link present).
+ *  The carrier file only reads while the iface is administratively up; a down
+ *  iface (cable unplugged → NM marks it unavailable) throws, which we treat as
+ *  no-cable. Synchronous: it's an instant sysfs read. */
+function hasCarrier(iface: string): boolean {
+  try {
+    return fs.readFileSync(`/sys/class/net/${iface}/carrier`, "utf-8").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Ethernet status for the setup wizard: whether a cable is physically plugged
+ *  in (poll target for "connect a cable") and whether it's actually carrying a
+ *  connection (gate for "proceed via Ethernet"). */
+export async function getEthernetStatus(): Promise<EthernetStatus> {
+  if (TEST_MODE) return { connected: true, cable: true, iface: "eth0" };
   try {
     const { stdout } = await exec("nmcli", [
       "-t", "-f", "DEVICE,TYPE,STATE",
       "device", "status",
     ], { timeout: NETWORK_TIMEOUT });
+
+    const ethDevices: string[] = [];
+    let connectedIface: string | null = null;
     for (const line of stdout.split("\n")) {
       const [dev, type, state] = line.split(":");
-      if (type === "ethernet" && state?.includes("connected")) {
-        return { connected: true, iface: dev };
-      }
+      if (type !== "ethernet" || !dev) continue;
+      ethDevices.push(dev);
+      // nmcli terse STATE is the bare word ("connected"/"disconnected"/...), so
+      // match exactly — `.includes("connected")` also matches "disconnected".
+      if (state === "connected" && !connectedIface) connectedIface = dev;
     }
-    // Check for physical link even if not connected
-    const { stdout: links } = await exec("ip", ["link", "show"], { timeout: NETWORK_TIMEOUT });
-    const ethMatch = links.match(/\d+:\s+(eth\w+|enp\w+|eno\w+).*state UP/);
-    if (ethMatch) {
-      return { connected: true, iface: ethMatch[1] };
+
+    if (connectedIface) {
+      return { connected: true, cable: true, iface: connectedIface };
     }
-    return { connected: false, iface: null };
+    // Not connected — is a cable still physically plugged in? carrier=1 means a
+    // link is present (e.g. cable in, DHCP still in flight). Lets the wizard say
+    // "cable detected, getting internet…" rather than "connect a cable".
+    for (const dev of ethDevices) {
+      if (hasCarrier(dev)) return { connected: false, cable: true, iface: dev };
+    }
+    return { connected: false, cable: false, iface: ethDevices[0] ?? null };
   } catch {
-    return { connected: false, iface: null };
+    return { connected: false, cable: false, iface: null };
   }
 }
 
