@@ -9,7 +9,7 @@ import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import { useT, LANGUAGES } from "@/lib/i18n";
 import type { Locale } from "@/lib/i18n";
-import { useLocalUrl } from "@/hooks/useLocalUrl";
+import { useDeviceAddress } from "@/hooks/useDeviceAddress";
 
 interface WifiStepProps {
   onNext: () => void;
@@ -17,7 +17,7 @@ interface WifiStepProps {
 
 export default function WifiStep({ onNext }: WifiStepProps) {
   const { locale, setLocale, t } = useT();
-  const localUrl = useLocalUrl();
+  const { localUrl, primaryUrl } = useDeviceAddress();
   const [showWifiList, setShowWifiList] = useState(false);
   const [networks, setNetworks] = useState<WifiNetwork[] | null>(null);
   const [loadingNetworks, setLoadingNetworks] = useState(false);
@@ -252,7 +252,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           setStatus(
             s.reason === "wrong-password"
               ? { type: "error", message: t("wifi.wrongPassword") }
-              : { type: "error", message: t("wifi.lostConnection", { url: localUrl }) }
+              : { type: "error", message: t("wifi.lostConnection", { url: primaryUrl }) }
           );
           return;
         }
@@ -535,7 +535,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
 
             <p className="text-xs text-amber-400/80 mt-4 leading-relaxed">
               <span className="font-semibold">{t("wifi.wifiNotePrefix")}</span> {t("wifi.wifiNote")}{" "}
-              <span className="font-semibold">{localUrl}</span>.
+              <span className="font-semibold">{primaryUrl}</span>.
             </p>
 
             <div className="flex items-center gap-3 mt-3">

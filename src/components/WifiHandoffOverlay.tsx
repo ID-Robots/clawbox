@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import ReconnectStage from "./ReconnectStage";
+import { imgProbe } from "@/lib/handoff-probe";
 
 interface WifiHandoffOverlayProps {
   /** The network the box is joining — shown in the copy. */
@@ -34,25 +35,6 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
     let cancelled = false;
     let loopTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function probe(attempt: number): Promise<boolean> {
-      return new Promise((resolve) => {
-        const img = document.createElement("img");
-        let settled = false;
-        const finish = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          img.onload = null;
-          img.onerror = null;
-          resolve(ok);
-        };
-        img.onload = () => finish(true);
-        img.onerror = () => finish(false);
-        // Cache-busted so a previously-failed probe isn't served from cache.
-        img.src = `${targetUrl}/clawbox-icon.png?probe=${attempt}`;
-        setTimeout(() => finish(false), 4000);
-      });
-    }
-
     const graceTimer = setTimeout(() => {
       if (cancelled) return;
       setPhase("waiting");
@@ -60,7 +42,7 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
       const loop = async () => {
         if (cancelled) return;
         attempt += 1;
-        const reachable = await probe(attempt);
+        const reachable = await imgProbe(targetUrl, attempt);
         if (cancelled) return;
         if (reachable) {
           setPhase("found");

@@ -6,6 +6,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
 import { setControlUiAllowedOrigins, restartGateway } from "@/lib/openclaw-config";
+import { getReachableIpv4 } from "@/lib/system-info";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,10 +32,12 @@ export async function GET() {
   const configured = (await get("hostname")) as string | undefined;
   const current = os.hostname();
   const hostname = configured || current || DEFAULT_HOSTNAME;
+  const ipv4 = await getReachableIpv4();
   return NextResponse.json({
     hostname,
     current,
     fqdn: `${hostname}.local`,
+    ipv4,
     default: DEFAULT_HOSTNAME,
   });
 }

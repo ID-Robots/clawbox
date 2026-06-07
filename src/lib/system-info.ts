@@ -124,6 +124,54 @@ async function getPrimaryNetwork(): Promise<{
   return { networkIp: "No connection", networkInterface: "—", networkRxBytes: 0, networkTxBytes: 0 };
 }
 
+const AP_SUBNET_PREFIX = "10.42.0.";
+
+/**
+ * Interface carrying the lowest-metric default route, parsed from
+ * `/proc/net/route` (default route has destination `00000000`). Returns null
+ * when the device has no default route (offline / AP-only).
+ */
+async function getDefaultRouteIface(): Promise<string | null> {
+  try {
+    const raw = await fs.readFile("/proc/net/route", "utf-8");
+    let best: { iface: string; metric: number } | null = null;
+    for (const line of raw.split("\n").slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 11 || cols[1] !== "00000000") continue;
+      const metric = parseInt(cols[6], 10) || 0;
+      if (!best || metric < best.metric) best = { iface: cols[0], metric };
+    }
+    return best?.iface ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The IPv4 address a client on the home network would use to reach the device.
+ * Prefers the default-route interface and skips loopback plus the captive-portal
+ * AP subnet (`10.42.0.x`). Returns null when the device is only on the setup AP.
+ *
+ * Surfaced as the primary access URL because on many home networks the access
+ * point drops wired→Wi-Fi mDNS multicast, making `<hostname>.local` resolution
+ * unreliable.
+ */
+export async function getReachableIpv4(): Promise<string | null> {
+  const ifaces = os.networkInterfaces();
+  const usable = (a: { family: string; internal: boolean; address: string }) =>
+    a.family === "IPv4" && !a.internal && !a.address.startsWith(AP_SUBNET_PREFIX);
+
+  const routeIface = await getDefaultRouteIface();
+  const preferred = routeIface ? ifaces[routeIface]?.find(usable) : undefined;
+  if (preferred) return preferred.address;
+
+  for (const addrs of Object.values(ifaces)) {
+    const match = addrs?.find(usable);
+    if (match) return match.address;
+  }
+  return null;
+}
+
 export async function gather(): Promise<SystemInfo> {
   const [uptimeRes, dfRes, tempRes, gpuRes] = await Promise.allSettled([
     exec("uptime", ["-p"]),
