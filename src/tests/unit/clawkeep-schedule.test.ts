@@ -7,6 +7,7 @@ const baseSchedule: ClawKeepSchedule = {
   frequency: "daily",
   timeOfDay: "02:00",
   weekday: 0,
+  retentionKeepLast: 10,
 };
 
 describe("computeNextRunMs", () => {
