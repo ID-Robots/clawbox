@@ -10,7 +10,12 @@ interface FileEntry {
   type: "file" | "directory";
   size: number | null;
   modified: string;
+  // Set only on recursive search results: path relative to the files root.
+  // When absent, the entry lives in the currently-loaded directory.
+  path?: string;
 }
+
+type ViewerKind = "text" | "image" | "pdf" | "video" | "audio" | "toobig" | "binary";
 
 type ViewMode = "grid" | "list";
 
@@ -55,6 +60,71 @@ function formatDate(iso: string): string {
 function fileExtension(name: string): string {
   const dot = name.lastIndexOf(".");
   return dot !== -1 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function downloadViaLink(url: string, name: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+}
+
+// Parent directory of a root-relative search-result path ("a/b/c.txt" -> "a/b").
+function parentDirOf(p?: string): string {
+  if (!p) return "";
+  const i = p.lastIndexOf("/");
+  return i === -1 ? "" : p.slice(0, i);
+}
+
+// Stable identity for selection + React keys. In a folder listing the name is
+// unique; in recursive search results two files can share a name across
+// directories, so the full relative path is the unique key.
+function entryId(e: FileEntry): string {
+  return e.path ?? e.name;
+}
+
+// ─── File viewer kind detection ────────────────────────────────────────────────
+
+// Anything bigger than this won't open in the in-browser text editor — it would
+// be sluggish and risks the gateway buffering a huge string. Such files fall
+// back to a download prompt.
+const TEXT_MAX = 2 * 1024 * 1024;
+
+// The file-serving route reads the whole file into memory (no Range streaming),
+// so cap inline media too — pointing a <video>/<img> at a multi-hundred-MB file
+// would buffer it all into the Jetson's RAM. Above this, offer a download.
+const MEDIA_MAX = 50 * 1024 * 1024;
+
+const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "avif"]);
+const PDF_EXT = new Set(["pdf"]);
+const VIDEO_EXT = new Set(["mp4", "webm", "ogv", "mov", "m4v"]);
+const AUDIO_EXT = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac"]);
+
+function resolveViewerKind(name: string, size: number | null): ViewerKind {
+  const ext = fileExtension(name);
+  const media: ViewerKind | null = IMAGE_EXT.has(ext) ? "image"
+    : PDF_EXT.has(ext) ? "pdf"
+    : VIDEO_EXT.has(ext) ? "video"
+    : AUDIO_EXT.has(ext) ? "audio"
+    : null;
+  if (media) return size != null && size > MEDIA_MAX ? "toobig" : media;
+  if (size != null && size > TEXT_MAX) return "toobig";
+  // Known-text, no-extension config/scripts, and unknown-but-small files all
+  // attempt the text editor; a binary sniff after fetch reclassifies if needed.
+  return "text";
+}
+
+// Cheap heuristic: a NUL byte or a high ratio of U+FFFD replacement chars (from
+// decoding non-UTF-8 bytes as text) means this isn't editable text.
+function looksBinary(text: string): boolean {
+  const sample = text.slice(0, 8000);
+  let replacement = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c === 0) return true;
+    if (c === 0xfffd) replacement++;
+  }
+  return replacement > sample.length * 0.02;
 }
 
 function fileIcon(name: string, type: "file" | "directory"): { icon: string; color: string } {
@@ -147,8 +217,18 @@ export default function FilesApp() {
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window !== "undefined" ? window.innerWidth >= 768 : true);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 
+  // Search + viewer state
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [recursive, setRecursive] = useState(false);
+  const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [viewer, setViewer] = useState<{ relPath: string; entry: FileEntry } | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const longPressRef = useRef<{ timer: ReturnType<typeof setTimeout>; entry: FileEntry } | null>(null);
 
   // ─── Load directory ────────────────────────────────────────────────────────
@@ -157,6 +237,12 @@ export default function FilesApp() {
     setLoading(true);
     setError(null);
     setSelected(null);
+    // Recursive results are scoped to one directory — drop them when we move
+    // to another folder (the typed filter in `query` is kept and re-applies to
+    // the new listing). navigateTo also closes the search bar for result dirs.
+    setRecursive(false);
+    setSearchResults([]);
+    setSearchTruncated(false);
     try {
       const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
       const data = await res.json();
@@ -181,6 +267,66 @@ export default function FilesApp() {
   // without a re-fetch.
   const visibleFiles = showHidden ? files : files.filter((f) => !f.name.startsWith("."));
 
+  // ─── Search ──────────────────────────────────────────────────────────────────
+
+  const entryRelPath = useCallback(
+    (entry: FileEntry) => entry.path ?? (currentPath ? `${currentPath}/${entry.name}` : entry.name),
+    [currentPath],
+  );
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setQuery("");
+    setRecursive(false);
+    setSearchResults([]);
+    setSearchTruncated(false);
+  }, []);
+
+  const runSearch = useCallback(async (q: string) => {
+    const term = q.trim();
+    if (!term) return;
+    setSearching(true);
+    setRecursive(true);
+    try {
+      const res = await fetch(
+        `/setup-api/files?dir=${encodeURIComponent(currentPath)}&search=${encodeURIComponent(term)}&hidden=${showHidden ? "1" : "0"}`,
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Search failed");
+      const sorted = [...(data.files as FileEntry[])].sort((a, b) => {
+        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+        return (a.path ?? a.name).localeCompare(b.path ?? b.name);
+      });
+      setSearchResults(sorted);
+      setSearchTruncated(Boolean(data.truncated));
+    } catch (e) {
+      setSearchResults([]);
+      setStatusMsg(e instanceof Error ? e.message : "Search failed");
+      setTimeout(() => setStatusMsg(null), 3000);
+    } finally {
+      setSearching(false);
+    }
+  }, [currentPath, showHidden]);
+
+  // Re-render whatever is on screen after a mutation (rename/delete/save):
+  // re-run the search if results are showing, otherwise reload the folder.
+  const refreshView = useCallback(() => {
+    if (recursive && query.trim()) runSearch(query);
+    else load(currentPath);
+  }, [recursive, query, runSearch, load, currentPath]);
+
+  useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
+
+  // The list to display: recursive results when present, else a live
+  // case-insensitive filter of the current folder, else the full folder.
+  const q = query.trim().toLowerCase();
+  const displayFiles = recursive
+    ? searchResults
+    : q
+      ? visibleFiles.filter((f) => f.name.toLowerCase().includes(q))
+      : visibleFiles;
+  const searchActive = recursive || q.length > 0;
+
   // ─── Breadcrumbs ────────────────────────────────────────────────────────────
 
   const breadcrumbs = [t("files.home"), ...currentPath.split("/").filter(Boolean)];
@@ -193,22 +339,23 @@ export default function FilesApp() {
 
   // ─── Navigation ────────────────────────────────────────────────────────────
 
+  // Open: directories navigate (search results jump to their real location);
+  // files open in the in-window viewer/editor.
   const navigateTo = (entry: FileEntry) => {
     if (entry.type === "directory") {
-      const next = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+      const next = entryRelPath(entry);
+      if (recursive) closeSearch();
       load(next);
+    } else {
+      setViewer({ relPath: entryRelPath(entry), entry });
     }
   };
 
   // ─── Download ──────────────────────────────────────────────────────────────
 
   const downloadFile = (entry: FileEntry) => {
-    const filePath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-    const url = `/setup-api/files/${filePath.split("/").map(encodeURIComponent).join("/")}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = entry.name;
-    a.click();
+    const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
+    downloadViaLink(url, entry.name);
   };
 
   // ─── Upload ────────────────────────────────────────────────────────────────
@@ -286,8 +433,7 @@ export default function FilesApp() {
   // ─── Rename ───────────────────────────────────────────────────────────────
 
   const renameEntry = async (entry: FileEntry, newName: string) => {
-    const filePath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-    const url = `/setup-api/files/${filePath.split("/").map(encodeURIComponent).join("/")}`;
+    const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
     const res = await fetch(url, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -297,20 +443,19 @@ export default function FilesApp() {
     if (!res.ok) { setStatusMsg(`Error: ${data.error}`); return; }
     setStatusMsg("Renamed");
     setTimeout(() => setStatusMsg(null), 2000);
-    load(currentPath);
+    refreshView();
   };
 
   // ─── Delete ───────────────────────────────────────────────────────────────
 
   const deleteEntry = async (entry: FileEntry) => {
-    const filePath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-    const url = `/setup-api/files/${filePath.split("/").map(encodeURIComponent).join("/")}`;
+    const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
     const res = await fetch(url, { method: "DELETE" });
     const data = await res.json();
     if (!res.ok) { setStatusMsg(`Error: ${data.error}`); return; }
     setStatusMsg("Deleted");
     setTimeout(() => setStatusMsg(null), 2000);
-    load(currentPath);
+    refreshView();
   };
 
   // ─── Dialog submit ────────────────────────────────────────────────────────
@@ -331,7 +476,7 @@ export default function FilesApp() {
   const openContextMenu = (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
-    setSelected(entry.name);
+    setSelected(entryId(entry));
     // Clamp position so menu doesn't overflow viewport
     const x = Math.min(e.clientX, window.innerWidth - 180);
     const y = Math.min(e.clientY, window.innerHeight - 200);
@@ -345,7 +490,7 @@ export default function FilesApp() {
     longPressRef.current = {
       entry,
       timer: setTimeout(() => {
-        setSelected(entry.name);
+        setSelected(entryId(entry));
         setContextMenu({ entry, x, y });
         longPressRef.current = null;
       }, 500),
@@ -458,6 +603,18 @@ export default function FilesApp() {
           {/* Actions */}
           <div className="flex items-center gap-1 shrink-0">
             <button
+              onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+              className={`p-1.5 rounded-md transition-colors hover:bg-white/[0.06] cursor-pointer ${
+                searchOpen || searchActive
+                  ? "text-[var(--coral-bright)]"
+                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              }`}
+              title={t("files.search")}
+              aria-pressed={searchOpen}
+            >
+              <Icon name="search" size={18} />
+            </button>
+            <button
               onClick={() => setDialog({ type: "mkdir", value: "" })}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.1] cursor-pointer"
               title={t("files.newFolder")}
@@ -494,6 +651,42 @@ export default function FilesApp() {
           </div>
         </div>
 
+        {/* ── Search bar ── */}
+        {searchOpen && (
+          <div className="flex items-center gap-2 px-3 py-2 shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+            <Icon name="search" size={16} className="text-[var(--text-muted)] shrink-0" />
+            <input
+              ref={searchInputRef}
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setRecursive(false); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); if (query.trim()) runSearch(query); }
+                else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+              }}
+              placeholder={t("files.searchPlaceholder")}
+              className="flex-1 min-w-0 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-[var(--text-muted)]"
+            />
+            {query.trim() && !recursive && (
+              <button
+                onClick={() => runSearch(query)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs whitespace-nowrap transition-colors bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/25 cursor-pointer shrink-0"
+                title={t("files.searchEverywhere")}
+              >
+                <Icon name="travel_explore" size={14} />
+                <span className="hidden sm:inline">{t("files.searchEverywhere")}</span>
+              </button>
+            )}
+            {searching && <Icon name="progress_activity" size={16} className="animate-spin text-[var(--text-muted)] shrink-0" />}
+            <button
+              onClick={closeSearch}
+              className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer shrink-0"
+              title={t("files.clearSearch")}
+            >
+              <Icon name="close" size={16} />
+            </button>
+          </div>
+        )}
+
         {/* ── File Area ── */}
         <div
           ref={dropZoneRef}
@@ -511,6 +704,17 @@ export default function FilesApp() {
             </div>
           )}
 
+          {recursive && !searching && displayFiles.length > 0 && (
+            <div className="sticky top-0 z-10 flex items-center gap-2 px-4 py-1.5 text-xs backdrop-blur bg-[var(--bg-surface)]/90 border-b border-[var(--border-subtle)] text-[var(--text-muted)]">
+              <Icon name="search" size={13} />
+              <span className="truncate">{t("files.searchResultsFor", { query: query.trim() })}</span>
+              <span className="opacity-70 shrink-0">· {displayFiles.length}</span>
+              {searchTruncated && (
+                <span className="opacity-70 shrink-0">· {t("files.searchTruncated", { count: displayFiles.length })}</span>
+              )}
+            </div>
+          )}
+
           {loading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
               <Icon name="progress_activity" size={24} className="animate-spin mr-2" />
@@ -522,19 +726,29 @@ export default function FilesApp() {
               <span className="text-sm">{error}</span>
               <button onClick={() => load(currentPath)} className="text-xs underline mt-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer">{t("files.retry")}</button>
             </div>
-          ) : visibleFiles.length === 0 ? (
-            <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
-              <Icon name="folder_open" size={56} color="var(--border-subtle)" />
-              <span className="text-sm">
-                {files.length === 0 ? t("files.emptyFolder") : t("files.hiddenAllItems")}
-              </span>
-              <span className="text-xs">
-                {files.length === 0 ? t("files.dropOrUpload") : t("files.hiddenToggleEye")}
-              </span>
-            </div>
+          ) : displayFiles.length === 0 ? (
+            searchActive ? (
+              <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
+                <Icon name="search_off" size={56} color="var(--border-subtle)" />
+                <span className="text-sm">
+                  {searching ? t("files.searching") : t("files.searchNoResults", { query: query.trim() })}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full flex-col gap-2 text-[var(--text-muted)]">
+                <Icon name="folder_open" size={56} color="var(--border-subtle)" />
+                <span className="text-sm">
+                  {files.length === 0 ? t("files.emptyFolder") : t("files.hiddenAllItems")}
+                </span>
+                <span className="text-xs">
+                  {files.length === 0 ? t("files.dropOrUpload") : t("files.hiddenToggleEye")}
+                </span>
+              </div>
+            )
           ) : viewMode === "grid" ? (
             <GridView
-              files={visibleFiles}
+              files={displayFiles}
+              showLocation={recursive}
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
@@ -544,7 +758,8 @@ export default function FilesApp() {
             />
           ) : (
             <ListView
-              files={visibleFiles}
+              files={displayFiles}
+              showLocation={recursive}
               selected={selected}
               onSelect={setSelected}
               onOpen={navigateTo}
@@ -558,8 +773,10 @@ export default function FilesApp() {
         {/* ── Status bar ── */}
         <div className="px-4 py-1.5 text-xs flex items-center justify-between shrink-0 border-t border-[var(--border-subtle)] text-[var(--text-muted)]">
           <span>
-            {statusMsg ?? `${visibleFiles.length} item${visibleFiles.length !== 1 ? "s" : ""}`}
-            {!showHidden && files.length > visibleFiles.length && (
+            {statusMsg ?? (searchActive
+              ? `${displayFiles.length} result${displayFiles.length !== 1 ? "s" : ""}`
+              : `${visibleFiles.length} item${visibleFiles.length !== 1 ? "s" : ""}`)}
+            {!searchActive && !showHidden && files.length > visibleFiles.length && (
               <span className="opacity-60"> · {files.length - visibleFiles.length} hidden</span>
             )}
           </span>
@@ -590,6 +807,16 @@ export default function FilesApp() {
         />
       )}
 
+      {/* ── File viewer / editor ── */}
+      {viewer && (
+        <FileViewer
+          relPath={viewer.relPath}
+          entry={viewer.entry}
+          onClose={() => setViewer(null)}
+          onSaved={refreshView}
+        />
+      )}
+
       {/* ── Dialogs ── */}
       {dialog.type && (
         <DialogOverlay
@@ -605,10 +832,11 @@ export default function FilesApp() {
 
 // ─── Grid View ────────────────────────────────────────────────────────────────
 
-function GridView({ files, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
+function GridView({ files, showLocation, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
   files: FileEntry[];
+  showLocation?: boolean;
   selected: string | null;
-  onSelect: (name: string | null) => void;
+  onSelect: (id: string | null) => void;
   onOpen: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onLongPressStart: (e: React.TouchEvent, entry: FileEntry) => void;
@@ -618,17 +846,19 @@ function GridView({ files, selected, onSelect, onOpen, onContextMenu, onLongPres
     <div className="p-4 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))" }}
       onClick={() => onSelect(null)}>
       {files.map((entry) => {
-        const isSelected = selected === entry.name;
+        const id = entryId(entry);
+        const isSelected = selected === id;
         const fi = fileIcon(entry.name, entry.type);
         return (
           <div
-            key={entry.name}
+            key={id}
+            title={showLocation && entry.path ? entry.path : entry.name}
             className={`flex flex-col items-center gap-1.5 p-3 rounded-xl cursor-pointer transition-all select-none ${
               isSelected
                 ? "bg-[var(--coral-bright)]/10 border border-[var(--coral-bright)]/40"
                 : "border border-transparent hover:bg-white/[0.04]"
             }`}
-            onClick={(e) => { e.stopPropagation(); onSelect(entry.name); }}
+            onClick={(e) => { e.stopPropagation(); onSelect(id); }}
             onDoubleClick={() => onOpen(entry)}
             onContextMenu={(e) => onContextMenu(e, entry)}
             onTouchStart={(e) => onLongPressStart(e, entry)}
@@ -648,10 +878,11 @@ function GridView({ files, selected, onSelect, onOpen, onContextMenu, onLongPres
 
 // ─── List View ────────────────────────────────────────────────────────────────
 
-function ListView({ files, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
+function ListView({ files, showLocation, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
   files: FileEntry[];
+  showLocation?: boolean;
   selected: string | null;
-  onSelect: (name: string | null) => void;
+  onSelect: (id: string | null) => void;
   onOpen: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onLongPressStart: (e: React.TouchEvent, entry: FileEntry) => void;
@@ -668,25 +899,34 @@ function ListView({ files, selected, onSelect, onOpen, onContextMenu, onLongPres
         <span className="text-right">{t("files.modified")}</span>
       </div>
       {files.map((entry) => {
-        const isSelected = selected === entry.name;
+        const id = entryId(entry);
+        const isSelected = selected === id;
         const fi = fileIcon(entry.name, entry.type);
+        const location = parentDirOf(entry.path);
         return (
           <div
-            key={entry.name}
+            key={id}
             className={`grid px-4 py-2 items-center cursor-pointer transition-colors border-b border-white/[0.03] select-none ${
               isSelected ? "bg-[var(--coral-bright)]/10" : "hover:bg-white/[0.03]"
             }`}
             style={{ gridTemplateColumns: "1fr 80px 160px" }}
-            onClick={(e) => { e.stopPropagation(); onSelect(entry.name); }}
+            onClick={(e) => { e.stopPropagation(); onSelect(id); }}
             onDoubleClick={() => onOpen(entry)}
             onContextMenu={(e) => onContextMenu(e, entry)}
             onTouchStart={(e) => onLongPressStart(e, entry)}
             onTouchEnd={onLongPressEnd}
             onTouchMove={onLongPressEnd}
           >
-            <span className="flex items-center gap-2.5 truncate">
+            <span className="flex items-center gap-2.5 min-w-0">
               <Icon name={fi.icon} size={20} color={fi.color} />
-              <span className="truncate text-sm text-[var(--text-primary)]">{entry.name}</span>
+              <span className="flex flex-col min-w-0">
+                <span className="truncate text-sm text-[var(--text-primary)]">{entry.name}</span>
+                {showLocation && (
+                  <span className="truncate text-[11px] text-[var(--text-muted)] leading-tight">
+                    {location ? `~/${location}` : t("files.home")}
+                  </span>
+                )}
+              </span>
             </span>
             <span className="text-right text-xs text-[var(--text-muted)]">{formatSize(entry.size)}</span>
             <span className="text-right text-xs text-[var(--text-muted)]">{formatDate(entry.modified)}</span>
@@ -731,6 +971,7 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onCl
   if (entry.type === "directory") {
     items.push({ icon: "folder_open", label: t("files.open"), onClick: onOpen });
   } else {
+    items.push({ icon: "open_in_new", label: t("files.open"), onClick: onOpen });
     items.push({ icon: "download", label: t("files.download"), onClick: onDownload });
   }
   items.push({ icon: "edit", label: t("files.rename"), onClick: onRename });
@@ -862,6 +1103,255 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── File Viewer / Editor ───────────────────────────────────────────────────────
+
+// Fills the Files window (absolute inset-0, not a full-screen fixed overlay) so
+// it stays inside the window frame. Text/code is editable and saved back via the
+// streaming PUT; images/pdf/audio/video preview inline; anything binary or too
+// large to edit falls back to a download prompt.
+function FileViewer({ relPath, entry, onClose, onSaved }: {
+  relPath: string;
+  entry: FileEntry;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { t } = useT();
+  const initialKind = resolveViewerKind(entry.name, entry.size);
+  const [kind, setKind] = useState<ViewerKind>(initialKind);
+  const [content, setContent] = useState("");
+  const [original, setOriginal] = useState("");
+  const [loading, setLoading] = useState(initialKind === "text");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  const url = `/setup-api/files/${relPath.split("/").map(encodeURIComponent).join("/")}`;
+  const dirty = kind === "text" && content !== original;
+
+  // Fetch text content; a binary sniff downgrades to the non-editable view.
+  useEffect(() => {
+    if (initialKind !== "text") return;
+    let cancelled = false;
+    setLoading(true);
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then((text) => {
+        if (cancelled) return;
+        if (looksBinary(text)) {
+          setKind("binary");
+        } else {
+          setContent(text);
+          setOriginal(text);
+        }
+      })
+      .catch(() => { if (!cancelled) setError(t("files.loadError")); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+
+  // Non-text kinds have no autofocusing textarea — focus the container so the
+  // Escape-to-close shortcut works.
+  useEffect(() => {
+    if (initialKind !== "text") rootRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    const slash = relPath.lastIndexOf("/");
+    const dir = slash === -1 ? "" : relPath.slice(0, slash);
+    const fname = slash === -1 ? relPath : relPath.slice(slash + 1);
+    try {
+      const res = await fetch(
+        `/setup-api/files?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(fname)}`,
+        { method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: content },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? t("files.saveError"));
+      }
+      setOriginal(content);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("files.saveError"));
+    } finally {
+      setSaving(false);
+    }
+  }, [content, relPath, onSaved, t]);
+
+  const attemptClose = useCallback(() => {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
+  }, [dirty, onClose]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    // While the discard confirmation is up, keep keys scoped to it — Escape
+    // dismisses it, and nothing else leaks through to the editor underneath.
+    if (confirmDiscard) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setConfirmDiscard(false);
+      }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (dirty) save();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      attemptClose();
+    }
+  };
+
+  const fi = fileIcon(entry.name, entry.type);
+
+  return (
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      className="absolute inset-0 z-40 flex flex-col bg-[var(--bg-deep)] outline-none"
+      onKeyDown={handleKeyDown}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+        <Icon name={fi.icon} size={18} color={fi.color} />
+        <span className="text-sm font-medium truncate flex-1 text-[var(--text-primary)]" title={relPath}>{entry.name}</span>
+        {kind === "text" && (dirty
+          ? <span className="text-[11px] text-[var(--text-muted)]" title={t("files.unsavedChanges")}>●</span>
+          : saved ? <span className="text-[11px] text-green-400">{t("files.saved")}</span> : null)}
+        {kind === "text" && (
+          <button
+            onClick={save}
+            disabled={!dirty || saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-default bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/25 cursor-pointer"
+            title={t("files.save")}
+          >
+            <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "animate-spin" : ""} />
+            <span className="hidden sm:inline">{t("files.save")}</span>
+          </button>
+        )}
+        <button
+          onClick={() => downloadViaLink(url, entry.name)}
+          className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
+          title={t("files.download")}
+        >
+          <Icon name="download" size={18} />
+        </button>
+        <button
+          onClick={attemptClose}
+          className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
+          title={t("files.close")}
+        >
+          <Icon name="close" size={18} />
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 min-h-0 overflow-auto relative">
+        {loading ? (
+          <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
+            <Icon name="progress_activity" size={24} className="animate-spin mr-2" />{t("files.loading")}
+          </div>
+        ) : error ? (
+          <ViewerMessage icon="error" text={error} url={url} name={entry.name} color="#f87171" />
+        ) : kind === "text" ? (
+          <textarea
+            autoFocus
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            spellCheck={false}
+            className="w-full h-full resize-none bg-[var(--bg-deep)] text-[var(--text-primary)] font-mono text-[13px] leading-relaxed p-4 outline-none"
+            style={{ tabSize: 2 }}
+          />
+        ) : kind === "image" ? (
+          <div className="flex items-center justify-center h-full p-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={url} alt={entry.name} className="max-w-full max-h-full object-contain" />
+          </div>
+        ) : kind === "pdf" ? (
+          <iframe src={url} title={entry.name} className="w-full h-full border-0 bg-white" />
+        ) : kind === "video" ? (
+          <div className="flex items-center justify-center h-full p-4 bg-black">
+            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+            <video src={url} controls className="max-w-full max-h-full" />
+          </div>
+        ) : kind === "audio" ? (
+          <div className="flex flex-col items-center justify-center h-full gap-4 p-6">
+            <Icon name="music_note" size={64} color="#06b6d4" />
+            <span className="text-sm text-[var(--text-secondary)] truncate max-w-full">{entry.name}</span>
+            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+            <audio src={url} controls />
+          </div>
+        ) : kind === "toobig" ? (
+          <ViewerMessage icon="visibility_off" text={t("files.fileTooLarge")} url={url} name={entry.name} />
+        ) : (
+          <ViewerMessage icon="draft" text={t("files.binaryFile")} url={url} name={entry.name} />
+        )}
+      </div>
+
+      {/* Discard-changes confirmation */}
+      {confirmDiscard && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="card-surface rounded-2xl p-6 w-72 shadow-2xl">
+            <h3 className="text-base font-semibold mb-4 text-[var(--text-primary)] flex items-center gap-2">
+              <Icon name="warning" size={20} color="#f59e0b" />
+              {t("files.unsavedChanges")}
+            </h3>
+            <div className="flex gap-2 justify-end">
+              <button
+                autoFocus
+                onClick={() => setConfirmDiscard(false)}
+                className="px-4 py-2 rounded-lg text-sm bg-white/[0.06] text-[var(--text-secondary)] hover:bg-white/[0.1] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                {t("cancel")}
+              </button>
+              <button
+                onClick={onClose}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-600 hover:bg-red-500 cursor-pointer"
+              >
+                {t("files.discard")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Fallback panel for files that can't be shown inline (binary, too large, or a
+// fetch error): explain why and offer a download.
+function ViewerMessage({ icon, text, url, name, color }: {
+  icon: string;
+  text: string;
+  url: string;
+  name: string;
+  color?: string;
+}) {
+  const { t } = useT();
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-3 p-6 text-center text-[var(--text-muted)]">
+      <Icon name={icon} size={48} color={color ?? "var(--border-subtle)"} />
+      <span className="text-sm max-w-sm">{text}</span>
+      <button
+        onClick={() => downloadViaLink(url, name)}
+        className="flex items-center gap-1.5 mt-1 px-3 py-1.5 rounded-lg text-sm bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/25 cursor-pointer"
+      >
+        <Icon name="download" size={16} />{t("files.downloadInstead")}
+      </button>
     </div>
   );
 }
