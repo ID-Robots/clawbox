@@ -481,6 +481,7 @@ try {
     accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
   } catch { /* opaque token — leave accountId null */ }
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.chmodSync(path.dirname(outPath), 0o700); // ~/.codex holds OAuth tokens — keep it owner-only (not just the 0600 file)
   fs.writeFileSync(outPath, JSON.stringify({
     OPENAI_API_KEY: null,
     tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
