@@ -375,9 +375,14 @@ export async function resetRunningState(): Promise<void> {
  * reader never sees a half-written file. Shared by resetRunningState() and
  * syncStateFromCloud().
  */
+let stateWriteSeq = 0;
+
 async function writeStateFile(state: StateFile): Promise<void> {
   await ensureDataDir();
-  const tmp = `${STATE_PATH}.tmp`;
+  // Per-call temp name (pid + monotonic counter) so concurrent writers — e.g.
+  // a pair-time cloud sync racing a stuck-spinner reset — can't clobber each
+  // other's temp file before the atomic rename.
+  const tmp = `${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`;
   await fs.writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await fs.rename(tmp, STATE_PATH);
 }

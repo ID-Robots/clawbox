@@ -429,7 +429,22 @@ export async function POST(request: Request) {
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
       ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
-    const configStore = await getAll().catch(() => ({} as Awaited<ReturnType<typeof getAll>>));
+    // Don't fail open on a config read error for ClawBox AI: previousClawaiToken
+    // would silently become "" and the account-switch unpair guard below would
+    // be skipped, potentially leaving ClawKeep paired to the previous account.
+    // For other providers a missing config is harmless, so keep the soft default.
+    let configStore: Awaited<ReturnType<typeof getAll>>;
+    try {
+      configStore = await getAll();
+    } catch {
+      if (isClawAI) {
+        return NextResponse.json(
+          { error: "Failed to read existing ClawBox AI configuration. Please retry." },
+          { status: 503 },
+        );
+      }
+      configStore = {} as Awaited<ReturnType<typeof getAll>>;
+    }
     // Capture the previously-stored ClawBox AI token *before* it gets
     // overwritten below, so the isClawAI block can detect an account switch
     // (token change) and unpair ClawKeep.

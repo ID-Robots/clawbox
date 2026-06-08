@@ -216,8 +216,13 @@ export default function ClawKeepApp() {
   // ends.
   useEffect(() => {
     const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    // Skip a tick if the previous refresh is still in flight, so a slow/hung
+    // fetch can't stack concurrent requests on the Jetson.
+    let inFlight = false;
     const id = window.setInterval(() => {
-      void refresh();
+      if (inFlight) return;
+      inFlight = true;
+      void refresh().finally(() => { inFlight = false; });
     }, intervalMs);
     return () => window.clearInterval(id);
   }, [status, refresh]);
