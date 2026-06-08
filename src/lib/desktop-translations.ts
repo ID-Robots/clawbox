@@ -234,6 +234,14 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "store.poweredBy": "Powered by ClawHub — {count} AI Skills",
     "store.searchApps": "Search apps...",
     "store.noAppsFound": "No apps found",
+    "store.sort": "Sort",
+    "store.sortPopular": "Popular",
+    "store.sortRating": "Top rated",
+    "store.sortName": "A–Z",
+    "store.official": "Official",
+    "store.featured": "Featured",
+    "store.updated": "Updated {date}",
+    "store.runsCode": "Runs code",
 
     // === SettingsApp ===
     "settings.appearance": "Appearance",
