@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
-import { get as getConfigValue } from "@/lib/config-store";
+import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
 
 export const dynamic = "force-dynamic";
@@ -287,6 +287,13 @@ export async function GET() {
         if (lookup.source === "portal") {
           clawaiAccountTier = lookup.tier;
           accountTierSource = "portal";
+          // Persist the portal-confirmed tier so the portal-unreachable
+          // fallback reflects the last *confirmed* tier, not a stale
+          // configure-time value (which flapped a Free badge to Pro and
+          // re-fired the celebration). Write only on change to avoid churn.
+          if (lookup.tier !== localTier) {
+            await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
+          }
         }
       }
     }
