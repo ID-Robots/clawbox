@@ -34,6 +34,67 @@ function safePath(rel: string): string | null {
   return resolved;
 }
 
+// Recursive name search rooted at `rootAbs`. Breadth-first so shallow matches
+// surface first; bounded by MAX_SCANNED/MAX_MATCHES so a search over a large
+// home directory can't hang the request or exhaust memory. Symlinked
+// directories are reported (if their name matches) but never traversed —
+// `dirent.isDirectory()` is false for symlinks, which avoids cycle loops.
+function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
+  const baseResolved = path.resolve(BASE_DIR);
+  const MAX_MATCHES = 300;
+  const MAX_SCANNED = 20000;
+  const matches: Array<{
+    name: string;
+    type: "file" | "directory";
+    size: number | null;
+    modified: string;
+    path: string;
+  }> = [];
+  const queue: string[] = [rootAbs];
+  let head = 0;
+  let scanned = 0;
+  let truncated = false;
+
+  while (head < queue.length) {
+    const dir = queue[head++];
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable dir (permissions) — skip it
+    }
+    for (const dirent of entries) {
+      if (scanned >= MAX_SCANNED) { truncated = true; break; }
+      scanned++;
+      const name = dirent.name;
+      if (!includeHidden && name.startsWith(".")) continue;
+      const isDir = dirent.isDirectory();
+      const full = path.join(dir, name);
+      if (name.toLowerCase().includes(query)) {
+        let size: number | null = null;
+        let modified = "";
+        try {
+          const s = fs.statSync(full);
+          size = isDir ? null : s.size;
+          modified = s.mtime.toISOString();
+        } catch { /* stat may fail on a broken symlink — still list the name */ }
+        matches.push({
+          name,
+          type: isDir ? "directory" : "file",
+          size,
+          modified,
+          path: path.relative(baseResolved, full).split(path.sep).join("/"),
+        });
+        if (matches.length >= MAX_MATCHES) { truncated = true; break; }
+      }
+      if (isDir) queue.push(full);
+    }
+    if (truncated) break;
+  }
+
+  return { files: matches, search: query, truncated };
+}
+
 function ensureBaseDir() {
   try { if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true }); } catch { /* read-only fs */ }
   // Ensure standard home subdirectories exist (skip when FILES_ROOT is explicitly set, e.g. tests)
@@ -63,6 +124,16 @@ export async function GET(req: NextRequest) {
 
   const stat = fs.statSync(abs);
   if (!stat.isDirectory()) return NextResponse.json({ error: "Not a directory" }, { status: 400 });
+
+  // Recursive search mode: walk the tree from `abs` and return matches with
+  // each one's path relative to the files root. Hidden files are excluded
+  // unless ?hidden=1, which also keeps the walk fast (heavy dot-dirs like
+  // .cache/.npm are skipped by default).
+  const searchRaw = req.nextUrl.searchParams.get("search");
+  if (searchRaw && searchRaw.trim()) {
+    const includeHidden = req.nextUrl.searchParams.get("hidden") === "1";
+    return NextResponse.json(searchTree(abs, searchRaw.trim().toLowerCase(), includeHidden));
+  }
 
   // Return everything including dotfiles. The client (FilesApp) hides
   // them by default and toggles visibility via the visibility/visibility_off
