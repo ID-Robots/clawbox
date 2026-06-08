@@ -25,6 +25,10 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+vi.mock("@/lib/clawkeep", () => ({
+  unpairLocal: vi.fn(),
+}));
+
 // Hoisted so the vi.mock factories below (which are themselves hoisted by
 // vitest) can see these. A plain const declaration at file-body position
 // would be in the TDZ when the mock factory evaluates.
@@ -88,6 +92,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 }));
 
 import { getAll, setMany } from "@/lib/config-store";
+import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
@@ -108,6 +113,7 @@ const mockGetLlamaCppMaxTokens = vi.mocked(getLlamaCppMaxTokens);
 const mockGetLlamaCppProxyBaseUrl = vi.mocked(getLlamaCppProxyBaseUrl);
 const mockGetLocalAiProxyBaseUrl = vi.mocked(getLocalAiProxyBaseUrl);
 const mockGetLocalAiToken = vi.mocked(getLocalAiToken);
+const mockUnpairLocal = vi.mocked(unpairLocal);
 
 // Create a mock child process that immediately succeeds
 function createSuccessfulChildProcess(): ChildProcess {
@@ -167,6 +173,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockRestartGateway.mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
+    mockUnpairLocal.mockResolvedValue(undefined);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
@@ -301,6 +308,46 @@ describe("POST /setup-api/ai-models/configure", () => {
         clawai_token: "portal-token-123",
       }),
     );
+  });
+
+  it("unpairs ClawKeep when the ClawBox AI account (token) changes", async () => {
+    // A token for a *different* account was already stored.
+    mockGetAll.mockResolvedValue({ clawai_token: "claw_OLD", ai_model_provider: "deepseek" });
+
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_NEW",
+    }));
+
+    expect(res.status).toBe(200);
+    // ClawKeep is bound to its own token/account, so switching accounts must
+    // unpair it (else backups keep going to the old account's storage), and
+    // clear the old account's stats so they don't linger on the new account.
+    expect(mockUnpairLocal).toHaveBeenCalledTimes(1);
+    expect(mockUnpairLocal).toHaveBeenCalledWith({ clearStats: true });
+  });
+
+  it("does not unpair ClawKeep when the ClawBox AI token is unchanged", async () => {
+    mockGetAll.mockResolvedValue({ clawai_token: "claw_SAME", ai_model_provider: "deepseek" });
+
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_SAME",
+    }));
+
+    expect(res.status).toBe(200);
+    expect(mockUnpairLocal).not.toHaveBeenCalled();
+  });
+
+  it("does not unpair ClawKeep on first-time ClawBox AI setup (no previous token)", async () => {
+    // getAll default ({}) — no prior clawai_token, so nothing to reset.
+    const res = await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_NEW",
+    }));
+
+    expect(res.status).toBe(200);
+    expect(mockUnpairLocal).not.toHaveBeenCalled();
   });
 
   it("configures ollama without apiKey", async () => {
