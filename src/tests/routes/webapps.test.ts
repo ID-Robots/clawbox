@@ -12,6 +12,10 @@ vi.mock("fs/promises", () => ({
 vi.mock("@/lib/code-projects", () => ({
   WEBAPPS_DIR: "/tmp/webapps",
   APP_ID_RE: /^[a-z0-9][a-z0-9_-]{0,63}$/,
+  // The create path now deploys + registers via this shared chokepoint; stub
+  // it so the route test doesn't hit real config IO (it owns the desktop
+  // registration, covered separately in code-projects/webapp-registry tests).
+  deployWebapp: vi.fn().mockResolvedValue(undefined),
 }));
 
 import fs from "fs/promises";
