@@ -84,13 +84,22 @@ export interface ClawKeepSchedule {
   timeOfDay: string;
   /** 0=Sunday … 6=Saturday. Only used when frequency === "weekly". */
   weekday: number;
+  /** Auto-cleanup: keep the newest N *unlocked* snapshots after each
+   * successful backup. Locked snapshots are always kept and never counted
+   * toward N. 0 disables retention. Read by the device runner from
+   * schedule.json. */
+  retentionKeepLast: number;
 }
+
+/** Default retention window. Keep the last 10 unlocked snapshots. */
+export const DEFAULT_RETENTION_KEEP_LAST = 10;
 
 export const DEFAULT_SCHEDULE: ClawKeepSchedule = {
   enabled: false,
   frequency: "daily",
   timeOfDay: "02:00",
   weekday: 0,
+  retentionKeepLast: DEFAULT_RETENTION_KEEP_LAST,
 };
 
 export interface ClawKeepStatus {
@@ -161,11 +170,19 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   const weekday = Number.isInteger(weekdayRaw) && weekdayRaw >= 0 && weekdayRaw <= 6
     ? weekdayRaw
     : DEFAULT_SCHEDULE.weekday;
+  // retentionKeepLast: a non-negative integer; 0 disables. Anything bogus
+  // falls back to the default so a malformed file can't silently turn off
+  // retention (which would let snapshots accumulate forever).
+  const keepRaw = Number(r.retentionKeepLast);
+  const retentionKeepLast = Number.isInteger(keepRaw) && keepRaw >= 0
+    ? keepRaw
+    : DEFAULT_SCHEDULE.retentionKeepLast;
   return {
     enabled: r.enabled === true,
     frequency,
     timeOfDay: time,
     weekday,
+    retentionKeepLast,
   };
 }
 
@@ -617,6 +634,10 @@ export interface CloudSnapshot {
   name: string;
   size_bytes: number;
   last_modified_ms: number;
+  /** Human label from the sidecar manifest; null/undefined = unnamed. */
+  label?: string | null;
+  /** Protected flag — a locked snapshot can't be deleted (manual or auto). */
+  locked?: boolean;
 }
 
 interface SnapshotsResponse {
@@ -722,6 +743,101 @@ export async function listCloudSnapshots(): Promise<CloudSnapshot[]> {
   return resp.snapshots ?? [];
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Snapshot management — label / lock / unlock / delete / prune
+// ────────────────────────────────────────────────────────────────────
+
+// Snapshot object names are portal-issued `<ts>-openclaw-backup.tar.gz(.enc)`.
+// Validate the shape on this side too (same regex the restore path uses) so a
+// hostile/garbled name is bounced with a clean 400 before we shell out — it
+// could never escape the portal-issued prefix anyway, but the early reject is
+// clearer for the user.
+const SNAPSHOT_NAME_RE = /^[A-Za-z0-9._-]+\.tar\.gz(\.enc)?$/;
+
+function assertSnapshotName(name: string): void {
+  if (!SNAPSHOT_NAME_RE.test(name)) {
+    throw new ClawKeepError("invalid snapshot name", 400);
+  }
+}
+
+/** Thrown when a delete is refused because the snapshot is locked. The route
+ * maps this to a 409 with `kind:"locked"` so the UI can say "Unlock first". */
+export class SnapshotLockedError extends ClawKeepError {
+  constructor(message: string, readonly kind: "locked" = "locked") {
+    super(message, 409);
+    this.name = "SnapshotLockedError";
+  }
+}
+
+interface MutationResponse {
+  ok: boolean;
+  error?: string;
+  kind?: string;
+}
+
+/** Set (or clear, when `text` is empty) a snapshot's human label. */
+export async function setSnapshotLabel(name: string, text: string): Promise<void> {
+  assertSnapshotName(name);
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<MutationResponse>(
+    bin,
+    "label",
+    [name, "--text", text],
+    { timeoutMs: 30_000 },
+  );
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "label failed", 502);
+  }
+}
+
+/** Mark a snapshot as protected (locked) — exempt from delete + retention. */
+export async function lockSnapshot(name: string): Promise<void> {
+  assertSnapshotName(name);
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<MutationResponse>(bin, "lock", [name], { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "lock failed", 502);
+  }
+}
+
+/** Remove a snapshot's protected flag. */
+export async function unlockSnapshot(name: string): Promise<void> {
+  assertSnapshotName(name);
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<MutationResponse>(bin, "unlock", [name], { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "unlock failed", 502);
+  }
+}
+
+/** Delete a snapshot. Refused (SnapshotLockedError) if it's locked. */
+export async function deleteSnapshot(name: string): Promise<void> {
+  assertSnapshotName(name);
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<MutationResponse>(bin, "delete", [name], { timeoutMs: 60_000 });
+  if (!resp.ok) {
+    if (resp.kind === "locked") {
+      throw new SnapshotLockedError(resp.error ?? "snapshot is locked");
+    }
+    throw new ClawKeepError(resp.error ?? "delete failed", 502);
+  }
+}
+
+/** Run retention on demand: keep the newest `keepLast` unlocked snapshots. */
+export async function pruneSnapshots(keepLast: number): Promise<string[]> {
+  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const resp = await spawnCliJson<MutationResponse & { deleted?: string[] }>(
+    bin,
+    "prune",
+    ["--keep-last", String(Math.max(0, Math.floor(keepLast)))],
+    { timeoutMs: 60_000 },
+  );
+  if (!resp.ok) {
+    throw new ClawKeepError(resp.error ?? "prune failed", 502);
+  }
+  return resp.deleted ?? [];
+}
+
 export async function runRestore(
   name: string,
   opts: { passphrase?: string } = {},
@@ -767,12 +883,19 @@ export async function runRestore(
   }
 }
 
-export async function runBackup(opts: { idle?: boolean } = {}): Promise<BackupResult> {
+export async function runBackup(
+  opts: { idle?: boolean; label?: string } = {},
+): Promise<BackupResult> {
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   return new Promise((resolve) => {
     const env = buildSpawnEnv();
     const args = ["--config", CLAWKEEP_CONFIG_PATH];
     if (opts.idle) args.push("--idle");
+    // Optional snapshot label from the UI's "Name this backup" field. Passed
+    // as an argv pair (not a secret, unlike the passphrase) — the daemon
+    // records it in the manifest after a successful upload.
+    const label = opts.label?.trim();
+    if (label) args.push("--label", label);
     const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";

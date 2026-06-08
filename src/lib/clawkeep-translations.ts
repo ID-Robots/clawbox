@@ -165,6 +165,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Decrypt & restore",
     "clawkeep.encryption.wrongPassphrase": "That passphrase didn't decrypt this archive. Try again?",
     "clawkeep.encryption.restoreFailed": "Restore failed.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Name this backup (optional)",
+    "clawkeep.backup.namePlaceholder": "e.g. Before v3 upgrade",
+    "clawkeep.schedule.keepLast": "Keep last",
+    "clawkeep.schedule.keepLastUnit": "backups",
+    "clawkeep.schedule.keepLastHelp": "Locked backups are always kept.",
+    "clawkeep.schedule.keepLastOff": "0 = keep every backup (no auto-cleanup).",
+    "clawkeep.snapshot.rename": "Rename",
+    "clawkeep.snapshot.renamePlaceholder": "Backup name",
+    "clawkeep.snapshot.save": "Save",
+    "clawkeep.snapshot.lock": "Lock",
+    "clawkeep.snapshot.unlock": "Unlock",
+    "clawkeep.snapshot.locked": "Locked",
+    "clawkeep.snapshot.delete": "Delete",
+    "clawkeep.snapshot.confirmDelete": "Confirm delete",
+    "clawkeep.snapshot.deleteLockedTooltip": "Unlock first",
   },
 
   bg: {
@@ -303,6 +320,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Декриптирай и възстанови",
     "clawkeep.encryption.wrongPassphrase": "Тази парола не декриптира този архив. Опитай отново?",
     "clawkeep.encryption.restoreFailed": "Възстановяването се провали.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Назовете този архив (по избор)",
+    "clawkeep.backup.namePlaceholder": "напр. Преди ъпгрейд до v3",
+    "clawkeep.schedule.keepLast": "Запази последните",
+    "clawkeep.schedule.keepLastUnit": "архива",
+    "clawkeep.schedule.keepLastHelp": "Заключените архиви винаги се запазват.",
+    "clawkeep.schedule.keepLastOff": "0 = запазвай всеки архив (без авто-почистване).",
+    "clawkeep.snapshot.rename": "Преименуване",
+    "clawkeep.snapshot.renamePlaceholder": "Име на архива",
+    "clawkeep.snapshot.save": "Запази",
+    "clawkeep.snapshot.lock": "Заключи",
+    "clawkeep.snapshot.unlock": "Отключи",
+    "clawkeep.snapshot.locked": "Заключен",
+    "clawkeep.snapshot.delete": "Изтрий",
+    "clawkeep.snapshot.confirmDelete": "Потвърди изтриване",
+    "clawkeep.snapshot.deleteLockedTooltip": "Първо отключете",
   },
 
   de: {
@@ -441,6 +475,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Entschlüsseln & Wiederherstellen",
     "clawkeep.encryption.wrongPassphrase": "Diese Passphrase hat das Archiv nicht entschlüsselt. Erneut versuchen?",
     "clawkeep.encryption.restoreFailed": "Wiederherstellung fehlgeschlagen.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Dieses Backup benennen (optional)",
+    "clawkeep.backup.namePlaceholder": "z. B. Vor v3-Upgrade",
+    "clawkeep.schedule.keepLast": "Letzte behalten",
+    "clawkeep.schedule.keepLastUnit": "Backups",
+    "clawkeep.schedule.keepLastHelp": "Gesperrte Backups werden immer behalten.",
+    "clawkeep.schedule.keepLastOff": "0 = jedes Backup behalten (keine automatische Bereinigung).",
+    "clawkeep.snapshot.rename": "Umbenennen",
+    "clawkeep.snapshot.renamePlaceholder": "Backup-Name",
+    "clawkeep.snapshot.save": "Speichern",
+    "clawkeep.snapshot.lock": "Sperren",
+    "clawkeep.snapshot.unlock": "Entsperren",
+    "clawkeep.snapshot.locked": "Gesperrt",
+    "clawkeep.snapshot.delete": "Löschen",
+    "clawkeep.snapshot.confirmDelete": "Löschen bestätigen",
+    "clawkeep.snapshot.deleteLockedTooltip": "Zuerst entsperren",
   },
 
   es: {
@@ -579,6 +630,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Descifrar y restaurar",
     "clawkeep.encryption.wrongPassphrase": "Esa contraseña no descifró este archivo. ¿Probamos de nuevo?",
     "clawkeep.encryption.restoreFailed": "Restauración fallida.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Nombra esta copia (opcional)",
+    "clawkeep.backup.namePlaceholder": "p. ej. Antes de actualizar a v3",
+    "clawkeep.schedule.keepLast": "Conservar las últimas",
+    "clawkeep.schedule.keepLastUnit": "copias",
+    "clawkeep.schedule.keepLastHelp": "Las copias bloqueadas siempre se conservan.",
+    "clawkeep.schedule.keepLastOff": "0 = conservar todas las copias (sin limpieza automática).",
+    "clawkeep.snapshot.rename": "Renombrar",
+    "clawkeep.snapshot.renamePlaceholder": "Nombre de la copia",
+    "clawkeep.snapshot.save": "Guardar",
+    "clawkeep.snapshot.lock": "Bloquear",
+    "clawkeep.snapshot.unlock": "Desbloquear",
+    "clawkeep.snapshot.locked": "Bloqueada",
+    "clawkeep.snapshot.delete": "Eliminar",
+    "clawkeep.snapshot.confirmDelete": "Confirmar eliminación",
+    "clawkeep.snapshot.deleteLockedTooltip": "Desbloquéala primero",
   },
 
   fr: {
@@ -717,6 +785,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Déchiffrer & restaurer",
     "clawkeep.encryption.wrongPassphrase": "Ce mot de passe n'a pas déchiffré cette archive. Réessayer ?",
     "clawkeep.encryption.restoreFailed": "Échec de la restauration.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Nommer cette sauvegarde (facultatif)",
+    "clawkeep.backup.namePlaceholder": "ex. Avant la mise à niveau v3",
+    "clawkeep.schedule.keepLast": "Conserver les derniers",
+    "clawkeep.schedule.keepLastUnit": "sauvegardes",
+    "clawkeep.schedule.keepLastHelp": "Les sauvegardes verrouillées sont toujours conservées.",
+    "clawkeep.schedule.keepLastOff": "0 = conserver toutes les sauvegardes (pas de nettoyage auto).",
+    "clawkeep.snapshot.rename": "Renommer",
+    "clawkeep.snapshot.renamePlaceholder": "Nom de la sauvegarde",
+    "clawkeep.snapshot.save": "Enregistrer",
+    "clawkeep.snapshot.lock": "Verrouiller",
+    "clawkeep.snapshot.unlock": "Déverrouiller",
+    "clawkeep.snapshot.locked": "Verrouillée",
+    "clawkeep.snapshot.delete": "Supprimer",
+    "clawkeep.snapshot.confirmDelete": "Confirmer la suppression",
+    "clawkeep.snapshot.deleteLockedTooltip": "Déverrouillez d'abord",
   },
 
   it: {
@@ -855,6 +940,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Decifra e ripristina",
     "clawkeep.encryption.wrongPassphrase": "Quella passphrase non ha decifrato questo archivio. Riproviamo?",
     "clawkeep.encryption.restoreFailed": "Ripristino fallito.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Assegna un nome a questo backup (facoltativo)",
+    "clawkeep.backup.namePlaceholder": "es. Prima dell'aggiornamento a v3",
+    "clawkeep.schedule.keepLast": "Conserva gli ultimi",
+    "clawkeep.schedule.keepLastUnit": "backup",
+    "clawkeep.schedule.keepLastHelp": "I backup bloccati vengono sempre conservati.",
+    "clawkeep.schedule.keepLastOff": "0 = conserva ogni backup (nessuna pulizia automatica).",
+    "clawkeep.snapshot.rename": "Rinomina",
+    "clawkeep.snapshot.renamePlaceholder": "Nome del backup",
+    "clawkeep.snapshot.save": "Salva",
+    "clawkeep.snapshot.lock": "Blocca",
+    "clawkeep.snapshot.unlock": "Sblocca",
+    "clawkeep.snapshot.locked": "Bloccato",
+    "clawkeep.snapshot.delete": "Elimina",
+    "clawkeep.snapshot.confirmDelete": "Conferma eliminazione",
+    "clawkeep.snapshot.deleteLockedTooltip": "Sblocca prima",
   },
 
   ja: {
@@ -993,6 +1095,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "復号化して復元",
     "clawkeep.encryption.wrongPassphrase": "そのパスフレーズではこのアーカイブを復号化できませんでした。もう一度試しますか?",
     "clawkeep.encryption.restoreFailed": "復元に失敗しました。",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "このバックアップに名前を付ける（任意）",
+    "clawkeep.backup.namePlaceholder": "例: v3 アップグレード前",
+    "clawkeep.schedule.keepLast": "保持する数",
+    "clawkeep.schedule.keepLastUnit": "件",
+    "clawkeep.schedule.keepLastHelp": "ロックされたバックアップは常に保持されます。",
+    "clawkeep.schedule.keepLastOff": "0 = すべてのバックアップを保持（自動削除なし）。",
+    "clawkeep.snapshot.rename": "名前を変更",
+    "clawkeep.snapshot.renamePlaceholder": "バックアップ名",
+    "clawkeep.snapshot.save": "保存",
+    "clawkeep.snapshot.lock": "ロック",
+    "clawkeep.snapshot.unlock": "ロック解除",
+    "clawkeep.snapshot.locked": "ロック済み",
+    "clawkeep.snapshot.delete": "削除",
+    "clawkeep.snapshot.confirmDelete": "削除を確認",
+    "clawkeep.snapshot.deleteLockedTooltip": "先にロックを解除してください",
   },
 
   nl: {
@@ -1131,6 +1250,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Ontsleutelen & herstellen",
     "clawkeep.encryption.wrongPassphrase": "Dat wachtwoord ontsleutelde dit archief niet. Opnieuw proberen?",
     "clawkeep.encryption.restoreFailed": "Herstel mislukt.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Geef deze back-up een naam (optioneel)",
+    "clawkeep.backup.namePlaceholder": "bijv. Voor v3-upgrade",
+    "clawkeep.schedule.keepLast": "Bewaar laatste",
+    "clawkeep.schedule.keepLastUnit": "back-ups",
+    "clawkeep.schedule.keepLastHelp": "Vergrendelde back-ups worden altijd bewaard.",
+    "clawkeep.schedule.keepLastOff": "0 = elke back-up bewaren (geen automatische opschoning).",
+    "clawkeep.snapshot.rename": "Hernoemen",
+    "clawkeep.snapshot.renamePlaceholder": "Naam van back-up",
+    "clawkeep.snapshot.save": "Opslaan",
+    "clawkeep.snapshot.lock": "Vergrendelen",
+    "clawkeep.snapshot.unlock": "Ontgrendelen",
+    "clawkeep.snapshot.locked": "Vergrendeld",
+    "clawkeep.snapshot.delete": "Verwijderen",
+    "clawkeep.snapshot.confirmDelete": "Verwijderen bevestigen",
+    "clawkeep.snapshot.deleteLockedTooltip": "Ontgrendel eerst",
   },
 
   sv: {
@@ -1269,6 +1405,23 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "Dekryptera och återställ",
     "clawkeep.encryption.wrongPassphrase": "Den lösenfrasen dekrypterade inte arkivet. Försöka igen?",
     "clawkeep.encryption.restoreFailed": "Återställning misslyckades.",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "Namnge den här säkerhetskopian (valfritt)",
+    "clawkeep.backup.namePlaceholder": "t.ex. Före v3-uppgradering",
+    "clawkeep.schedule.keepLast": "Behåll senaste",
+    "clawkeep.schedule.keepLastUnit": "säkerhetskopior",
+    "clawkeep.schedule.keepLastHelp": "Låsta säkerhetskopior behålls alltid.",
+    "clawkeep.schedule.keepLastOff": "0 = behåll alla säkerhetskopior (ingen automatisk rensning).",
+    "clawkeep.snapshot.rename": "Byt namn",
+    "clawkeep.snapshot.renamePlaceholder": "Namn på säkerhetskopia",
+    "clawkeep.snapshot.save": "Spara",
+    "clawkeep.snapshot.lock": "Lås",
+    "clawkeep.snapshot.unlock": "Lås upp",
+    "clawkeep.snapshot.locked": "Låst",
+    "clawkeep.snapshot.delete": "Ta bort",
+    "clawkeep.snapshot.confirmDelete": "Bekräfta borttagning",
+    "clawkeep.snapshot.deleteLockedTooltip": "Lås upp först",
   },
 
   zh: {
@@ -1407,5 +1560,22 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.encryption.decryptRestore": "解密并恢复",
     "clawkeep.encryption.wrongPassphrase": "该密码无法解密此归档。再试一次?",
     "clawkeep.encryption.restoreFailed": "恢复失败。",
+
+    // === Snapshot management (name / lock / retention) ===
+    "clawkeep.backup.nameLabel": "为此备份命名（可选）",
+    "clawkeep.backup.namePlaceholder": "例如：升级到 v3 之前",
+    "clawkeep.schedule.keepLast": "保留最近",
+    "clawkeep.schedule.keepLastUnit": "个备份",
+    "clawkeep.schedule.keepLastHelp": "锁定的备份始终保留。",
+    "clawkeep.schedule.keepLastOff": "0 = 保留所有备份（不自动清理）。",
+    "clawkeep.snapshot.rename": "重命名",
+    "clawkeep.snapshot.renamePlaceholder": "备份名称",
+    "clawkeep.snapshot.save": "保存",
+    "clawkeep.snapshot.lock": "锁定",
+    "clawkeep.snapshot.unlock": "解锁",
+    "clawkeep.snapshot.locked": "已锁定",
+    "clawkeep.snapshot.delete": "删除",
+    "clawkeep.snapshot.confirmDelete": "确认删除",
+    "clawkeep.snapshot.deleteLockedTooltip": "请先解锁",
   },
 };

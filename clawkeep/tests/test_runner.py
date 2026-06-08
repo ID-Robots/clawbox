@@ -75,6 +75,18 @@ def isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield tmp_path / "state.json"
 
 
+@pytest.fixture(autouse=True)
+def stub_manifest(monkeypatch: pytest.MonkeyPatch):
+    """The happy-path backup now writes a sidecar manifest and runs retention
+    after a successful upload. Stub the S3-backed manifest/list calls so the
+    failure-matrix tests don't make real network calls on the post-upload
+    path. Tests that exercise retention directly re-patch these inside a
+    `with patch(...)` block, which transparently overrides these stubs."""
+    monkeypatch.setattr(s3, "read_manifest", lambda creds: {"version": 1, "snapshots": {}})
+    monkeypatch.setattr(s3, "write_manifest", lambda creds, manifest: None)
+    monkeypatch.setattr(s3, "list_snapshots", lambda creds: [])
+
+
 def test_happy_path(isolate_state: Path, tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     archive = _archive(tmp_path)
@@ -305,6 +317,95 @@ def test_stats_failure_does_not_fail_run(isolate_state: Path, tmp_path: Path) ->
     assert final["status"] == "ok"
     assert final["cloud_bytes"] is None
     assert final["snapshot_count"] is None
+
+
+# ── Retention / auto-cleanup ──────────────────────────────────────────────
+
+
+def _snap(name: str, *, locked: bool = False, ms: int = 0) -> s3.Snapshot:
+    return s3.Snapshot(name=name, size_bytes=1, last_modified_ms=ms, locked=locked)
+
+
+def test_apply_retention_keeps_newest_and_exempts_locked() -> None:
+    # newest-first, as list_snapshots returns them. s4 is locked.
+    snaps = [
+        _snap("s5", ms=5),
+        _snap("s4", ms=4, locked=True),
+        _snap("s3", ms=3),
+        _snap("s2", ms=2),
+        _snap("s1", ms=1),
+    ]
+    deleted: list[str] = []
+    with (
+        patch("clawkeep.runner.s3.list_snapshots", return_value=snaps),
+        patch(
+            "clawkeep.runner.s3.delete_snapshot",
+            side_effect=lambda creds, name: deleted.append(name),
+        ),
+        patch("clawkeep.runner.s3.read_manifest", return_value={"version": 1, "snapshots": {}}),
+        patch("clawkeep.runner.s3.write_manifest"),
+    ):
+        result = runner.apply_retention(CREDS, keep_last=2)
+    # Unlocked newest-first: s5, s3, s2, s1. Keep 2 (s5, s3) → delete s2, s1.
+    # The locked s4 is kept and never counts toward the "2".
+    assert set(result) == {"s2", "s1"}
+    assert "s4" not in deleted
+    assert "s5" not in deleted and "s3" not in deleted
+
+
+def test_apply_retention_boundary_keeps_all_when_at_limit() -> None:
+    snaps = [_snap("s3", ms=3), _snap("s2", ms=2), _snap("s1", ms=1)]
+    deleted: list[str] = []
+    with (
+        patch("clawkeep.runner.s3.list_snapshots", return_value=snaps),
+        patch(
+            "clawkeep.runner.s3.delete_snapshot",
+            side_effect=lambda creds, name: deleted.append(name),
+        ),
+        patch("clawkeep.runner.s3.read_manifest", return_value={"version": 1, "snapshots": {}}),
+        patch("clawkeep.runner.s3.write_manifest"),
+    ):
+        result = runner.apply_retention(CREDS, keep_last=3)
+    assert result == []
+    assert deleted == []
+
+
+def test_apply_retention_disabled_when_keep_last_zero() -> None:
+    with (
+        patch("clawkeep.runner.s3.list_snapshots") as ls,
+        patch("clawkeep.runner.s3.delete_snapshot") as ds,
+    ):
+        result = runner.apply_retention(CREDS, keep_last=0)
+    assert result == []
+    ls.assert_not_called()
+    ds.assert_not_called()
+
+
+def test_apply_retention_gcs_stale_manifest_entries() -> None:
+    # Only s2/s1 exist now; the manifest still references a long-gone object.
+    snaps = [_snap("s2", ms=2), _snap("s1", ms=1)]
+    manifest = {
+        "version": 1,
+        "snapshots": {
+            "s2": {"label": "keep", "locked": False, "createdAt": 2},
+            "ghost": {"label": "deleted ages ago", "locked": False, "createdAt": 0},
+        },
+    }
+    written: list[dict] = []
+    with (
+        patch("clawkeep.runner.s3.list_snapshots", return_value=snaps),
+        patch("clawkeep.runner.s3.delete_snapshot"),
+        patch("clawkeep.runner.s3.read_manifest", return_value=manifest),
+        patch(
+            "clawkeep.runner.s3.write_manifest",
+            side_effect=lambda creds, m: written.append(m),
+        ),
+    ):
+        runner.apply_retention(CREDS, keep_last=10)
+    assert len(written) == 1
+    snaps_out = written[0]["snapshots"]
+    assert "ghost" not in snaps_out  # lazily GC'd
+    assert "s2" in snaps_out
 
 
 def test_idle_skips_when_recent_heartbeat(isolate_state: Path, tmp_path: Path) -> None:

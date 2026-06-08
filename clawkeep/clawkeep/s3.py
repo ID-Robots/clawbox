@@ -11,6 +11,7 @@ unit tests, etc.) can run on a host that has not yet installed boto3.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .api import Credentials
+
+# Sidecar object that annotates snapshots with a human label + lock flag.
+# Lives in the SAME prefix as the backups but is NEVER itself a snapshot:
+# it is excluded from list_snapshots()/stats() so it can't show up in the
+# UI or be counted against the user's quota / snapshotCount.
+MANIFEST_OBJECT = "manifest.json"
+MANIFEST_VERSION = 1
 
 
 class S3Error(Exception):
@@ -36,6 +44,11 @@ class Snapshot:
     name: str               # object name relative to the prefix (e.g. "<ts>-openclaw-backup.tar.gz")
     size_bytes: int
     last_modified_ms: int   # unix ms — easy for the React side to format with timeAgo()
+    # Annotations merged in from manifest.json. A snapshot with no manifest
+    # entry (e.g. created before this feature shipped) reads back as
+    # label=None, locked=False — i.e. unnamed and unprotected.
+    label: Optional[str] = None
+    locked: bool = False
 
 
 def _join(prefix: str, name: str) -> str:
@@ -115,6 +128,89 @@ def upload(
     return key
 
 
+def _empty_manifest() -> dict[str, Any]:
+    return {"version": MANIFEST_VERSION, "snapshots": {}}
+
+
+def read_manifest(creds: Credentials) -> dict[str, Any]:
+    """GET manifest.json from the prefix. A missing manifest (NoSuchKey) is
+    not an error — it just means nothing has been annotated yet, so we return
+    a fresh empty manifest. Any other S3 failure is surfaced as S3Error.
+
+    The returned dict always has a well-formed `{"version", "snapshots": {}}`
+    shape so callers can index `["snapshots"]` without guarding."""
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:  # pragma: no cover
+        raise S3Error("boto3/botocore not installed") from e
+
+    cli = _client(creds)
+    key = _join(creds.prefix, MANIFEST_OBJECT)
+    try:
+        resp = cli.get_object(Bucket=creds.bucket, Key=key)
+        raw = resp["Body"].read()
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return _empty_manifest()
+        raise S3Error(f"manifest read failed for s3://{creds.bucket}/{key}: {e}") from e
+    except BotoCoreError as e:
+        raise S3Error(f"manifest read failed for s3://{creds.bucket}/{key}: {e}") from e
+
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        # A corrupt manifest shouldn't wedge backups — treat it as empty and
+        # the next write rewrites it cleanly.
+        return _empty_manifest()
+    if not isinstance(data, dict):
+        return _empty_manifest()
+    snaps = data.get("snapshots")
+    if not isinstance(snaps, dict):
+        data["snapshots"] = {}
+    data.setdefault("version", MANIFEST_VERSION)
+    return data
+
+
+def write_manifest(creds: Credentials, manifest: dict[str, Any]) -> None:
+    """PUT manifest.json into the prefix (overwrites)."""
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:  # pragma: no cover
+        raise S3Error("boto3/botocore not installed") from e
+
+    cli = _client(creds)
+    key = _join(creds.prefix, MANIFEST_OBJECT)
+    body = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    try:
+        cli.put_object(
+            Bucket=creds.bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+        )
+    except (BotoCoreError, ClientError) as e:
+        raise S3Error(f"manifest write failed for s3://{creds.bucket}/{key}: {e}") from e
+
+
+def delete_snapshot(creds: Credentials, object_name: str) -> None:
+    """DELETE one object under the prefix. Raises S3Error on failure.
+
+    This is the raw object delete — callers are responsible for the
+    locked-snapshot guard and for pruning the manifest entry."""
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:  # pragma: no cover
+        raise S3Error("boto3/botocore not installed") from e
+
+    cli = _client(creds)
+    key = _join(creds.prefix, object_name)
+    try:
+        cli.delete_object(Bucket=creds.bucket, Key=key)
+    except (BotoCoreError, ClientError) as e:
+        raise S3Error(f"delete failed for s3://{creds.bucket}/{key}: {e}") from e
+
+
 def _strip_prefix(prefix: str, key: str) -> str:
     """Return the object name without the user prefix (so the UI never has
     to know about the prefix layout)."""
@@ -148,6 +244,12 @@ def stats(creds: Credentials) -> CloudStats:
         paginator = cli.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
             for obj in page.get("Contents", []) or []:
+                name = _strip_prefix(creds.prefix, str(obj.get("Key", "")))
+                # The sidecar manifest is bookkeeping, not a backup — exclude it
+                # from both byte usage and the snapshot count so the UI/quota
+                # never see it.
+                if name == MANIFEST_OBJECT:
+                    continue
                 total += int(obj.get("Size", 0))
                 count += 1
     except (BotoCoreError, ClientError) as e:
@@ -167,6 +269,12 @@ def list_snapshots(creds: Credentials) -> list[Snapshot]:
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
 
+    # Manifest annotations are merged in below. A read failure here would be
+    # surfaced as S3Error; a *missing* manifest yields an empty mapping so
+    # every snapshot reads back as unnamed + unlocked (back-compat).
+    manifest = read_manifest(creds)
+    entries = manifest.get("snapshots", {})
+
     cli = _client(creds)
     out: list[Snapshot] = []
     try:
@@ -181,10 +289,22 @@ def list_snapshots(creds: Credentials) -> list[Snapshot]:
                 # MinIO/some R2 lifecycles emit them, but they're not snapshots.
                 if not name or name.endswith("/"):
                     continue
+                # The sidecar manifest is never itself a snapshot.
+                if name == MANIFEST_OBJECT:
+                    continue
+                entry = entries.get(name) if isinstance(entries, dict) else None
+                label: Optional[str] = None
+                locked = False
+                if isinstance(entry, dict):
+                    raw_label = entry.get("label")
+                    label = raw_label if isinstance(raw_label, str) and raw_label else None
+                    locked = bool(entry.get("locked", False))
                 out.append(Snapshot(
                     name=name,
                     size_bytes=int(obj.get("Size", 0)),
                     last_modified_ms=_last_modified_ms(obj.get("LastModified")),
+                    label=label,
+                    locked=locked,
                 ))
     except (BotoCoreError, ClientError) as e:
         raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e

@@ -25,6 +25,11 @@ Commands:
   daemon           Run a single backup cycle (alias for `clawkeepd`)
   snapshots        List cloud snapshots (JSON to stdout)
   restore          Restore a snapshot over the live state directory
+  label            Set/clear a snapshot's human label (manifest)
+  lock             Mark a snapshot as protected (never auto/manually deleted)
+  unlock           Remove a snapshot's protected flag
+  delete           Delete a snapshot (refused if locked)
+  prune            Apply retention now (keep newest N unlocked snapshots)
   set-passphrase   Set the device-local backup encryption passphrase
   clear-passphrase Remove the stored passphrase (future backups will need a new one)
   passphrase-status Print {"set": bool} as JSON
@@ -48,6 +53,16 @@ def clawkeep_main(argv: list[str] | None = None) -> int:
         return _snapshots_main(rest)
     if cmd == "restore":
         return _restore_main(rest)
+    if cmd == "label":
+        return _label_main(rest)
+    if cmd == "lock":
+        return _lock_main(rest, locked=True)
+    if cmd == "unlock":
+        return _lock_main(rest, locked=False)
+    if cmd == "delete":
+        return _delete_main(rest)
+    if cmd == "prune":
+        return _prune_main(rest)
     if cmd == "set-passphrase":
         return _set_passphrase_main(rest)
     if cmd == "clear-passphrase":
@@ -172,6 +187,143 @@ def _restore_main(argv: list[str]) -> int:
             for a in result.assets
         ],
     }))
+    return 0
+
+
+def _mint_creds(config_path: str | None):
+    """Shared setup for the manifest/snapshot-management subcommands: parse
+    config, load the token, mint short-lived R2 credentials."""
+    cfg, bearer = _load_cfg_and_token(config_path)
+    from . import api
+    return api.mint_credentials(cfg.server, bearer)
+
+
+def _manifest_entry(manifest: dict, name: str) -> dict:
+    """Return the manifest entry for `name`, creating a default one in place
+    if absent. New entries are stamped with createdAt=now so a snapshot first
+    annotated via label/lock still gets a creation time."""
+    from . import api
+    snaps = manifest.setdefault("snapshots", {})
+    entry = snaps.get(name)
+    if not isinstance(entry, dict):
+        entry = {"label": None, "locked": False, "createdAt": api.now_ms()}
+        snaps[name] = entry
+    return entry
+
+
+def _label_main(argv: list[str]) -> int:
+    """`clawkeep label <objectName> --text "<label>"` — set or clear a
+    snapshot's human label in the manifest. An empty/whitespace text clears
+    the label (sets it to null)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="clawkeep label")
+    parser.add_argument("name", help="snapshot object name")
+    parser.add_argument("--text", default="", help="label text; empty clears it")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args(argv)
+
+    text = args.text.strip()
+    new_label = text if text else None
+    try:
+        creds = _mint_creds(args.config)
+        manifest = s3.read_manifest(creds)
+        entry = _manifest_entry(manifest, args.name)
+        entry["label"] = new_label
+        s3.write_manifest(creds, manifest)
+    except (cfg_mod.ConfigError, token.TokenError) as e:
+        return _emit_err(e, 64)
+    except Exception as e:  # noqa: BLE001
+        return _emit_err(e, 1)
+
+    print(json.dumps({"ok": True, "name": args.name, "label": new_label}))
+    return 0
+
+
+def _lock_main(argv: list[str], *, locked: bool) -> int:
+    """`clawkeep lock|unlock <objectName>` — toggle a snapshot's protected
+    flag in the manifest. A locked snapshot can't be deleted manually or by
+    auto-cleanup until it's unlocked."""
+    import argparse
+
+    prog = "clawkeep lock" if locked else "clawkeep unlock"
+    parser = argparse.ArgumentParser(prog=prog)
+    parser.add_argument("name", help="snapshot object name")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        creds = _mint_creds(args.config)
+        manifest = s3.read_manifest(creds)
+        entry = _manifest_entry(manifest, args.name)
+        entry["locked"] = locked
+        s3.write_manifest(creds, manifest)
+    except (cfg_mod.ConfigError, token.TokenError) as e:
+        return _emit_err(e, 64)
+    except Exception as e:  # noqa: BLE001
+        return _emit_err(e, 1)
+
+    print(json.dumps({"ok": True, "name": args.name, "locked": locked}))
+    return 0
+
+
+def _delete_main(argv: list[str]) -> int:
+    """`clawkeep delete <objectName>` — delete a snapshot object + its
+    manifest entry. Refused (exit 2, kind="locked") if the snapshot is
+    locked; the UI surfaces that as "Unlock first"."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="clawkeep delete")
+    parser.add_argument("name", help="snapshot object name")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        creds = _mint_creds(args.config)
+        manifest = s3.read_manifest(creds)
+        snaps = manifest.get("snapshots", {})
+        entry = snaps.get(args.name) if isinstance(snaps, dict) else None
+        if isinstance(entry, dict) and bool(entry.get("locked", False)):
+            print(json.dumps({
+                "ok": False,
+                "kind": "locked",
+                "error": f"snapshot {args.name} is locked; unlock it before deleting",
+            }))
+            return 2
+        s3.delete_snapshot(creds, args.name)
+        if isinstance(snaps, dict) and args.name in snaps:
+            snaps.pop(args.name, None)
+            s3.write_manifest(creds, manifest)
+    except (cfg_mod.ConfigError, token.TokenError) as e:
+        return _emit_err(e, 64)
+    except Exception as e:  # noqa: BLE001
+        return _emit_err(e, 1)
+
+    print(json.dumps({"ok": True, "name": args.name}))
+    return 0
+
+
+def _prune_main(argv: list[str]) -> int:
+    """`clawkeep prune --keep-last N` — run retention on demand: keep the
+    newest N unlocked snapshots, delete the rest. Locked snapshots are
+    always kept and don't count toward N. N<=0 is a no-op."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="clawkeep prune")
+    parser.add_argument("--keep-last", type=int, required=True, dest="keep_last")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        from . import runner
+        creds = _mint_creds(args.config)
+        deleted = runner.apply_retention(creds, args.keep_last)
+    except (cfg_mod.ConfigError, token.TokenError) as e:
+        return _emit_err(e, 64)
+    except Exception as e:  # noqa: BLE001
+        return _emit_err(e, 1)
+
+    print(json.dumps({"ok": True, "deleted": deleted, "keepLast": args.keep_last}))
     return 0
 
 
