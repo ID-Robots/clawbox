@@ -38,7 +38,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   clawai: "ClawBox AI",
   anthropic: "Anthropic Claude",
   openai: "OpenAI GPT",
-  "openai-codex": "OpenAI Codex",
+  codex: "OpenAI Codex",
   google: "Google Gemini",
   openrouter: "OpenRouter",
   ollama: "Ollama Local",
@@ -56,7 +56,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5.4",
-  "openai-codex": "openai-codex/gpt-5.4",
+  codex: "codex/gpt-5.4",
   google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };

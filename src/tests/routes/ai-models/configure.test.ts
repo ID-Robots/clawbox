@@ -16,6 +16,7 @@ vi.mock("fs/promises", () => ({
     rename: vi.fn(),
     chown: vi.fn(),
     mkdir: vi.fn(),
+    rm: vi.fn(),
   },
 }));
 
@@ -160,6 +161,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.rename.mockResolvedValue();
     mockFs.chown.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.rm.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockReadOpenClawConfig.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -405,7 +407,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain("config set agents.defaults.model.primary openai-codex/gpt-5.4");
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4");
   });
 
   it("includes projectId for google oauth", async () => {

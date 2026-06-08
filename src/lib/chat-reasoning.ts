@@ -40,7 +40,9 @@ export interface ProviderReasoningConfig {
 
 export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   openai: { levels: ["off", "low", "medium", "high", "xhigh"], default: "medium" },
-  "openai-codex": { levels: ["off", "low", "medium", "high", "xhigh"], default: "medium" },
+  // ChatGPT-subscription provider, renamed from `openai-codex` in OpenClaw
+  // 2026.6.x. Provider ids are normalized to `codex` before they reach here.
+  codex: { levels: ["off", "low", "medium", "high", "xhigh"], default: "medium" },
   // Anthropic effort docs: `low | medium | high | max` on Opus 4.6+, Sonnet
   // 4.6, Opus 4.7, Mythos. Default per platform.claude.com is `high`. xhigh is
   // Opus-4.7-only; we omit until we add per-model gating.
