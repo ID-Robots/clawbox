@@ -1,0 +1,96 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "ClawBox Docs",
+  "description": "Official documentation for ClawBox — pre-configured AI hardware running OpenClaw. Setup guides, hardware specs, messaging channels, and troubleshooting.",
+  "colors": {
+    "primary": "#F26B21",
+    "light": "#FF8A4C",
+    "dark": "#F26B21"
+  },
+  "favicon": "/favicon.png",
+  "logo": {
+    "light": "/logo/light.png",
+    "dark": "/logo/dark.png",
+    "href": "https://clawbox.tech"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "index",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Setup",
+            "pages": [
+              "setup/first-boot",
+              "setup/connect-network",
+              "setup/choose-ai-provider"
+            ]
+          },
+          {
+            "group": "Hardware",
+            "pages": [
+              "hardware/clawbox-connect",
+              "hardware/clawbox-workstation"
+            ]
+          },
+          {
+            "group": "Using ClawBox",
+            "pages": [
+              "guides/messaging-channels",
+              "guides/subscriptions"
+            ]
+          },
+          {
+            "group": "Support",
+            "pages": [
+              "support/troubleshooting",
+              "support/faq"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Buy a ClawBox",
+          "href": "https://clawbox.tech",
+          "icon": "cart-shopping"
+        },
+        {
+          "anchor": "Community",
+          "href": "https://discord.gg/vsTsaY4Tuk",
+          "icon": "discord"
+        }
+      ]
+    }
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Support",
+        "href": "mailto:yanko@idrobots.com"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get ClawBox",
+      "href": "https://clawbox.tech"
+    }
+  },
+  "footer": {
+    "socials": {
+      "website": "https://clawbox.tech",
+      "discord": "https://discord.gg/vsTsaY4Tuk",
+      "github": "https://github.com/ID-Robots"
+    }
+  }
+}
