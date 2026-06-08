@@ -31,6 +31,9 @@ jobs:
       - name: Export static docs
         working-directory: docs-site
         run: |
+          # IMPORTANT: export must run against source only — any leftover build
+          # artifacts in this dir get recursively inlined into every page (huge HTML).
+          rm -rf _site _chk _site_preview export.zip
           npx -y mint@latest export
           rm -rf _site
           mkdir _site

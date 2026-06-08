@@ -1,0 +1,90 @@
+---
+title: "OpenClaw Hardware Requirements"
+summary: "Minimum, recommended, and power-user hardware for running OpenClaw — and where ClawBox fits."
+---
+
+# OpenClaw Hardware Requirements
+
+Don't overcomplicate it. OpenClaw is surprisingly lightweight for an AI assistant.
+This page covers what you actually need — from bare minimum to running local AI models.
+
+## Quick answer: what do you need?
+
+<CardGroup cols={3}>
+  <Card title="Minimum" icon="circle">
+    **1 vCPU · 1 GB RAM · 10 GB**
+    Messaging only.
+  </Card>
+  <Card title="Recommended" icon="circle-check">
+    **2+ vCPU · 4 GB+ RAM · 20 GB**
+    Full features + browser automation.
+  </Card>
+  <Card title="Power User" icon="microchip">
+    **4+ cores · 16 GB+ RAM · GPU**
+    Local AI models.
+  </Card>
+</CardGroup>
+
+## Minimum requirements
+
+- **4 GB RAM** (8 GB recommended)
+- Modern **x86_64 or ARM64** CPU
+- **Node.js 20+**
+- Always-on internet connection
+- Runs on **Linux, macOS, or Windows**
+
+## Detailed tiers
+
+### Minimum — messaging only
+- **Specs:** 1 vCPU, 1 GB RAM, 10 GB storage, 1 Mbps+
+- **Can do:** Telegram/WhatsApp messaging, simple text commands, basic API integrations, scheduled messages
+- **Can't do:** browser automation, local AI models, multiple concurrent tasks, image processing
+- **Examples:** $5/mo VPS · Raspberry Pi 4 (2 GB) · old laptop
+
+### Recommended — full features (most users)
+- **Specs:** 2+ vCPU, 4 GB+ RAM, 20 GB+ storage, 10 Mbps+, Linux preferred
+- **Can do:** full browser automation (Playwright), web scraping & research, multiple messaging platforms, image analysis via API, complex workflows, voice messages
+- **Can't do:** large local AI models, real-time video
+- **Examples:** $10–20/mo VPS · Raspberry Pi 5 (8 GB) · **ClawBox Connect** · Mac Mini
+
+### Power User — local AI models
+- **Specs:** 4+ cores, 16 GB+ RAM, 100 GB+ SSD, 25 Mbps+, NVIDIA GPU, Linux (Ubuntu/Debian)
+- **Can do:** everything above, plus local LLMs (7B–13B), local image generation, on-device speech recognition, fully offline operation, multiple browser instances
+- **Can't do:** 70B+ models need more VRAM → see [ClawBox Workstation](/hardware/clawbox-workstation)
+- **Examples:** **ClawBox Connect** (67 TOPS) · gaming PC with GPU · **ClawBox Workstation** (DGX Spark)
+
+## Why dedicated hardware?
+
+Running OpenClaw on dedicated hardware vs a shared VPS or your daily-use laptop:
+
+| Dedicated (ClawBox) | Shared VPS / your laptop |
+|---|---|
+| **24/7 uptime** — heartbeats, schedules, monitoring never stop | Stops when your laptop sleeps or restarts |
+| **No resource competition** — 100% dedicated CPU/GPU/RAM | Browser, Slack, IDE fight for memory |
+| **Consistent performance** — no noisy neighbors | Unpredictable slowdowns |
+| **Lower long-term cost** — €549 once vs €20–40/mo VPS | €720–2,880 over 3 years |
+| **True privacy** — data stays on your hardware | Cloud provider has access |
+
+## Local model performance (ClawBox Connect, 67 TOPS)
+
+| Model | Speed | Quality |
+|---|---|---|
+| Llama 3.1 8B (Q4) | ~3.5 tok/s | Excellent |
+| Mistral 7B (Q4) | ~4.2 tok/s | Excellent |
+| Qwen2.5 7B (Q4) | ~4.0 tok/s | Excellent |
+| Phi-3 Mini (Q4) | ~6.8 tok/s | Good |
+| Gemma 2B (Q4) | ~9.1 tok/s | Fast |
+| TinyLlama 1B (Q4) | ~15.3 tok/s | Basic |
+
+<Note>
+For larger models, use your own cloud API key (Claude, GPT, Gemini) — see
+[Choose Your AI Provider](/setup/choose-ai-provider). For large models **fully local**,
+see [ClawBox Workstation](/hardware/clawbox-workstation) (128 GB unified memory, up to ~200B params).
+</Note>
+
+## Skip the DIY
+
+<Card title="Get ClawBox — pre-configured, ready in 5 minutes" href="https://clawbox.tech" icon="cart-shopping" horizontal>
+  ClawBox ships with Recommended+ specs, OpenClaw pre-installed, dual-band Wi-Fi and Bluetooth.
+  Manual DIY setup is typically 2–4+ hours (plus waiting for hardware).
+</Card>

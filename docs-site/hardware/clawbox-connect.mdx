@@ -16,19 +16,32 @@ The entry-tier ClawBox: a compact, low-power, always-on AI assistant for your de
 | Component | Spec |
 |---|---|
 | Compute | NVIDIA Jetson Orin Nano Super (8 GB) |
-| AI performance | 67 TOPS · 1024 CUDA cores |
-| Storage | 512 GB NVMe SSD |
-| Case | Carbon-fiber enclosure |
-| Connectivity | Wi-Fi + Gigabit Ethernet |
-| Power draw | ~7–15 W (≈ €39/year electricity) |
-| OS | OpenClaw OS (Next.js web desktop) |
-| Software | OpenClaw pre-installed |
+| AI performance | 67 TOPS |
+| GPU | 1024-core NVIDIA Ampere, 625 MHz |
+| Memory | 8 GB LPDDR5, 102 GB/s bandwidth (unified CPU/GPU) |
+| Storage | 512 GB NVMe SSD (PCIe Gen3 x4, ~2,100 MB/s) |
+| Connectivity | Wi-Fi 6 + Bluetooth 5.0 + Gigabit Ethernet |
+| Ports | USB-A, USB-C, HDMI, Ethernet, microSD |
+| Power draw | 7 W idle · 15 W typical · 25 W max (20 W USB-C PSU included) |
+| Size | 100 × 79 × 31 mm, carbon-color case (~260 g) |
+| OS | Ubuntu 22.04 LTS + OpenClaw pre-installed |
 
 ## What it's good for
 
 - A **24/7 personal assistant** you message from Telegram, WhatsApp, Discord, or the web.
 - **Browser automation** and everyday agent tasks.
 - Running with **cloud AI providers** (ClawBox AI, Claude, GPT, Gemini) or smaller local models.
+
+## Local model performance
+
+| Model | Speed | Quality |
+|---|---|---|
+| Llama 3.1 8B (Q4) | ~3.5 tok/s | Excellent |
+| Mistral 7B (Q4) | ~4.2 tok/s | Excellent |
+| Phi-3 Mini (Q4) | ~6.8 tok/s | Good |
+| Gemma 2B (Q4) | ~9.1 tok/s | Fast |
+
+See full requirements and tiers in [Hardware Requirements](/hardware/requirements).
 
 ## What to pair it with
 

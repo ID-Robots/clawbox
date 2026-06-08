@@ -31,14 +31,16 @@
             "pages": [
               "setup/first-boot",
               "setup/connect-network",
-              "setup/choose-ai-provider"
+              "setup/choose-ai-provider",
+              "setup/openclaw-setup"
             ]
           },
           {
             "group": "Hardware",
             "pages": [
               "hardware/clawbox-connect",
-              "hardware/clawbox-workstation"
+              "hardware/clawbox-workstation",
+              "hardware/requirements"
             ]
           },
           {
