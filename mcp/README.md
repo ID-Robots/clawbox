@@ -6,7 +6,7 @@ exposes ~45 tools so the OpenClaw agent can drive the device — shell, files,
 web, browser automation, the desktop, system control, code projects, and a
 full Claude-Code-style coding suite.
 
-```
+```text
 agent ──stdio (MCP)──▶ clawbox-mcp.ts ──HTTP(Bearer)──▶ Next.js /setup-api/* ──▶ device
                        clawbox-cli.ts  (same backend, shell-callable)
 ```

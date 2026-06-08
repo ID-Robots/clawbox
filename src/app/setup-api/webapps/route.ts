@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { WEBAPPS_DIR, APP_ID_RE, deployWebapp } from "@/lib/code-projects";
+import { WEBAPPS_DIR, APP_ID_RE, deployWebapp, writeWebappIndex } from "@/lib/code-projects";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -73,19 +73,33 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "HTML content too large (max 1MB)" }, { status: 413 });
     }
 
-    if (name) {
+    // Distinguish a create from an update by whether the payload carries a
+    // `name` property — not its truthiness. A POST with `name: ""` is an
+    // invalid create (400), not a silent update that would leave the app
+    // without meta.json or desktop registration.
+    const hasName = Object.prototype.hasOwnProperty.call(body, "name");
+    if (hasName) {
       // Create: write index.html + meta.json and durably register on the
       // desktop via the shared chokepoint (keeps the on-disk layout in lockstep
       // with buildProject, and the app appears even if the desktop wasn't open
       // to consume the ui:pending-action handoff).
+      if (typeof name !== "string" || name.trim() === "") {
+        return NextResponse.json({ error: "Name is required" }, { status: 400 });
+      }
       await deployWebapp(appId, html, { name, color, icon });
     } else {
       // Update: only rewrite the HTML. Re-stamping meta.json here would clobber
       // the saved display name (an update carries no `name`), and re-registering
-      // is unnecessary — the app is already on the desktop.
-      const appDir = path.join(WEBAPPS_DIR, appId);
-      await fs.mkdir(appDir, { recursive: true });
-      await fs.writeFile(path.join(appDir, "index.html"), html, "utf-8");
+      // is unnecessary — the app is already on the desktop. Reject updates to an
+      // app that was never created so a typo'd appId can't half-deploy.
+      const exists = await fs
+        .stat(path.join(WEBAPPS_DIR, appId, "meta.json"))
+        .then(() => true)
+        .catch(() => false);
+      if (!exists) {
+        return NextResponse.json({ error: "Webapp not found" }, { status: 404 });
+      }
+      await writeWebappIndex(appId, html);
     }
 
     return NextResponse.json({

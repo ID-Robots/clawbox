@@ -63,12 +63,14 @@ import {
 } from "@/lib/code-projects";
 
 import fs from "fs/promises";
+import { registerWebappInPreferences } from "@/lib/webapp-registry";
 const mockReadFile = vi.mocked(fs.readFile);
 const mockReaddir = vi.mocked(fs.readdir);
 const mockStat = vi.mocked(fs.stat);
 const mockWriteFile = vi.mocked(fs.writeFile);
 const mockMkdir = vi.mocked(fs.mkdir);
 const mockRm = vi.mocked(fs.rm);
+const mockRegisterWebappInPreferences = vi.mocked(registerWebappInPreferences);
 
 describe("code-projects", () => {
   beforeEach(() => {
@@ -343,6 +345,16 @@ describe("code-projects", () => {
       expect(result.filesInlined).toBe(2);
       expect(result.html).toContain("<style>");
       expect(result.html).toContain("alert(1)");
+      // First build must durably register the app on the desktop — a
+      // regression that drops registration would otherwise pass silently.
+      expect(mockRegisterWebappInPreferences).toHaveBeenCalledWith(
+        "myapp",
+        "My App",
+        expect.objectContaining({
+          color: "#f97316",
+          webappUrl: "/setup-api/webapps?app=myapp",
+        }),
+      );
     });
 
     it("throws when index.html is missing", async () => {

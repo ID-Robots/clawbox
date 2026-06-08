@@ -626,7 +626,14 @@ GIT SAFETY:
 async function checkApiEndpoint(path: string): Promise<{ ok: boolean; detail: string }> {
   try {
     const res = await fetch(`${API_BASE}${path}`, {
-      headers: API_TOKEN ? { authorization: `Bearer ${API_TOKEN}` } : {},
+      headers: {
+        accept: "application/json",
+        ...(API_TOKEN ? { authorization: `Bearer ${API_TOKEN}` } : {}),
+      },
+      // Don't follow a 302→/login: surface it as a non-ok status (an auth
+      // failure) instead of landing on the login HTML and reporting a JSON
+      // parse error.
+      redirect: "manual",
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) {

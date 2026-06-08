@@ -6,6 +6,7 @@ vi.mock("fs/promises", () => ({
     readFile: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    stat: vi.fn(),
   },
 }));
 
@@ -16,12 +17,15 @@ vi.mock("@/lib/code-projects", () => ({
   // it so the route test doesn't hit real config IO (it owns the desktop
   // registration, covered separately in code-projects/webapp-registry tests).
   deployWebapp: vi.fn().mockResolvedValue(undefined),
+  // The update path refreshes only index.html via this helper.
+  writeWebappIndex: vi.fn().mockResolvedValue(undefined),
 }));
 
 import fs from "fs/promises";
 const mockReadFile = vi.mocked(fs.readFile);
 const mockMkdir = vi.mocked(fs.mkdir);
 const mockWriteFile = vi.mocked(fs.writeFile);
+const mockStat = vi.mocked(fs.stat);
 
 describe("/setup-api/webapps", () => {
   let GET: (req: NextRequest) => Promise<Response>;
@@ -111,6 +115,37 @@ describe("/setup-api/webapps", () => {
       });
       const res = await POST(req);
       expect(res.status).toBe(413);
+    });
+
+    it("rejects a create with an empty name", async () => {
+      const req = new NextRequest(new URL("http://localhost/setup-api/webapps"), {
+        method: "POST",
+        body: JSON.stringify({ appId: "myapp", html: "<html></html>", name: "" }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+    });
+
+    it("updates an existing webapp when no name is sent", async () => {
+      mockStat.mockResolvedValue({} as never);
+      const req = new NextRequest(new URL("http://localhost/setup-api/webapps"), {
+        method: "POST",
+        body: JSON.stringify({ appId: "myapp", html: "<html>updated</html>" }),
+      });
+      const res = await POST(req);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+    });
+
+    it("returns 404 when updating a webapp that does not exist", async () => {
+      mockStat.mockRejectedValue(new Error("ENOENT") as never);
+      const req = new NextRequest(new URL("http://localhost/setup-api/webapps"), {
+        method: "POST",
+        body: JSON.stringify({ appId: "ghost", html: "<html></html>" }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(404);
     });
   });
 });

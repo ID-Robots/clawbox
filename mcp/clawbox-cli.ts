@@ -37,7 +37,10 @@ function getApiToken(): string {
     cachedToken = fromEnv;
     return fromEnv;
   }
-  const root = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+  // Mirror src/lib/mcp-token.ts so a dev/local CLI run finds the same token
+  // file the server wrote under the cwd, not just the on-device install path.
+  const root = process.env.CLAWBOX_ROOT
+    || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
   try {
     const raw = readFileSync(join(root, "data", ".mcp-token"), "utf-8").trim();
     if (raw.length >= 16) {

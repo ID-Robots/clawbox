@@ -471,13 +471,34 @@ export async function buildProject(
     }
   );
 
-  // Deploy + durably register via the shared chokepoint so this stays in
-  // lockstep with the webapps POST route (same on-disk layout, meta.json
-  // shape, and desktop registration).
-  await deployWebapp(projectId, html, { name, color });
+  // First build registers the app on the desktop via the shared chokepoint
+  // (same on-disk layout + meta.json shape as the webapps POST route). A
+  // rebuild only refreshes index.html — re-running deployWebapp would clobber
+  // the saved icon and re-surface an app the user intentionally hid.
+  const alreadyDeployed = await fs
+    .stat(path.join(WEBAPPS_DIR, projectId, "meta.json"))
+    .then(() => true)
+    .catch(() => false);
+  if (alreadyDeployed) {
+    await writeWebappIndex(projectId, html);
+  } else {
+    await deployWebapp(projectId, html, { name, color });
+  }
 
   const url = `/setup-api/webapps?app=${projectId}`;
   return { html, url, filesInlined };
+}
+
+/**
+ * Refresh only the deployed index.html for an existing webapp. The shared
+ * "update" chokepoint (webapps POST update branch + buildProject rebuilds) —
+ * it deliberately leaves meta.json and the desktop registration untouched so a
+ * rebuild can't wipe the saved icon or re-surface an app the user hid.
+ */
+export async function writeWebappIndex(appId: string, html: string): Promise<void> {
+  const dir = path.join(WEBAPPS_DIR, appId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
 }
 
 /**
@@ -486,17 +507,19 @@ export async function buildProject(
  * webapps POST route and buildProject — so the on-disk layout, the meta.json
  * shape, and the preference registration can't drift between the two create
  * paths (and can't be half-applied by one caller forgetting a step).
+ *
+ * Create-time only: it (re)writes meta.json and re-registers in preferences.
+ * For rebuilds of an existing app use writeWebappIndex so existing metadata
+ * and hidden/uninstalled state are preserved.
  */
 export async function deployWebapp(
   appId: string,
   html: string,
   meta: { name: string; color?: string; icon?: string },
 ): Promise<void> {
-  const dir = path.join(WEBAPPS_DIR, appId);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
+  await writeWebappIndex(appId, html);
   await fs.writeFile(
-    path.join(dir, "meta.json"),
+    path.join(WEBAPPS_DIR, appId, "meta.json"),
     JSON.stringify({ name: meta.name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
