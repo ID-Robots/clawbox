@@ -1198,10 +1198,19 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
   }, [dirty, onClose]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // While the discard confirmation is up, keep keys scoped to it — Escape
+    // dismisses it, and nothing else leaks through to the editor underneath.
+    if (confirmDiscard) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setConfirmDiscard(false);
+      }
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       if (dirty) save();
-    } else if (e.key === "Escape" && !confirmDiscard) {
+    } else if (e.key === "Escape") {
       e.preventDefault();
       attemptClose();
     }
@@ -1303,6 +1312,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
             </h3>
             <div className="flex gap-2 justify-end">
               <button
+                autoFocus
                 onClick={() => setConfirmDiscard(false)}
                 className="px-4 py-2 rounded-lg text-sm bg-white/[0.06] text-[var(--text-secondary)] hover:bg-white/[0.1] hover:text-[var(--text-primary)] cursor-pointer"
               >

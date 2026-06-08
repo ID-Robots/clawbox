@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
@@ -39,7 +40,7 @@ function safePath(rel: string): string | null {
 // home directory can't hang the request or exhaust memory. Symlinked
 // directories are reported (if their name matches) but never traversed —
 // `dirent.isDirectory()` is false for symlinks, which avoids cycle loops.
-function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
+async function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
   const baseResolved = path.resolve(BASE_DIR);
   const MAX_MATCHES = 300;
   const MAX_SCANNED = 20000;
@@ -59,7 +60,7 @@ function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
     const dir = queue[head++];
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch {
       continue; // unreadable dir (permissions) — skip it
     }
@@ -74,7 +75,7 @@ function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
         let size: number | null = null;
         let modified = "";
         try {
-          const s = fs.statSync(full);
+          const s = await fsp.stat(full);
           size = isDir ? null : s.size;
           modified = s.mtime.toISOString();
         } catch { /* stat may fail on a broken symlink — still list the name */ }
@@ -132,7 +133,7 @@ export async function GET(req: NextRequest) {
   const searchRaw = req.nextUrl.searchParams.get("search");
   if (searchRaw && searchRaw.trim()) {
     const includeHidden = req.nextUrl.searchParams.get("hidden") === "1";
-    return NextResponse.json(searchTree(abs, searchRaw.trim().toLowerCase(), includeHidden));
+    return NextResponse.json(await searchTree(abs, searchRaw.trim().toLowerCase(), includeHidden));
   }
 
   // Return everything including dotfiles. The client (FilesApp) hides

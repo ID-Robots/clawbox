@@ -275,6 +275,22 @@ describe("GET /setup-api/files?search=", () => {
     expect(body.files).toEqual([]);
     expect(body.truncated).toBe(false);
   });
+
+  it("caps results at the match limit and flags truncation", async () => {
+    // The walk stops at MAX_MATCHES (300); create more matches than that so it
+    // has to bail early and report truncated=true rather than returning all.
+    for (let i = 0; i < 305; i++) {
+      fs.writeFileSync(path.join(TEST_ROOT, `trunc-${i}.txt`), "x");
+    }
+
+    const req = createRequest("/setup-api/files?search=trunc");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.files).toHaveLength(300);
+    expect(body.truncated).toBe(true);
+  });
 });
 
 describe("POST /setup-api/files", () => {
