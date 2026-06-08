@@ -9,6 +9,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "./config-store";
+import { registerWebappInPreferences } from "./webapp-registry";
 
 // ── Paths ──
 
@@ -479,6 +480,10 @@ export async function buildProject(
     JSON.stringify({ name, color, icon: "" }),
     "utf-8"
   );
+
+  // Durably register on the desktop (same backstop as the webapps POST route)
+  // so a build run while the desktop was closed still lands on the app grid.
+  await registerWebappInPreferences(projectId, name, { color, webappUrl: `/setup-api/webapps?app=${projectId}` });
 
   const url = `/setup-api/webapps?app=${projectId}`;
   return { html, url, filesInlined };

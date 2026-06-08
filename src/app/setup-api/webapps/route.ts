@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
 import { WEBAPPS_DIR, APP_ID_RE } from "@/lib/code-projects";
+import { registerWebappInPreferences } from "@/lib/webapp-registry";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -83,6 +84,17 @@ export async function POST(request: NextRequest) {
       JSON.stringify({ name: name || appId, color: color || "#f97316", icon: icon || "" }),
       "utf-8"
     );
+
+    // Durably register on the desktop so the app appears even if the desktop
+    // wasn't open to consume the ui:pending-action handoff. Create-flow only:
+    // an update (no `name`) shouldn't overwrite the saved display name.
+    if (name) {
+      await registerWebappInPreferences(appId, name, {
+        color,
+        iconUrl: icon,
+        webappUrl: `/setup-api/webapps?app=${appId}`,
+      });
+    }
 
     return NextResponse.json({
       success: true,

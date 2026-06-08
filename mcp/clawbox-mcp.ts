@@ -71,8 +71,70 @@ const CLAWBOX_STUB = `You are the AI inside a ClawBox — a private NVIDIA Jetso
 const CLAWBOX_MCP_INSTRUCTIONS = `${CLAWBOX_STUB}\n\n${BROWSER_ROUTING_INSTRUCTIONS}`;
 
 // ══════════════════════════════════════════════════════════════════════
-// HTTP HELPERS
+// HTTP HELPERS + STRUCTURED ERRORS
 // ══════════════════════════════════════════════════════════════════════
+
+// Thrown by api() on a non-2xx response so the tool() wrapper can classify it
+// (status → code) instead of agents having to scrape a free-form string.
+class ApiError extends Error {
+  constructor(readonly status: number, readonly body: string) {
+    super(`API ${status}: ${body}`);
+    this.name = "ApiError";
+  }
+}
+
+// Thrown by spawnBackground when a hard-blocked command is run without an
+// explicit override, so the block is enforced at the shared spawn chokepoint —
+// the bash tool, background tasks, and the agent tool can't diverge.
+class DangerousCommandError extends Error {
+  constructor(readonly blocked: string[]) {
+    super(`Command blocked: ${blocked.join("; ")}`);
+    this.name = "DangerousCommandError";
+  }
+}
+
+type ToolErrorCode =
+  | "AUTH_FAILED" | "NOT_FOUND" | "ENDPOINT_DOWN" | "API_ERROR"
+  | "TIMEOUT" | "INVALID_RESPONSE" | "DANGEROUS_COMMAND" | "INTERNAL";
+
+function classifyError(err: unknown): { code: ToolErrorCode; message: string; details?: string } {
+  if (err instanceof DangerousCommandError) {
+    return { code: "DANGEROUS_COMMAND", message: `${err.message}. Pass allowDangerous:true to override (you accept responsibility).` };
+  }
+  if (err instanceof ApiError) {
+    const details = err.body ? err.body.slice(0, 500) : undefined;
+    if (err.status === 401 || err.status === 403) {
+      return { code: "AUTH_FAILED", message: "MCP token rejected by /setup-api/* — check CLAWBOX_MCP_TOKEN or data/.mcp-token.", details };
+    }
+    if (err.status === 404) return { code: "NOT_FOUND", message: err.message, details };
+    if (err.status >= 500) return { code: "ENDPOINT_DOWN", message: err.message, details };
+    return { code: "API_ERROR", message: err.message, details };
+  }
+  if (err instanceof Error) {
+    const m = err.message.toLowerCase();
+    if (m.includes("aborted") || m.includes("timed out") || m.includes("timeout")) {
+      return { code: "TIMEOUT", message: err.message };
+    }
+    if (m.includes("json") || m.includes("unexpected token") || m.includes("parse")) {
+      return { code: "INVALID_RESPONSE", message: err.message, details: err.stack };
+    }
+    return { code: "INTERNAL", message: err.message, details: err.stack };
+  }
+  return { code: "INTERNAL", message: String(err) };
+}
+
+// Structured tool-error envelope: agents branch on `code` instead of parsing
+// English. Returned as the tool's text content with isError:true.
+function toolErrorResult(err: unknown) {
+  const { code, message, details } = classifyError(err);
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: true, code, message, ...(details ? { details } : {}) }, null, 2),
+    }],
+    isError: true as const,
+  };
+}
 
 async function api(path: string, options?: RequestInit) {
   // Inject the MCP bearer on every call. middleware.ts accepts this for
@@ -85,7 +147,7 @@ async function api(path: string, options?: RequestInit) {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${body}`);
+    throw new ApiError(res.status, body);
   }
   return res.json();
 }
@@ -160,17 +222,18 @@ const GIT_SAFETY_PATTERNS: [RegExp, string][] = [
   [/\bgit\s+add\s+(-A|--all|\.)(\s|$)/, "git add -A/--all/. — may stage secrets or large files. Prefer adding specific files."],
 ];
 
-const READ_ONLY_PATTERNS = /^\s*(ls|cat|head|tail|less|more|find|grep|rg|wc|file|stat|du|df|top|ps|who|id|uname|hostname|date|echo|printf|which|type|env|printenv|set)\b/;
-
-function detectDangerousCommand(cmd: string): string[] {
+// Split severities: DANGEROUS patterns are hard-blocked (require an explicit
+// allowDangerous override); GIT_SAFETY patterns are advisory and only warn.
+function detectDangerousCommand(cmd: string): { blocked: string[]; warnings: string[] } {
+  const blocked: string[] = [];
   const warnings: string[] = [];
   for (const [pattern, msg] of DANGEROUS_PATTERNS) {
-    if (pattern.test(cmd)) warnings.push(`⚠ DANGEROUS: ${msg}`);
+    if (pattern.test(cmd)) blocked.push(msg);
   }
   for (const [pattern, msg] of GIT_SAFETY_PATTERNS) {
-    if (pattern.test(cmd)) warnings.push(`⚠ GIT SAFETY: ${msg}`);
+    if (pattern.test(cmd)) warnings.push(msg);
   }
-  return warnings;
+  return { blocked, warnings };
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -213,7 +276,15 @@ function evictStaleBgTasks() {
   }
 }
 
-function spawnBackground(command: string, timeoutMs: number, desc = "", workDir = HOME): BgTask {
+function spawnBackground(command: string, timeoutMs: number, desc = "", workDir = HOME, allowDangerous = false): BgTask {
+  // Shared enforcement chokepoint: bash-background AND the agent tool spawn
+  // through here, so the dangerous-command block can't be bypassed by routing a
+  // command through `agent` instead of `bash`.
+  const { blocked } = detectDangerousCommand(command);
+  if (blocked.length && !allowDangerous) {
+    console.error(`[clawbox-mcp] BLOCKED dangerous command (spawnBackground): ${command} (${blocked.join("; ")})`);
+    throw new DangerousCommandError(blocked);
+  }
   evictStaleBgTasks();
   const id = `bg-${++bgTaskSeq}`;
   const task: BgTask = {
@@ -432,11 +503,41 @@ const server = new McpServer(
   { instructions: CLAWBOX_MCP_INSTRUCTIONS },
 );
 
+// Thin wrapper over server.tool that catches any throw from a handler and
+// returns a structured { error, code, message, details } envelope (via
+// toolErrorResult) instead of letting the SDK surface an opaque error string.
+// Every tool below registers through this. Mirrors server.tool's two arities:
+//   tool(name, desc, zodShape, handler)  — tool with params
+//   tool(name, desc, handler)            — no-param tool
+/* eslint-disable @typescript-eslint/no-explicit-any -- the SDK's per-tool
+   arg types can't be expressed through a single wrapper signature; the zod
+   shape still validates args at runtime. */
+function tool(
+  name: string,
+  description: string,
+  shapeOrHandler: Record<string, z.ZodTypeAny> | ((...a: any[]) => any),
+  maybeHandler?: (...a: any[]) => any,
+) {
+  const handler = (maybeHandler ?? shapeOrHandler) as (...a: any[]) => any;
+  const wrapped = async (...args: any[]) => {
+    try {
+      return await handler(...args);
+    } catch (err) {
+      return toolErrorResult(err);
+    }
+  };
+  if (maybeHandler) {
+    return server.tool(name, description, shapeOrHandler as Record<string, z.ZodTypeAny>, wrapped as any);
+  }
+  return server.tool(name, description, wrapped as any);
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 // ══════════════════════════════════════════════════════════════════════
 // TOOL: bash
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "bash",
   `Execute a shell command on the ClawBox device and return stdout/stderr.
 
@@ -464,17 +565,41 @@ GIT SAFETY:
     description: z.string().optional().describe("Brief description of what this command does"),
     run_in_background: z.boolean().optional().describe("Run in background, return task ID immediately"),
     cwd: z.string().optional().describe("Working directory (default: /home/clawbox)"),
+    allowDangerous: z.boolean().optional().describe("Override the dangerous-command block (rm -rf /, dd, mkfs, fork bombs, etc.). You accept responsibility. Default false."),
   },
-  async ({ command, timeout, description, run_in_background, cwd }) => {
+  async ({ command, timeout, description, run_in_background, cwd, allowDangerous }) => {
     const timeoutMs = Math.min(timeout ?? COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT);
     const workDir = cwd || HOME;
 
-    // Dangerous command detection
-    const warnings = detectDangerousCommand(command);
-    const warningText = warnings.length ? warnings.join("\n") + "\n\n" : "";
+    // Severity-split detection: hard-block destructive commands unless the
+    // caller explicitly opts in; git-safety patterns only warn.
+    const { blocked, warnings } = detectDangerousCommand(command);
+    if (blocked.length && allowDangerous !== true) {
+      console.error(`[clawbox-mcp] BLOCKED dangerous command: ${command} (${blocked.join("; ")})`);
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: true,
+            code: "DANGEROUS_COMMAND",
+            message: `Command blocked: ${blocked.join("; ")}. Pass allowDangerous:true to override (you accept responsibility).`,
+            details: command,
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+    if (blocked.length) {
+      console.error(`[clawbox-mcp] DANGEROUS command overridden via allowDangerous: ${command} (${blocked.join("; ")})`);
+    }
+    const notes = [
+      ...blocked.map((b) => `⚠ DANGEROUS (overridden): ${b}`),
+      ...warnings.map((w) => `⚠ GIT SAFETY: ${w}`),
+    ];
+    const warningText = notes.length ? notes.join("\n") + "\n\n" : "";
 
     if (run_in_background) {
-      const task = spawnBackground(command, timeoutMs, description || "", workDir);
+      const task = spawnBackground(command, timeoutMs, description || "", workDir, allowDangerous);
       return {
         content: [{
           type: "text",
@@ -495,10 +620,52 @@ GIT SAFETY:
 );
 
 // ══════════════════════════════════════════════════════════════════════
+// TOOL: clawbox_health
+// ══════════════════════════════════════════════════════════════════════
+
+async function checkApiEndpoint(path: string): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: API_TOKEN ? { authorization: `Bearer ${API_TOKEN}` } : {},
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) {
+      return { ok: false, detail: res.status === 401 || res.status === 403 ? `HTTP ${res.status} (token rejected)` : `HTTP ${res.status}` };
+    }
+    await res.json(); // ensure the body parses (a login HTML page would throw)
+    return { ok: true, detail: `HTTP ${res.status}` };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+tool(
+  "clawbox_health",
+  `Check that the MCP bearer token is valid and the ClawBox /setup-api/* surface is reachable. Run this first when tools are failing — it pinpoints auth (token rejected) vs connectivity (endpoint down) vs a specific endpoint, instead of leaving you to guess from an opaque tool error. Returns { healthy, checks, timestamp }.`,
+  async () => {
+    const checks: Record<string, { ok: boolean; detail: string }> = {};
+    // The MCP authenticates with API_TOKEN from its env; middleware verifies it
+    // against the shared data/.mcp-token. An empty/short token here is the root
+    // cause of the AUTH_FAILED tool errors.
+    checks.mcp_token = API_TOKEN
+      ? { ok: API_TOKEN.length >= 16, detail: API_TOKEN.length >= 16 ? "present in env" : "present but too short (<16 chars)" }
+      : { ok: false, detail: "CLAWBOX_MCP_TOKEN not set in the MCP server env" };
+    // Independent round-trips — run them together so a slow/hung endpoint
+    // doesn't double the diagnostic's wall-clock (each has a 5s timeout).
+    [checks.api_system_info, checks.api_preferences] = await Promise.all([
+      checkApiEndpoint("/setup-api/system/info"),
+      checkApiEndpoint("/setup-api/preferences?all=1"),
+    ]);
+    const healthy = Object.values(checks).every((c) => c.ok);
+    return { content: [{ type: "text" as const, text: JSON.stringify({ healthy, checks, timestamp: Date.now() }, null, 2) }] };
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════
 // TOOL: task_status
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "task_status",
   "Check the status and output of a background bash task.",
   { id: z.string().describe("Background task ID (e.g., 'bg-1')") },
@@ -519,7 +686,7 @@ server.tool(
 // TOOL: read_file
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "read_file",
   `Read a file from the filesystem. Returns content with line numbers (cat -n format).
 
@@ -641,7 +808,7 @@ Usage:
 // TOOL: write_file
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "write_file",
   `Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Parent directories are created automatically.
 
@@ -704,7 +871,7 @@ IMPORTANT:
 // TOOL: edit_file
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "edit_file",
   `Edit a file by replacing an exact string match. Preferred way to modify existing files — changes only the targeted section.
 
@@ -789,7 +956,7 @@ RULES:
 // TOOL: list_directory
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "list_directory",
   "List files and directories at a given path. Returns names, types, and sizes.",
   { path: z.string().optional().describe("Directory path (default: /home/clawbox/clawbox)") },
@@ -814,7 +981,7 @@ server.tool(
 // TOOL: glob
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "glob",
   `Fast file pattern matching. Find files by name using glob syntax.
 
@@ -876,7 +1043,7 @@ Use this for finding files by name. For searching file *contents*, use grep.`,
 // TOOL: grep
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "grep",
   `Search file contents for a text pattern. Uses ripgrep (rg) or grep.
 
@@ -989,7 +1156,7 @@ Supports regex, context lines, case-insensitive, multiline, file type filtering.
 // TOOL: web_fetch
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "web_fetch",
   `Fetch a URL and return the page content as readable text/markdown.
 
@@ -1070,7 +1237,7 @@ If the URL redirects to a different host, a warning is shown.`,
 // TOOL: web_search
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "web_search",
   `Search the web and return results with titles, URLs, and snippets.
 After searching, use web_fetch to read specific pages in full.`,
@@ -1150,7 +1317,7 @@ After searching, use web_fetch to read specific pages in full.`,
 // TOOL: notebook_edit
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "notebook_edit",
   `Edit Jupyter notebook (.ipynb) cells. Supports replacing cell content, inserting new cells, and deleting cells.
 
@@ -1218,7 +1385,7 @@ Use read_file first to see the notebook cells and their indices.`,
 // TOOL: agent (sub-agent delegation)
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "agent",
   `Spawn a background sub-agent that executes a sequence of shell commands autonomously.
 
@@ -1254,7 +1421,7 @@ Returns a task ID — check progress with task_status.`,
 // TASK MANAGEMENT (full-featured)
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool(
+tool(
   "task_create",
   `Create a task to track progress on multi-step work.
 
@@ -1289,7 +1456,7 @@ Tasks can have dependencies (blockedBy) — a blocked task cannot start until it
   }
 );
 
-server.tool(
+tool(
   "task_update",
   `Update a task's status, details, or dependencies.
 
@@ -1353,7 +1520,7 @@ When completing a task, any tasks it blocks become unblocked.`,
   }
 );
 
-server.tool(
+tool(
   "task_get",
   "Get full details of a specific task including description, dependencies, and metadata.",
   { task_id: z.string().describe("Task ID") },
@@ -1392,7 +1559,7 @@ server.tool(
   }
 );
 
-server.tool(
+tool(
   "task_list",
   `List all tasks. Shows user tasks and background tasks with status.
 
@@ -1419,7 +1586,7 @@ Prefer working on tasks in ID order (lowest first). Blocked tasks cannot start u
   }
 );
 
-server.tool(
+tool(
   "task_stop",
   "Stop a running background task by killing its process.",
   { task_id: z.string().describe("Background task ID (e.g., 'bg-1')") },
@@ -1441,17 +1608,17 @@ server.tool(
 // CLAWBOX SYSTEM TOOLS
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool("system_stats", "Get comprehensive system statistics: CPU, memory, disk, network, temperature, GPU, top processes", async () => {
+tool("system_stats", "Get comprehensive system statistics: CPU, memory, disk, network, temperature, GPU, top processes", async () => {
   const stats = await api("/setup-api/system/stats");
   return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
 });
 
-server.tool("system_info", "Get basic system info: hostname, CPU, memory, temperature, disk", async () => {
+tool("system_info", "Get basic system info: hostname, CPU, memory, temperature, disk", async () => {
   const info = await api("/setup-api/system/info");
   return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
 });
 
-server.tool("system_power", "Restart or shut down the ClawBox device",
+tool("system_power", "Restart or shut down the ClawBox device",
   { action: z.enum(["restart", "shutdown"]).describe("Power action") },
   async ({ action }) => {
     await apiPost("/setup-api/system/power", { action });
@@ -1506,7 +1673,7 @@ async function browserAction(action: string, params: Record<string, unknown> = {
   return apiPost("/setup-api/browser", { action, sessionId, ...params }) as Promise<Record<string, unknown>>;
 }
 
-server.tool("browser_open",
+tool("browser_open",
   `Preferred tool when the user asks to open the browser, open a website, or start browsing.
 Attaches to the live Chromium window running on the ClawBox desktop via CDP and optionally navigates to a URL. Returns a screenshot.
 This controls the real browser visible in VNC, not the Browser Setup desktop app.
@@ -1523,7 +1690,7 @@ Workflow: browser_open → browser_screenshot → browser_click/type → browser
   }
 );
 
-server.tool("browser_launch",
+tool("browser_launch",
   `Alias of browser_open for compatibility.
 Attach to the live Chromium window running on the ClawBox desktop via CDP and optionally navigate to a URL. Returns a screenshot.
 This controls the real browser visible in VNC, not a separate hidden browser.
@@ -1539,7 +1706,7 @@ Workflow: browser_launch → browser_screenshot → browser_click/type → brows
   }
 );
 
-server.tool("browser_navigate",
+tool("browser_navigate",
   "Navigate the browser to a new URL. Returns screenshot of the loaded page.",
   { url: z.string().describe("URL to navigate to") },
   async ({ url }) => {
@@ -1548,7 +1715,7 @@ server.tool("browser_navigate",
   }
 );
 
-server.tool("browser_click",
+tool("browser_click",
   "Click at x,y coordinates in the current desktop browser screenshot. Use browser_screenshot to find element positions.",
   { x: z.number().describe("X coordinate"), y: z.number().describe("Y coordinate"), button: z.enum(["left", "right", "middle"]).optional().describe("Mouse button (default: left)") },
   async ({ x, y, button }) => {
@@ -1557,7 +1724,7 @@ server.tool("browser_click",
   }
 );
 
-server.tool("browser_type",
+tool("browser_type",
   "Type text into the currently focused element in the browser. Click an input field first.",
   { text: z.string().describe("Text to type") },
   async ({ text }) => {
@@ -1566,7 +1733,7 @@ server.tool("browser_type",
   }
 );
 
-server.tool("browser_keypress",
+tool("browser_keypress",
   "Press a special key. Common keys: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, ArrowLeft, ArrowRight.",
   { key: z.string().describe("Key name (e.g. Enter, Tab, Escape)") },
   async ({ key }) => {
@@ -1575,7 +1742,7 @@ server.tool("browser_keypress",
   }
 );
 
-server.tool("browser_scroll",
+tool("browser_scroll",
   "Scroll the page at the given coordinates. Positive deltaY scrolls down.",
   { x: z.number().describe("X coordinate"), y: z.number().describe("Y coordinate"), deltaX: z.number().optional().describe("Horizontal scroll"), deltaY: z.number().describe("Vertical scroll (positive=down)") },
   async ({ x, y, deltaX, deltaY }) => {
@@ -1584,7 +1751,7 @@ server.tool("browser_scroll",
   }
 );
 
-server.tool("browser_screenshot",
+tool("browser_screenshot",
   "Take a screenshot of the current desktop browser page. Use this to see what's on screen before clicking.",
   async () => {
     const result = await browserAction("screenshot");
@@ -1592,7 +1759,7 @@ server.tool("browser_screenshot",
   }
 );
 
-server.tool("browser_close", "End the current browser control session. The desktop Chromium window stays open.", async () => {
+tool("browser_close", "End the current browser control session. The desktop Chromium window stays open.", async () => {
   if (currentSessionId) {
     try { await apiPost("/setup-api/browser", { action: "close", sessionId: currentSessionId }); } catch {}
     currentSessionId = null;
@@ -1604,7 +1771,7 @@ server.tool("browser_close", "End the current browser control session. The deskt
 // APP STORE
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool("app_search", "Search the ClawBox app store",
+tool("app_search", "Search the ClawBox app store",
   { query: z.string().optional().describe("Search query"), category: z.string().optional().describe("Category"), limit: z.number().optional().describe("Max results") },
   async ({ query, category, limit }) => {
     const p = new URLSearchParams();
@@ -1613,12 +1780,12 @@ server.tool("app_search", "Search the ClawBox app store",
   }
 );
 
-server.tool("app_install", "Install an app from the ClawBox store",
+tool("app_install", "Install an app from the ClawBox store",
   { appId: z.string().describe("App ID") },
   async ({ appId }) => { await apiPost("/setup-api/apps/install", { appId }); return { content: [{ type: "text", text: `App '${appId}' installed.` }] }; }
 );
 
-server.tool("app_uninstall", "Uninstall an app from ClawBox",
+tool("app_uninstall", "Uninstall an app from ClawBox",
   { appId: z.string().describe("App ID") },
   async ({ appId }) => { await apiPost("/setup-api/apps/uninstall", { appId }); return { content: [{ type: "text", text: `App '${appId}' uninstalled.` }] }; }
 );
@@ -1627,13 +1794,13 @@ server.tool("app_uninstall", "Uninstall an app from ClawBox",
 // NETWORK
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool("wifi_scan", "Scan for WiFi networks", async () => {
+tool("wifi_scan", "Scan for WiFi networks", async () => {
   return { content: [{ type: "text", text: JSON.stringify((await api("/setup-api/wifi/scan")).networks, null, 2) }] };
 });
-server.tool("wifi_status", "Get WiFi connection status", async () => {
+tool("wifi_status", "Get WiFi connection status", async () => {
   return { content: [{ type: "text", text: JSON.stringify(await api("/setup-api/wifi/status"), null, 2) }] };
 });
-server.tool("vnc_status", "Check VNC server status", async () => {
+tool("vnc_status", "Check VNC server status", async () => {
   return { content: [{ type: "text", text: JSON.stringify(await api("/setup-api/vnc"), null, 2) }] };
 });
 
@@ -1641,14 +1808,14 @@ server.tool("vnc_status", "Check VNC server status", async () => {
 // PREFERENCES
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool("preferences_get", "Get ClawBox user preferences",
+tool("preferences_get", "Get ClawBox user preferences",
   { keys: z.string().optional().describe("Comma-separated keys (omit for all)") },
   async ({ keys }) => {
     return { content: [{ type: "text", text: JSON.stringify(await api(`/setup-api/preferences${keys ? `?keys=${encodeURIComponent(keys)}` : ""}`), null, 2) }] };
   }
 );
 
-server.tool("preferences_set", "Set ClawBox user preferences",
+tool("preferences_set", "Set ClawBox user preferences",
   { preferences: z.string().describe("JSON string of key-value pairs") },
   async ({ preferences }) => {
     const parsed = JSON.parse(preferences);
@@ -1671,7 +1838,7 @@ const AVAILABLE_APPS = [
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
 ];
 
-server.tool("ui_open_app", "Open an app on the ClawBox desktop. For real web browsing, use browser_open or browser_launch instead of opening the 'browser' app.",
+tool("ui_open_app", "Open an app on the ClawBox desktop. For real web browsing, use browser_open or browser_launch instead of opening the 'browser' app.",
   { appId: z.string().describe("App ID") },
   async ({ appId }) => {
     await apiPost("/setup-api/kv", { key: "ui:pending-action", value: JSON.stringify({ type: "open_app", appId, ts: Date.now() }) });
@@ -1687,7 +1854,7 @@ server.tool("ui_open_app", "Open an app on the ClawBox desktop. For real web bro
   }
 );
 
-server.tool("ui_list_apps", "List apps available on the ClawBox desktop", async () => {
+tool("ui_list_apps", "List apps available on the ClawBox desktop", async () => {
   let installed: { id: string; name: string }[] = [];
   try {
     const r = await runShell("ls /home/clawbox/.openclaw/skills/ 2>/dev/null");
@@ -1697,7 +1864,7 @@ server.tool("ui_list_apps", "List apps available on the ClawBox desktop", async 
   return { content: [{ type: "text", text: `Apps:\n${all.join("\n")}` }] };
 });
 
-server.tool("ui_notify", "Show a notification on the ClawBox desktop",
+tool("ui_notify", "Show a notification on the ClawBox desktop",
   { message: z.string().describe("Message") },
   async ({ message }) => {
     await apiPost("/setup-api/kv", { key: "ui:pending-action", value: JSON.stringify({ type: "notify", message, ts: Date.now() }) });
@@ -1709,7 +1876,7 @@ server.tool("ui_notify", "Show a notification on the ClawBox desktop",
 // WEBAPP CREATION
 // ══════════════════════════════════════════════════════════════════════
 
-server.tool("webapp_create",
+tool("webapp_create",
   `Create a single-file web app on the ClawBox desktop. For multi-file apps, use code_project_* instead.
 Write complete standalone HTML with inline CSS/JS. Dark theme: bg #1a1a2e, text #e0e0e0, accent #f97316. No CDN links.
 
@@ -1740,7 +1907,7 @@ Values are strings — JSON.stringify objects before saving, JSON.parse after lo
   }
 );
 
-server.tool("webapp_update", "Update an existing webapp's HTML.",
+tool("webapp_update", "Update an existing webapp's HTML.",
   { appId: z.string().describe("App ID"), html: z.string().describe("Updated HTML") },
   async ({ appId, html }) => {
     await apiPost("/setup-api/webapps", { appId, html });
@@ -1756,7 +1923,7 @@ async function codeApi(action: string, body: Record<string, unknown> = {}) {
   return apiPost("/setup-api/code", { action, ...body });
 }
 
-server.tool("code_project_init",
+tool("code_project_init",
   `Create a new code project for building a ClawBox webapp.
 1. Init → scaffolds index.html + style.css + app.js
 2. Use read_file/write_file/edit_file on files in data/code-projects/<id>/
@@ -1786,13 +1953,13 @@ Namespace keys with projectId prefix (e.g. "todo:items"). Values are strings —
   }
 );
 
-server.tool("code_project_list", "List all code projects.", async () => {
+tool("code_project_list", "List all code projects.", async () => {
   const data = await codeApi("list-projects") as { projects: { projectId: string; name: string; updated: string }[] };
   if (!data.projects.length) return { content: [{ type: "text", text: "No projects." }] };
   return { content: [{ type: "text", text: `Projects:\n${data.projects.map((p) => `${p.projectId} — ${p.name} (${new Date(p.updated).toLocaleDateString()})`).join("\n")}` }] };
 });
 
-server.tool("code_project_build",
+tool("code_project_build",
   `Build and deploy a code project. Inlines CSS/JS into index.html, deploys to desktop, opens the app.`,
   {
     projectId: z.string().describe("Project ID"),
@@ -1817,7 +1984,7 @@ server.tool("code_project_build",
   }
 );
 
-server.tool("code_project_delete", "Delete a code project source files.",
+tool("code_project_delete", "Delete a code project source files.",
   { projectId: z.string().describe("Project ID") },
   async ({ projectId }) => {
     await codeApi("delete-project", { projectId });
@@ -1834,7 +2001,7 @@ server.tool("code_project_delete", "Delete a code project source files.",
 // specific message for each ("not found" vs "is empty") instead of
 // collapsing both into a misleading "not found".
 let cachedFieldGuide: string | null | undefined = undefined;
-server.tool(
+tool(
   "clawbox_context",
   "Return the ClawBox field guide: what ClawBox is, the mascot, available tools, architecture, and house rules. Call once at the start of a session to understand the device you're operating.",
   async () => {
