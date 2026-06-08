@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run a single backup cycle and exit (default; reserved for clarity)",
     )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional human label to record for this backup's snapshot",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -71,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.idle:
         return runner.run_idle(cfg, bearer)
 
-    return runner.run_once(cfg, bearer)
+    label = args.label.strip() if isinstance(args.label, str) and args.label.strip() else None
+    return runner.run_once(cfg, bearer, label=label)
 
 
 if __name__ == "__main__":

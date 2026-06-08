@@ -48,8 +48,15 @@ describe("readSchedule / writeSchedule", () => {
       frequency: "weekly",
       timeOfDay: "09:30",
       weekday: 3,
+      retentionKeepLast: 5,
     });
-    expect(written).toEqual({ enabled: true, frequency: "weekly", timeOfDay: "09:30", weekday: 3 });
+    expect(written).toEqual({
+      enabled: true,
+      frequency: "weekly",
+      timeOfDay: "09:30",
+      weekday: 3,
+      retentionKeepLast: 5,
+    });
     const reread = await clawkeep.readSchedule();
     expect(reread).toEqual(written);
   });
@@ -61,6 +68,7 @@ describe("readSchedule / writeSchedule", () => {
       frequency: "hourly",
       timeOfDay: "02:00",
       weekday: 0,
+      retentionKeepLast: 10,
     });
     expect(out.frequency).toBe("daily");
   });
@@ -71,8 +79,32 @@ describe("readSchedule / writeSchedule", () => {
       frequency: "daily",
       timeOfDay: "midnight",
       weekday: 0,
+      retentionKeepLast: 10,
     });
     expect(out.timeOfDay).toBe(clawkeep.DEFAULT_SCHEDULE.timeOfDay);
+  });
+
+  it("sanitises a bogus retentionKeepLast to the default", async () => {
+    const out = await clawkeep.writeSchedule({
+      enabled: true,
+      frequency: "daily",
+      timeOfDay: "02:00",
+      weekday: 0,
+      // @ts-expect-error -- testing runtime coercion
+      retentionKeepLast: "lots",
+    });
+    expect(out.retentionKeepLast).toBe(clawkeep.DEFAULT_SCHEDULE.retentionKeepLast);
+  });
+
+  it("keeps retentionKeepLast=0 (auto-cleanup disabled)", async () => {
+    const out = await clawkeep.writeSchedule({
+      enabled: true,
+      frequency: "daily",
+      timeOfDay: "02:00",
+      weekday: 0,
+      retentionKeepLast: 0,
+    });
+    expect(out.retentionKeepLast).toBe(0);
   });
 
   it("clamps an out-of-range weekday back to the default", async () => {
@@ -81,6 +113,7 @@ describe("readSchedule / writeSchedule", () => {
       frequency: "weekly",
       timeOfDay: "02:00",
       weekday: 12,
+      retentionKeepLast: 10,
     });
     expect(out.weekday).toBe(clawkeep.DEFAULT_SCHEDULE.weekday);
   });
@@ -92,12 +125,13 @@ describe("readSchedule / writeSchedule", () => {
       frequency: "daily",
       timeOfDay: "02:00",
       weekday: 0,
+      retentionKeepLast: 10,
     });
     expect(out.enabled).toBe(false);
   });
 
   it("schedule.json is written 0600", async () => {
-    await clawkeep.writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "02:00", weekday: 0 });
+    await clawkeep.writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "02:00", weekday: 0, retentionKeepLast: 10 });
     const stat = await fs.stat(path.join(DATA_DIR, "schedule.json"));
     expect(stat.mode & 0o777).toBe(0o600);
   });
@@ -115,12 +149,13 @@ describe("computeNextRunMs", () => {
       frequency: "daily",
       timeOfDay: "ninety:nine",
       weekday: 0,
+      retentionKeepLast: 10,
     };
     expect(clawkeep.computeNextRunMs(s, new Date("2026-04-29T12:00:00"))).toBe(0);
   });
 
   it("daily picks today's slot when the time is still ahead", () => {
-    const s = { enabled: true, frequency: "daily" as const, timeOfDay: "23:30", weekday: 0 };
+    const s = { enabled: true, frequency: "daily" as const, timeOfDay: "23:30", weekday: 0, retentionKeepLast: 10 };
     const now = new Date("2026-04-29T12:00:00");
     const next = new Date(clawkeep.computeNextRunMs(s, now));
     expect(next.getDate()).toBe(29);
@@ -128,7 +163,7 @@ describe("computeNextRunMs", () => {
   });
 
   it("daily rolls forward when the time has passed", () => {
-    const s = { enabled: true, frequency: "daily" as const, timeOfDay: "01:00", weekday: 0 };
+    const s = { enabled: true, frequency: "daily" as const, timeOfDay: "01:00", weekday: 0, retentionKeepLast: 10 };
     const now = new Date("2026-04-29T12:00:00");
     const next = new Date(clawkeep.computeNextRunMs(s, now));
     expect(next.getDate()).toBe(30);
@@ -136,7 +171,7 @@ describe("computeNextRunMs", () => {
   });
 
   it("weekly lands on the configured weekday in the future", () => {
-    const s = { enabled: true, frequency: "weekly" as const, timeOfDay: "02:00", weekday: 0 }; // Sunday
+    const s = { enabled: true, frequency: "weekly" as const, timeOfDay: "02:00", weekday: 0, retentionKeepLast: 10 }; // Sunday
     const now = new Date("2026-04-29T12:00:00"); // Wednesday
     const next = new Date(clawkeep.computeNextRunMs(s, now));
     expect(next.getDay()).toBe(0);
@@ -229,6 +264,7 @@ describe("getStatus", () => {
       frequency: "daily",
       timeOfDay: `${hh}:${mm}`,
       weekday: 0,
+      retentionKeepLast: 10,
     });
     const status = await clawkeep.getStatus();
     expect(status.schedule.enabled).toBe(true);

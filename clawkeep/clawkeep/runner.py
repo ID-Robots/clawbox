@@ -8,17 +8,25 @@ schedule the next run.
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import threading
 import time
 from pathlib import Path
 
-from . import api, crypto, openclaw, passphrase, s3, state
+from . import api, crypto, openclaw, passphrase, s3, state, token
 from .api import ApiError
 from .config import Config
 
 log = logging.getLogger(__name__)
+
+# Auto-cleanup retention default: keep the newest N unlocked snapshots after
+# each successful backup. Locked snapshots are always kept and never counted
+# against N. 0 (or negative) disables retention entirely. The user-facing
+# value is persisted by the TS bridge into schedule.json as
+# `retentionKeepLast`; we read it there so the device and UI stay in sync.
+DEFAULT_RETENTION_KEEP_LAST = 10
 
 # Exit codes — surfaceable to systemd via daemon.py.
 EXIT_OK = 0
@@ -124,8 +132,75 @@ def _resolve_staging(cfg: Config) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="clawkeep-")), True
 
 
-def run_once(cfg: Config, token: str) -> int:
-    """One full backup cycle. Returns a process exit code."""
+def _retention_keep_last() -> int:
+    """Read `retentionKeepLast` from schedule.json in the data dir.
+
+    The TS bridge owns schedule.json; the daemon only reads this one scalar.
+    A missing file/field, or a malformed value, falls back to the default so
+    a botched write can't accidentally disable retention or wipe snapshots."""
+    path = token.data_dir() / "schedule.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_RETENTION_KEEP_LAST
+    if not isinstance(raw, dict) or "retentionKeepLast" not in raw:
+        return DEFAULT_RETENTION_KEEP_LAST
+    try:
+        return int(raw["retentionKeepLast"])
+    except (TypeError, ValueError):
+        return DEFAULT_RETENTION_KEEP_LAST
+
+
+def apply_retention(creds: api.Credentials, keep_last: int) -> list[str]:
+    """Prune old snapshots, keeping the newest `keep_last` UNLOCKED ones.
+
+    Locked snapshots are always kept and never count against `keep_last`.
+    `keep_last <= 0` disables retention (no-op). Returns the list of deleted
+    object names (useful for logging/tests). Also lazily GCs manifest entries
+    whose backing object no longer exists.
+    """
+    if keep_last <= 0:
+        return []
+
+    snapshots = s3.list_snapshots(creds)  # newest-first, locked flag merged in
+    existing = {s.name for s in snapshots}
+    unlocked = [s for s in snapshots if not s.locked]
+    to_delete = unlocked[keep_last:]
+
+    deleted: list[str] = []
+    for snap in to_delete:
+        # Defence-in-depth: list_snapshots already filtered locked out, but
+        # never delete a locked object even if the partition logic regressed.
+        if snap.locked:
+            continue
+        s3.delete_snapshot(creds, snap.name)
+        log.info("retention: deleted old snapshot %s", snap.name)
+        deleted.append(snap.name)
+        existing.discard(snap.name)
+
+    # Rewrite the manifest: drop entries for everything we deleted plus any
+    # entry whose object is already gone (lazy GC).
+    manifest = s3.read_manifest(creds)
+    snaps = manifest.get("snapshots", {})
+    if isinstance(snaps, dict):
+        changed = False
+        for name in list(snaps.keys()):
+            if name not in existing:
+                snaps.pop(name, None)
+                changed = True
+        if changed:
+            s3.write_manifest(creds, manifest)
+
+    return deleted
+
+
+def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
+    """One full backup cycle. Returns a process exit code.
+
+    `label` optionally names the resulting snapshot — it's recorded in the
+    sidecar manifest after a successful upload. The TS bridge passes it
+    through from the UI's "Name this backup" field.
+    """
     st = state.load()
 
     # Encryption gate — refuse to run if no passphrase is set. The user-
@@ -306,6 +381,31 @@ def run_once(cfg: Config, token: str) -> int:
         # Upload finished — pin the readout at 100% before moving on.
         st.upload_bytes_done = st.upload_bytes_total
         state.save(st)
+
+        # Annotate the freshly-uploaded snapshot in the sidecar manifest
+        # (label from the caller; locked defaults to false). Best-effort: a
+        # manifest write failure must not fail an otherwise-good backup — the
+        # snapshot still exists and reads back as unnamed/unlocked.
+        try:
+            manifest = s3.read_manifest(creds)
+            snaps = manifest.setdefault("snapshots", {})
+            snaps[encrypted_path.name] = {
+                "label": label,
+                "locked": False,
+                "createdAt": api.now_ms(),
+            }
+            s3.write_manifest(creds, manifest)
+        except s3.S3Error as e:
+            log.warning("manifest annotate failed (continuing): %s", e)
+
+        # Auto-cleanup: prune old unlocked snapshots past the retention window.
+        # Locked snapshots are exempt. Best-effort — a retention failure must
+        # not fail the backup that just succeeded.
+        keep_last = _retention_keep_last()
+        try:
+            apply_retention(creds, keep_last)
+        except s3.S3Error as e:
+            log.warning("retention prune failed (continuing): %s", e)
 
         # Best-effort stats — leave the per-run fields *unsent* on failure
         # so a transient ListBucket doesn't clobber the portal's last-known
