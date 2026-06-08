@@ -455,15 +455,15 @@ describe("/setup-api/ai-models/status", () => {
     });
   });
 
-  it("normalizes provider aliases like openai-codex for the UI", async () => {
+  it("normalizes the codex provider (and legacy openai-codex) for the UI", async () => {
     mockReadConfig.mockResolvedValue({
       auth: {
         profiles: {
-          "openai-codex:default": { provider: "openai-codex", mode: "oauth" },
+          "codex:default": { provider: "codex", mode: "oauth" },
         },
       },
       agents: {
-        defaults: { model: { primary: "openai-codex/gpt-5.4" } },
+        defaults: { model: { primary: "codex/gpt-5.4" } },
       },
     } as never);
 
@@ -472,6 +472,6 @@ describe("/setup-api/ai-models/status", () => {
 
     expect(body.provider).toBe("openai");
     expect(body.providerLabel).toBe("OpenAI GPT");
-    expect(body.model).toBe("openai-codex/gpt-5.4");
+    expect(body.model).toBe("codex/gpt-5.4");
   });
 });

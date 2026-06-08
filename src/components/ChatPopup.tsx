@@ -197,7 +197,7 @@ interface ProviderReasoningConfig {
 
 const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   openai: { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
-  'openai-codex': { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
+  codex: { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
   // Anthropic effort docs: `low | medium | high | max` on Opus 4.6+,
   // Sonnet 4.6, Opus 4.7, Mythos. Default per platform.claude.com is
   // `high`. xhigh is Opus-4.7-only; we omit until we add per-model

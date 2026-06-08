@@ -64,14 +64,15 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
-// OpenAI ChatGPT subscription (Codex) models. Available when the user
-// authenticates via OAuth instead of pasting an API key. NO -pro
-// variants — those are API-key only (they 400 with "model not
-// supported when using Codex with a ChatGPT account" on the OAuth
-// path). Per developers.openai.com/codex/models the supported set
-// via ChatGPT-account auth is gpt-5.5, gpt-5.4, gpt-5.4-mini.
-// Filter lives in ALLOWED_MODEL_RE_BY_PROVIDER (catalog route).
-export const OPENAI_CODEX_MODELS: readonly ProviderModelOption[] = [
+// ChatGPT-subscription (Codex) models — provider id `codex` in OpenClaw
+// 2026.6.x (renamed from `openai-codex` in <=2026.5.x). Available when
+// the user authenticates via ChatGPT OAuth instead of pasting an API
+// key. NO -pro variants — those are API-key only (they 400 with "model
+// not supported when using Codex with a ChatGPT account" on the OAuth
+// path). Per developers.openai.com/codex/models the supported set via
+// ChatGPT-account auth is gpt-5.5, gpt-5.4, gpt-5.4-mini. Filter lives
+// in ALLOWED_MODEL_RE_BY_PROVIDER (catalog route).
+export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
   { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
@@ -99,7 +100,7 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 // own /api/v1/models for the last). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
-export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "openai-codex", "google", "openrouter"] as const;
+export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
 export function isCatalogProvider(provider: string | null | undefined): provider is CatalogProvider {
@@ -126,9 +127,9 @@ export const PROVIDER_CATALOGS = Object.freeze({
     defaultModelId: "gpt-5.4",
     allowCustom: true,
   },
-  "openai-codex": {
-    provider: "openai-codex",
-    models: OPENAI_CODEX_MODELS,
+  codex: {
+    provider: "codex",
+    models: CODEX_MODELS,
     defaultModelId: "gpt-5.4",
     allowCustom: true,
   },

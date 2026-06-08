@@ -87,8 +87,8 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
-      defaultModel: "openai-codex/gpt-5.4",
-      profileKey: "openai-codex:default",
+      defaultModel: "codex/gpt-5.4",
+      profileKey: "codex:default",
     },
   },
   google: {
@@ -471,9 +471,9 @@ export async function POST(request: Request) {
       //
       // Provider namespace differs between auth modes:
       //   openai + token        → openai/<id>       (api.openai.com)
-      //   openai + subscription → openai-codex/<id> (chatgpt.com backend)
+      //   openai + subscription → codex/<id>        (chatgpt.com backend)
       // The two catalogs are NOT the same — `gpt-5.4` only exists on
-      // openai-codex; `gpt-5` only exists on openai direct. The
+      // codex; `gpt-5` only exists on openai direct. The
       // `config.defaultModel` was already set to the correct namespace
       // above by applying subscriptionOverride, so we derive the
       // target provider from the existing default instead of `provider`.
@@ -483,7 +483,7 @@ export async function POST(request: Request) {
         "openrouter",
         "anthropic",
         "openai",
-        "openai-codex",
+        "codex",
         "google",
       ]);
       if (supportedProviders.has(targetProvider)) {
@@ -517,7 +517,7 @@ export async function POST(request: Request) {
     //
     //   * anthropic     → --auth-choice apiKey --anthropic-api-key
     //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
-    //   * openai-codex  → --auth-choice openai-codex (OAuth flow)
+    //   * codex         → ChatGPT app-server auth (~/.codex/auth.json, written by gateway-pre-start.sh)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
@@ -805,8 +805,8 @@ export async function POST(request: Request) {
     //    primary model, tagged `source: "user"` so OpenClaw's per-turn
     //    model resolver returns early and doesn't flip the session back
     //    to the previous provider on the first message after the switch.
-    //    Without this, a session that was bound to e.g. openai-codex
-    //    keeps routing to openai-codex even after the user changes the
+    //    Without this, a session that was bound to e.g. codex
+    //    keeps routing to codex even after the user changes the
     //    primary provider to ClawBox AI / DeepSeek / etc. — the new
     //    default only seeds future sessions. Mirror of the sweep in
     //    /setup-api/chat/model (see PR #73 for context on why "user" is
@@ -851,12 +851,24 @@ export async function POST(request: Request) {
     //     calls collapse to one openclaw fork.
     //
     //     `ocProvider` is the openclaw-side provider id (e.g. "anthropic",
-    //     "openai", "openai-codex", "google", "deepseek"). The catalog uses
+    //     "openai", "codex", "google", "deepseek"). The catalog uses
     //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
     //     Skip providers that aren't part of the catalog (local-only, llamacpp).
     const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
     if (isCatalogProvider(catalogProvider)) {
       refreshCatalogInBackground(catalogProvider);
+    }
+
+    // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
+    // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this
+    // OAuth profile (write-if-missing). On an explicit (re)login, clear the
+    // stale file so the restart below regenerates it with the fresh token —
+    // afterward the Codex app-server owns its own refresh, so we don't touch
+    // it again.
+    if (ocProvider === "codex") {
+      await fs
+        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
+        .catch(() => {});
     }
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model

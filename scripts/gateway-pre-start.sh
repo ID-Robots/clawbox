@@ -341,10 +341,38 @@ else:
 PY
 fi
 
+# One-time config migration for devices updating from OpenClaw <=2026.5.x:
+# the ChatGPT-subscription provider id was renamed `openai-codex` -> `codex`
+# in 2026.6.x, so a device configured on the old version still has
+# `model.primary = openai-codex/<model>` stored — which 2026.6.x rejects with
+# "Unknown model: openai-codex/..." until the user re-picks the model. Rewrite
+# the stored primary to `codex/<model>` so the update self-heals (the auth side
+# is covered by the ~/.codex synthesis below, which reads the legacy
+# openai-codex:default profile).
+LEGACY_CODEX_PRIMARY="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError):
+    print(""); sys.exit(0)
+primary = (((cfg.get("agents") or {}).get("defaults") or {}).get("model") or {}).get("primary") or ""
+print(primary if isinstance(primary, str) and primary.lower().startswith("openai-codex/") else "")
+PY
+)"
+if [ -n "$LEGACY_CODEX_PRIMARY" ]; then
+  NEW_CODEX_PRIMARY="codex/${LEGACY_CODEX_PRIMARY#*/}"
+  if "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
+    echo "  Migrated primary model $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY (openai-codex provider renamed to codex in OpenClaw 2026.6.x)"
+  else
+    echo "  WARN: failed to migrate $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY; Codex chats may fail with 'Unknown model'"
+  fi
+fi
+
 # Ensure @openclaw/codex runtime plugin is installed if any agent uses
-# the openai-codex provider. OpenClaw 2026.5.12 split the codex harness
+# the codex provider (`openai-codex` on OpenClaw <=2026.5.x, renamed to
+# `codex` in 2026.6.x — we detect both). OpenClaw split the codex harness
 # out of the core gateway into a separate npm package and only auto-
-# installs it during `openclaw onboard --auth-choice openai-codex…`.
+# installs it during `openclaw onboard --auth-choice codex…`.
 # Our configure route writes openclaw.json directly (see the schema-
 # drift note in src/app/setup-api/ai-models/configure/route.ts), so
 # devices that pick a Codex model never trigger the install and the
@@ -375,11 +403,13 @@ auth = cfg.get("auth")
 profiles_raw = auth.get("profiles", {}) if isinstance(auth, dict) else {}
 profiles = profiles_raw if isinstance(profiles_raw, dict) else {}
 uses_codex = (
-    isinstance(primary, str) and primary.lower().startswith("openai-codex/")
+    isinstance(primary, str)
+    and (primary.lower().startswith("codex/") or primary.lower().startswith("openai-codex/"))
 ) or any(
-    (isinstance(k, str) and k.lower().startswith("openai-codex:")) or
+    (isinstance(k, str)
+     and (k.lower().startswith("codex:") or k.lower().startswith("openai-codex:"))) or
     (isinstance(v, dict) and isinstance(v.get("provider"), str)
-     and v["provider"].lower() == "openai-codex")
+     and v["provider"].lower() in ("codex", "openai-codex"))
     for k, v in profiles.items()
 )
 print("1" if uses_codex else "0")
@@ -426,6 +456,40 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
   "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1 \
     || echo "  WARN: openclaw plugins install $CODEX_SPEC failed; Codex chats will fail until resolved"
+fi
+
+# Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
+# ~/.codex/auth.json (not the openclaw profile) — without it the app-server
+# falls back to api.openai.com with no bearer -> 401. Synthesize it from the
+# codex OAuth profile (account_id decoded from the access JWT). Write-if-
+# missing: the app-server owns refresh once it exists, so we don't clobber it.
+if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
+  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
+  if [ ! -f "$CODEX_AUTH_FILE" ]; then
+    node - "$OPENCLAW_HOME_DIR/agents/main/agent/auth-profiles.json" "$CODEX_AUTH_FILE" <<'NODE'
+const fs = require("fs"), path = require("path");
+const [apPath, outPath] = process.argv.slice(2);
+try {
+  const data = JSON.parse(fs.readFileSync(apPath, "utf8"));
+  const profiles = data.profiles || {};
+  const p = profiles["codex:default"] || profiles["openai-codex:default"];
+  if (!p || !p.access) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+  let accountId = null;
+  try {
+    const claims = JSON.parse(Buffer.from(p.access.split(".")[1], "base64url").toString());
+    const auth = claims["https://api.openai.com/auth"] || {};
+    accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
+  } catch { /* opaque token — leave accountId null */ }
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, JSON.stringify({
+    OPENAI_API_KEY: null,
+    tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
+    last_refresh: new Date().toISOString(),
+  }, null, 2), { mode: 0o600 });
+  console.log("  Wrote ~/.codex/auth.json for the Codex app-server (account_id " + (accountId ? "resolved" : "missing") + ")");
+} catch (e) { console.log("  Codex auth.json: " + e.message); }
+NODE
+  fi
 fi
 
 # Ensure the per-install MCP bearer token exists and is wired into the

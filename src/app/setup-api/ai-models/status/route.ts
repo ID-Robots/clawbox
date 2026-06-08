@@ -204,7 +204,10 @@ function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   if (normalized === "deepseek" || normalized === "clawai") return "clawai";
-  if (normalized.startsWith("openai")) return "openai";
+  // `codex` is the ChatGPT-subscription provider id (was `openai-codex`
+  // on OpenClaw <=2026.5.x); collapse it under openai for the UI like the
+  // openai* prefixes above.
+  if (normalized.startsWith("openai") || normalized === "codex") return "openai";
   if (normalized.startsWith("google")) return "google";
   if (normalized.startsWith("anthropic")) return "anthropic";
   if (normalized.startsWith("openrouter")) return "openrouter";
