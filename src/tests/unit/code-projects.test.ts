@@ -38,6 +38,12 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/tmp/test-data",
 }));
 
+// buildProject now registers the built app on the desktop (durability backstop).
+// Stub it so the build tests stay focused on the build output, not config IO.
+vi.mock("@/lib/webapp-registry", () => ({
+  registerWebappInPreferences: vi.fn(),
+}));
+
 import {
   validateProjectId,
   initProject,

@@ -471,22 +471,40 @@ export async function buildProject(
     }
   );
 
-  // Deploy to webapps directory
-  const webappDir = path.join(WEBAPPS_DIR, projectId);
-  await fs.mkdir(webappDir, { recursive: true });
-  await fs.writeFile(path.join(webappDir, "index.html"), html, "utf-8");
-  await fs.writeFile(
-    path.join(webappDir, "meta.json"),
-    JSON.stringify({ name, color, icon: "" }),
-    "utf-8"
-  );
-
-  // Durably register on the desktop (same backstop as the webapps POST route)
-  // so a build run while the desktop was closed still lands on the app grid.
-  await registerWebappInPreferences(projectId, name, { color, webappUrl: `/setup-api/webapps?app=${projectId}` });
+  // Deploy + durably register via the shared chokepoint so this stays in
+  // lockstep with the webapps POST route (same on-disk layout, meta.json
+  // shape, and desktop registration).
+  await deployWebapp(projectId, html, { name, color });
 
   const url = `/setup-api/webapps?app=${projectId}`;
   return { html, url, filesInlined };
+}
+
+/**
+ * Deploy a single-page webapp to data/webapps/<appId>/ (index.html + meta.json)
+ * and durably register it on the desktop. The one chokepoint shared by the
+ * webapps POST route and buildProject — so the on-disk layout, the meta.json
+ * shape, and the preference registration can't drift between the two create
+ * paths (and can't be half-applied by one caller forgetting a step).
+ */
+export async function deployWebapp(
+  appId: string,
+  html: string,
+  meta: { name: string; color?: string; icon?: string },
+): Promise<void> {
+  const dir = path.join(WEBAPPS_DIR, appId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
+  await fs.writeFile(
+    path.join(dir, "meta.json"),
+    JSON.stringify({ name: meta.name, color: meta.color || "#f97316", icon: meta.icon || "" }),
+    "utf-8",
+  );
+  await registerWebappInPreferences(appId, meta.name, {
+    color: meta.color,
+    iconUrl: meta.icon,
+    webappUrl: `/setup-api/webapps?app=${appId}`,
+  });
 }
 
 // ── Helpers ──

@@ -3,8 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { WEBAPPS_DIR, APP_ID_RE } from "@/lib/code-projects";
-import { registerWebappInPreferences } from "@/lib/webapp-registry";
+import { WEBAPPS_DIR, APP_ID_RE, deployWebapp } from "@/lib/code-projects";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -74,26 +73,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "HTML content too large (max 1MB)" }, { status: 413 });
     }
 
-    const appDir = path.join(WEBAPPS_DIR, appId);
-    await fs.mkdir(appDir, { recursive: true });
-    await fs.writeFile(path.join(appDir, "index.html"), html, "utf-8");
-
-    // Save metadata
-    await fs.writeFile(
-      path.join(appDir, "meta.json"),
-      JSON.stringify({ name: name || appId, color: color || "#f97316", icon: icon || "" }),
-      "utf-8"
-    );
-
-    // Durably register on the desktop so the app appears even if the desktop
-    // wasn't open to consume the ui:pending-action handoff. Create-flow only:
-    // an update (no `name`) shouldn't overwrite the saved display name.
     if (name) {
-      await registerWebappInPreferences(appId, name, {
-        color,
-        iconUrl: icon,
-        webappUrl: `/setup-api/webapps?app=${appId}`,
-      });
+      // Create: write index.html + meta.json and durably register on the
+      // desktop via the shared chokepoint (keeps the on-disk layout in lockstep
+      // with buildProject, and the app appears even if the desktop wasn't open
+      // to consume the ui:pending-action handoff).
+      await deployWebapp(appId, html, { name, color, icon });
+    } else {
+      // Update: only rewrite the HTML. Re-stamping meta.json here would clobber
+      // the saved display name (an update carries no `name`), and re-registering
+      // is unnecessary — the app is already on the desktop.
+      const appDir = path.join(WEBAPPS_DIR, appId);
+      await fs.mkdir(appDir, { recursive: true });
+      await fs.writeFile(path.join(appDir, "index.html"), html, "utf-8");
     }
 
     return NextResponse.json({
