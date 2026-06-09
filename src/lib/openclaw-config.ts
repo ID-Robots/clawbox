@@ -601,12 +601,23 @@ export async function restartGateway(): Promise<void> {
   }
 }
 
-/** Send SIGUSR1 to the gateway process so it hot-reloads skills without a full restart. */
+/** Send SIGUSR1 to the gateway so it restarts and picks up newly-installed skills. */
 export async function reloadGateway(): Promise<void> {
   try {
-    const { stdout } = await exec("pgrep", ["-f", "openclaw-gateway"], { timeout: 5_000 });
-    const pidStr = stdout.trim().split("\n")[0];
-    const pid = parseInt(pidStr, 10);
+    // The gateway process renames its argv to just "openclaw", so the old
+    // `pgrep -f "openclaw-gateway"` matched nothing and SIGUSR1 was never sent —
+    // installing a skill left the gateway untouched and the chat's reload
+    // overlay hung forever. Resolve the PID deterministically from systemd,
+    // falling back to an exact process-name match for dev / non-systemd runs.
+    let pid = 0;
+    try {
+      const { stdout } = await exec("systemctl", ["show", "clawbox-gateway.service", "-p", "MainPID", "--value"], { timeout: 5_000 });
+      pid = parseInt(stdout.trim(), 10);
+    } catch { /* not under systemd — fall through to pgrep */ }
+    if (!Number.isFinite(pid) || pid <= 0) {
+      const { stdout } = await exec("pgrep", ["-x", "openclaw"], { timeout: 5_000 });
+      pid = parseInt(stdout.trim().split("\n")[0], 10);
+    }
     if (Number.isFinite(pid) && pid > 0) {
       process.kill(pid, "SIGUSR1");
     }

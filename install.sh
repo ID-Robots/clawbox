@@ -54,12 +54,14 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-gateway.service
   clawbox-performance.service
   clawbox-heartbeat.timer
+  clawbox-ap-watchdog.timer
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-heartbeat.service
   clawbox-browser.service
   clawbox-tunnel.service
   "clawbox-root-update@.service"
+  clawbox-ap-watchdog.service
 )
 
 # Load persisted WiFi interface if available
@@ -1177,11 +1179,16 @@ step_systemd_services() {
     [[ "$svc" == "clawbox-browser.service" ]] && continue
     [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
+    # Timer-driven one-shot (no [Install]); enabled via its .timer below.
+    [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
   # transition to Online without waiting for the next reboot.
   systemctl enable --now clawbox-heartbeat.timer
+  # Start the AP watchdog immediately so a dropped setup hotspot self-heals
+  # without waiting for a reboot.
+  systemctl enable --now clawbox-ap-watchdog.timer
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Migration: prior installs enabled clawbox-tunnel by default, which loops

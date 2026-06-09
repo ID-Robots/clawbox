@@ -190,6 +190,109 @@ describe("GET /setup-api/files", () => {
   });
 });
 
+describe("GET /setup-api/files?search=", () => {
+  it("finds matching files recursively and returns root-relative paths", async () => {
+    fs.mkdirSync(path.join(TEST_ROOT, "a", "b"), { recursive: true });
+    fs.writeFileSync(path.join(TEST_ROOT, "a", "report.txt"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "a", "b", "report-final.txt"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "a", "notes.md"), "x");
+
+    const req = createRequest("/setup-api/files?search=report");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.search).toBe("report");
+    const paths = body.files.map((f: { path: string }) => f.path).sort();
+    expect(paths).toEqual(["a/b/report-final.txt", "a/report.txt"]);
+    expect(body.files.every((f: { type: string }) => f.type === "file")).toBe(true);
+  });
+
+  it("matches case-insensitively", async () => {
+    fs.writeFileSync(path.join(TEST_ROOT, "ReadMe.MD"), "x");
+
+    const req = createRequest("/setup-api/files?search=readme");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(body.files).toHaveLength(1);
+    expect(body.files[0].path).toBe("ReadMe.MD");
+  });
+
+  it("matches directories too, with null size", async () => {
+    fs.mkdirSync(path.join(TEST_ROOT, "projects"));
+
+    const req = createRequest("/setup-api/files?search=project");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(body.files).toHaveLength(1);
+    expect(body.files[0].type).toBe("directory");
+    expect(body.files[0].path).toBe("projects");
+    expect(body.files[0].size).toBeNull();
+  });
+
+  it("excludes hidden entries by default and includes them with hidden=1", async () => {
+    fs.mkdirSync(path.join(TEST_ROOT, ".secret-config"));
+    fs.writeFileSync(path.join(TEST_ROOT, ".secret-config", "config.json"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "config.txt"), "x");
+
+    const visible = await (await filesGet(createRequest("/setup-api/files?search=config"))).json();
+    const visiblePaths = visible.files.map((f: { path: string }) => f.path);
+    expect(visiblePaths).toContain("config.txt");
+    expect(visiblePaths).not.toContain(".secret-config");
+    expect(visiblePaths).not.toContain(".secret-config/config.json");
+
+    const all = await (await filesGet(createRequest("/setup-api/files?search=config&hidden=1"))).json();
+    const allPaths = all.files.map((f: { path: string }) => f.path);
+    expect(allPaths).toContain(".secret-config");
+    expect(allPaths).toContain(".secret-config/config.json");
+    expect(allPaths).toContain("config.txt");
+  });
+
+  it("scopes the search to the requested subdirectory", async () => {
+    fs.mkdirSync(path.join(TEST_ROOT, "keep"), { recursive: true });
+    fs.mkdirSync(path.join(TEST_ROOT, "skip"), { recursive: true });
+    fs.writeFileSync(path.join(TEST_ROOT, "keep", "match.txt"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "skip", "match.txt"), "x");
+
+    const req = createRequest("/setup-api/files?dir=keep&search=match");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(body.files).toHaveLength(1);
+    expect(body.files[0].path).toBe("keep/match.txt");
+  });
+
+  it("returns an empty result set (not an error) when nothing matches", async () => {
+    fs.writeFileSync(path.join(TEST_ROOT, "alpha.txt"), "x");
+
+    const req = createRequest("/setup-api/files?search=zzzznope");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.files).toEqual([]);
+    expect(body.truncated).toBe(false);
+  });
+
+  it("caps results at the match limit and flags truncation", async () => {
+    // The walk stops at MAX_MATCHES (300); create more matches than that so it
+    // has to bail early and report truncated=true rather than returning all.
+    for (let i = 0; i < 305; i++) {
+      fs.writeFileSync(path.join(TEST_ROOT, `trunc-${i}.txt`), "x");
+    }
+
+    const req = createRequest("/setup-api/files?search=trunc");
+    const res = await filesGet(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.files).toHaveLength(300);
+    expect(body.truncated).toBe(true);
+  });
+});
+
 describe("POST /setup-api/files", () => {
   describe("mkdir action", () => {
     it("creates a new directory", async () => {

@@ -9,6 +9,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "./config-store";
+import { registerWebappInPreferences } from "./webapp-registry";
 
 // ── Paths ──
 
@@ -470,18 +471,63 @@ export async function buildProject(
     }
   );
 
-  // Deploy to webapps directory
-  const webappDir = path.join(WEBAPPS_DIR, projectId);
-  await fs.mkdir(webappDir, { recursive: true });
-  await fs.writeFile(path.join(webappDir, "index.html"), html, "utf-8");
-  await fs.writeFile(
-    path.join(webappDir, "meta.json"),
-    JSON.stringify({ name, color, icon: "" }),
-    "utf-8"
-  );
+  // First build registers the app on the desktop via the shared chokepoint
+  // (same on-disk layout + meta.json shape as the webapps POST route). A
+  // rebuild only refreshes index.html — re-running deployWebapp would clobber
+  // the saved icon and re-surface an app the user intentionally hid.
+  const alreadyDeployed = await fs
+    .stat(path.join(WEBAPPS_DIR, projectId, "meta.json"))
+    .then(() => true)
+    .catch(() => false);
+  if (alreadyDeployed) {
+    await writeWebappIndex(projectId, html);
+  } else {
+    await deployWebapp(projectId, html, { name, color });
+  }
 
   const url = `/setup-api/webapps?app=${projectId}`;
   return { html, url, filesInlined };
+}
+
+/**
+ * Refresh only the deployed index.html for an existing webapp. The shared
+ * "update" chokepoint (webapps POST update branch + buildProject rebuilds) —
+ * it deliberately leaves meta.json and the desktop registration untouched so a
+ * rebuild can't wipe the saved icon or re-surface an app the user hid.
+ */
+export async function writeWebappIndex(appId: string, html: string): Promise<void> {
+  const dir = path.join(WEBAPPS_DIR, appId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
+}
+
+/**
+ * Deploy a single-page webapp to data/webapps/<appId>/ (index.html + meta.json)
+ * and durably register it on the desktop. The one chokepoint shared by the
+ * webapps POST route and buildProject — so the on-disk layout, the meta.json
+ * shape, and the preference registration can't drift between the two create
+ * paths (and can't be half-applied by one caller forgetting a step).
+ *
+ * Create-time only: it (re)writes meta.json and re-registers in preferences.
+ * For rebuilds of an existing app use writeWebappIndex so existing metadata
+ * and hidden/uninstalled state are preserved.
+ */
+export async function deployWebapp(
+  appId: string,
+  html: string,
+  meta: { name: string; color?: string; icon?: string },
+): Promise<void> {
+  await writeWebappIndex(appId, html);
+  await fs.writeFile(
+    path.join(WEBAPPS_DIR, appId, "meta.json"),
+    JSON.stringify({ name: meta.name, color: meta.color || "#f97316", icon: meta.icon || "" }),
+    "utf-8",
+  );
+  await registerWebappInPreferences(appId, meta.name, {
+    color: meta.color,
+    iconUrl: meta.icon,
+    webappUrl: `/setup-api/webapps?app=${appId}`,
+  });
 }
 
 // ── Helpers ──

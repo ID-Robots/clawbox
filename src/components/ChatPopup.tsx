@@ -14,6 +14,14 @@ import {
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { isSentinel } from '@/lib/chat-sentinels'
+import {
+  type ThinkingLevel,
+  type ProviderReasoningConfig,
+  THINKING_LEVEL_LABELS,
+  getProviderReasoningConfig,
+  readPersistedThinkingLevel,
+  PERSIST_KEY_PREFIX,
+} from '@/lib/chat-reasoning'
 
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
@@ -131,7 +139,7 @@ import {
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel } from '@/lib/clawbox-ai-models'
+import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 
@@ -166,81 +174,6 @@ function extractText(msg: unknown): string {
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
-
-// Reasoning effort levels accepted by the OpenClaw gateway. The wire
-// vocabulary is broader than what any single upstream API supports —
-// each provider only honors a subset, with the gateway translating
-// (e.g. DeepSeek `xhigh`→`max`, Google `adaptive`→`thinking_budget=-1`).
-type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'adaptive'
-const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
-  off: 'Off',
-  minimal: 'Minimal',
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'X-High',
-  max: 'Max',
-  adaptive: 'Adaptive',
-}
-
-// Per-provider effort levels and defaults. Sourced from each upstream's
-// official API docs (see fix/clawai-account-tier branch history for the
-// research notes). Showing the universal 8-level dropdown for every
-// provider was misleading — `Max` doesn't exist on OpenAI, `Minimal`
-// was dropped from gpt-5.4+, Google has `Adaptive` (thinking_budget=-1)
-// where others have `Default`, etc. Per-provider config keeps the UI
-// honest.
-interface ProviderReasoningConfig {
-  levels: readonly ThinkingLevel[]
-  default: ThinkingLevel
-}
-
-const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
-  openai: { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
-  'openai-codex': { levels: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
-  // Anthropic effort docs: `low | medium | high | max` on Opus 4.6+,
-  // Sonnet 4.6, Opus 4.7, Mythos. Default per platform.claude.com is
-  // `high`. xhigh is Opus-4.7-only; we omit until we add per-model
-  // gating.
-  anthropic: { levels: ['low', 'medium', 'high', 'max'], default: 'high' },
-  // Gemini 2.5 thinking_budget: 0=off (Flash/Lite only — Pro silently
-  // ignores), -1=adaptive (auto). Picker stays provider-wide; Pro will
-  // fall back to adaptive when user picks Off.
-  google: { levels: ['off', 'low', 'medium', 'high', 'adaptive'], default: 'adaptive' },
-  // DeepSeek V4 docs accept low/medium/high/xhigh/max but compatibility
-  // layer maps low+medium→high and xhigh→max upstream, so the user-facing
-  // useful scale is just three.
-  deepseek: { levels: ['low', 'medium', 'high'], default: 'high' },
-  // ClawBox AI routes via DeepSeek today.
-  clawai: { levels: ['low', 'medium', 'high'], default: 'high' },
-  // OpenRouter normalizes per underlying model — surface the full set
-  // they document at openrouter.ai/docs/guides/best-practices/reasoning-tokens.
-  openrouter: { levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'], default: 'medium' },
-}
-
-const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {
-  levels: ['off', 'low', 'medium', 'high'],
-  default: 'medium',
-}
-
-function getProviderReasoningConfig(provider: string | null | undefined): ProviderReasoningConfig {
-  if (!provider) return FALLBACK_REASONING_CONFIG
-  return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG
-}
-
-const PERSIST_KEY_PREFIX = 'clawbox:chat:thinkingLevel'
-
-function readPersistedThinkingLevel(
-  provider: string | null | undefined,
-  cfg: ProviderReasoningConfig,
-): ThinkingLevel {
-  if (typeof window === 'undefined' || !provider) return cfg.default
-  try {
-    const raw = window.localStorage?.getItem(`${PERSIST_KEY_PREFIX}:${provider}`)
-    if (raw && cfg.levels.includes(raw as ThinkingLevel)) return raw as ThinkingLevel
-  } catch { /* localStorage unavailable */ }
-  return cfg.default
-}
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
@@ -1200,6 +1133,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
 
+  // The dropdown gate above only catches Max-tier picks the user *clicks*. A
+  // non-Max account can also boot with the Max tier already saved as the
+  // default (picked during setup, or left over after a plan downgrade). The
+  // portal gateway then silently rejects every turn — the user only sees the
+  // opaque "[assistant turn failed]". Catch that on load: explain it with an
+  // upgrade link and drop to the Pro tier the plan supports so chat works.
+  const tierGuardRef = useRef(false)
+  useEffect(() => {
+    if (tierGuardRef.current || clawboxLogin.loading) return
+    const active = chatModelState?.activeModel
+    if (!active || !isClawboxAiProModel(active) || clawboxLogin.tier === 'pro') return
+    tierGuardRef.current = true
+    setMessages(prev => [...prev, {
+      role: 'system',
+      text: `Max Tier needs a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it — switching you to Pro Tier so chat keeps working.`,
+      timestamp: Date.now(),
+      variant: 'error',
+    }])
+    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
+  }, [chatModelState?.activeModel, clawboxLogin.tier, clawboxLogin.loading, switchChatModel])
+
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
     if (!target) return
@@ -1318,6 +1272,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryCountRef.current = 0
       startReloadProgressTimer()
     }
+    // A skill install signals the gateway to restart (SIGUSR1), which drops the
+    // WS shortly after this event fires. We deliberately do NOT force a
+    // reconnect here (unlike the provider path below): the install route does
+    // not await the restart, so the WS is still up when this runs and the
+    // natural onClose → reconnect → resolve path delivers the post-restart
+    // `hello` that clears the overlay and auto-sends the skill-confirm message.
+    // Forcing a reconnect here instead races the restart and the auto-send
+    // lands on a dead socket.
     const skillHandler = makeHandler('skill')
     // Treat a primary-AI-provider change the same as a skill install:
     // the gateway is restarting, the chat WS is about to drop, and
@@ -1538,22 +1500,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             )
           })()}
           {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
-              the upstream-API-accurate set per provider. The wire
-              vocabulary is the OpenClaw gateway's full union; the
-              gateway translates per-provider (DeepSeek `xhigh`→`max`,
-              Google `adaptive`→`thinking_budget=-1`, etc.). */}
-          <HeaderDropdown
-            ariaLabel="Reasoning effort"
-            value={effectiveThinkingLevel}
-            options={visibleThinkingLevels.map(level => ({
-              id: level,
-              label: THINKING_LEVEL_LABELS[level] ?? level,
-            }))}
-            onChange={handleThinkingLevelChange}
-            onPointerDown={stopHeaderDrag}
-            triggerMaxWidth={100}
-            popoverWidth={180}
-          />
+              the upstream-API-accurate set per provider. The wire vocabulary
+              is the OpenClaw gateway's full union; the gateway translates
+              per-provider (DeepSeek `xhigh`→`max`, Google `adaptive`→
+              `thinking_budget=-1`, etc.). Hidden entirely for providers with
+              no real reasoning choice (off-only, e.g. local Gemma) — a
+              single-option dropdown is pointless and picking a level errors at
+              the gateway ("thinkingLevel … not supported for llamacpp/gemma…"). */}
+          {visibleThinkingLevels.length > 1 && (
+            <HeaderDropdown
+              ariaLabel="Reasoning effort"
+              value={effectiveThinkingLevel}
+              options={visibleThinkingLevels.map(level => ({
+                id: level,
+                label: THINKING_LEVEL_LABELS[level] ?? level,
+              }))}
+              onChange={handleThinkingLevelChange}
+              onPointerDown={stopHeaderDrag}
+              triggerMaxWidth={100}
+              popoverWidth={180}
+            />
+          )}
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (

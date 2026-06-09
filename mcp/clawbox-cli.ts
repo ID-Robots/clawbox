@@ -14,11 +14,52 @@
  *   clawbox system info
  */
 
+import { readFileSync } from "fs";
+import { join } from "path";
+
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
 
+// MCP bearer token. /setup-api/* is session-gated by src/middleware.ts once
+// setup completes, but it also accepts this per-install bearer (see
+// src/lib/mcp-token.ts) in lieu of a session cookie. Without it every call is
+// 307'd to /login and we'd JSON.parse the login HTML — the classic
+// "invalid JSON response: Failed to parse JSON" failure. clawbox-mcp.ts reads
+// this from its env; the CLI is launched separately (from the agent's shell)
+// which may not inherit that env, so fall back to the on-disk token the
+// gateway pre-start script wrote. Loaded lazily so token-free commands like
+// `app list` still work without it.
+let cachedToken: string | null = null;
+function getApiToken(): string {
+  if (cachedToken) return cachedToken;
+  const fromEnv = process.env.CLAWBOX_MCP_TOKEN;
+  if (fromEnv && fromEnv.length >= 16) {
+    cachedToken = fromEnv;
+    return fromEnv;
+  }
+  // Mirror src/lib/mcp-token.ts so a dev/local CLI run finds the same token
+  // file the server wrote under the cwd, not just the on-device install path.
+  const root = process.env.CLAWBOX_ROOT
+    || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+  try {
+    const raw = readFileSync(join(root, "data", ".mcp-token"), "utf-8").trim();
+    if (raw.length >= 16) {
+      cachedToken = raw;
+      return raw;
+    }
+  } catch {
+    // fall through to the missing-token error
+  }
+  console.error("MCP token not found: set CLAWBOX_MCP_TOKEN or ensure data/.mcp-token exists (is the gateway pre-start script running?).");
+  process.exit(1);
+}
+
 async function api(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, options);
+  const headers = new Headers(options?.headers);
+  if (!headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${getApiToken()}`);
+  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     console.error(`Error ${res.status}: ${body}`);

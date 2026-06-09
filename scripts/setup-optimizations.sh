@@ -12,7 +12,7 @@ echo "=== ClawBox Optimizations ==="
 
 # ── 1. TTS Caching Script ─────────────────────────────────────────────────
 
-echo "[1/4] Installing TTS cache system..."
+echo "[1/5] Installing TTS cache system..."
 mkdir -p "$SCRIPTS_DST"
 
 cat > "$SCRIPTS_DST/tts-cached.sh" << 'TTS_EOF'
@@ -65,7 +65,7 @@ echo "  ✓ TTS cache script installed"
 
 # ── 2. CPU Optimization Script ────────────────────────────────────────────
 
-echo "[2/4] Installing CPU optimizer..."
+echo "[2/5] Installing CPU optimizer..."
 
 cat > "$SCRIPTS_DST/optimize-cpu.sh" << 'CPU_EOF'
 #!/bin/bash
@@ -97,8 +97,10 @@ if [ -n "$WHISPER_PID" ]; then
     echo "  Whisper STT → cores 3-5"
 fi
 
-# OpenClaw gateway - can use all cores
-GATEWAY_PID=$(pgrep -f openclaw-gateway || echo "")
+# OpenClaw gateway - can use all cores. The process renames its argv to just
+# "openclaw", so match the exact name rather than the (never-matching)
+# "openclaw-gateway" string.
+GATEWAY_PID=$(pgrep -x openclaw | head -n1 || echo "")
 if [ -n "$GATEWAY_PID" ]; then
     taskset -cp 0-5 "$GATEWAY_PID"
     echo "  OpenClaw Gateway → all cores"
@@ -125,15 +127,34 @@ echo "  ✓ CPU optimizer installed"
 
 # ── 3. Pre-cache Common Phrases ───────────────────────────────────────────
 
-echo "[3/4] Skipping TTS pre-cache (servers start on demand)"
+echo "[3/5] Skipping TTS pre-cache (servers start on demand)"
 
 # ── 4. Apply CPU Optimization ─────────────────────────────────────────────
 
-echo "[4/4] Applying CPU optimization..."
+echo "[4/5] Applying CPU optimization..."
 su - "$CLAWBOX_USER" -c "bash '$SCRIPTS_DST/optimize-cpu.sh'" 2>/dev/null || true
+
+# ── 5. inotify limits for the OpenClaw gateway's file watchers ─────────────
+
+echo "[5/5] Raising inotify limits for gateway file watchers..."
+# The gateway runs several file watchers (skills/workspace, config reload,
+# MEMORY.md). Jetson's stock ceilings (128 instances / 65536 watches) can be
+# exhausted under load and surface as "EMFILE: too many open files" crashes +
+# restart loops. Persist higher limits and apply now — best-effort: the apply
+# is a no-op (and must not fail the install) inside CI/containers where
+# /proc/sys is read-only. See ID-Robots/clawbox#160.
+cat > /etc/sysctl.d/99-clawbox-inotify.conf << 'INOTIFY_EOF' || true
+# ClawBox: raise inotify ceilings so the OpenClaw gateway's watchers don't hit
+# EMFILE under load. See ID-Robots/clawbox#160.
+fs.inotify.max_user_instances = 512
+fs.inotify.max_user_watches = 524288
+INOTIFY_EOF
+sysctl -p /etc/sysctl.d/99-clawbox-inotify.conf >/dev/null 2>&1 || true
+echo "  ✓ inotify limits raised (instances=512, watches=524288)"
 
 echo ""
 echo "=== Optimizations Complete ==="
 echo "  • TTS caching system installed"
 echo "  • CPU affinity optimization for AI workloads"
 echo "  • Threading environment variables configured"
+echo "  • inotify limits raised for gateway watchers"

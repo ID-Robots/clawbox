@@ -1,6 +1,6 @@
 {
   "name": "clawbox-setup",
-  "version": "3.0.7",
+  "version": "3.1.0",
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
@@ -10,7 +10,7 @@
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
     "build": "next build",
-    "postbuild": "SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); [ -n \"$SRVJS\" ] && SDIR=$(dirname \"$SRVJS\") && cp -r .next/static \"$SDIR/.next/static\" && cp -r public \"$SDIR/public\" && [ \"$SRVJS\" != \".next/standalone/server.js\" ] && ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js || true",
+    "postbuild": "SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); if [ -n \"$SRVJS\" ]; then SDIR=$(dirname \"$SRVJS\"); rm -rf \"$SDIR/.next/static\" \"$SDIR/public\"; cp -r .next/static \"$SDIR/.next/static\"; cp -r public \"$SDIR/public\"; if [ \"$SRVJS\" != \".next/standalone/server.js\" ]; then ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js; fi; fi",
     "start": "PORT=80 HOSTNAME=0.0.0.0 node production-server.js",
     "lint": "eslint",
     "test": "vitest run --config vitest.config.ts",

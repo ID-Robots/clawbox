@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
+import ReconnectingOverlay from "./ReconnectingOverlay";
 
 interface UpdateStepProps {
   onNext: () => void;
@@ -61,6 +62,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  // The update reboots the device at the "Updating ClawBox and restarting"
+  // step. Once the server stops answering, hand off to the reconnecting overlay
+  // so the user gets the same animated loop as a manual restart; it polls until
+  // the server is back, then reloads (the status route resumes post-reboot).
+  const [serverDown, setServerDown] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
   const actionControllerRef = useRef<AbortController | null>(null);
@@ -81,7 +87,16 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     const controller = new AbortController();
     pollControllerRef.current = controller;
     let consecutiveFailures = 0;
-    let serverWentDown = false;
+    const noteFailure = () => {
+      consecutiveFailures++;
+      // Three misses (~6s) ⇒ the reboot has taken the server down. Surface the
+      // reconnecting overlay and stop our own poll — the overlay owns the
+      // reconnect-and-reload from here.
+      if (consecutiveFailures >= 3) {
+        setServerDown(true);
+        stopPolling();
+      }
+    };
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch("/setup-api/update/status", {
@@ -89,12 +104,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         });
         if (controller.signal.aborted) return;
         if (!res.ok) {
-          consecutiveFailures++;
-          if (consecutiveFailures >= 3) serverWentDown = true;
-          return;
-        }
-        if (serverWentDown) {
-          window.location.reload();
+          noteFailure();
           return;
         }
         consecutiveFailures = 0;
@@ -106,8 +116,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         }
       } catch {
         if (controller.signal.aborted) return;
-        consecutiveFailures++;
-        if (consecutiveFailures >= 3) serverWentDown = true;
+        noteFailure();
       }
     }, 2000);
   }, [stopPolling]);
@@ -188,6 +197,12 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const runningStep = isRunning && state && state.currentStepIndex >= 0
     ? state.steps[state.currentStepIndex]
     : null;
+
+  // Device is rebooting mid-update — the animated reconnect loop takes over
+  // until the server returns, then reloads to resume the post-reboot steps.
+  if (serverDown) {
+    return <ReconnectingOverlay />;
+  }
 
   if (loading) {
     return (

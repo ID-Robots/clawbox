@@ -10,7 +10,7 @@ describe("clawbox MCP browser guidance", () => {
     );
 
     expect(mcpSource).toContain("Use the dedicated browser_* tools for web browsing and browser automation.");
-    expect(mcpSource).toContain('server.tool("browser_open"');
+    expect(mcpSource).toContain('tool("browser_open"');
     expect(mcpSource).toContain('Do not use ui_open_app("browser") for normal browsing.');
   });
 

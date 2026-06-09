@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
+import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -167,7 +168,12 @@ export async function POST() {
     }
 
     const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
-    const allFailures = [...dataFailures, ...openclawFailures];
+    // ClawKeep state (token, config, passphrase, schedule) lives in its own
+    // dir (~/.clawkeep), outside DATA_DIR and ~/.openclaw — so without this a
+    // factory reset would leave the device still paired to the previous
+    // account's cloud backups. Wipe it too.
+    const clawkeepFailures = await removeDirectoryContents(CLAWKEEP_DATA_DIR);
+    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures];
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly

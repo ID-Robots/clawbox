@@ -633,6 +633,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
+  const [ipv4, setIpv4] = useState<string>("");
   const [hostnameInput, setHostnameInput] = useState<string>("");
   const [hostnameStatus, setHostnameStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [hostnameSaving, setHostnameSaving] = useState(false);
@@ -754,18 +755,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const hardRedirect = setTimeout(redirect, REBOOT_HARD_REDIRECT_MS);
     return () => { cancelled = true; clearTimeout(probeStart); clearTimeout(hardRedirect); };
   }, [hostnameRebootTo]);
-  const [currentHost, setCurrentHost] = useState<string>("");
-  useEffect(() => { if (typeof window !== "undefined") setCurrentHost(window.location.hostname); }, []);
-  const accessedByIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(currentHost) || currentHost === "localhost";
   const localUrl = hostname ? `${hostname}.local` : "";
-  const fullLocalUrl = localUrl ? `${typeof window !== "undefined" ? window.location.protocol : "http:"}//${localUrl}${typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : ""}` : "";
+  const proto = typeof window !== "undefined" ? window.location.protocol : "http:";
+  const port = typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : "";
+  const fullLocalUrl = localUrl ? `${proto}//${localUrl}${port}` : "";
+  // Prefer the IP: on home networks the access point often drops wired→Wi-Fi
+  // mDNS multicast, so `<hostname>.local` resolution is unreliable. The IP is
+  // the dependable address; `.local` is shown as a best-effort fallback.
+  const ipUrl = ipv4 ? `${proto}//${ipv4}${port}` : "";
+  const primaryUrl = ipUrl || fullLocalUrl;
+  const primaryLabel = ipv4 || localUrl;
   const [copiedLocalUrl, setCopiedLocalUrl] = useState(false);
   const copyLocalUrl = async () => {
-    if (!fullLocalUrl) return;
+    if (!primaryUrl) return;
     // Shared helper — falls back to the textarea + execCommand path on
     // plain http origins (clawbox.local etc.) where the modern Clipboard
     // API is blocked by the secure-context requirement.
-    if (await copyToClipboard(fullLocalUrl)) {
+    if (await copyToClipboard(primaryUrl)) {
       setCopiedLocalUrl(true);
       setTimeout(() => setCopiedLocalUrl(false), 1500);
     }
@@ -791,6 +797,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setHostname(d.hostname);
         setHostnameInput(d.hostname);
       }
+      if (typeof d.ipv4 === "string") setIpv4(d.ipv4);
     }).catch(() => {});
   }, []);
 
@@ -1639,14 +1646,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
 
-              {localUrl && (
-                <div className={`mt-4 rounded-xl border px-4 py-3 ${accessedByIp ? "border-amber-400/30 bg-amber-400/[0.08]" : "border-white/[0.06] bg-white/[0.03]"}`}>
+              {primaryLabel && (
+                <div className="mt-4 rounded-xl border px-4 py-3 border-white/[0.06] bg-white/[0.03]">
                   <div className="flex items-center gap-2 mb-1.5">
-                    <span className={`material-symbols-rounded ${accessedByIp ? "text-amber-300" : "text-[var(--coral-bright)]"}`} style={{ fontSize: 16 }}>{accessedByIp ? "warning" : "link"}</span>
+                    <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>link</span>
                     <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">Access this device at</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a href={fullLocalUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{localUrl}</a>
+                    <a href={primaryUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{primaryLabel}</a>
                     <button
                       onClick={copyLocalUrl}
                       className="px-2.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
@@ -1658,9 +1665,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </button>
                   </div>
                   <span className="sr-only" aria-live="polite">{copiedLocalUrl ? "URL copied to clipboard" : ""}</span>
-                  {accessedByIp && (
-                    <p className="text-[11px] text-amber-100/85 mt-2 leading-relaxed">
-                      You&apos;re currently visiting this device by IP address ({currentHost}). The IP changes when WiFi and Ethernet swap, which can drop your session. Use <span className="font-mono">{localUrl}</span> instead so the URL stays the same on either connection.
+                  {ipv4 && localUrl && (
+                    <p className="text-[11px] text-[var(--text-muted)] mt-2 leading-relaxed">
+                      <span className="font-mono text-[var(--text-secondary)]">{localUrl}</span> also works on networks that support mDNS. The IP can change when the device reconnects — reserve it in your router for a permanent address.
                     </p>
                   )}
                 </div>

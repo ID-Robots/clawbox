@@ -305,9 +305,11 @@ function ChromeDesktopInner() {
         if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
         // Open windows
         if (Array.isArray(data.desktop_open_windows)) {
+          // Restore the workspace but minimized — windows return to the taskbar
+          // instead of popping open over a fresh desktop on every reload/reboot.
           const restored = (data.desktop_open_windows as Array<{ appId: string; minimized: boolean; x?: number; y?: number; width?: number; height?: number }>)
             .filter((w) => w.appId !== "setup")
-            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height }));
+            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: true, x: w.x, y: w.y, width: w.width, height: w.height }));
           if (restored.length > 0) {
             setOpenWindows(restored);
             setNextZIndex(100 + restored.length);
@@ -1108,11 +1110,14 @@ function ChromeDesktopInner() {
             // Skip if already processed
             if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
             lastProcessedTs = ts;
-            // Delete before processing to prevent re-reads
+            // Delete before processing to prevent re-reads. The KV route's
+            // delete contract is { delete: "<key>" } — sending { delete: true }
+            // silently 400s, leaving the action in KV so it re-fires (and
+            // reopens the app) on every reload.
             await fetch("/setup-api/kv", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ key: "ui:pending-action", delete: true }),
+              body: JSON.stringify({ delete: "ui:pending-action" }),
             }).catch(() => {});
             if (action.type === "open_app" && action.appId) {
               openAppRef.current(action.appId);
