@@ -524,9 +524,9 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/wifi/ethernet") {
       // Ethernet present: the setup specs drive the Ethernet-first happy path
-      // ("Continue with Ethernet"), which advances in-page. The WiFi path tears
-      // down the hotspot and redirects to the box's new address — untestable in
-      // e2e, tracked in #167.
+      // ("Continue with Ethernet"), which advances in-page. The WiFi-handoff
+      // path is covered by setup-wifi-handoff.spec.ts, which overrides this
+      // route (no cable) and mocks the box's home-network origin.
       await fulfillJson(route, { connected: true, cable: true });
       return;
     }
