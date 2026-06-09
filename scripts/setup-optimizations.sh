@@ -97,8 +97,10 @@ if [ -n "$WHISPER_PID" ]; then
     echo "  Whisper STT → cores 3-5"
 fi
 
-# OpenClaw gateway - can use all cores
-GATEWAY_PID=$(pgrep -f openclaw-gateway || echo "")
+# OpenClaw gateway - can use all cores. The process renames its argv to just
+# "openclaw", so match the exact name rather than the (never-matching)
+# "openclaw-gateway" string.
+GATEWAY_PID=$(pgrep -x openclaw | head -n1 || echo "")
 if [ -n "$GATEWAY_PID" ]; then
     taskset -cp 0-5 "$GATEWAY_PID"
     echo "  OpenClaw Gateway → all cores"

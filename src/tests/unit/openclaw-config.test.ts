@@ -467,9 +467,9 @@ describe("openclaw-config", () => {
       process.kill = originalKill;
     });
 
-    it("sends SIGUSR1 to the gateway process", async () => {
+    it("sends SIGUSR1 to the gateway PID resolved from systemd", async () => {
       setupExecFileMock({
-        "pgrep -f openclaw-gateway": { stdout: "12345\n", stderr: "" },
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "12345\n", stderr: "" },
       });
 
       await openclawConfig.reloadGateway();
@@ -477,9 +477,10 @@ describe("openclaw-config", () => {
       expect(process.kill).toHaveBeenCalledWith(12345, "SIGUSR1");
     });
 
-    it("uses first PID when pgrep returns multiple", async () => {
+    it("falls back to pgrep -x and uses the first PID when systemd MainPID is unavailable", async () => {
       setupExecFileMock({
-        "pgrep -f openclaw-gateway": { stdout: "12345\n67890\n", stderr: "" },
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
+        "pgrep -x openclaw": { stdout: "12345\n67890\n", stderr: "" },
       });
 
       await openclawConfig.reloadGateway();
@@ -487,10 +488,11 @@ describe("openclaw-config", () => {
       expect(process.kill).toHaveBeenCalledWith(12345, "SIGUSR1");
     });
 
-    it("does not throw when pgrep finds no process (ESRCH)", async () => {
+    it("does not throw when the gateway process is not found (ESRCH)", async () => {
       const error = new Error("No process found") as NodeJS.ErrnoException;
       error.code = "ESRCH";
       setupExecFileMock({
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
         pgrep: error,
       });
 
@@ -498,9 +500,10 @@ describe("openclaw-config", () => {
       await expect(openclawConfig.reloadGateway()).resolves.toBeUndefined();
     });
 
-    it("does not call process.kill when pgrep returns empty output", async () => {
+    it("does not call process.kill when no PID is found", async () => {
       setupExecFileMock({
-        "pgrep -f openclaw-gateway": { stdout: "", stderr: "" },
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
+        "pgrep -x openclaw": { stdout: "", stderr: "" },
       });
 
       await openclawConfig.reloadGateway();
@@ -508,9 +511,10 @@ describe("openclaw-config", () => {
       expect(process.kill).not.toHaveBeenCalled();
     });
 
-    it("does not call process.kill when PID is NaN", async () => {
+    it("does not call process.kill when the resolved PID is NaN", async () => {
       setupExecFileMock({
-        "pgrep -f openclaw-gateway": { stdout: "not-a-number\n", stderr: "" },
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "not-a-number\n", stderr: "" },
+        "pgrep -x openclaw": { stdout: "still-not-a-number\n", stderr: "" },
       });
 
       await openclawConfig.reloadGateway();
@@ -523,6 +527,7 @@ describe("openclaw-config", () => {
       const error = new Error("Unexpected error") as NodeJS.ErrnoException;
       error.code = "EPERM";
       setupExecFileMock({
+        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
         pgrep: error,
       });
 
