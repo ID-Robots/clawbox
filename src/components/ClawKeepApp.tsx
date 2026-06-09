@@ -205,14 +205,25 @@ export default function ClawKeepApp() {
     refresh();
   }, [refresh]);
 
-  // Poll the dashboard every 3s while a backup is in progress. The server
-  // is the source of truth, so reopening the window mid-run still picks up
-  // the live "running" state and shows the right step.
+  // Poll the dashboard at a cadence that depends on whether a backup is
+  // running: fast (3s) during a backup so the live "running" step stays
+  // current, slow (10s) otherwise so an already-open window still reflects
+  // state changed elsewhere — e.g. switching the ClawBox AI account unpairs
+  // ClawKeep server-side, and without this the window keeps showing the stale
+  // "you're protected" screen until the user clicks something. getStatus() is
+  // a cheap local-file read (no portal call). The effect re-runs whenever
+  // `status` changes, so the period re-evaluates the moment a backup starts or
+  // ends.
   useEffect(() => {
-    if (!isBackupRunning(status)) return;
+    const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    // Skip a tick if the previous refresh is still in flight, so a slow/hung
+    // fetch can't stack concurrent requests on the Jetson.
+    let inFlight = false;
     const id = window.setInterval(() => {
-      void refresh();
-    }, 3000);
+      if (inFlight) return;
+      inFlight = true;
+      void refresh().finally(() => { inFlight = false; });
+    }, intervalMs);
     return () => window.clearInterval(id);
   }, [status, refresh]);
 

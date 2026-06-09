@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { ClawKeepError, deleteToken, resetRunningState } from "@/lib/clawkeep";
+import { ClawKeepError, unpairLocal } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -16,10 +16,7 @@ export const dynamic = "force-dynamic";
 // the dashboard.
 export async function POST() {
   try {
-    await deleteToken();
-    await resetRunningState().catch((err) => {
-      console.warn("[unpair] could not reset state.json (continuing):", err);
-    });
+    await unpairLocal();
     return NextResponse.json({ ok: true });
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;

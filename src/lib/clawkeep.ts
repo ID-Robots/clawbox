@@ -303,6 +303,34 @@ export async function deleteToken(): Promise<void> {
 }
 
 /**
+ * Forget this device's ClawKeep pairing locally: delete the token and clear
+ * the in-flight "running" state. Does NOT revoke server-side, and deliberately
+ * keeps config.toml / passphrase / schedule so a re-pair against a new account
+ * reuses the same encryption + schedule. Shared by the unpair route and the
+ * ClawBox-AI-account-change reset so the two stay in lockstep.
+ *
+ * `clearStats` controls what happens to the historical "last successful"
+ * numbers (last backup time / cloud size / snapshot count):
+ *  - false (default, manual "unpair this device"): keep them, since the user
+ *    may re-pair the same account and shouldn't lose their protection history.
+ *  - true (ClawBox AI account change): wipe them — they belong to the previous
+ *    account, so leaving them would make the new account's "you're protected"
+ *    screen show the old account's snapshot count and size.
+ */
+export async function unpairLocal(opts: { clearStats?: boolean } = {}): Promise<void> {
+  await deleteToken();
+  if (opts.clearStats) {
+    await fs.rm(STATE_PATH, { force: true }).catch((err) => {
+      console.warn("[clawkeep] could not clear state.json during account-change unpair (continuing):", err);
+    });
+  } else {
+    await resetRunningState().catch((err) => {
+      console.warn("[clawkeep] could not reset state.json during unpair (continuing):", err);
+    });
+  }
+}
+
+/**
  * Clear the in-flight tracking fields in state.json so the dashboard
  * stops showing a "running" spinner inherited from a daemon that was
  * killed mid-backup (systemd restart, OOM, manual `kill`, etc.).
@@ -339,9 +367,23 @@ export async function resetRunningState(): Promise<void> {
     upload_bytes_done: 0,
     upload_started_at_ms: 0,
   };
+  await writeStateFile(cleaned);
+}
+
+/**
+ * Atomically write state.json (temp file + rename, mode 0600) so a concurrent
+ * reader never sees a half-written file. Shared by resetRunningState() and
+ * syncStateFromCloud().
+ */
+let stateWriteSeq = 0;
+
+async function writeStateFile(state: StateFile): Promise<void> {
   await ensureDataDir();
-  const tmp = `${STATE_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(cleaned, null, 2), { mode: 0o600 });
+  // Per-call temp name (pid + monotonic counter) so concurrent writers — e.g.
+  // a pair-time cloud sync racing a stuck-spinner reset — can't clobber each
+  // other's temp file before the atomic rename.
+  const tmp = `${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`;
+  await fs.writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await fs.rename(tmp, STATE_PATH);
 }
 
@@ -734,13 +776,59 @@ function spawnCliJson<T>(
   });
 }
 
-export async function listCloudSnapshots(): Promise<CloudSnapshot[]> {
+async function fetchCloudSnapshots(): Promise<SnapshotsResponse> {
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
   if (!resp.ok) {
     throw new ClawKeepError(resp.error ?? "snapshots failed", 502);
   }
-  return resp.snapshots ?? [];
+  return resp;
+}
+
+export async function listCloudSnapshots(): Promise<CloudSnapshot[]> {
+  return (await fetchCloudSnapshots()).snapshots ?? [];
+}
+
+/**
+ * Seed state.json from the account's existing cloud snapshots.
+ *
+ * The dashboard's "last backup / cloud size / snapshot count" all come from
+ * state.json, which is only written by a *local* backup run. So right after
+ * (re)pairing an account that already has backups in the cloud, the device
+ * has no local record of them and would show "0 B / 0 / never" until the next
+ * backup. Pulling the real snapshot list on pair fixes that — the dashboard
+ * reflects what's actually in the account's cloud prefix immediately.
+ *
+ * Best-effort: a cloud-list failure (offline, portal hiccup, daemon missing)
+ * leaves state.json untouched rather than blocking the pair. Combined with the
+ * account-change `unpairLocal({ clearStats })` wipe, an offline re-pair then
+ * shows a clean slate instead of the previous account's numbers.
+ */
+export async function syncStateFromCloud(): Promise<void> {
+  let resp: SnapshotsResponse;
+  try {
+    resp = await fetchCloudSnapshots();
+  } catch (err) {
+    console.warn("[clawkeep] cloud snapshot sync after pair failed (continuing):", err);
+    return;
+  }
+  const snapshots = resp.snapshots ?? [];
+  const lastBackupAtMs = snapshots.reduce((max, s) => Math.max(max, s.last_modified_ms ?? 0), 0);
+  // Prefer the daemon's authoritative prefix total; fall back to summing the
+  // per-snapshot sizes only if an older daemon doesn't report cloudBytes.
+  const cloudBytes = resp.cloudBytes ?? snapshots.reduce((sum, s) => sum + (s.size_bytes ?? 0), 0);
+  await writeStateFile({
+    last_backup_at_ms: lastBackupAtMs,
+    last_cloud_bytes: cloudBytes,
+    last_snapshot_count: snapshots.length,
+    last_heartbeat_at_ms: lastBackupAtMs,
+    last_heartbeat_status: "",
+    last_step: "",
+    last_step_at_ms: 0,
+    upload_bytes_total: 0,
+    upload_bytes_done: 0,
+    upload_started_at_ms: 0,
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { writeToken } from "@/lib/clawkeep";
+import { syncStateFromCloud, writeToken } from "@/lib/clawkeep";
 import {
   type ClawKeepConnectSession,
   clearClawKeepSession,
@@ -46,6 +46,12 @@ async function readErrorBody(response: Response): Promise<string> {
 async function persistTokenInBackground(session: ClawKeepConnectSession, accessToken: string) {
   try {
     await writeToken(accessToken);
+    // Seed the dashboard from this account's existing cloud backups so a
+    // re-authenticated account shows its real snapshots/size right away
+    // instead of "0 B / never" until the first local backup. Best-effort:
+    // syncStateFromCloud swallows its own errors so a cloud-list failure
+    // can't fail the pairing.
+    await syncStateFromCloud();
     await writeClawKeepSession({
       ...session,
       status: "complete",
