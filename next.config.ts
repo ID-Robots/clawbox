@@ -88,7 +88,12 @@ const nextConfig: NextConfig = {
               "default-src 'self'",
               `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
               "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: blob:",
+              // The .local sources mirror connect-src below: the WiFi/credentials
+              // handoff overlays detect the box at its new address with an <img>
+              // probe (fetch is CORS-blocked cross-origin), and without them the
+              // browser CSP-blocks the probe before it leaves the page — the
+              // auto-redirect never fires and users must follow the manual URL.
+              "img-src 'self' data: blob: http://*.local http://*.local:* https://*.local https://*.local:*",
               "font-src 'self'",
               "connect-src 'self' ws: wss: http://*.local http://*.local:* https://*.local https://*.local:*",
               // Allow code-server iframe and webapp iframes (same origin)
