@@ -136,7 +136,12 @@ async function loadChatModelState() {
     }
   }
 
-  const primaryProvider = normalizeProvider(configStore.ai_model_provider);
+  // Prefer the live OpenClaw primary model's provider over the ClawBox config
+  // store: the store only refreshes at configure-time, so it drifts when the
+  // model changes elsewhere (#162). Fall back to the store for local/no-model.
+  const primaryProvider = (!isLocalModel(activeModel) && activeModel
+    ? normalizeProviderFromModel(activeModel)
+    : null) ?? normalizeProvider(configStore.ai_model_provider);
   // Keyed by *provider* (not by model id) so each provider gets ONE
   // row in the chat dropdown. Model variants (ClawBox AI Flash/Pro,
   // Claude Haiku/Sonnet/Opus, GPT-5.4 / -mini, etc.) are surfaced via
