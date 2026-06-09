@@ -1272,6 +1272,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryCountRef.current = 0
       startReloadProgressTimer()
     }
+    // A skill install signals the gateway to restart (SIGUSR1), which drops the
+    // WS shortly after this event fires. We deliberately do NOT force a
+    // reconnect here (unlike the provider path below): the install route does
+    // not await the restart, so the WS is still up when this runs and the
+    // natural onClose → reconnect → resolve path delivers the post-restart
+    // `hello` that clears the overlay and auto-sends the skill-confirm message.
+    // Forcing a reconnect here instead races the restart and the auto-send
+    // lands on a dead socket.
     const skillHandler = makeHandler('skill')
     // Treat a primary-AI-provider change the same as a skill install:
     // the gateway is restarting, the chat WS is about to drop, and
