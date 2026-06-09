@@ -80,7 +80,10 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   const SETTINGS_KEY = `clawbox-app-settings-${appId}`;
   const [settings, setSettings] = useState<Record<string, string | boolean>>({});
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  // "connected" = backend actually wrote the skill's config; "saved" = values
+  // stored but the skill has no on-device config writer yet (so it can't use
+  // them). Distinguishing the two keeps us from claiming a false "Connected!".
+  const [saveResult, setSaveResult] = useState<"idle" | "connected" | "saved">("idle");
   const [skillInfo, setSkillInfo] = useState<SkillInfo | null>(null);
   const [loadingSkill, setLoadingSkill] = useState(true);
   const [skillError, setSkillError] = useState(false);
@@ -113,7 +116,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
       kv.setJSON(SETTINGS_KEY, next);
       return next;
     });
-    setSaved(false);
+    setSaveResult("idle");
   }, [SETTINGS_KEY]);
 
   const [toggleError, setToggleError] = useState<string | null>(null);
@@ -147,13 +150,17 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [`app_${appId}_settings`]: settings }),
       });
-      await fetch("/setup-api/apps/settings", {
+      const res = await fetch("/setup-api/apps/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId, settings }),
       });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      // Only claim "Connected" when the backend actually wrote the skill's
+      // config (configWritten). Otherwise the values are stored but the skill
+      // can't read them yet — don't imply it's wired up.
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      setSaveResult(data?.configWritten ? "connected" : "saved");
+      setTimeout(() => setSaveResult("idle"), 4000);
     } catch {}
     setSaving(false);
   }, [appId, settings]);
@@ -300,6 +307,13 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 </div>
               ))}
             </div>
+            {saveResult === "saved" && (
+              <p className="text-xs text-amber-300/70 mt-3 leading-relaxed">
+                Keys saved on-device, but this skill doesn’t have a config writer yet,
+                so it can’t use them until its setup is wired. Your input stays on the
+                device — it is never sent to the agent.
+              </p>
+            )}
           </>
         )}
       </div>
@@ -329,12 +343,14 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
             onClick={handleSave}
             disabled={saving}
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
-              saved
+              saveResult === "connected"
                 ? "bg-green-500/20 text-green-400"
+                : saveResult === "saved"
+                ? "bg-amber-500/15 text-amber-300"
                 : "bg-white/10 hover:bg-white/15 text-white"
             } disabled:opacity-50`}
           >
-            {saving ? "Connecting..." : saved ? "Connected!" : "Connect"}
+            {saving ? "Connecting..." : saveResult === "connected" ? "Connected!" : saveResult === "saved" ? "Saved" : "Connect"}
           </button>
         )}
       </div>
