@@ -25,7 +25,7 @@ test.describe.configure({ mode: "serial" });
 
 test.describe("power restart", () => {
   test("trigger reboot, container exits, comes back with state intact", async () => {
-    test.setTimeout(10 * 60_000);
+    test.setTimeout(13 * 60_000);
 
     // Snapshot the state we expect to survive the restart.
     const before = await getStatus();
@@ -38,8 +38,9 @@ test.describe("power restart", () => {
       // write. Either outcome is fine.
     });
 
-    // systemd takes a moment to cascade the unit stops; allow up to 2 min.
-    await waitForContainerStopped(120_000);
+    // systemd cascades the unit stops (each up to its TimeoutStopSec); under CI
+    // load this can run past 2 min, so use the helper's default 4 min ceiling.
+    await waitForContainerStopped();
 
     // Explicitly restart. entrypoint.sh runs again but sees the volume is
     // populated and skips the initial seed. clawbox-bootstrap.service sees
