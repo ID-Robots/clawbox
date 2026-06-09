@@ -24,7 +24,12 @@ const PROBE_PNG = Buffer.from(
 );
 
 test("wifi connect hands off through the overlay and resumes the wizard", async ({ page }, testInfo) => {
-  await installClawboxMocks(page);
+  // The default 50ms timer cap also crushes imgProbe's own 4s timeout — on
+  // slow hardware the route-interception round trip doesn't fit in 50ms, so
+  // every probe attempt "times out" and the overlay never finds the box.
+  // 500ms keeps the grace/probe/redirect loop fast but gives the intercepted
+  // probe response room to land.
+  await installClawboxMocks(page, { timeoutCapMs: 500 });
 
   // No ethernet: routes are checked newest-first, so this overrides the
   // helper's cable-connected default and drives the WiFi-first path.
