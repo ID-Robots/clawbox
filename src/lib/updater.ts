@@ -304,6 +304,7 @@ const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repe
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
+const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
@@ -342,21 +343,43 @@ function compareSemverTags(a: string, b: string): number {
   return 0;
 }
 
+/** Read the `version` field from a package.json, or null if unreadable. */
+async function readPkgVersion(pkgPath: string): Promise<string | null> {
+  try {
+    const raw = await readFile(pkgPath, "utf-8");
+    return (JSON.parse(raw) as { version?: string }).version ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The installed ClawBox version, read from package.json at runtime.
+ *
+ * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time from
+ * `git describe`, so when a device syncs new code + package.json without a
+ * clean Next rebuild, the baked value goes stale — the device then mis-reports
+ * its own version and keeps offering an update it already installed. package.json
+ * is rewritten by the git sync, so it always reflects the running release.
+ * Falls back to the build-time value, then "unknown", if the file is unreadable.
+ */
+async function readClawboxVersion(): Promise<string> {
+  const v = await readPkgVersion(CLAWBOX_PKG);
+  if (v) return v.startsWith("v") ? v : `v${v}`;
+  return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
+}
+
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
     return cachedVersionInfo;
   }
 
-  const [targetVersion, openclawCurrent, openclawTarget] = await Promise.all([
+  const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
     execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
       .then(({ stdout }) => stdout.trim() || null)
-      .catch(() =>
-        // Fallback: read version from installed package.json
-        readFile(OPENCLAW_PKG, "utf-8")
-          .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
-          .catch(() => null)
-      ),
+      // Fallback: read version from the installed package.json
+      .catch(() => readPkgVersion(OPENCLAW_PKG)),
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
@@ -370,11 +393,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
         return OPENCLAW_VERSION_FALLBACK;
       }
     })(),
+    readClawboxVersion(),
   ]);
 
-  // git describe gives "v2.2.0-3-gad4bf5a" for commits after a tag;
-  // extract the base tag so we can compare properly with the target tag
-  const rawVersion = process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
+  // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
+  // so it compares cleanly against the target tag.
   const baseTag = rawVersion.match(/^(v\d+\.\d+\.\d+)/)?.[1] ?? rawVersion;
 
   // Only report a target if it's strictly newer than the device's base tag.
