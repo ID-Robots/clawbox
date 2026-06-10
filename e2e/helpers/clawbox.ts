@@ -524,9 +524,9 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/wifi/ethernet") {
       // Ethernet present: the setup specs drive the Ethernet-first happy path
-      // ("Continue with Ethernet"), which advances in-page. The WiFi path tears
-      // down the hotspot and redirects to the box's new address — untestable in
-      // e2e, tracked in #167.
+      // ("Continue with Ethernet"), which advances in-page. The WiFi-handoff
+      // path is covered by setup-wifi-handoff.spec.ts, which overrides this
+      // route (no cable) and mocks the box's home-network origin.
       await fulfillJson(route, { connected: true, cable: true });
       return;
     }
@@ -1109,19 +1109,29 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   });
 }
 
+/**
+ * The wizard step right after WiFi: the update step auto-advances to
+ * credentials the moment it sees there's nothing to install, and with test
+ * timers capped (installClawboxMocks) that can happen before Playwright
+ * catches the update step on screen — so race the two steps rather than
+ * assuming the update step lingers long enough to assert.
+ */
+export function wizardStepAfterWifi(page: Page) {
+  return page
+    .getByTestId("setup-step-update")
+    .or(page.getByTestId("setup-step-credentials"))
+    .first();
+}
+
 export async function completeSetupWizard(page: Page) {
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
   // Ethernet-first happy path: a wired uplink lets the wizard advance in-page.
-  // (The WiFi path redirects through the handoff overlay — untestable, see #167.)
+  // (The WiFi path is covered by setup-wifi-handoff.spec.ts.)
   await page.getByRole("button", { name: "Continue with Ethernet" }).click();
 
-  // The update step auto-advances to credentials the moment it sees there's
-  // nothing to install. With test timers capped (installClawboxMocks) that can
-  // happen before Playwright catches the update step on screen, so race the two
-  // steps rather than assuming the update step lingers long enough to assert.
   const updateStep = page.getByTestId("setup-step-update");
   const credentialsStep = page.getByTestId("setup-step-credentials");
-  await expect(updateStep.or(credentialsStep).first()).toBeVisible({ timeout: 10_000 });
+  await expect(wizardStepAfterWifi(page)).toBeVisible({ timeout: 10_000 });
   if (await updateStep.isVisible().catch(() => false)) {
     const advancedAutomatically = await expect(credentialsStep).toBeVisible({ timeout: 4_000 })
       .then(() => true)
