@@ -297,6 +297,43 @@ describe("updater", () => {
       expect(aptStep?.error).not.toContain("Linkdown");
     });
 
+    it("treats a post_update budget overrun as advisory — the update still completes", async () => {
+      // post_update's content is non-fatal by design (every fixup is
+      // `|| warn`); an overrun just means cold caches made it slow. Failing
+      // the whole update over it painted "Update failed" (with a Retry that
+      // re-runs everything) on a successful update.
+      const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": timeoutErr,
+        "show clawbox-root-update@post_update.service": { stdout: "success\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      // Drive it through the post-restart continuation: resumes at post_update.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      const result = await updater.checkContinuation();
+      expect(result).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.status).toBe("completed");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
+    });
+
     it("stops the update sequence when bootstrap_updater fails", async () => {
       setupExecFileMock({
         "start clawbox-root-update@bootstrap_updater.service": new Error("systemctl failed"),
