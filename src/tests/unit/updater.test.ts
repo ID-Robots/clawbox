@@ -350,6 +350,23 @@ describe("updater", () => {
       const rebuildStep = state.steps.find((step) => step.id === "restart");
       expect(rebuildStep?.status).toBe("failed");
     });
+
+    it("reports a failed update when no new build was produced", async () => {
+      // Power-cycle scenario: the rebuild unit failed, the box was rebooted
+      // before the watcher noticed (so the unit's systemd Result reset), and
+      // the stale flag survived. The recorded BUILD_ID still matching the
+      // on-disk one is the proof no rebuild happened.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockReadFile.mockResolvedValue("build-aaa\n");
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("without producing a new build");
+    });
   });
 
   describe("getTargetVersion", () => {

@@ -93,7 +93,14 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   }
 }
 
-class RebuildFailedError extends Error {}
+/** Read .next/BUILD_ID — regenerated on every successful `next build`. */
+async function readBuildId(): Promise<string> {
+  try {
+    return (await readFile(path.join(PROJECT_DIR, ".next", "BUILD_ID"), "utf-8")).trim();
+  } catch {
+    return "";
+  }
+}
 
 /**
  * Wait for the rebuild_reboot root unit to take this process down (it
@@ -103,25 +110,25 @@ class RebuildFailedError extends Error {}
  * "Update complete" while the box kept serving the old build, with the
  * promised restart never coming. Watch the unit instead: a failure surfaces
  * as a failed step with the real error, and only systemd killing us counts
- * as success.
+ * as success — this function never returns normally.
  */
-async function waitForRebuildToTakeOver(): Promise<void> {
+async function waitForRebuildToTakeOver(): Promise<never> {
   const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
+  let message = "Rebuild did not restart the device within the expected window";
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
-    const result = await getRootStepResult(REBUILD_ROOT_STEP);
-    if (result === "failed") {
-      // The restart isn't coming — clear the flag so the next server start
-      // doesn't "continue" a rebuild that never happened.
-      await set("update_needs_continuation", undefined);
+    if ((await getRootStepResult(REBUILD_ROOT_STEP)) === "failed") {
       const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP);
-      throw new RebuildFailedError(
-        lastLog ? `Rebuild failed: ${lastLog}` : "Rebuild failed — see clawbox-root-update@rebuild_reboot logs",
-      );
+      message = lastLog
+        ? `Rebuild failed: ${lastLog}`
+        : "Rebuild failed — see clawbox-root-update@rebuild_reboot logs";
+      break;
     }
   }
+  // Either way the restart isn't coming — clear the flag so the next server
+  // start doesn't "continue" a rebuild that never happened.
   await set("update_needs_continuation", undefined);
-  throw new RebuildFailedError("Rebuild did not restart the device within the expected window");
+  throw new Error(message);
 }
 
 function getLastLogLine(logText: string): string | null {
@@ -251,7 +258,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
     ` && ${gitCmd} clean -fd`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
-  await set("update_needs_continuation", true);
+  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
+  // every successful `next build`, so the continuation can demand positive
+  // evidence the rebuild actually happened. Without it, a power cycle in the
+  // few seconds between unit failure and our watcher noticing would reset the
+  // unit's systemd state and let the continuation fake a completed update.
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
   await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
   await waitForRebuildToTakeOver();
 }
@@ -321,8 +333,8 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     id: RESTART_STEP_ID,
     label: "Updating ClawBox and restarting",
     // timeoutMs is unenforced for customRun steps; the real budget lives in
-    // REBUILD_TAKEOVER_TIMEOUT_MS inside waitForRebuildToTakeOver. Kept in
-    // sync for readers.
+    // REBUILD_TAKEOVER_TIMEOUT_MS inside waitForRebuildToTakeOver — same
+    // constant, so it can't drift.
     timeoutMs: REBUILD_TAKEOVER_TIMEOUT_MS,
     customRun: updateClawBoxAndReboot,
     // If the rebuild failed, the new install.sh never deployed — running
@@ -591,14 +603,21 @@ export async function checkContinuation(): Promise<boolean> {
   const startFrom = restartIndex + 1;
 
   // The flag only proves the rebuild unit was STARTED, not that it rebuilt
-  // and restarted anything. If the server came back some other way (manual
-  // restart, crash recovery) while the unit had failed, resuming here would
-  // stamp "Update complete" on a box still running its old build. After a
-  // genuine reboot the unit's Result resets, so this only trips on real
-  // failures.
-  if ((await getRootStepResult(REBUILD_ROOT_STEP)) === "failed") {
-    const message =
-      (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart";
+  // and restarted anything. Resuming blindly would stamp "Update complete"
+  // on a box still running its old build. Demand evidence the rebuild
+  // happened: the unit must not sit in `failed`, and the on-disk BUILD_ID
+  // must differ from the one recorded before the rebuild (systemd unit state
+  // resets across reboots, so the Result check alone can be erased by a
+  // power cycle; the BUILD_ID can't). Legacy boolean flags (written by the
+  // previous updater version) carry no build identity — for those only the
+  // unit check applies.
+  const unitFailed = (await getRootStepResult(REBUILD_ROOT_STEP)) === "failed";
+  const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
+  const buildUnchanged = recordedBuildId !== null && recordedBuildId === (await readBuildId());
+  if (unitFailed || buildUnchanged) {
+    const message = unitFailed
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
+      : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
     state = createInitialState();
     state.phase = "failed";
     for (let i = 0; i < restartIndex; i++) {
@@ -607,7 +626,6 @@ export async function checkContinuation(): Promise<boolean> {
     state.steps[restartIndex].status = "failed";
     state.steps[restartIndex].error = message;
     state.error = message;
-    state.currentStepIndex = -1;
     return false;
   }
 

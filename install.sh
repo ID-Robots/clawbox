@@ -956,8 +956,10 @@ oc_config_set() {
     if as_clawbox "$OPENCLAW_BIN" config set "$@"; then
       return 0
     fi
-    echo "  config set $1 failed (attempt $attempt/3) — retrying..."
-    sleep 2
+    if [ "$attempt" -lt 3 ]; then
+      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      sleep 2
+    fi
   done
   echo "  ERROR: config set $1 failed after 3 attempts" >&2
   return 1
