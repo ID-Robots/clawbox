@@ -3,6 +3,10 @@ import { execSync } from "child_process";
 
 const isDev = process.env.NODE_ENV === "development";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
+// LAN origins the box can reappear at after a network/hostname change —
+// shared by connect-src (fetch probes) and img-src (the handoff overlays'
+// <img> probes) so the two CSP directives can't drift apart.
+const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
 // Git-based version: "v2.0.0" on tag, "v2.0.0-3-gca62836" after commits
 const APP_VERSION = (() => {
   try {
@@ -88,14 +92,14 @@ const nextConfig: NextConfig = {
               "default-src 'self'",
               `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
               "style-src 'self' 'unsafe-inline'",
-              // The .local sources mirror connect-src below: the WiFi/credentials
-              // handoff overlays detect the box at its new address with an <img>
-              // probe (fetch is CORS-blocked cross-origin), and without them the
-              // browser CSP-blocks the probe before it leaves the page — the
+              // LOCAL_LAN_SOURCES in img-src: the WiFi/credentials handoff
+              // overlays detect the box at its new address with an <img> probe
+              // (fetch is CORS-blocked cross-origin), and without it the browser
+              // CSP-blocks the probe before it leaves the page — the
               // auto-redirect never fires and users must follow the manual URL.
-              "img-src 'self' data: blob: http://*.local http://*.local:* https://*.local https://*.local:*",
+              `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES}`,
               "font-src 'self'",
-              "connect-src 'self' ws: wss: http://*.local http://*.local:* https://*.local https://*.local:*",
+              `connect-src 'self' ws: wss: ${LOCAL_LAN_SOURCES}`,
               // Allow code-server iframe and webapp iframes (same origin)
               `frame-src 'self' blob:`,
               `frame-ancestors ${frameAncestors}`,

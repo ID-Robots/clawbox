@@ -1,5 +1,5 @@
 import { expect, test } from "./helpers/coverage";
-import { installClawboxMocks } from "./helpers/clawbox";
+import { installClawboxMocks, wizardStepAfterWifi } from "./helpers/clawbox";
 
 /**
  * Covers the WiFi-handoff path (#167): joining a home network on the
@@ -23,7 +23,7 @@ const PROBE_PNG = Buffer.from(
   "base64",
 );
 
-test("wifi connect hands off through the overlay and resumes the wizard", async ({ page }, testInfo) => {
+test("wifi connect hands off through the overlay and resumes the wizard", async ({ page, baseURL }) => {
   // The default 50ms timer cap also crushes imgProbe's own 4s timeout — on
   // slow hardware the route-interception round trip doesn't fit in 50ms, so
   // every probe attempt "times out" and the overlay never finds the box.
@@ -41,7 +41,6 @@ test("wifi connect hands off through the overlay and resumes the wizard", async 
   );
 
   // The box's "new address" on the home network.
-  const baseURL = testInfo.project.use.baseURL ?? "http://localhost:3000";
   await page.route("http://clawbox.local/clawbox-icon.png*", (route) =>
     route.fulfill({ contentType: "image/png", body: PROBE_PNG }),
   );
@@ -67,9 +66,6 @@ test("wifi connect hands off through the overlay and resumes the wizard", async 
 
   // Probe answers → overlay redirects to the box's new address → bounced back
   // to the test origin → the wizard reloads and resumes PAST the WiFi step
-  // (the connect mock set wifi_configured). Update may auto-advance to
-  // credentials, so accept either resume target.
-  const updateStep = page.getByTestId("setup-step-update");
-  const credentialsStep = page.getByTestId("setup-step-credentials");
-  await expect(updateStep.or(credentialsStep).first()).toBeVisible({ timeout: 15_000 });
+  // (the connect mock set wifi_configured).
+  await expect(wizardStepAfterWifi(page)).toBeVisible({ timeout: 15_000 });
 });
