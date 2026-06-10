@@ -28,7 +28,12 @@ const BASE_ORIGIN = process.env.PLAYWRIGHT_BASE_URL || `http://localhost:${cover
 // home-network address — untestable in e2e (no real box to probe), so that
 // new code stays uncovered and pins the aggregate at ~39%. Raise back to 40
 // once #167 lands e2e for the handoff flow.
-const MIN_APP_COVERAGE = 38;
+//
+// 2026-06-10: raised 38 → 40. setup-wifi-handoff.spec.ts now drives the
+// WiFi-handoff path end to end (the home-network origin is mocked at the
+// network layer, so WifiHandoffOverlay's real probe/redirect logic runs),
+// which un-pins the handoff/overlay code that forced the 06-05 drop.
+const MIN_APP_COVERAGE = 40;
 
 async function walk(dir) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
