@@ -68,9 +68,60 @@ export interface UpdateState {
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
 
-/** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
-function waitForTermination(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 30_000));
+// Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
+// Jetson, plus the config/redeploy steps before it and the reboot after.
+const REBUILD_TAKEOVER_TIMEOUT_MS = 900_000;
+
+// The root unit that performs the rebuild + restart. Distinct from
+// RESTART_STEP_ID ("restart"), which is the UI step's identity — querying
+// `clawbox-root-update@restart.service` would hit a unit that doesn't exist
+// (and `systemctl show -p Result` reports "success" for unloaded units, which
+// would silently disable the failure detection below).
+const REBUILD_ROOT_STEP = "rebuild_reboot";
+
+/** `systemctl show <unit> -p Result --value`, or null if unqueryable. */
+async function getRootStepResult(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", `clawbox-root-update@${stepId}.service`, "-p", "Result", "--value"],
+      { timeout: 10_000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+class RebuildFailedError extends Error {}
+
+/**
+ * Wait for the rebuild_reboot root unit to take this process down (it
+ * restarts clawbox-setup / reboots the box on success). The old
+ * implementation was a blind 30s sleep that resolved SUCCESS — so a rebuild
+ * that failed (or merely outlived the sleep) let the update march on to
+ * "Update complete" while the box kept serving the old build, with the
+ * promised restart never coming. Watch the unit instead: a failure surfaces
+ * as a failed step with the real error, and only systemd killing us counts
+ * as success.
+ */
+async function waitForRebuildToTakeOver(): Promise<void> {
+  const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    const result = await getRootStepResult(REBUILD_ROOT_STEP);
+    if (result === "failed") {
+      // The restart isn't coming — clear the flag so the next server start
+      // doesn't "continue" a rebuild that never happened.
+      await set("update_needs_continuation", undefined);
+      const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP);
+      throw new RebuildFailedError(
+        lastLog ? `Rebuild failed: ${lastLog}` : "Rebuild failed — see clawbox-root-update@rebuild_reboot logs",
+      );
+    }
+  }
+  await set("update_needs_continuation", undefined);
+  throw new RebuildFailedError("Rebuild did not restart the device within the expected window");
 }
 
 function getLastLogLine(logText: string): string | null {
@@ -201,8 +252,8 @@ async function updateClawBoxAndReboot(): Promise<void> {
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
   await set("update_needs_continuation", true);
-  await startRootServiceFireAndForget("rebuild_reboot");
-  await waitForTermination();
+  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  await waitForRebuildToTakeOver();
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -269,8 +320,15 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: RESTART_STEP_ID,
     label: "Updating ClawBox and restarting",
-    timeoutMs: 90_000,
+    // timeoutMs is unenforced for customRun steps; the real budget lives in
+    // REBUILD_TAKEOVER_TIMEOUT_MS inside waitForRebuildToTakeOver. Kept in
+    // sync for readers.
+    timeoutMs: REBUILD_TAKEOVER_TIMEOUT_MS,
     customRun: updateClawBoxAndReboot,
+    // If the rebuild failed, the new install.sh never deployed — running
+    // post_update fixups from a half-applied state helps nobody. Stop here
+    // and surface the error.
+    failFast: true,
   },
   {
     // Runs after reboot via checkContinuation — picks up dispatcher scripts,
@@ -531,6 +589,27 @@ export async function checkContinuation(): Promise<boolean> {
 
   const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
+
+  // The flag only proves the rebuild unit was STARTED, not that it rebuilt
+  // and restarted anything. If the server came back some other way (manual
+  // restart, crash recovery) while the unit had failed, resuming here would
+  // stamp "Update complete" on a box still running its old build. After a
+  // genuine reboot the unit's Result resets, so this only trips on real
+  // failures.
+  if ((await getRootStepResult(REBUILD_ROOT_STEP)) === "failed") {
+    const message =
+      (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart";
+    state = createInitialState();
+    state.phase = "failed";
+    for (let i = 0; i < restartIndex; i++) {
+      state.steps[i].status = "completed";
+    }
+    state.steps[restartIndex].status = "failed";
+    state.steps[restartIndex].error = message;
+    state.error = message;
+    state.currentStepIndex = -1;
+    return false;
+  }
 
   running = true;
   state = createInitialState();

@@ -318,6 +318,38 @@ describe("updater", () => {
       expect(result).toBe(true);
       expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
     });
+
+    it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
+      // The continuation flag only proves the rebuild unit STARTED. If the
+      // server came back without the unit succeeding (georgi: a config-set
+      // conflict killed it before the build), resuming would stamp "Update
+      // complete" on a box still running its old build.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p Result": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: "ConfigMutationConflictError: config changed since last load\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      // Flag still cleared — the failure must not replay on every poll.
+      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("ConfigMutationConflictError: config changed since last load");
+      // The UI step's id is "restart"; "rebuild_reboot" is the root UNIT name.
+      const rebuildStep = state.steps.find((step) => step.id === "restart");
+      expect(rebuildStep?.status).toBe("failed");
+    });
   });
 
   describe("getTargetVersion", () => {

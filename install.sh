@@ -942,24 +942,44 @@ step_openclaw_patch() {
   echo "  Device identity bypass patch applied and verified"
 }
 
+# `openclaw config set` (OpenClaw 2026.6.x) does an optimistic-concurrency
+# check: if anything else writes openclaw.json between its load and write —
+# the live gateway, or the CLI's own state migrations triggered by the
+# PREVIOUS call — it dies with ConfigMutationConflictError. Under
+# `set -euo pipefail` that aborted the whole step mid-update and left
+# devices half-updated: rebuild_reboot never reached the rebuild, while the
+# updater still reported success (see fix in src/lib/updater.ts). Each retry
+# reloads the config fresh, so a transient conflict resolves itself.
+oc_config_set() {
+  local attempt
+  for attempt in 1 2 3; do
+    if as_clawbox "$OPENCLAW_BIN" config set "$@"; then
+      return 0
+    fi
+    echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+    sleep 2
+  done
+  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  return 1
+}
+
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local CLAWBOX_AI_ENV="$PROJECT_DIR/.env"
   local CLAWBOX_AI_KEY="${CLAWBOX_AI_API_KEY:-}"
   local AUTH_PROFILES="$CLAWBOX_HOME/.openclaw/agents/main/agent/auth-profiles.json"
 
-  # Sequential config set calls to avoid ConfigMutationConflictError
   # Only seed the primary model if unset — preserves the user's provider choice
   # across updates (rebuild_reboot re-invokes this step).
   local CURRENT_PRIMARY
   CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
-    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+    oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
     echo "  Default model set"
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi
-  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.compaction.reserveTokensFloor 24000
+  oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
   echo "  Compaction reserve floor set"
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
@@ -970,44 +990,21 @@ step_openclaw_config() {
     CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
     mkdir -p "$(dirname "$AUTH_PROFILES")"
     CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
-    as_clawbox "$OPENCLAW_BIN" config set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
-    as_clawbox "$OPENCLAW_BIN" config set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
-    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.fallback "deepseek/deepseek-chat"
+    oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
+    oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
     echo "  ClawBox AI fallback model configured"
   fi
 
-  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode token
-  # Seed a strong per-device gateway token (not the public legacy literal).
-  # gateway-pre-start.sh preserves it on every start; the gateway resolves it
-  # from config (no --token flag). Only seed when missing/weak so re-runs of
-  # the installer don't rotate a token a device is already using.
-  # Strong = a `${ENV}` interpolation or a >=32-char non-legacy string
-  # (kept in lockstep with is_strong_gateway_token in gateway-pre-start.sh).
-  # `|| true`: on a fresh install the token key doesn't exist yet, so
-  # `config get` exits non-zero — without this, set -euo pipefail would abort
-  # the whole installer here (caught by the e2e-install harness).
-  EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
-  if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
-    GW_TOKEN_STRONG=1
-  elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
-    GW_TOKEN_STRONG=1
-  else
-    GW_TOKEN_STRONG=0
-  fi
-  if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
-    GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN"
-    echo "  Gateway auth token generated (per-device)"
-  else
-    echo "  Gateway auth token preserved (already strong)"
-  fi
-  echo "  Gateway auth mode set to token"
-
-  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
-  echo "  allowInsecureAuth enabled"
-
-  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json
-  echo "  dangerouslyDisableDeviceAuth enabled"
+  # gateway.auth.mode/token and gateway.controlUi.{allowInsecureAuth,
+  # dangerouslyDisableDeviceAuth} are deliberately NOT set here:
+  # gateway-pre-start.sh owns them, enforcing all four atomically (single
+  # read-modify-write on openclaw.json) on every gateway start — including
+  # the start right after this installer/updater finishes. Setting them here
+  # too made two writers race the live gateway; the controlUi pair was the
+  # exact `config set` that died with ConfigMutationConflictError mid-update
+  # and aborted rebuild_reboot before the rebuild.
+  echo "  Gateway auth/controlUi config deferred to gateway-pre-start.sh"
 
   # Register Telegram channel (if token exists)
   if [ -f "$CLAWBOX_CONFIG" ]; then
