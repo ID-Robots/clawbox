@@ -318,6 +318,55 @@ describe("updater", () => {
       expect(result).toBe(true);
       expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
     });
+
+    it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
+      // The continuation flag only proves the rebuild unit STARTED. If the
+      // server came back without the unit succeeding (georgi: a config-set
+      // conflict killed it before the build), resuming would stamp "Update
+      // complete" on a box still running its old build.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p Result": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: "ConfigMutationConflictError: config changed since last load\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      // Flag still cleared — the failure must not replay on every poll.
+      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("ConfigMutationConflictError: config changed since last load");
+      // The UI step's id is "restart"; "rebuild_reboot" is the root UNIT name.
+      const rebuildStep = state.steps.find((step) => step.id === "restart");
+      expect(rebuildStep?.status).toBe("failed");
+    });
+
+    it("reports a failed update when no new build was produced", async () => {
+      // Power-cycle scenario: the rebuild unit failed, the box was rebooted
+      // before the watcher noticed (so the unit's systemd Result reset), and
+      // the stale flag survived. The recorded BUILD_ID still matching the
+      // on-disk one is the proof no rebuild happened.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockReadFile.mockResolvedValue("build-aaa\n");
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("without producing a new build");
+    });
   });
 
   describe("getTargetVersion", () => {
