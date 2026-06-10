@@ -124,6 +124,15 @@ export async function dockerStart(): Promise<void> {
   await execFileAsync("docker", ["start", CONTAINER_NAME], { timeout: 60_000 });
 }
 
+/**
+ * Force-stop the container (SIGTERM to PID 1, SIGKILL after the grace period).
+ * Fallback for the power test when an in-container `systemctl reboot` doesn't
+ * propagate to a container exit on its own (a CI Docker-in-systemd flake).
+ */
+export async function dockerStop(): Promise<void> {
+  await execFileAsync("docker", ["stop", "-t", "30", CONTAINER_NAME], { timeout: 60_000 });
+}
+
 export async function dockerExec(cmd: string[], opts: { user?: string; timeoutMs?: number } = {}): Promise<string> {
   const args = ["exec"];
   if (opts.user) args.push("--user", opts.user);
