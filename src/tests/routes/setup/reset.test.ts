@@ -44,7 +44,9 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
     _opts: object,
     callback?: (error: Error | null, result: { stdout: string; stderr: string }) => void
   ) => {
-    const key = `${cmd} ${args[0] || ""}`;
+    // Full args so a key like "systemctl start clawbox-root-update@chpasswd"
+    // can target a specific service via substring match in `includes()` below.
+    const key = `${cmd} ${args.join(" ")}`;
 
     let result: { stdout: string; stderr: string } | Error | undefined;
     for (const k of Object.keys(results)) {
