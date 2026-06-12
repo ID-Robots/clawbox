@@ -46,16 +46,15 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
     callback?: (error: Error | null, result: { stdout: string; stderr: string }) => void
   ) => {
     // Full args so a key like "systemctl start clawbox-root-update@chpasswd"
-    // can target a specific service via substring match in `includes()` below.
+    // can target a specific service via substring match below. Pick the most
+    // specific (longest) matching key, not the first — otherwise a broad key
+    // like "systemctl" listed earlier would shadow the service-specific stubs.
     const key = `${cmd} ${args.join(" ")}`;
 
-    let result: { stdout: string; stderr: string } | Error | undefined;
-    for (const k of Object.keys(results)) {
-      if (key.includes(k)) {
-        result = results[k];
-        break;
-      }
-    }
+    const matchedKey = Object.keys(results)
+      .filter((k) => key.includes(k))
+      .sort((a, b) => b.length - a.length)[0];
+    const result = matchedKey !== undefined ? results[matchedKey] : undefined;
 
     if (callback) {
       if (result instanceof Error) {
