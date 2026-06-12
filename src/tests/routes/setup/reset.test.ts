@@ -13,6 +13,7 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn(),
     writeFile: vi.fn(),
     chown: vi.fn(),
+    unlink: vi.fn(),
   },
 }));
 
@@ -24,7 +25,12 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/test/data",
 }));
 
+vi.mock("@/lib/auth", () => ({
+  getSystemUsername: vi.fn(() => "clawbox"),
+}));
+
 import { resetUpdateState } from "@/lib/updater";
+import { getSystemUsername } from "@/lib/auth";
 
 type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
 
@@ -39,15 +45,16 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
     _opts: object,
     callback?: (error: Error | null, result: { stdout: string; stderr: string }) => void
   ) => {
-    const key = `${cmd} ${args[0] || ""}`;
+    // Full args so a key like "systemctl start clawbox-root-update@chpasswd"
+    // can target a specific service via substring match below. Pick the most
+    // specific (longest) matching key, not the first — otherwise a broad key
+    // like "systemctl" listed earlier would shadow the service-specific stubs.
+    const key = `${cmd} ${args.join(" ")}`;
 
-    let result: { stdout: string; stderr: string } | Error | undefined;
-    for (const k of Object.keys(results)) {
-      if (key.includes(k)) {
-        result = results[k];
-        break;
-      }
-    }
+    const matchedKey = Object.keys(results)
+      .filter((k) => key.includes(k))
+      .sort((a, b) => b.length - a.length)[0];
+    const result = matchedKey !== undefined ? results[matchedKey] : undefined;
 
     if (callback) {
       if (result instanceof Error) {
@@ -88,6 +95,7 @@ describe("POST /setup-api/setup/reset", () => {
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
     mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
     mockResetUpdateState.mockReturnValue();
     setupExecFileMock({
       nmcli: { stdout: "", stderr: "" },
@@ -172,11 +180,27 @@ describe("POST /setup-api/setup/reset", () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Connection refused"));
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await resetPost();
+    // The route retries the Ollama API briefly after starting the service;
+    // drive those (fake-timer) sleeps so the retry loop can give up.
+    const resPromise = resetPost();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const res = await resPromise;
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  it("starts the Ollama service before deleting models", async () => {
+    // Local AI exclusive mode routinely leaves Ollama STOPPED, and its models
+    // live under /usr/share/ollama — unreachable by the home wipe. The reset
+    // must start the service so the API deletes can actually run.
+    await resetPost();
+
+    const call = mockExecFile.mock.calls.find(
+      ([cmd, args]) => cmd === "/usr/bin/systemctl" && args?.[0] === "start" && args?.[1] === "ollama",
+    );
+    expect(call).toBeDefined();
   });
 
   it("deletes WiFi connections", async () => {
@@ -278,5 +302,143 @@ describe("POST /setup-api/setup/reset", () => {
     // Should still succeed (seeding is non-fatal)
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  it("resets the system password to the default 'clawbox' after wiping data", async () => {
+    await resetPost();
+
+    // chpasswd input must be `clawbox:clawbox\n` (chpasswd parses line by
+    // line; a missing newline drops the entry on some impls).
+    const chpasswdCall = mockFs.writeFile.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(chpasswdCall).toBeDefined();
+    expect(chpasswdCall![1]).toBe("clawbox:clawbox\n");
+    expect((chpasswdCall![2] as { mode: number }).mode).toBe(0o600);
+
+    // The root systemd service must have been started — without it, the
+    // file we just wrote is just an inert text file.
+    const startCall = mockExecFile.mock.calls.find(
+      ([cmd, args]) =>
+        cmd === "/usr/bin/sudo" &&
+        args?.[0] === "/usr/bin/systemctl" &&
+        args?.[1] === "start" &&
+        args?.[2] === "clawbox-root-update@chpasswd.service",
+    );
+    expect(startCall).toBeDefined();
+  });
+
+  it("continues the reset when the password reset fails (non-fatal)", async () => {
+    // chpasswd service failure must not strand the user on a half-reset box;
+    // the wizard's CredentialsStep on first boot re-prompts and overwrites.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setupExecFileMock({
+      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
+      systemctl: { stdout: "", stderr: "" },
+      nmcli: { stdout: "", stderr: "" },
+    });
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // The security regression must be loudly logged for journalctl.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[Reset][SECURITY]"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("refuses to write a chpasswd record for an unsafe username", async () => {
+    // The username comes from env vars; a value with ":" or a newline would
+    // inject extra entries into the colon/newline-delimited chpasswd format.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(getSystemUsername).mockReturnValueOnce("evil:root\nroot");
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    // Reset still completes (password reset is best-effort)…
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // …but no chpasswd input was ever written.
+    const chpasswdCall = mockFs.writeFile.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(chpasswdCall).toBeUndefined();
+    errSpy.mockRestore();
+  });
+
+  it("wipes previous-owner state from the home directory", async () => {
+    await resetPost();
+
+    // The security-critical set: SSH keys (authorized_keys would readmit
+    // the previous owner even after the password reset), codex OAuth tokens,
+    // the AI-browser profile (cookies/sessions), credential-bearing dotfiles,
+    // and the HuggingFace login token.
+    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token"]) {
+      const call = mockFs.rm.mock.calls.find(
+        ([p]) => typeof p === "string" && p.endsWith(suffix),
+      );
+      expect(call, `expected fs.rm for path ending '${suffix}'`).toBeDefined();
+      expect(call![1]).toMatchObject({ recursive: true, force: true });
+    }
+  });
+
+  it("wipes user file folders but keeps the directories", async () => {
+    await resetPost();
+
+    // Documents/Downloads/Desktop are content-wiped via readdir+rm (the
+    // Files app expects the dirs to exist), not rm'd wholesale.
+    for (const dir of ["Documents", "Downloads", "Desktop"]) {
+      const call = mockFs.readdir.mock.calls.find(
+        ([p]) => typeof p === "string" && p.endsWith(dir),
+      );
+      expect(call, `expected readdir on '${dir}'`).toBeDefined();
+    }
+  });
+
+  it("clears the user crontab", async () => {
+    await resetPost();
+
+    const call = mockExecFile.mock.calls.find(([cmd, args]) => cmd === "crontab" && args?.[0] === "-r");
+    expect(call).toBeDefined();
+  });
+
+  it("aborts the reboot when the SSH key wipe fails", async () => {
+    // A survivor in ~/.ssh means the previous owner can still get in —
+    // that must surface as a failed reset, not a silent reboot.
+    mockFs.rm.mockImplementation((p: unknown) =>
+      typeof p === "string" && p.endsWith(".ssh")
+        ? Promise.reject(new Error("EPERM"))
+        : Promise.resolve(),
+    );
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain(".ssh");
+  });
+
+  it("scrubs the plaintext chpasswd input file if the password reset fails", async () => {
+    // writeFile succeeds but the service start fails: the plaintext credential
+    // must be unlinked so it isn't left readable on disk.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setupExecFileMock({
+      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
+      systemctl: { stdout: "", stderr: "" },
+      nmcli: { stdout: "", stderr: "" },
+    });
+
+    await resetPost();
+    errSpy.mockRestore();
+
+    const unlinkInputCall = mockFs.unlink.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(unlinkInputCall).toBeDefined();
   });
 });

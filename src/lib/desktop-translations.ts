@@ -339,7 +339,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.branchHint": "Leave empty to follow current branch or main",
     "settings.update": "Update",
     "settings.factoryResetTitle": "Factory Reset?",
-    "settings.factoryResetDesc": "This will erase all settings, credentials, and AI configuration. The setup wizard will restart.",
+    "settings.factoryResetDesc": "This will erase all settings, credentials, AI configuration, and all personal files on the device. The setup wizard will restart.",
     "settings.reset": "Reset",
     "settings.resetting": "Resetting...",
     "settings.erasingSettings": "Erasing all settings and restarting. Please wait.",
