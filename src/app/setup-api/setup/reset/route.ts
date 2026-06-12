@@ -3,6 +3,7 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME } from "@/lib/chpasswd";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -154,27 +155,28 @@ async function unmaskGateway(): Promise<void> {
  */
 async function resetSystemPasswordToDefault(): Promise<void> {
   const DEFAULT_PASSWORD = "clawbox";
-  const inputPath = path.join(DATA_DIR, ".chpasswd-input");
   try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(
-      inputPath,
+      CHPASSWD_INPUT_PATH,
       `${getSystemUsername()}:${DEFAULT_PASSWORD}\n`,
       { mode: 0o600 },
     );
-    const serviceName = "clawbox-root-update@chpasswd.service";
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", serviceName], {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
       timeout: 10_000,
     }).catch(() => {});
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", serviceName], {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
       timeout: 30_000,
     });
     console.log("[Reset] System password reset to factory default");
   } catch (err) {
     // The input file carries a plaintext credential — scrub it on failure.
-    await fs.unlink(inputPath).catch(() => {});
-    console.warn(
-      "[Reset] Failed to reset system password (wizard's CredentialsStep will re-prompt):",
+    await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
+    // Error, not warn: a failed reset leaves the device in a security
+    // regression (factory-reset but still owned with the prior password)
+    // until the wizard's CredentialsStep runs on next boot and overwrites.
+    console.error(
+      "[Reset][SECURITY] System password NOT reset — prior password still active until CredentialsStep runs:",
       err instanceof Error ? err.message : err,
     );
   }
@@ -267,8 +269,7 @@ export async function POST() {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
 
-    // 6a. Reset the Linux user password to the shipping default. Done after
-    // the data/ wipe so the chpasswd input file lands in a clean state dir.
+    // 6a. Reset the Linux user password to the shipping default.
     await resetSystemPasswordToDefault();
 
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
