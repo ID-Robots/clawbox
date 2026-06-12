@@ -21,15 +21,31 @@ const PRESERVE_FILES = new Set(["network.env"]);
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
   const OLLAMA = "http://127.0.0.1:11434";
-  let models: { name: string }[];
+  // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
+  // runtime shuts it down while llama.cpp is active), and its models live
+  // under /usr/share/ollama — out of reach of the home wipe. Start it
+  // best-effort so the API deletes below actually run; the polkit grant
+  // already allows the clawbox user to manage units.
   try {
-    const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) return;
-    const data = await res.json();
-    models = data.models ?? [];
+    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 30_000 });
   } catch {
-    // Ollama not running — nothing to clean
-    return;
+    // Not installed / failed to start — the fetch below decides what's cleanable.
+  }
+  let models: { name: string }[] = [];
+  // The API needs a moment after a cold start; retry briefly.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+      if (res.ok) {
+        const data = await res.json();
+        models = data.models ?? [];
+        break;
+      }
+    } catch {
+      // Ollama not (yet) answering.
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1_500));
+    else return; // never came up — nothing reachable to clean
   }
   for (const { name } of models) {
     try {
@@ -141,7 +157,10 @@ async function unmaskGateway(): Promise<void> {
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 
 // Personal state OUTSIDE data/ and ~/.openclaw that a used device accumulates.
-// Removed entirely on factory reset:
+// Removed entirely on factory reset. A REMOVE-list (not a KEEP-list) on
+// purpose: a stale entry here is a no-op (`force: true`), while a wrong
+// KEEP-list would delete bun/openclaw/voice models on a box that reboots
+// into AP mode with no internet to re-download them — a reflash.
 const HOME_REMOVE_PATHS = [
   // authorized_keys would let the previous owner SSH back in even after the
   // password reset below; private keys/known_hosts identify the prior owner.
@@ -151,11 +170,23 @@ const HOME_REMOVE_PATHS = [
   // AI-browser Chromium profile: cookies, logged-in sessions, history
   // (PROFILE in scripts/launch-browser.sh).
   ".config/clawbox-browser",
+  // Shell/REPL histories and identity the TerminalApp + agent run_command
+  // accumulate; .netrc/.npmrc can carry plaintext credentials.
   ".bash_history",
   ".zsh_history",
-  // GGUF models downloaded for Local AI — opt-in post-setup, so a fresh box
-  // has none. Large, but parity with as-flashed state wins.
-  ".cache/llama.cpp",
+  ".python_history",
+  ".node_repl_history",
+  ".lesshst",
+  ".viminfo",
+  ".wget-hsts",
+  ".gitconfig",
+  ".netrc",
+  ".npmrc",
+  // `hf auth login` token — surgical file removals; the surrounding
+  // ~/.cache/huggingface keeps the as-flashed Whisper/Kokoro voice models,
+  // which can't be re-downloaded once the box is back in AP mode.
+  ".cache/huggingface/token",
+  ".cache/huggingface/stored_tokens",
   // VS Code server state/extensions from the VSCode app.
   ".local/share/code-server",
 ];
@@ -183,8 +214,14 @@ async function wipeHomeUserState(): Promise<string[]> {
     failures.push(...dirFailures.map((f) => `${rel}/${f}`));
   }
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
-  // crontab — that's the desired end state, not a failure.
-  await execFile("crontab", ["-r"], { timeout: 10_000 }).catch(() => {});
+  // crontab — that's the desired end state, not a failure; anything else
+  // (missing binary, cron.deny) leaves a persistence vector and gets logged.
+  await execFile("crontab", ["-r"], { timeout: 10_000 }).catch((err) => {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    if (!/no crontab/i.test(stderr)) {
+      console.warn("[Reset] Failed to clear crontab:", err instanceof Error ? err.message : err);
+    }
+  });
   return failures;
 }
 

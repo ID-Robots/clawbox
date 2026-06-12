@@ -934,7 +934,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               <>
                 <h3 className="text-lg font-bold text-gray-100 mb-2">Factory Reset?</h3>
                 <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
-                  This will erase all settings, credentials, and tokens and restart the setup wizard from scratch.
+                  This will erase all settings, credentials, tokens, and all personal files on the device, then restart the setup wizard from scratch.
                 </p>
                 <div className="flex items-center gap-3 justify-end">
                   <button

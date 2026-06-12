@@ -180,11 +180,27 @@ describe("POST /setup-api/setup/reset", () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Connection refused"));
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await resetPost();
+    // The route retries the Ollama API briefly after starting the service;
+    // drive those (fake-timer) sleeps so the retry loop can give up.
+    const resPromise = resetPost();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const res = await resPromise;
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  it("starts the Ollama service before deleting models", async () => {
+    // Local AI exclusive mode routinely leaves Ollama STOPPED, and its models
+    // live under /usr/share/ollama — unreachable by the home wipe. The reset
+    // must start the service so the API deletes can actually run.
+    await resetPost();
+
+    const call = mockExecFile.mock.calls.find(
+      ([cmd, args]) => cmd === "/usr/bin/systemctl" && args?.[0] === "start" && args?.[1] === "ollama",
+    );
+    expect(call).toBeDefined();
   });
 
   it("deletes WiFi connections", async () => {
@@ -331,10 +347,11 @@ describe("POST /setup-api/setup/reset", () => {
   it("wipes previous-owner state from the home directory", async () => {
     await resetPost();
 
-    // The security-critical trio: SSH keys (authorized_keys would readmit
+    // The security-critical set: SSH keys (authorized_keys would readmit
     // the previous owner even after the password reset), codex OAuth tokens,
-    // and the AI-browser profile (cookies/sessions).
-    for (const suffix of [".ssh", ".codex", "clawbox-browser"]) {
+    // the AI-browser profile (cookies/sessions), credential-bearing dotfiles,
+    // and the HuggingFace login token.
+    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token"]) {
       const call = mockFs.rm.mock.calls.find(
         ([p]) => typeof p === "string" && p.endsWith(suffix),
       );
