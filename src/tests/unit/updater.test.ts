@@ -227,6 +227,8 @@ describe("updater", () => {
     it("uses the root step journal output when a root update step fails", async () => {
       setupExecFileMock({
         "start clawbox-root-update@apt_update.service": new Error("systemctl failed"),
+        // The journal only overrides the error when the unit reports failed.
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "Waiting for apt lock...\nE: Could not get lock /var/lib/dpkg/lock-frontend\n",
           stderr: "",
@@ -257,9 +259,85 @@ describe("updater", () => {
       expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
     });
 
+    it("reports a budget overrun instead of the journal when a root step times out", async () => {
+      // execFile kills the blocking `systemctl start` when OUR timeout
+      // expires (err.killed) — the unit itself usually keeps running. The
+      // journal's last line at that moment is just whatever fixup finished
+      // most recently and must NOT be presented as the failure.
+      const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+      setupExecFileMock({
+        "start clawbox-root-update@apt_update.service": timeoutErr,
+        "show clawbox-root-update@apt_update.service": { stdout: "success\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: "Linkdown routing sysctl installed\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        const state = updater.getUpdateState();
+        const aptStep = state.steps.find((step) => step.id === "apt_update");
+        expect(aptStep?.status).toBe("failed");
+      });
+
+      const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.error).toContain("was still running after");
+      expect(aptStep?.error).not.toContain("Linkdown");
+    });
+
+    it("treats a post_update budget overrun as advisory — the update still completes", async () => {
+      // post_update's content is non-fatal by design (every fixup is
+      // `|| warn`); an overrun just means cold caches made it slow. Failing
+      // the whole update over it painted "Update failed" (with a Retry that
+      // re-runs everything) on a successful update.
+      const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": timeoutErr,
+        "show clawbox-root-update@post_update.service": { stdout: "success\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      // Drive it through the post-restart continuation: resumes at post_update.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      const result = await updater.checkContinuation();
+      expect(result).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.status).toBe("completed");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
+    });
+
     it("stops the update sequence when bootstrap_updater fails", async () => {
       setupExecFileMock({
         "start clawbox-root-update@bootstrap_updater.service": new Error("systemctl failed"),
+        "show clawbox-root-update@bootstrap_updater.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "fatal: invalid branch name in .update-branch\n",
           stderr: "",
