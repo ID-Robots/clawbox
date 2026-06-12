@@ -13,6 +13,7 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn(),
     writeFile: vi.fn(),
     chown: vi.fn(),
+    unlink: vi.fn(),
   },
 }));
 
@@ -22,6 +23,10 @@ vi.mock("@/lib/updater", () => ({
 
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/test/data",
+}));
+
+vi.mock("@/lib/auth", () => ({
+  getSystemUsername: vi.fn(() => "clawbox"),
 }));
 
 import { resetUpdateState } from "@/lib/updater";
@@ -88,6 +93,7 @@ describe("POST /setup-api/setup/reset", () => {
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
     mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
     mockResetUpdateState.mockReturnValue();
     setupExecFileMock({
       nmcli: { stdout: "", stderr: "" },
@@ -278,5 +284,62 @@ describe("POST /setup-api/setup/reset", () => {
     // Should still succeed (seeding is non-fatal)
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  it("resets the system password to the default 'clawbox' after wiping data", async () => {
+    await resetPost();
+
+    // chpasswd input must be `clawbox:clawbox\n` (chpasswd parses line by
+    // line; a missing newline drops the entry on some impls).
+    const chpasswdCall = mockFs.writeFile.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(chpasswdCall).toBeDefined();
+    expect(chpasswdCall![1]).toBe("clawbox:clawbox\n");
+    expect((chpasswdCall![2] as { mode: number }).mode).toBe(0o600);
+
+    // The root systemd service must have been started — without it, the
+    // file we just wrote is just an inert text file.
+    const startCall = mockExecFile.mock.calls.find(
+      ([cmd, args]) =>
+        cmd === "/usr/bin/sudo" &&
+        args?.[0] === "/usr/bin/systemctl" &&
+        args?.[1] === "start" &&
+        args?.[2] === "clawbox-root-update@chpasswd.service",
+    );
+    expect(startCall).toBeDefined();
+  });
+
+  it("continues the reset when the password reset fails (non-fatal)", async () => {
+    // chpasswd service failure must not strand the user on a half-reset box;
+    // the wizard's CredentialsStep on first boot re-prompts and overwrites.
+    setupExecFileMock({
+      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
+      systemctl: { stdout: "", stderr: "" },
+      nmcli: { stdout: "", stderr: "" },
+    });
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+  });
+
+  it("scrubs the plaintext chpasswd input file if the password reset fails", async () => {
+    // writeFile succeeds but the service start fails: the plaintext credential
+    // must be unlinked so it isn't left readable on disk.
+    setupExecFileMock({
+      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
+      systemctl: { stdout: "", stderr: "" },
+      nmcli: { stdout: "", stderr: "" },
+    });
+
+    await resetPost();
+
+    const unlinkInputCall = mockFs.unlink.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(unlinkInputCall).toBeDefined();
   });
 });
