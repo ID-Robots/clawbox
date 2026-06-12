@@ -78,7 +78,7 @@ The installer expects to run from `/home/clawbox/clawbox` as the `clawbox`
 user's checkout (the same layout shipped devices use):
 
 ```bash
-sudo useradd -m -s /bin/bash clawbox 2>/dev/null || true
+id -u clawbox >/dev/null 2>&1 || sudo useradd -m -s /bin/bash clawbox
 sudo git clone https://github.com/ID-Robots/clawbox.git /home/clawbox/clawbox
 sudo chown -R clawbox:clawbox /home/clawbox/clawbox
 cd /home/clawbox/clawbox
