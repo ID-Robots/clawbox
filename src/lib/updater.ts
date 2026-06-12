@@ -37,7 +37,18 @@ interface UpdateStepDef {
   requiresRoot?: boolean;
   failFast?: boolean;
   customRun?: () => Promise<void>;
+  /**
+   * A budget overrun doesn't fail the update for this step — it's marked
+   * completed and the run carries on. For steps whose content is non-fatal
+   * by design (post_update: every fixup inside is `|| warn`), an overrun
+   * painting "Update failed" on a successful update is worse than letting
+   * the unit finish in the background. Genuine unit failures still fail.
+   */
+  advisoryOnOverrun?: boolean;
 }
+
+/** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
+class BudgetOverrunError extends Error {}
 
 export type StepStatus =
   | "pending"
@@ -345,10 +356,18 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     // Runs after reboot via checkContinuation — picks up dispatcher scripts,
     // sysctls, and other root fixups that landed in the new install.sh.
+    // 5 min, not 60s: on a freshly-installed device the fixups run on cold
+    // caches (clawkeep pip force-reinstall, vnc apt work) and routinely
+    // outlive a 1-minute budget — which painted a false-red step on an
+    // otherwise successful update. The fixups can legitimately wait even
+    // longer (wait_for_apt alone allows 900s), so an overrun past these 5
+    // minutes is advisory: the unit finishes on its own (TimeoutStartSec is
+    // 30 min) and everything inside it is non-fatal by design.
     id: "post_update",
     label: "Applying system fixups",
-    timeoutMs: 60_000,
+    timeoutMs: 300_000,
     requiresRoot: true,
+    advisoryOnOverrun: true,
   },
 ];
 
@@ -363,9 +382,26 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   await execFile("/usr/bin/systemctl", ["reset-failed", serviceName], {
     timeout: 10_000,
   }).catch(() => {});
-  await execFile("/usr/bin/systemctl", ["start", serviceName], {
-    timeout: timeoutMs + 30_000,
-  });
+  const startedAt = Date.now();
+  try {
+    await execFile("/usr/bin/systemctl", ["start", serviceName], {
+      timeout: timeoutMs + 30_000,
+    });
+  } catch (err) {
+    // When OUR timeout kills the blocking `systemctl start`, the unit itself
+    // usually keeps running (it has its own much larger TimeoutStartSec) and
+    // often finishes fine in the background. Report that as a budget overrun
+    // — otherwise the caller dresses up the unit's most recent (often
+    // successful) log line as the failure, which is how a healthy update
+    // once showed "failed: Linkdown routing sysctl installed".
+    if ((err as { killed?: boolean }).killed) {
+      const waitedS = Math.round((Date.now() - startedAt) / 1000);
+      throw new BudgetOverrunError(
+        `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
+      );
+    }
+    throw err;
+  }
 }
 
 let cachedTargetVersion: string | null = null;
@@ -752,7 +788,19 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
-      if (step.requiresRoot) {
+      // An overrun on an advisory step doesn't fail the update: the unit is
+      // still running and will finish on its own — mark the step completed
+      // and move on, instead of painting "Update failed" (with a Retry that
+      // would re-run the whole update) over a successful one.
+      if (err instanceof BudgetOverrunError && step.advisoryOnOverrun) {
+        state.steps[i].status = "completed";
+        console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
+        continue;
+      }
+      // Only let the unit's journal override the error when the unit actually
+      // FAILED — on a budget overrun it's still running, and its last log line
+      // is just whatever fixup happened to finish most recently.
+      if (step.requiresRoot && (await getRootStepResult(step.id)) === "failed") {
         const rootFailure = await readRootStepFailure(step.id);
         if (rootFailure) message = rootFailure;
       }

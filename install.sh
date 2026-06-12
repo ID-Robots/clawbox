@@ -18,6 +18,27 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
+# Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
+# checkout by flash.sh) parses old EXPECTED_*_SERVICES while step_git_pull
+# later refreshes config/ on disk to a newer set of unit files. The drift
+# guard in step_systemd_services then fires on units the up-to-date install.sh
+# already registers. Pulling and re-exec'ing up-front (before constants are
+# parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
+
+if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
+  _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _br="${CLAWBOX_BRANCH:-main}"
+  echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
+  git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+  if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+    chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+    echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
+    exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+  fi
+  echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+fi
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
