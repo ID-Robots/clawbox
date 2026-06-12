@@ -328,6 +328,57 @@ describe("POST /setup-api/setup/reset", () => {
     expect(body.success).toBe(true);
   });
 
+  it("wipes previous-owner state from the home directory", async () => {
+    await resetPost();
+
+    // The security-critical trio: SSH keys (authorized_keys would readmit
+    // the previous owner even after the password reset), codex OAuth tokens,
+    // and the AI-browser profile (cookies/sessions).
+    for (const suffix of [".ssh", ".codex", "clawbox-browser"]) {
+      const call = mockFs.rm.mock.calls.find(
+        ([p]) => typeof p === "string" && p.endsWith(suffix),
+      );
+      expect(call, `expected fs.rm for path ending '${suffix}'`).toBeDefined();
+      expect(call![1]).toMatchObject({ recursive: true, force: true });
+    }
+  });
+
+  it("wipes user file folders but keeps the directories", async () => {
+    await resetPost();
+
+    // Documents/Downloads/Desktop are content-wiped via readdir+rm (the
+    // Files app expects the dirs to exist), not rm'd wholesale.
+    for (const dir of ["Documents", "Downloads", "Desktop"]) {
+      const call = mockFs.readdir.mock.calls.find(
+        ([p]) => typeof p === "string" && p.endsWith(dir),
+      );
+      expect(call, `expected readdir on '${dir}'`).toBeDefined();
+    }
+  });
+
+  it("clears the user crontab", async () => {
+    await resetPost();
+
+    const call = mockExecFile.mock.calls.find(([cmd, args]) => cmd === "crontab" && args?.[0] === "-r");
+    expect(call).toBeDefined();
+  });
+
+  it("aborts the reboot when the SSH key wipe fails", async () => {
+    // A survivor in ~/.ssh means the previous owner can still get in —
+    // that must surface as a failed reset, not a silent reboot.
+    mockFs.rm.mockImplementation((p: unknown) =>
+      typeof p === "string" && p.endsWith(".ssh")
+        ? Promise.reject(new Error("EPERM"))
+        : Promise.resolve(),
+    );
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain(".ssh");
+  });
+
   it("scrubs the plaintext chpasswd input file if the password reset fails", async () => {
     // writeFile succeeds but the service start fails: the plaintext credential
     // must be unlinked so it isn't left readable on disk.

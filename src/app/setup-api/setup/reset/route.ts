@@ -138,6 +138,56 @@ async function unmaskGateway(): Promise<void> {
   }
 }
 
+const HOME_DIR = process.env.HOME || "/home/clawbox";
+
+// Personal state OUTSIDE data/ and ~/.openclaw that a used device accumulates.
+// Removed entirely on factory reset:
+const HOME_REMOVE_PATHS = [
+  // authorized_keys would let the previous owner SSH back in even after the
+  // password reset below; private keys/known_hosts identify the prior owner.
+  ".ssh",
+  // OAuth tokens synthesized by gateway-pre-start.sh for the codex app-server.
+  ".codex",
+  // AI-browser Chromium profile: cookies, logged-in sessions, history
+  // (PROFILE in scripts/launch-browser.sh).
+  ".config/clawbox-browser",
+  ".bash_history",
+  ".zsh_history",
+  // GGUF models downloaded for Local AI — opt-in post-setup, so a fresh box
+  // has none. Large, but parity with as-flashed state wins.
+  ".cache/llama.cpp",
+  // VS Code server state/extensions from the VSCode app.
+  ".local/share/code-server",
+];
+// User-visible folders the Files app exposes (and recreates empty on demand):
+// wipe the contents, keep the directories.
+const HOME_CONTENT_WIPE_DIRS = ["Documents", "Downloads", "Desktop"];
+
+/**
+ * Wipe previous-owner state from the home directory so a factory-reset
+ * device matches a fresh flash, not just a fresh ClawBox config. Returns
+ * failure strings (same contract as removeDirectoryContents) — a survivor
+ * in ~/.ssh is a security problem the caller must surface, not swallow.
+ */
+async function wipeHomeUserState(): Promise<string[]> {
+  const failures: string[] = [];
+  await Promise.all(
+    HOME_REMOVE_PATHS.map((rel) =>
+      fs.rm(path.join(HOME_DIR, rel), { recursive: true, force: true }).catch((err) => {
+        failures.push(`${rel}: ${err}`);
+      }),
+    ),
+  );
+  for (const rel of HOME_CONTENT_WIPE_DIRS) {
+    const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel));
+    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+  }
+  // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
+  // crontab — that's the desired end state, not a failure.
+  await execFile("crontab", ["-r"], { timeout: 10_000 }).catch(() => {});
+  return failures;
+}
+
 /**
  * Reset the Linux user password back to the shipping default ("clawbox"), so
  * a factory-reset device matches its as-flashed state. Without this, the only
@@ -219,7 +269,9 @@ export async function POST() {
     // factory reset would leave the device still paired to the previous
     // account's cloud backups. Wipe it too.
     const clawkeepFailures = await removeDirectoryContents(CLAWKEEP_DATA_DIR);
-    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures];
+    // Previous-owner home-dir state (SSH keys, browser profile, user files…).
+    const homeFailures = await wipeHomeUserState();
+    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures];
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly
