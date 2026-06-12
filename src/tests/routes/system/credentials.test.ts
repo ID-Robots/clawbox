@@ -17,6 +17,8 @@ vi.mock("fs/promises", () => ({
 vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
   get: vi.fn(async () => false),
+  // @/lib/chpasswd derives its input path from DATA_DIR at module load.
+  DATA_DIR: "/test/data",
 }));
 
 vi.mock("@/lib/auth", () => ({

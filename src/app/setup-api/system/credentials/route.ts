@@ -4,18 +4,13 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { get, set } from "@/lib/config-store";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername, verifyPassword, isSafePasswordChars } from "@/lib/auth";
 import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-const PROJECT_ROOT = process.env.CLAWBOX_ROOT || process.env.CONFIG_ROOT || "/home/clawbox/clawbox";
 const execFile = promisify(execFileCb);
-const CHPASSWD_INPUT_PATH = path.join(
-  PROJECT_ROOT,
-  "data",
-  ".chpasswd-input"
-);
 
 const PASSWORD_RATE_LIMIT = { windowMs: 15 * 60 * 1000, max: 5 };
 
@@ -66,15 +61,14 @@ export async function POST(request: Request) {
     // systemd service (clawbox-root-update@chpasswd) since the main
     // service runs as clawbox with NoNewPrivileges=true.
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
-    await fs.writeFile(CHPASSWD_INPUT_PATH, `${getSystemUsername()}:${password}\n`, {
+    await fs.writeFile(CHPASSWD_INPUT_PATH, chpasswdRecord(getSystemUsername(), password), {
       mode: 0o600,
     });
     try {
-      const serviceName = "clawbox-root-update@chpasswd.service";
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", serviceName], {
+      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
         timeout: 10_000,
       }).catch(() => {});
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", serviceName], {
+      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
         timeout: 30_000,
       });
     } catch (err) {

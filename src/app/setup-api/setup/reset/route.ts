@@ -3,7 +3,7 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME } from "@/lib/chpasswd";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -246,7 +246,7 @@ async function resetSystemPasswordToDefault(): Promise<void> {
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(
       CHPASSWD_INPUT_PATH,
-      `${getSystemUsername()}:${DEFAULT_PASSWORD}\n`,
+      chpasswdRecord(getSystemUsername(), DEFAULT_PASSWORD),
       { mode: 0o600 },
     );
     await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {

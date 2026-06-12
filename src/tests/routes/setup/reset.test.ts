@@ -30,6 +30,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { resetUpdateState } from "@/lib/updater";
+import { getSystemUsername } from "@/lib/auth";
 
 type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
 
@@ -331,6 +332,7 @@ describe("POST /setup-api/setup/reset", () => {
   it("continues the reset when the password reset fails (non-fatal)", async () => {
     // chpasswd service failure must not strand the user on a half-reset box;
     // the wizard's CredentialsStep on first boot re-prompts and overwrites.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     setupExecFileMock({
       "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
       systemctl: { stdout: "", stderr: "" },
@@ -342,6 +344,32 @@ describe("POST /setup-api/setup/reset", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+    // The security regression must be loudly logged for journalctl.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[Reset][SECURITY]"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("refuses to write a chpasswd record for an unsafe username", async () => {
+    // The username comes from env vars; a value with ":" or a newline would
+    // inject extra entries into the colon/newline-delimited chpasswd format.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(getSystemUsername).mockReturnValueOnce("evil:root\nroot");
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    // Reset still completes (password reset is best-effort)…
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // …but no chpasswd input was ever written.
+    const chpasswdCall = mockFs.writeFile.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    );
+    expect(chpasswdCall).toBeUndefined();
+    errSpy.mockRestore();
   });
 
   it("wipes previous-owner state from the home directory", async () => {
@@ -399,6 +427,7 @@ describe("POST /setup-api/setup/reset", () => {
   it("scrubs the plaintext chpasswd input file if the password reset fails", async () => {
     // writeFile succeeds but the service start fails: the plaintext credential
     // must be unlinked so it isn't left readable on disk.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     setupExecFileMock({
       "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
       systemctl: { stdout: "", stderr: "" },
@@ -406,6 +435,7 @@ describe("POST /setup-api/setup/reset", () => {
     });
 
     await resetPost();
+    errSpy.mockRestore();
 
     const unlinkInputCall = mockFs.unlink.mock.calls.find(
       ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),

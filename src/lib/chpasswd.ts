@@ -16,3 +16,24 @@ import { DATA_DIR } from "@/lib/config-store";
 
 export const CHPASSWD_INPUT_PATH = path.join(DATA_DIR, ".chpasswd-input");
 export const CHPASSWD_SERVICE_NAME = "clawbox-root-update@chpasswd.service";
+
+// POSIX-portable username (useradd's default policy). The username reaches us
+// via env vars (CLAWBOX_USER/SUDO_USER/USER), so validate before composing
+// the record — a name containing ":" or a newline would inject an extra
+// password entry into the colon/newline-delimited chpasswd format.
+const SAFE_USERNAME = /^[a-z_][a-z0-9_-]{0,31}\$?$/;
+
+/**
+ * Compose a single chpasswd record, refusing usernames that could corrupt
+ * the format. Colons in the PASSWORD are fine (chpasswd splits on the first
+ * colon), but CR/LF/NUL would terminate the record early — reject them.
+ */
+export function chpasswdRecord(user: string, password: string): string {
+  if (!SAFE_USERNAME.test(user)) {
+    throw new Error(`Unsafe username for chpasswd record: ${JSON.stringify(user)}`);
+  }
+  if (/[\r\n\0]/.test(password)) {
+    throw new Error("Unsafe password for chpasswd record (control characters)");
+  }
+  return `${user}:${password}\n`;
+}
