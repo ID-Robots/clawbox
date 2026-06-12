@@ -224,7 +224,12 @@ if [ -n "$SCAN_OUTPUT" ]; then
     }
     END { print "]" }
   ' > "$SCAN_CACHE"
-  NETWORK_COUNT=$(grep -o '"ssid"' "$SCAN_CACHE" 2>/dev/null | wc -l)
+  # grep returns 1 when there are no matches, and `pipefail` propagates that
+  # through `| wc -l`, which combined with `set -e` aborts the script before
+  # the AP creation steps run. Catch the non-zero pipeline exit with a
+  # post-substitution `||` so an empty cache yields NETWORK_COUNT=0 rather
+  # than killing the AP startup.
+  NETWORK_COUNT=$(grep -o '"ssid"' "$SCAN_CACHE" 2>/dev/null | wc -l) || NETWORK_COUNT=0
   echo "[AP] Cached $NETWORK_COUNT networks to $SCAN_CACHE"
 else
   echo "[]" > "$SCAN_CACHE"
