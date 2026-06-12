@@ -60,11 +60,34 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ## 🚀 Quick Start
 
+### Requirements
+
+| | Supported |
+|---|---|
+| **Device** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **OS image** | **JetPack 6.2** (Ubuntu 22.04 / L4T R36.x) — [download](https://developer.nvidia.com/embedded/jetpack-sdk-62) |
+
+> ⚠️ **JetPack 7.x (Ubuntu 24.04) is not supported yet.** NVIDIA's newest images
+> default to JetPack 7 — flash **JetPack 6.2** instead. On 24.04 the installer
+> fails on Python's externally-managed-environment policy (PEP 668), among
+> other differences. JetPack 6.2 is the platform every shipped ClawBox runs.
+
+### Install
+
+The installer expects to run from `/home/clawbox/clawbox` as the `clawbox`
+user's checkout (the same layout shipped devices use):
+
 ```bash
+id -u clawbox >/dev/null 2>&1 || sudo useradd -m -s /bin/bash clawbox
+sudo git clone https://github.com/ID-Robots/clawbox.git /home/clawbox/clawbox
+sudo chown -R clawbox:clawbox /home/clawbox/clawbox
+cd /home/clawbox/clawbox
 sudo bash install.sh
 ```
 
-Connect to the **ClawBox-Setup** WiFi network (open, no password) and navigate to:
+The install provisions everything from scratch (20–40 min on a fresh image).
+When it finishes, connect to the **ClawBox-Setup** WiFi network (open, no
+password) and navigate to:
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
