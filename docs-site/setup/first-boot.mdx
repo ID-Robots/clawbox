@@ -1,0 +1,73 @@
+---
+title: "Setup Guide"
+summary: "Unbox, connect, pair via QR code, and start chatting with your ClawBox in ~5 minutes."
+---
+
+# Setup Guide
+
+Get your ClawBox up and running in about **5 minutes**. No tools required — just a
+Wi-Fi or Ethernet connection.
+
+<Info>
+**Setup time:** ~5 minutes · **Tools:** none · **Needed:** Wi-Fi or Ethernet
+</Info>
+
+## What's in the box
+
+- ClawBox unit (NVIDIA Jetson Orin Nano 8 GB)
+- 512 GB NVMe SSD with OpenClaw pre-installed
+- 20 W USB-C power adapter
+- Ethernet cable
+- Quick-start card with QR code
+
+## Setup steps
+
+<Steps>
+  <Step title="Unbox your ClawBox">
+    Remove it from the packaging, check all components are present, and place it on a
+    flat, ventilated surface. Keep the quick-start card handy.
+  </Step>
+  <Step title="Connect to your network">
+    Plug the Ethernet cable into your router (recommended), or use Wi-Fi — the setup
+    wizard will guide you. A stable connection matters for first-time setup.
+  </Step>
+  <Step title="Power on">
+    Connect the power adapter and plug it into an outlet. Wait for the status LED to turn
+    **solid green** (~60 seconds).
+  </Step>
+  <Step title="Pair your device">
+    Open your phone camera or a QR scanner and scan the QR code on the quick-start card.
+    Choose your messaging platform (Telegram recommended) and follow the pairing wizard
+    to link your account.
+  </Step>
+  <Step title="Start chatting">
+    Send your first message to test the connection. Try a question or a command, then
+    explore features like browser automation and voice.
+  </Step>
+</Steps>
+
+<Check>
+A reply to your first message means your ClawBox is live. 🦀
+</Check>
+
+## Reaching the device directly
+
+If you prefer the browser setup page, visit `http://clawbox.local` from a device on the
+same network.
+
+<Warning>
+If `clawbox.local` doesn't load, **disable any active VPN** first (the most common
+cause), or use the device's IP address from your router's client list:
+`http://<device-ip>`. Some networks also block mDNS — Ethernet is the most reliable path.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure OpenClaw" href="/setup/openclaw-setup" icon="gear">
+    Channels, voice, AI models, advanced options.
+  </Card>
+  <Card title="Choose your AI" href="/setup/choose-ai-provider" icon="robot">
+    ClawBox AI, or bring Claude / GPT / Gemini.
+  </Card>
+</CardGroup>
