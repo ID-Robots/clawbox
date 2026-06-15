@@ -2237,7 +2237,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             <I18nProvider><AIModelsStep
               embedded
-              providerIds={["llamacpp", "ollama"]}
+              providerIds={["llamacpp"]}
               defaultProviderId="llamacpp"
               currentProviderId={localAiStatus?.provider ?? null}
               currentModel={localAiStatus?.model ?? null}

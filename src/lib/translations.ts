@@ -137,6 +137,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Connect AI Model",
     "ai.description": "Select your AI provider and enter your API key or subscription token.",
+    "ai.fullyLocal": "Fully local",
     "ai.skipUseLocalOnly": "Skip — I'll use only local AI",
     "ai.clawaiDesc": "Register once, then paste your token",
     "ai.clawaiHint": "Create a ClawBox AI portal account, generate a token, and paste it during setup to connect your device.",
@@ -541,6 +542,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Свързване на AI модел",
     "ai.description": "Изберете AI доставчик и въведете API ключ или токен за абонамент.",
+    "ai.fullyLocal": "Изцяло локален",
     "ai.skipUseLocalOnly": "Пропусни — ще използвам само локален AI",
     "ai.clawaiDesc": "Най-достъпен — започнете безплатно",
     "ai.clawaiHint": "ClawBox AI е безплатен и предварително конфигуриран. Просто натиснете по-долу, за да започнете — не е нужен API ключ или акаунт.",
@@ -944,6 +946,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "KI-Modell verbinden",
     "ai.description": "Wähle deinen KI-Anbieter und gib deinen API-Schlüssel oder Abo-Token ein.",
+    "ai.fullyLocal": "Vollständig lokal",
     "ai.skipUseLocalOnly": "Überspringen — nur lokale KI verwenden",
     "ai.clawaiDesc": "Am günstigsten — kostenlos starten",
     "ai.clawaiHint": "ClawBox AI ist kostenlos und vorkonfiguriert. Klicke einfach unten, um loszulegen — kein API-Schlüssel oder Konto nötig.",
@@ -1347,6 +1350,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Conectar modelo de IA",
     "ai.description": "Selecciona tu proveedor de IA e introduce tu clave API o token de suscripción.",
+    "ai.fullyLocal": "Totalmente local",
     "ai.skipUseLocalOnly": "Omitir — usaré solo IA local",
     "ai.clawaiDesc": "Más asequible — empieza gratis",
     "ai.clawaiHint": "ClawBox AI es gratuito y viene preconfigurado. Solo haz clic abajo para empezar — no necesitas clave API ni cuenta.",
@@ -1750,6 +1754,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Connecter un modèle d'IA",
     "ai.description": "Sélectionnez votre fournisseur d'IA et entrez votre clé API ou jeton d'abonnement.",
+    "ai.fullyLocal": "Entièrement local",
     "ai.skipUseLocalOnly": "Passer — je n'utiliserai que l'IA locale",
     "ai.clawaiDesc": "Le plus abordable — commencez gratuitement",
     "ai.clawaiHint": "ClawBox AI est gratuit et préconfiguré. Cliquez ci-dessous pour commencer — aucune clé API ni compte nécessaire.",
@@ -2153,6 +2158,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Connetti modello IA",
     "ai.description": "Seleziona il tuo fornitore di IA e inserisci la chiave API o il token dell'abbonamento.",
+    "ai.fullyLocal": "Completamente locale",
     "ai.skipUseLocalOnly": "Salta — userò solo l'IA locale",
     "ai.clawaiDesc": "Più conveniente — inizia gratis",
     "ai.clawaiHint": "ClawBox AI è gratuito e preconfigurato. Clicca qui sotto per iniziare — non servono chiave API né account.",
@@ -2556,6 +2562,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "AIモデルを接続",
     "ai.description": "AIプロバイダーを選択し、APIキーまたはサブスクリプショントークンを入力してください。",
+    "ai.fullyLocal": "完全ローカル",
     "ai.skipUseLocalOnly": "スキップ — ローカルAIのみを使用します",
     "ai.clawaiDesc": "最もお手頃 — 無料で始める",
     "ai.clawaiHint": "ClawBox AIは無料で設定済みです。下のボタンをクリックするだけで始められます。APIキーもアカウントも不要です。",
@@ -2959,6 +2966,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "AI-model verbinden",
     "ai.description": "Kies je AI-provider en voer je API-sleutel of abonnementstoken in.",
+    "ai.fullyLocal": "Volledig lokaal",
     "ai.skipUseLocalOnly": "Overslaan — ik gebruik alleen lokale AI",
     "ai.clawaiDesc": "Meest betaalbaar — gratis beginnen",
     "ai.clawaiHint": "ClawBox AI is gratis en vooraf geconfigureerd. Klik hieronder om te beginnen — geen API-sleutel of account nodig.",
@@ -3362,6 +3370,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "Anslut AI-modell",
     "ai.description": "Välj din AI-leverantör och ange din API-nyckel eller prenumerationstoken.",
+    "ai.fullyLocal": "Helt lokal",
     "ai.skipUseLocalOnly": "Hoppa över — jag använder bara lokal AI",
     "ai.clawaiDesc": "Mest prisvärd — börja gratis",
     "ai.clawaiHint": "ClawBox AI är gratis och förkonfigurerat. Klicka nedan för att komma igång — ingen API-nyckel eller konto behövs.",
@@ -3765,6 +3774,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // === AIModelsStep ===
     "ai.title": "连接 AI 模型",
     "ai.description": "选择 AI 供应商并输入 API 密钥或订阅令牌。",
+    "ai.fullyLocal": "完全本地",
     "ai.skipUseLocalOnly": "跳过 — 我只使用本地 AI",
     "ai.clawaiDesc": "最实惠 — 免费开始",
     "ai.clawaiHint": "ClawBox AI 免费且已预配置。点击下方即可开始——无需 API 密钥或账户。",
