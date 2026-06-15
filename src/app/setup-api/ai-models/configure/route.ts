@@ -383,6 +383,7 @@ export async function POST(request: Request) {
       provider?: string;
       apiKey?: string;
       authMode?: string;
+      idToken?: string;
       refreshToken?: string;
       expiresIn?: number;
       projectId?: string;
@@ -396,7 +397,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
@@ -585,11 +586,16 @@ export async function POST(request: Request) {
         markLocalAiTokenMigrated();
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
-        // { type: "oauth", provider, access, refresh, expires, projectId? }
+        // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
+        // `id` is the OAuth id_token (a JWT). The Codex app-server authenticates
+        // with it, and gateway-pre-start's ~/.codex/auth.json synthesis uses
+        // `id` (falling back to `access`). Persisting it keeps the synthesized
+        // id_token a valid JWT instead of whatever `access` happens to be.
         authProfiles.profiles[config.profileKey] = {
           type: "oauth",
           provider: ocProvider,
           access: normalizedApiKey,
+          ...(typeof idToken === "string" && idToken ? { id: idToken } : {}),
           refresh: refreshToken || "",
           expires: expiresIn
             ? Date.now() + expiresIn * 1000
