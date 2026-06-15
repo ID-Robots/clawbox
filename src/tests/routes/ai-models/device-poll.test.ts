@@ -207,7 +207,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(body.error).toContain("Token exchange failed");
   });
 
-  it("attempts API key exchange when id_token present", async () => {
+  it("returns the OAuth tokens incl. id_token without an api-key exchange", async () => {
     const mockFetch = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -224,13 +224,6 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
           refresh_token: "first-refresh",
           expires_in: 3600,
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({
-          api_key: "sk-test-api-key",
-          expires_in: 86400,
-        }),
       });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -239,38 +232,11 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
-    expect(body.access_token).toBe("sk-test-api-key");
-  });
-
-  it("falls back to access_token when API key exchange fails", async () => {
-    const mockFetch = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({
-          authorization_code: "test-auth-code",
-          code_verifier: "test-verifier",
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({
-          access_token: "fallback-token",
-          id_token: "test-id-token",
-          refresh_token: "first-refresh",
-          expires_in: 3600,
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-      });
-    vi.stubGlobal("fetch", mockFetch);
-
-    const res = await devicePollPost();
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.access_token).toBe("fallback-token");
+    // Codex needs the JWTs, not an exchanged sk- key: id_token is preserved and
+    // there is no third (id_token → api-key) fetch.
+    expect(body.access_token).toBe("first-token");
+    expect(body.id_token).toBe("test-id-token");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("returns 502 for server errors", async () => {
