@@ -9,7 +9,7 @@ import {
   restartGateway,
   findOpenclawBin,
   runOpenclawConfigSet,
-  DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+  compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
   applyModelOverrideToAllAgentSessions,
@@ -637,11 +637,21 @@ export async function POST(request: Request) {
         console.log(`[AI Config] Promoted local model to active primary: ${config.defaultModel}`);
       }
     }
+    // Reserve sized to the active model's context window. Local models run on
+    // small windows (Ollama 32K) where the flat default leaves no room for the
+    // agent's heavy system prompt + tools; cloud models (unbounded window)
+    // fall through to the full default.
+    const activeContextWindow = isOllama
+      ? OLLAMA_CONTEXT_WINDOW
+      : isLlamaCpp
+        ? llamaCppContextWindow
+        : Number.POSITIVE_INFINITY;
+    const compactionReserveFloor = compactionReserveFloorForContext(activeContextWindow);
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       "agents.defaults.compaction.reserveTokensFloor",
-      `${DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR}`,
+      `${compactionReserveFloor}`,
     ]);
 
     // 4c. Local device gateway setup: keep token auth enabled for LAN binding,

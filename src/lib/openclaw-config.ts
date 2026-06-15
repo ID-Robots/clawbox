@@ -144,6 +144,25 @@ const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
+// Smallest reserve worth keeping — roughly one summary's worth of headroom.
+const MIN_COMPACTION_RESERVE_TOKENS_FLOOR = 4096;
+
+// Size the compaction reserve to a model's context window. The 24000 default
+// suits large-context cloud models, but it swallows most of a small local
+// window — Ollama caps at 32K, so a flat 24000 leaves only ~8.7K of usable
+// input, less than the agent's ~20K-token system prompt + tool schemas. Every
+// turn then fails before the model runs ("context overflow" / unrecoverable
+// auto-compaction). A quarter of the window, clamped to [MIN, default], keeps
+// small local models usable while large windows still get the full default.
+export function compactionReserveFloorForContext(contextWindow: number): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR;
+  }
+  return Math.min(
+    DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+    Math.max(MIN_COMPACTION_RESERVE_TOKENS_FLOOR, Math.round(contextWindow / 4)),
+  );
+}
 
 // Fields on each entry of `<agents-dir>/<agent>/sessions/sessions.json`
 // that OpenClaw reads to decide which provider/model a running session

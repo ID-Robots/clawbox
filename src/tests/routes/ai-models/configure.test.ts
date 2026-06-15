@@ -48,6 +48,12 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
 
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
+  // Pure helper — mirror the real implementation (unit-tested in
+  // openclaw-config.test.ts) so the configure route computes a real reserve.
+  compactionReserveFloorForContext: (contextWindow: number) =>
+    Number.isFinite(contextWindow) && contextWindow > 0
+      ? Math.min(24000, Math.max(4096, Math.round(contextWindow / 4)))
+      : 24000,
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
@@ -371,6 +377,13 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+
+    // Ollama's 32K window gets a context-scaled reserve (32768/4 = 8192), not
+    // the flat 24000 default — a 24000 floor leaves too little usable input for
+    // the agent's system prompt + tools, so every turn overflows before the
+    // model runs.
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
   });
 
   it("configures llama.cpp without apiKey", async () => {
