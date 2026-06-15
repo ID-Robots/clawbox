@@ -443,7 +443,11 @@ describe("POST /setup-api/ai-models/configure", () => {
   it("configures subscription auth mode for oauth", async () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
-      apiKey: "access-token",
+      // Codex subscription credentials must be JWT-shaped (3 dot-segments) —
+      // the configure route rejects non-JWT tokens to avoid recreating the
+      // "invalid ID token format" failure.
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
       authMode: "subscription",
       refreshToken: "refresh-token",
       expiresIn: 3600,

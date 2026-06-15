@@ -1172,7 +1172,7 @@ export default function AIModelsStep({
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; refresh_token?: string; expires_in?: number; projectId?: string }
+    tokenData: { access_token: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string }
   ) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1195,6 +1195,7 @@ export default function AIModelsStep({
           provider: selectedProvider,
           apiKey: tokenData.access_token,
           authMode: "subscription",
+          idToken: tokenData.id_token,
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
           ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),

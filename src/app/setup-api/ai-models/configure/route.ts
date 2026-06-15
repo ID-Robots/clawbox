@@ -383,6 +383,7 @@ export async function POST(request: Request) {
       provider?: string;
       apiKey?: string;
       authMode?: string;
+      idToken?: string;
       refreshToken?: string;
       expiresIn?: number;
       projectId?: string;
@@ -396,7 +397,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
@@ -464,6 +465,28 @@ export async function POST(request: Request) {
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+
+    // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
+    // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
+    // `access`). If neither is JWT-shaped, that synthesis produces an invalid
+    // id_token and every request fails with "invalid ID token format" — reject
+    // the save here so the failure surfaces at config time, not in the chat.
+    const normalizedIdToken = typeof idToken === "string" ? idToken.trim() : "";
+    const isJwtLike = (value: string) => value.split(".").length === 3;
+    if (
+      authMode === "subscription" &&
+      ocProvider === "codex" &&
+      !isJwtLike(normalizedIdToken || normalizedApiKey)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "OpenAI subscription OAuth did not return a valid JWT credential. Please restart the authorization flow.",
+        },
+        { status: 502 },
+      );
+    }
+
     const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
@@ -585,11 +608,16 @@ export async function POST(request: Request) {
         markLocalAiTokenMigrated();
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
-        // { type: "oauth", provider, access, refresh, expires, projectId? }
+        // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
+        // `id` is the OAuth id_token (a JWT). The Codex app-server authenticates
+        // with it, and gateway-pre-start's ~/.codex/auth.json synthesis uses
+        // `id` (falling back to `access`). Persisting it keeps the synthesized
+        // id_token a valid JWT instead of whatever `access` happens to be.
         authProfiles.profiles[config.profileKey] = {
           type: "oauth",
           provider: ocProvider,
           access: normalizedApiKey,
+          ...(normalizedIdToken ? { id: normalizedIdToken } : {}),
           refresh: refreshToken || "",
           expires: expiresIn
             ? Date.now() + expiresIn * 1000
