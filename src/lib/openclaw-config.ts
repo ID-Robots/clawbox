@@ -577,6 +577,102 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
   await writeConfig(config);
 }
 
+// === Telegram pairing (DM sender approval) ===
+//
+// OpenClaw's default `dmPolicy: "pairing"` makes an unknown Telegram sender's
+// first message inert until the owner approves their 8-char code. OpenClaw
+// persists approvals in `~/.openclaw/credentials/telegram-<account>-allowFrom.json`
+// (a string array of user ids) — a *different* file from `openclaw.json`, so the
+// boot-time `channels.telegram.allowFrom` strip in gateway-pre-start.sh never
+// touches them. We only ever approve specific senders; we never widen dmPolicy.
+
+const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
+const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
+
+export interface TelegramPairingRequest {
+  code?: string;
+  userId?: string;
+  username?: string;
+  displayName?: string;
+  [key: string]: unknown;
+}
+
+// Spawn the openclaw CLI capturing stdout. Mirrors spawnOpenclawConfigSet's
+// timeout/error handling but returns stdout (needed to read `--json` output).
+// The CLI cold-starts in ~10-12s on Jetson, hence the 30s default budget.
+function runOpenclawCli(args: string[], timeoutMs = 30_000): Promise<string> {
+  const bin = findOpenclawBin();
+  const cwd = process.env.HOME ?? "/home/clawbox";
+  const env = { HOME: "/home/clawbox", ...process.env };
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], cwd, env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`${bin} ${args.join(" ")} timed out after ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+    child.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+    child.on("close", (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.trim() || stdout.trim() || `${bin} ${args.join(" ")} exited with code ${code}`));
+      }
+    });
+  });
+}
+
+/** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json`. */
+export async function listTelegramPairingRequests(): Promise<TelegramPairingRequest[]> {
+  const out = await runOpenclawCli(["pairing", "list", "telegram", "--json"]);
+  try {
+    const parsed = JSON.parse(out) as { requests?: unknown };
+    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Approve a pending pairing code and notify the requester on Telegram
+ * (`openclaw pairing approve telegram <CODE> --notify`). The `--notify` flag
+ * makes OpenClaw send the "you're approved" confirmation to the user itself.
+ * Throws on an invalid format or a non-zero CLI exit (e.g. expired/unknown code).
+ */
+export async function approveTelegramPairing(code: string): Promise<void> {
+  const normalized = code.trim().toUpperCase();
+  if (!PAIRING_CODE_RE.test(normalized)) {
+    throw new Error("Invalid pairing code format");
+  }
+  await runOpenclawCli(["pairing", "approve", "telegram", normalized, "--notify"]);
+}
+
+/** Approved Telegram sender ids, read from the allowFrom store (empty on any failure). */
+export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+  const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
+    if (!Array.isArray(parsed.allowFrom)) return [];
+    return parsed.allowFrom.filter((v): v is string => typeof v === "string");
+  } catch {
+    return [];
+  }
+}
+
 // Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
 // provider. Every enabled plugin loads its tool schemas synchronously on
 // the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),

@@ -1075,6 +1075,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // null = loading; default ON when unset on the device.
   const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
+  // Telegram pairing / user-access state.
+  const [tgApproved, setTgApproved] = useState<string[]>([]);
+  const [tgPending, setTgPending] = useState<Array<{ code?: string; userId?: string; username?: string; displayName?: string }> | null>(null);
+  const [tgPendingLoading, setTgPendingLoading] = useState(false);
+  const [tgPairingCode, setTgPairingCode] = useState("");
+  const [tgApproving, setTgApproving] = useState(false);
+  const [tgPairingStatus, setTgPairingStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshTelegramStatus = useCallback(async () => {
     try {
@@ -1099,14 +1106,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  const refreshPairing = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/telegram/pairing", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (Array.isArray(d.approved)) setTgApproved(d.approved);
+    } catch {
+      // keep last known approved list on a transient error
+    }
+  }, []);
+
   useEffect(() => {
     if (section !== "telegram" && !isMobile) return;
     refreshTelegramStatus();
+    refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [section, isMobile, refreshTelegramStatus]);
+  }, [section, isMobile, refreshTelegramStatus, refreshPairing]);
 
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
@@ -1129,6 +1148,55 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setTgStreamingPending(false);
     }
   }, [tgStreaming]);
+
+  const loadPending = useCallback(async () => {
+    setTgPendingLoading(true);
+    setTgPairingStatus(null);
+    try {
+      const r = await fetch("/setup-api/telegram/pairing?pending=1", { cache: "no-store" });
+      const d = await r.json();
+      if (r.ok) {
+        setTgPending(Array.isArray(d.pending) ? d.pending : []);
+        if (Array.isArray(d.approved)) setTgApproved(d.approved);
+      } else {
+        setTgPairingStatus({ type: "error", message: d.error || t("settings.pairingCheckFailed") });
+      }
+    } catch {
+      setTgPairingStatus({ type: "error", message: t("settings.pairingCheckFailed") });
+    } finally {
+      setTgPendingLoading(false);
+    }
+  }, [t]);
+
+  const approvePairingCode = useCallback(async (rawCode: string) => {
+    const code = rawCode.trim().toUpperCase();
+    if (!/^[A-Z0-9]{8}$/.test(code)) {
+      setTgPairingStatus({ type: "error", message: t("settings.pairingInvalidCode") });
+      return;
+    }
+    setTgApproving(true);
+    setTgPairingStatus(null);
+    try {
+      const r = await fetch("/setup-api/telegram/pairing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const d = await r.json();
+      if (r.ok && d.success) {
+        if (Array.isArray(d.approved)) setTgApproved(d.approved);
+        setTgPairingCode("");
+        setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
+      } else {
+        setTgPairingStatus({ type: "error", message: d.error || t("settings.pairingApproveFailed") });
+      }
+    } catch {
+      setTgPairingStatus({ type: "error", message: t("settings.pairingApproveFailed") });
+    } finally {
+      setTgApproving(false);
+    }
+  }, [t]);
 
   const saveTelegram = async () => {
     if (!tgToken.trim()) {
@@ -2347,6 +2415,117 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+
+            {/* User access — pairing approval (only when a bot is configured) */}
+            {tgConfigured && !tgReconfigure && !tgConfiguring && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">group</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.pairingTitle")}</label>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.pairingHint")}</p>
+
+                {/* Paste a code */}
+                <div className="flex items-stretch gap-2">
+                  <input
+                    type="text"
+                    value={tgPairingCode}
+                    onChange={(e) => { setTgPairingCode(e.target.value.toUpperCase()); setTgPairingStatus(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !tgApproving) approvePairingCode(tgPairingCode); }}
+                    placeholder={t("settings.pairingCodePlaceholder")}
+                    maxLength={8}
+                    spellCheck={false}
+                    autoCapitalize="characters"
+                    className="flex-1 min-w-0 px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-primary)] font-mono tracking-[0.3em] uppercase placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:border-[var(--coral-bright)]/60"
+                  />
+                  <button
+                    type="button"
+                    disabled={tgApproving || tgPairingCode.trim().length !== 8}
+                    onClick={() => approvePairingCode(tgPairingCode)}
+                    className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors shrink-0 inline-flex items-center gap-1.5"
+                  >
+                    {tgApproving && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                    {t("settings.pairingApprove")}
+                  </button>
+                </div>
+
+                {tgPairingStatus && <div className="mt-3"><StatusMessage type={tgPairingStatus.type} message={tgPairingStatus.message} /></div>}
+
+                {/* Pending requests — opt-in load (the list CLI is slow on Jetson) */}
+                <div className="mt-4">
+                  {tgPending === null ? (
+                    <button
+                      type="button"
+                      disabled={tgPendingLoading}
+                      onClick={loadPending}
+                      className="inline-flex items-center gap-1.5 text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
+                    >
+                      <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                      {tgPendingLoading ? t("settings.pairingChecking") : t("settings.pairingCheck")}
+                    </button>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-semibold text-[var(--text-secondary)]">{t("settings.pairingPending")}</span>
+                        <button
+                          type="button"
+                          disabled={tgPendingLoading}
+                          onClick={loadPending}
+                          className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
+                        >
+                          <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 14 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                          {t("settings.pairingCheck")}
+                        </button>
+                      </div>
+                      {tgPending.length === 0 ? (
+                        <p className="text-xs text-[var(--text-muted)]">{t("settings.pairingNoPending")}</p>
+                      ) : (
+                        <ul className="space-y-2 list-none p-0 m-0">
+                          {tgPending.map((req, i) => {
+                            const label = req.username ? `@${req.username}` : (req.displayName || req.userId || req.code || `#${i + 1}`);
+                            return (
+                              <li key={req.code || req.userId || i} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
+                                <div className="min-w-0">
+                                  <div className="text-sm text-[var(--text-primary)] truncate">{label}</div>
+                                  {req.userId && <div className="text-xs text-[var(--text-muted)] font-mono truncate">{req.userId}</div>}
+                                </div>
+                                {req.code && (
+                                  <button
+                                    type="button"
+                                    disabled={tgApproving}
+                                    onClick={() => approvePairingCode(req.code!)}
+                                    className="px-3 py-1.5 rounded-md bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 text-xs font-semibold text-[var(--coral-bright)] transition-colors shrink-0 disabled:opacity-50 cursor-pointer"
+                                  >
+                                    {t("settings.pairingApprove")}
+                                  </button>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Approved users */}
+                <div className="mt-4 pt-4 border-t border-white/[0.06]">
+                  <span className="text-xs font-semibold text-[var(--text-secondary)]">{t("settings.pairingApprovedTitle")}</span>
+                  {tgApproved.length === 0 ? (
+                    <p className="text-xs text-[var(--text-muted)] mt-1">{t("settings.pairingNoApproved")}</p>
+                  ) : (
+                    <ul className="mt-2 flex flex-wrap gap-2 list-none p-0 m-0">
+                      {tgApproved.map((id) => (
+                        <li key={id} className="inline-flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-full px-3 py-1 text-xs text-[var(--text-secondary)] font-mono">
+                          <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }} aria-hidden="true">check</span>
+                          {id}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Setup card — shown when not configured or reconfiguring */}
             {(tgConfigured === false || tgReconfigure || tgConfiguring) && (
