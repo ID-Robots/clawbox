@@ -50,6 +50,19 @@ CLAWBOX_HOME="/home/clawbox"
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
 # llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
 # installer can run inside a CI container. See e2e-install/README.md.
+#
+# The e2e-install entrypoint seeds /etc/clawbox/test-mode.env before any
+# install.sh runs. Source it so EVERY invocation detects test mode up front —
+# not just the first-boot bootstrap (which gets CLAWBOX_TEST_MODE in its
+# service env), but also the updater-triggered `install.sh --step` runs via
+# clawbox-root-update@.service, which otherwise inherit only
+# /etc/clawbox/network.env (populated late, during step_network_setup) and so
+# hit the real Jetson/WiFi steps and fail on a non-Tegra CI host. The file
+# exists only in the test container, so this is a no-op on real devices.
+if [ -f /etc/clawbox/test-mode.env ]; then
+  # shellcheck disable=SC1091
+  source /etc/clawbox/test-mode.env
+fi
 CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
 is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
