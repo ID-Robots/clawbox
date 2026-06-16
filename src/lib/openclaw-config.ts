@@ -621,18 +621,40 @@ const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
 export const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
 
 export interface TelegramPairingRequest {
+  /** The 8-char pairing code. */
   code?: string;
-  userId?: string;
-  username?: string;
-  displayName?: string;
+  /** Sender id — the Telegram user id that lands in the allowlist on approval. */
+  id?: string;
+  /** Free-form sender metadata OpenClaw attaches (e.g. username / name). */
+  meta?: Record<string, unknown>;
+  createdAt?: string;
   [key: string]: unknown;
 }
 
-/** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json`. */
+/** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json` (authoritative). */
 export async function listTelegramPairingRequests(): Promise<TelegramPairingRequest[]> {
   const out = await spawnOpenclaw(["pairing", "list", "telegram", "--json"], { captureStdout: true });
   try {
     const parsed = JSON.parse(out) as { requests?: unknown };
+    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
+ * store file — a plain read with no CLI cold-start, so it's cheap enough to poll
+ * for the desktop "new request" popup. The store path mirrors the allowFrom
+ * store; the default account is unsuffixed (`telegram-pairing.json`).
+ */
+export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+  const file = path.join(
+    CREDENTIALS_DIR,
+    account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`,
+  );
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { requests?: unknown };
     return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
   } catch {
     return [];

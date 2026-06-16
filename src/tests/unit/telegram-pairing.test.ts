@@ -79,3 +79,46 @@ describe("approveTelegramPairing", () => {
     await expect(approveTelegramPairing("fql2a98k!")).rejects.toThrow(); // 9 + symbol
   });
 });
+
+describe("readTelegramPairingRequests", () => {
+  let tmpHome: string;
+  const origHome = process.env.OPENCLAW_HOME;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "oc-home-"));
+    process.env.OPENCLAW_HOME = tmpHome;
+    await fs.mkdir(path.join(tmpHome, "credentials"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (origHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = origHome;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  async function writePairing(content: string): Promise<void> {
+    await fs.writeFile(
+      path.join(tmpHome, "credentials", "telegram-pairing.json"),
+      content,
+      "utf-8",
+    );
+  }
+
+  it("returns the pending requests from the store file", async () => {
+    await writePairing(JSON.stringify({ version: 1, requests: [{ code: "ABCD2345", id: "42" }] }));
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    expect(await readTelegramPairingRequests()).toEqual([{ code: "ABCD2345", id: "42" }]);
+  });
+
+  it("returns [] when the file is missing", async () => {
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    expect(await readTelegramPairingRequests()).toEqual([]);
+  });
+
+  it("returns [] on malformed JSON", async () => {
+    await writePairing("{not json");
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    expect(await readTelegramPairingRequests()).toEqual([]);
+  });
+});

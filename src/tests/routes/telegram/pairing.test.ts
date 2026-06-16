@@ -7,6 +7,7 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/openclaw-config", () => ({
   readTelegramAllowFrom: vi.fn(),
   listTelegramPairingRequests: vi.fn(),
+  readTelegramPairingRequests: vi.fn(),
   approveTelegramPairing: vi.fn(),
   // The route imports this constant for its own format check — the mock must
   // provide it or `PAIRING_CODE_RE.test(...)` throws and every POST 500s.
@@ -17,12 +18,14 @@ import { get } from "@/lib/config-store";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
+  readTelegramPairingRequests,
   approveTelegramPairing,
 } from "@/lib/openclaw-config";
 
 const mockGet = vi.mocked(get);
 const mockReadAllow = vi.mocked(readTelegramAllowFrom);
 const mockListPending = vi.mocked(listTelegramPairingRequests);
+const mockReadPending = vi.mocked(readTelegramPairingRequests);
 const mockApprove = vi.mocked(approveTelegramPairing);
 
 describe("/setup-api/telegram/pairing", () => {
@@ -46,6 +49,7 @@ describe("/setup-api/telegram/pairing", () => {
     mockGet.mockResolvedValue("123:abc");
     mockReadAllow.mockResolvedValue(["6057319791"]);
     mockListPending.mockResolvedValue([]);
+    mockReadPending.mockResolvedValue([]);
     mockApprove.mockResolvedValue();
 
     const mod = await import("@/app/setup-api/telegram/pairing/route");
@@ -82,14 +86,26 @@ describe("/setup-api/telegram/pairing", () => {
     expect(mockListPending).not.toHaveBeenCalled();
   });
 
-  it("GET includes pending requests when ?pending=1", async () => {
-    mockListPending.mockResolvedValue([{ code: "FQL2A98K", userId: "999" }]);
+  it("GET includes pending requests via the CLI when ?pending=1", async () => {
+    mockListPending.mockResolvedValue([{ code: "FQL2A98K", id: "999" }]);
     const res = await GET(getReq("http://localhost/setup-api/telegram/pairing?pending=1"));
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(mockListPending).toHaveBeenCalledTimes(1);
-    expect(body.pending).toEqual([{ code: "FQL2A98K", userId: "999" }]);
+    expect(mockReadPending).not.toHaveBeenCalled();
+    expect(body.pending).toEqual([{ code: "FQL2A98K", id: "999" }]);
+  });
+
+  it("GET reads the pairing store file (not the CLI) when ?poll=1", async () => {
+    mockReadPending.mockResolvedValue([{ code: "ABCD2345", id: "42" }]);
+    const res = await GET(getReq("http://localhost/setup-api/telegram/pairing?poll=1"));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockReadPending).toHaveBeenCalledTimes(1);
+    expect(mockListPending).not.toHaveBeenCalled();
+    expect(body.pending).toEqual([{ code: "ABCD2345", id: "42" }]);
   });
 
   it("GET returns 500 when reading the approved list fails", async () => {

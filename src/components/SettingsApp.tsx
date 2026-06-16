@@ -1077,7 +1077,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
   // Telegram pairing / user-access state.
   const [tgApproved, setTgApproved] = useState<string[]>([]);
-  const [tgPending, setTgPending] = useState<Array<{ code?: string; userId?: string; username?: string; displayName?: string }> | null>(null);
+  const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; meta?: Record<string, unknown>; createdAt?: string }> | null>(null);
   const [tgPendingLoading, setTgPendingLoading] = useState(false);
   const [tgPairingCode, setTgPairingCode] = useState("");
   const [tgApproving, setTgApproving] = useState(false);
@@ -2482,12 +2482,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       ) : (
                         <ul className="space-y-2 list-none p-0 m-0">
                           {tgPending.map((req, i) => {
-                            const label = req.username ? `@${req.username}` : (req.displayName || req.userId || req.code || `#${i + 1}`);
+                            const uname = typeof req.meta?.username === "string" ? req.meta.username : "";
+                            const label = uname ? `@${uname}` : (req.id || req.code || `#${i + 1}`);
                             return (
-                              <li key={req.code || req.userId || i} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
+                              <li key={req.code || req.id || i} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
                                 <div className="min-w-0">
                                   <div className="text-sm text-[var(--text-primary)] truncate">{label}</div>
-                                  {req.userId && <div className="text-xs text-[var(--text-muted)] font-mono truncate">{req.userId}</div>}
+                                  {req.id && <div className="text-xs text-[var(--text-muted)] font-mono truncate">{req.id}</div>}
                                 </div>
                                 {req.code && (
                                   <button

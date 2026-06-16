@@ -3,6 +3,7 @@ import { get } from "@/lib/config-store";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
+  readTelegramPairingRequests,
   approveTelegramPairing,
   PAIRING_CODE_RE,
 } from "@/lib/openclaw-config";
@@ -25,9 +26,16 @@ export async function GET(request: Request) {
         { headers: { "Cache-Control": "no-store" } },
       );
     }
+    const params = new URL(request.url).searchParams;
     const approved = await readTelegramAllowFrom();
-    const wantPending = new URL(request.url).searchParams.get("pending") === "1";
-    const pending = wantPending ? await listTelegramPairingRequests() : [];
+    // `?poll=1` reads the pairing-store file (fast — safe for the desktop poller);
+    // `?pending=1` uses the authoritative CLI (the Settings "Check" button).
+    const pending =
+      params.get("poll") === "1"
+        ? await readTelegramPairingRequests()
+        : params.get("pending") === "1"
+          ? await listTelegramPairingRequests()
+          : [];
     return NextResponse.json(
       { configured: true, approved, pending },
       { headers: { "Cache-Control": "no-store" } },
