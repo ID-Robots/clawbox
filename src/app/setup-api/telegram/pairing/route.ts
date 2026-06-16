@@ -4,11 +4,10 @@ import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
   approveTelegramPairing,
+  PAIRING_CODE_RE,
 } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
-
-const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
 
 async function isConfigured(): Promise<boolean> {
   const token = await get("telegram_bot_token");

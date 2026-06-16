@@ -8,6 +8,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   readTelegramAllowFrom: vi.fn(),
   listTelegramPairingRequests: vi.fn(),
   approveTelegramPairing: vi.fn(),
+  // The route imports this constant for its own format check — the mock must
+  // provide it or `PAIRING_CODE_RE.test(...)` throws and every POST 500s.
+  PAIRING_CODE_RE: /^[A-Z0-9]{8}$/,
 }));
 
 import { get } from "@/lib/config-store";

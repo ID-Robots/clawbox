@@ -85,31 +85,49 @@ export async function runOpenclawConfigSet(
   throw lastError ?? new Error("runOpenclawConfigSet exhausted retries");
 }
 
-function spawnOpenclawConfigSet(
-  args: string[],
-  options: OpenclawConfigSetOptions & { timeoutMs: number },
-): Promise<void> {
+interface SpawnOpenclawOptions {
+  /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
+  timeoutMs?: number;
+  /** Capture and resolve stdout (needed to read `--json` output). Default false. */
+  captureStdout?: boolean;
+  uid?: number;
+  gid?: number;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Spawn the `openclaw` CLI with a per-call timeout and uniform error handling,
+ * resolving with stdout (empty unless `captureStdout` is set).
+ *
+ * stdout is left "ignore" unless a caller asks for it: OpenClaw's CLI can emit a
+ * lot of stdout under verbose/debug modes and, with a full kernel pipe buffer
+ * and no one draining it, the child would deadlock. stderr is always captured —
+ * it carries the ConfigMutationConflictError signature used for retry.
+ */
+function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
-  const { timeoutMs, uid, gid } = options;
+  const { uid, gid, captureStdout = false } = options;
+  const timeoutMs = options.timeoutMs ?? 30_000;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
+  const label = `${bin} ${args.join(" ")}`;
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    // stdin + stdout are "ignore" so the child isn't blocked writing into a
-    // pipe no one is reading — OpenClaw's CLI can produce a lot of stdout
-    // under verbose/debug modes, and with a full kernel pipe buffer it would
-    // deadlock waiting for someone to drain it. We only care about stderr,
-    // which carries the ConfigMutationConflictError signature used for retry.
-    const child = spawn(bin, ["config", "set", ...args], {
-      stdio: ["ignore", "ignore", "pipe"],
+    const child = spawn(bin, args, {
+      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
       env,
     });
 
+    let stdout = "";
     let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
@@ -118,7 +136,7 @@ function spawnOpenclawConfigSet(
       if (!settled) {
         settled = true;
         child.kill("SIGKILL");
-        reject(new Error(`${bin} config set timed out after ${timeoutMs}ms`));
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
       }
     }, timeoutMs);
 
@@ -134,11 +152,24 @@ function spawnOpenclawConfigSet(
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        if (code === 0) resolve();
-        else reject(new Error(stderr.trim() || `${bin} config set exited with code ${code}`));
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.trim() || stdout.trim() || `${label} exited with code ${code}`));
       }
     });
   });
+}
+
+function spawnOpenclawConfigSet(
+  args: string[],
+  options: OpenclawConfigSetOptions & { timeoutMs: number },
+): Promise<void> {
+  return spawnOpenclaw(["config", "set", ...args], {
+    timeoutMs: options.timeoutMs,
+    uid: options.uid,
+    gid: options.gid,
+    cwd: options.cwd,
+    env: options.env,
+  }).then(() => undefined);
 }
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
@@ -587,7 +618,7 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
 // touches them. We only ever approve specific senders; we never widen dmPolicy.
 
 const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
-const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
+export const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
 
 export interface TelegramPairingRequest {
   code?: string;
@@ -597,48 +628,9 @@ export interface TelegramPairingRequest {
   [key: string]: unknown;
 }
 
-// Spawn the openclaw CLI capturing stdout. Mirrors spawnOpenclawConfigSet's
-// timeout/error handling but returns stdout (needed to read `--json` output).
-// The CLI cold-starts in ~10-12s on Jetson, hence the 30s default budget.
-function runOpenclawCli(args: string[], timeoutMs = 30_000): Promise<string> {
-  const bin = findOpenclawBin();
-  const cwd = process.env.HOME ?? "/home/clawbox";
-  const env = { HOME: "/home/clawbox", ...process.env };
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], cwd, env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        reject(new Error(`${bin} ${args.join(" ")} timed out after ${timeoutMs}ms`));
-      }
-    }, timeoutMs);
-    child.on("error", (err) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        reject(err);
-      }
-    });
-    child.on("close", (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr.trim() || stdout.trim() || `${bin} ${args.join(" ")} exited with code ${code}`));
-      }
-    });
-  });
-}
-
 /** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json`. */
 export async function listTelegramPairingRequests(): Promise<TelegramPairingRequest[]> {
-  const out = await runOpenclawCli(["pairing", "list", "telegram", "--json"]);
+  const out = await spawnOpenclaw(["pairing", "list", "telegram", "--json"], { captureStdout: true });
   try {
     const parsed = JSON.parse(out) as { requests?: unknown };
     return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
@@ -658,10 +650,14 @@ export async function approveTelegramPairing(code: string): Promise<void> {
   if (!PAIRING_CODE_RE.test(normalized)) {
     throw new Error("Invalid pairing code format");
   }
-  await runOpenclawCli(["pairing", "approve", "telegram", normalized, "--notify"]);
+  await spawnOpenclaw(["pairing", "approve", "telegram", normalized, "--notify"]);
 }
 
-/** Approved Telegram sender ids, read from the allowFrom store (empty on any failure). */
+/**
+ * Approved Telegram sender ids, read from the allowFrom store (empty on any
+ * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
+ * so it defaults to "default" (file `telegram-default-allowFrom.json`).
+ */
 export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
   const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
   try {
