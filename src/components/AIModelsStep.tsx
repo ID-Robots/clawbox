@@ -320,7 +320,7 @@ function ConfiguringOverlay({
   );
 }
 
-const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic"]);
+const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic", "llamacpp"]);
 
 const PROVIDERS: Provider[] = [
   {
@@ -1751,9 +1751,14 @@ export default function AIModelsStep({
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {(provider.id === "clawai" || provider.id === "llamacpp") && (
+                    {provider.id === "clawai" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
                         {t("recommended")}
+                      </span>
+                    )}
+                    {provider.id === "llamacpp" && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
+                        {t("ai.fullyLocal")}
                       </span>
                     )}
                   </span>
