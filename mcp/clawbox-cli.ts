@@ -12,10 +12,12 @@
  *   clawbox notify <message>
  *   clawbox system stats
  *   clawbox system info
+ *   clawbox update
  */
 
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
+import { spawnSync } from "child_process";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
@@ -321,6 +323,23 @@ async function main() {
     await apiPost("/setup-api/code", { action: "delete-project", projectId });
     console.log(`✅ Deleted project "${projectId}".`);
 
+  } else if (cmd === "update") {
+    // ClawBox system update: re-run the full installer in place. It git-syncs
+    // to the latest pinned code, then runs every step (system packages,
+    // OpenClaw at the pinned version, gateway config) and rebuilds — the same
+    // complete path the Settings -> Update button drives, but straight in the
+    // terminal so you can watch each step and see exactly where it fails.
+    // Requires root, so it shells out via sudo.
+    const projectRoot = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+    const installScript = join(projectRoot, "install.sh");
+    if (!existsSync(installScript)) {
+      console.error(`install.sh not found at ${installScript} — set CLAWBOX_ROOT to your ClawBox checkout.`);
+      process.exit(1);
+    }
+    console.log(`Running ClawBox update — sudo bash ${installScript}\n`);
+    const res = spawnSync("sudo", ["bash", installScript], { stdio: "inherit" });
+    process.exit(res.status ?? 1);
+
   } else {
     console.log(`ClawBox CLI — Control the ClawBox device
 
@@ -333,6 +352,7 @@ Usage:
   clawbox notify <message>
   clawbox system stats
   clawbox system info
+  clawbox update                       Update ClawBox + OpenClaw in place (runs the installer; needs sudo)
 
 Code Projects:
   clawbox code init <projectId> <name> [template] [color]
