@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
+  set: vi.fn(),
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
@@ -14,7 +15,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   PAIRING_CODE_RE: /^[A-Z0-9]{8}$/,
 }));
 
-import { get } from "@/lib/config-store";
+import { get, set } from "@/lib/config-store";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
@@ -27,6 +28,7 @@ const mockReadAllow = vi.mocked(readTelegramAllowFrom);
 const mockListPending = vi.mocked(listTelegramPairingRequests);
 const mockReadPending = vi.mocked(readTelegramPairingRequests);
 const mockApprove = vi.mocked(approveTelegramPairing);
+const mockSet = vi.mocked(set);
 
 describe("/setup-api/telegram/pairing", () => {
   let GET: (req: Request) => Promise<Response>;
@@ -81,7 +83,7 @@ describe("/setup-api/telegram/pairing", () => {
 
     expect(res.status).toBe(200);
     expect(body.configured).toBe(true);
-    expect(body.approved).toEqual(["6057319791"]);
+    expect(body.approved).toEqual([{ id: "6057319791" }]);
     expect(body.pending).toEqual([]);
     expect(mockListPending).not.toHaveBeenCalled();
   });
@@ -138,7 +140,26 @@ describe("/setup-api/telegram/pairing", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(mockApprove).toHaveBeenCalledWith("FQL2A98K");
-    expect(body.approved).toEqual(["6057319791", "999"]);
+    expect(body.approved).toEqual([{ id: "6057319791" }, { id: "999" }]);
+  });
+
+  it("POST captures the requester's name from the pending store and stores it", async () => {
+    mockGet.mockImplementation(async (key: string) =>
+      key === "telegram_bot_token"
+        ? "123:abc"
+        : key === "telegram_approved_names"
+          ? { "999": "Ivan" }
+          : null,
+    );
+    mockReadAllow.mockResolvedValue(["999"]);
+    mockReadPending.mockResolvedValue([{ code: "FQL2A98K", id: "999", meta: { name: "Ivan" } }]);
+
+    const res = await POST(postReq({ code: "fql2a98k" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", { "999": "Ivan" });
+    expect(body.approved).toEqual([{ id: "999", name: "Ivan" }]);
   });
 
   it("POST maps an expired/unknown code to a 400", async () => {

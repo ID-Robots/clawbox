@@ -625,8 +625,8 @@ export interface TelegramPairingRequest {
   code?: string;
   /** Sender id — the Telegram user id that lands in the allowlist on approval. */
   id?: string;
-  /** Free-form sender metadata OpenClaw attaches (e.g. username / name). */
-  meta?: Record<string, unknown>;
+  /** Sender metadata OpenClaw attaches — `name` is the Telegram display name. */
+  meta?: { name?: string; [key: string]: unknown };
   createdAt?: string;
   [key: string]: unknown;
 }
