@@ -1244,7 +1244,7 @@ function ChromeDesktopInner() {
   // when Settings is closed. De-duped by code via localStorage so a dismissed
   // request doesn't pop again.
   const [pairingRequests, setPairingRequests] = useState<
-    Array<{ code?: string; id?: string; meta?: { firstName?: string; lastName?: string } }>
+    Array<{ code?: string; id?: string; name?: string }>
   >([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
 
@@ -1765,8 +1765,7 @@ function ChromeDesktopInner() {
 
           {/* New Telegram access request popup(s) */}
           {pairingRequests.map((req) => {
-            const name = [req.meta?.firstName, req.meta?.lastName].filter((v): v is string => typeof v === "string" && v.length > 0).join(" ");
-            const label = name || req.id || "A Telegram user";
+            const label = req.name || req.id || "A Telegram user";
             const code = req.code || "";
             return (
               <div

@@ -152,7 +152,7 @@ describe("/setup-api/telegram/pairing", () => {
           : null,
     );
     mockReadAllow.mockResolvedValue(["999"]);
-    mockReadPending.mockResolvedValue([{ code: "FQL2A98K", id: "999", meta: { firstName: "Ivan" } }]);
+    mockReadPending.mockResolvedValue([{ code: "FQL2A98K", id: "999", name: "Ivan" }]);
 
     const res = await POST(postReq({ code: "fql2a98k" }));
     const body = await res.json();

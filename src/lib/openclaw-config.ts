@@ -627,8 +627,28 @@ export interface TelegramPairingRequest {
   id?: string;
   /** Sender metadata OpenClaw attaches — `firstName`/`lastName` are the Telegram name. */
   meta?: { firstName?: string; lastName?: string; [key: string]: unknown };
+  /** Display name, derived from `meta` once at the read boundary so callers (the
+   *  popup, Settings list, and approve route) don't each re-derive it. */
+  name?: string;
   createdAt?: string;
   [key: string]: unknown;
+}
+
+/** Build a display name from a pairing request's meta (Telegram first/last name). */
+function deriveTelegramName(meta: TelegramPairingRequest["meta"]): string | undefined {
+  const name = [meta?.firstName, meta?.lastName]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ");
+  return name || undefined;
+}
+
+/** Normalise a raw `requests` array, attaching a derived `name` to each entry. */
+function withDerivedNames(requests: unknown): TelegramPairingRequest[] {
+  if (!Array.isArray(requests)) return [];
+  return (requests as TelegramPairingRequest[]).map((r) => ({
+    ...r,
+    name: r.name ?? deriveTelegramName(r.meta),
+  }));
 }
 
 /** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json` (authoritative). */
@@ -636,7 +656,7 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
   const out = await spawnOpenclaw(["pairing", "list", "telegram", "--json"], { captureStdout: true });
   try {
     const parsed = JSON.parse(out) as { requests?: unknown };
-    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+    return withDerivedNames(parsed.requests);
   } catch {
     return [];
   }
@@ -655,7 +675,7 @@ export async function readTelegramPairingRequests(account = "default"): Promise<
   );
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { requests?: unknown };
-    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+    return withDerivedNames(parsed.requests);
   } catch {
     return [];
   }

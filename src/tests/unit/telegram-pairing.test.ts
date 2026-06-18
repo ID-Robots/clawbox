@@ -111,6 +111,13 @@ describe("readTelegramPairingRequests", () => {
     expect(await readTelegramPairingRequests()).toEqual([{ code: "ABCD2345", id: "42" }]);
   });
 
+  it("derives a display name from meta.firstName/lastName", async () => {
+    await writePairing(JSON.stringify({ version: 1, requests: [{ code: "ABCD2345", id: "42", meta: { firstName: "Krasi", lastName: "K" } }] }));
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    const [req] = await readTelegramPairingRequests();
+    expect(req.name).toBe("Krasi K");
+  });
+
   it("returns [] when the file is missing", async () => {
     const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
     expect(await readTelegramPairingRequests()).toEqual([]);

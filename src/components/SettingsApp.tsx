@@ -1077,7 +1077,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
   // Telegram pairing / user-access state.
   const [tgApproved, setTgApproved] = useState<Array<{ id: string; name?: string }>>([]);
-  const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; meta?: { firstName?: string; lastName?: string }; createdAt?: string }> | null>(null);
+  const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; name?: string; createdAt?: string }> | null>(null);
   const [tgPendingLoading, setTgPendingLoading] = useState(false);
   const [tgPairingCode, setTgPairingCode] = useState("");
   const [tgApproving, setTgApproving] = useState(false);
@@ -2504,8 +2504,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       ) : (
                         <ul className="space-y-2 list-none p-0 m-0">
                           {tgPending.map((req, i) => {
-                            const name = [req.meta?.firstName, req.meta?.lastName].filter((v): v is string => typeof v === "string" && v.length > 0).join(" ");
-                            const label = name || req.id || req.code || `#${i + 1}`;
+                            const label = req.name || req.id || req.code || `#${i + 1}`;
                             return (
                               <li key={req.code || req.id || i} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
                                 <div className="min-w-0">
