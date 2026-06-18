@@ -1127,6 +1127,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       .catch(() => setTgStreaming(true));
   }, [section, isMobile, refreshTelegramStatus, refreshPairing]);
 
+  // Refresh the approved/pending lists when an approval happens anywhere (e.g.
+  // the desktop popup) so the Settings list updates without a manual reload.
+  useEffect(() => {
+    const onApproved = (e: Event) => {
+      const code = (e as CustomEvent<{ code?: string }>).detail?.code;
+      refreshPairing();
+      if (code) setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code.toUpperCase()) : prev));
+    };
+    window.addEventListener("clawbox:telegram-approved", onApproved);
+    return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
+  }, [refreshPairing]);
+
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
     setTgStreamingPending(true);
@@ -1187,6 +1199,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (Array.isArray(d.approved)) setTgApproved(d.approved);
         setTgPairingCode("");
         setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
       } else {
         setTgPairingStatus({ type: "error", message: d.error || t("settings.pairingApproveFailed") });

@@ -691,6 +691,19 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
   }
 }
 
+/**
+ * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
+ * token changes: previously-approved senders belong to the old bot, so a new
+ * bot should start with a fresh allowlist. Best-effort — missing files are fine.
+ */
+export async function clearTelegramPairingState(account = "default"): Promise<void> {
+  const files = [
+    path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
+    path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),
+  ];
+  await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
+}
+
 // Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
 // provider. Every enabled plugin loads its tool schemas synchronously on
 // the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),
