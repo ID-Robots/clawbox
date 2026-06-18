@@ -28,7 +28,21 @@ fi
 
 if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
   _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  _br="${CLAWBOX_BRANCH:-main}"
+  # Resolve the branch like resolve_update_branch() does below — explicit
+  # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
+  # else main. Defaulting straight to main (Gap 1) force-reset a beta (or any
+  # non-main) box toward main on a bare `install.sh`. is_safe_git_ref() isn't
+  # defined this early, so validate inline before the value reaches a git ref.
+  _br="${CLAWBOX_BRANCH:-}"
+  if [ -z "$_br" ] && [ -f "$_b/.update-branch" ]; then
+    _br="$(head -n 1 "$_b/.update-branch" | tr -d '[:space:]')"
+  fi
+  if [ -z "$_br" ]; then
+    _br="$(git -C "$_b" -c safe.directory="$_b" symbolic-ref --short HEAD 2>/dev/null || true)"
+  fi
+  # Empty (no env/file/branch) or unsafe (defends against a malicious
+  # .update-branch — the value is interpolated into a git ref below) → main.
+  case "$_br" in ""|*[!A-Za-z0-9._/-]*) _br="main" ;; esac
   echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
   git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
   if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
@@ -591,6 +605,13 @@ resolve_update_branch() {
   UPDATE_TARGET_LOCAL="main"
   UPDATE_TARGET_UPSTREAM="origin/main"
 
+  # An explicit CLAWBOX_BRANCH (CLI or systemd env) wins over everything else.
+  if [ -n "${CLAWBOX_BRANCH:-}" ] && is_safe_git_ref "${CLAWBOX_BRANCH}"; then
+    UPDATE_TARGET_LOCAL="$CLAWBOX_BRANCH"
+    UPDATE_TARGET_UPSTREAM="origin/$CLAWBOX_BRANCH"
+    return 0
+  fi
+
   local pinned=""
   if [ -f "$PROJECT_DIR/.update-branch" ]; then
     pinned=$(head -n 1 "$PROJECT_DIR/.update-branch" | tr -d '[:space:]')
@@ -654,26 +675,16 @@ step_git_pull() {
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
   else
-    local CURRENT_BRANCH
-    CURRENT_BRANCH=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" branch --show-current)
-    # Only switch branches if CLAWBOX_BRANCH was explicitly set
-    local TARGET_BRANCH="${CLAWBOX_BRANCH:-$CURRENT_BRANCH}"
-    echo "  Repository exists, pulling latest on branch '$TARGET_BRANCH'..."
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
-    if [ "$TARGET_BRANCH" != "$CURRENT_BRANCH" ]; then
-      if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null; then
-        # Try creating a tracking branch from origin if it only exists remotely
-        if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH" 2>/dev/null; then
-          echo "Error: failed to checkout branch '$TARGET_BRANCH'" >&2
-          exit 1
-        fi
-      fi
-    fi
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
-    # Fix project ownership — git operations run as root can leave both git
-    # metadata and working-tree files owned by root, which blocks later pulls
-    # and writes by the clawbox user.
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+    # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
+    # current branch > main) instead of a fast-forward-only merge. The old
+    # `merge --ff-only ... || echo continuing` silently kept stale code whenever
+    # the box had any local divergence, which then pinned config/openclaw-target.txt,
+    # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
+    # robust path the in-app updater takes: fetch, drop local changes, checkout,
+    # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
+    resolve_update_branch
+    echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+    sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
   fi
 }
 
