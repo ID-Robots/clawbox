@@ -1,0 +1,76 @@
+---
+title: "Updating ClawBox"
+summary: "The reliable way to update your ClawBox to the latest version — and how to recover if an update gets stuck."
+---
+
+# Updating ClawBox
+
+Keeping your ClawBox current gets you the newest features and fixes. This page covers the **most reliable way to update** and how to recover if an in‑app update ever gets stuck.
+
+<Note>
+Your data, settings and channel tokens live in `~/.openclaw`, separate from the app code. Updating the app does not touch them — and the steps below make a backup first, just in case.
+</Note>
+
+## Update safely (recommended)
+
+This one‑line updater syncs your box cleanly to the latest version. It works on **any** ClawBox version and is the method we recommend — especially for older boxes, where the in‑app **System Update** button can stall.
+
+Open the **Terminal** app on the ClawBox desktop, or connect over SSH from your computer:
+
+<Steps>
+  <Step title="Connect (if using SSH)">
+    Use the device's **IP address** (the same one you use for `:18789`), not `clawbox.local`:
+    ```bash
+    ssh clawbox@YOUR_BOX_IP
+    ```
+    The password is the system password you set during setup (the screen won't show characters as you type — that's normal).
+  </Step>
+  <Step title="Back up your settings">
+    ```bash
+    cp -r ~/.openclaw ~/.openclaw.backup-$(date +%F)
+    ```
+    This keeps a dated copy of your data, settings and channel tokens.
+  </Step>
+  <Step title="Run the updater (one line)">
+    ```bash
+    bash <(curl -fsSL https://raw.githubusercontent.com/id-robots/clawbox/main/scripts/force-update.sh)
+    ```
+    Let it finish — it fetches the latest version, rebuilds, and restarts the services. This takes a few minutes.
+  </Step>
+  <Step title="Confirm it's back">
+    Open `http://YOUR_BOX_IP` for the desktop and click **Connect** at `http://YOUR_BOX_IP:18789`. Both should work, and you'll be on the latest version.
+  </Step>
+</Steps>
+
+## Always use the device IP, not `clawbox.local`
+
+`clawbox.local` relies on **mDNS** (Bonjour), which many Windows setups and home routers don't handle reliably — guest networks, "client isolation", VPNs and some mesh systems block it. The device's **IP address** always works because it's a direct connection.
+
+Find the IP in your router's connected‑devices list (it's the same address you use for the `:18789` dashboard), then browse to `http://YOUR_BOX_IP`.
+
+## An update got stuck, or I can't access the UI afterward
+
+On older versions, the in‑app **System Update** can stop midway if the device has local changes — the dashboard still loads at `:18789` but **Connect** does nothing. The fix is the same safe updater above, which syncs cleanly and bypasses the issue:
+
+<Steps>
+  <Step title="Connect over SSH (use the IP)">
+    ```bash
+    ssh clawbox@YOUR_BOX_IP
+    ```
+  </Step>
+  <Step title="Run the recovery updater">
+    ```bash
+    bash <(curl -fsSL https://raw.githubusercontent.com/id-robots/clawbox/main/scripts/force-update.sh)
+    ```
+  </Step>
+  <Step title="Check the services are running">
+    ```bash
+    systemctl is-active clawbox-gateway.service clawbox-setup.service
+    ```
+    Both should print `active`. Then reload `http://YOUR_BOX_IP` and click **Connect** at `:18789`.
+  </Step>
+</Steps>
+
+<Warning>
+If any step returns an error, stop there rather than forcing it — book a quick call and we'll finish it together: [calendly.com/yanko-idrobots](https://calendly.com/yanko-idrobots).
+</Warning>
