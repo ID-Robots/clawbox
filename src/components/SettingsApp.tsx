@@ -1267,6 +1267,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
+        // A token change resets the allowlist server-side; clear the lists
+        // optimistically and re-fetch so the UI reflects the fresh bot without
+        // a manual reload.
+        if (data.reset) {
+          setTgApproved([]);
+          setTgPending(null);
+          setTgPairingStatus(null);
+        }
+        refreshPairing();
       } else {
         configureReject(new Error(data.error || "configure returned success=false"));
         setTgConfiguring(false);
