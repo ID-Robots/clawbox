@@ -96,7 +96,10 @@ export async function POST(request: Request) {
       );
       if (match) {
         approvedId = match.id;
-        if (typeof match.meta?.name === "string") approvedName = match.meta.name;
+        const name = [match.meta?.firstName, match.meta?.lastName]
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+          .join(" ");
+        if (name) approvedName = name;
       }
     } catch {
       // name capture is best-effort — approval still proceeds
