@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
+import { get, set } from "@/lib/config-store";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
@@ -10,9 +10,29 @@ import {
 
 export const dynamic = "force-dynamic";
 
+// OpenClaw's allowlist stores bare ids only. We remember the display name
+// captured at approval time (ClawBox-side, in config-store) so the UI can show
+// who each approved sender is.
+const APPROVED_NAMES_KEY = "telegram_approved_names";
+
 async function isConfigured(): Promise<boolean> {
   const token = await get("telegram_bot_token");
   return typeof token === "string" && token.length > 0;
+}
+
+async function readApprovedNames(): Promise<Record<string, string>> {
+  const raw = await get(APPROVED_NAMES_KEY);
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [id, name] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof name === "string") out[id] = name;
+  }
+  return out;
+}
+
+async function buildApproved(names?: Record<string, string>): Promise<Array<{ id: string; name?: string }>> {
+  const [ids, nameMap] = await Promise.all([readTelegramAllowFrom(), names ?? readApprovedNames()]);
+  return ids.map((id) => ({ id, name: nameMap[id] }));
 }
 
 // GET — list approved senders (fast: a single file read). With `?pending=1` it
@@ -27,7 +47,7 @@ export async function GET(request: Request) {
       );
     }
     const params = new URL(request.url).searchParams;
-    const approved = await readTelegramAllowFrom();
+    const approved = await buildApproved();
     // `?poll=1` reads the pairing-store file (fast — safe for the desktop poller);
     // `?pending=1` uses the authoritative CLI (the Settings "Check" button).
     const pending =
@@ -66,6 +86,22 @@ export async function POST(request: Request) {
       );
     }
 
+    // Capture the requester's id + name from the pending store BEFORE approving
+    // (approval removes the request, and the allowlist keeps only the id).
+    let approvedId: string | undefined;
+    let approvedName: string | undefined;
+    try {
+      const match = (await readTelegramPairingRequests()).find(
+        (r) => typeof r.code === "string" && r.code.toUpperCase() === code,
+      );
+      if (match) {
+        approvedId = match.id;
+        if (match.name) approvedName = match.name;
+      }
+    } catch {
+      // name capture is best-effort — approval still proceeds
+    }
+
     try {
       await approveTelegramPairing(code);
     } catch (err) {
@@ -87,7 +123,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const approved = await readTelegramAllowFrom();
+    let names: Record<string, string> | undefined;
+    if (approvedId && approvedName) {
+      names = await readApprovedNames();
+      names[approvedId] = approvedName;
+      await set(APPROVED_NAMES_KEY, names);
+    }
+    const approved = await buildApproved(names);
     return NextResponse.json({ success: true, approved });
   } catch (err) {
     return NextResponse.json(

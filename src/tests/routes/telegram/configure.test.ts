@@ -1,20 +1,24 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(),
   set: vi.fn(),
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
+  clearTelegramPairingState: vi.fn(),
 }));
 
-import { set } from "@/lib/config-store";
-import { setTelegramToken, restartGateway } from "@/lib/openclaw-config";
+import { get, set } from "@/lib/config-store";
+import { setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
 
+const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockSetTelegramToken = vi.mocked(setTelegramToken);
 const mockRestartGateway = vi.mocked(restartGateway);
+const mockClearPairing = vi.mocked(clearTelegramPairingState);
 
 describe("POST /setup-api/telegram/configure", () => {
   let telegramConfigurePost: (req: Request) => Promise<Response>;
@@ -31,9 +35,11 @@ describe("POST /setup-api/telegram/configure", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
+    mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
     mockSetTelegramToken.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
+    mockClearPairing.mockResolvedValue();
 
     const mod = await import("@/app/setup-api/telegram/configure/route");
     telegramConfigurePost = mod.POST;
@@ -53,6 +59,29 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", token);
     expect(mockSetTelegramToken).toHaveBeenCalledWith(token);
     expect(mockRestartGateway).toHaveBeenCalled();
+  });
+
+  it("resets the allowlist + name map when the bot token changes", async () => {
+    mockGet.mockResolvedValue("111:OLD_token_value");
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "222:new_token_value" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(true);
+    expect(mockClearPairing).toHaveBeenCalledTimes(1);
+    expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+  });
+
+  it("keeps the allowlist when re-saving the same token", async () => {
+    const token = "111:same_token_value";
+    mockGet.mockResolvedValue(token);
+    const res = await telegramConfigurePost(jsonRequest({ botToken: token }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(false);
+    expect(mockClearPairing).not.toHaveBeenCalled();
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
   });
 
   it("returns 400 for invalid JSON", async () => {

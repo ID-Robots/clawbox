@@ -1244,7 +1244,7 @@ function ChromeDesktopInner() {
   // when Settings is closed. De-duped by code via localStorage so a dismissed
   // request doesn't pop again.
   const [pairingRequests, setPairingRequests] = useState<
-    Array<{ code?: string; id?: string; meta?: Record<string, unknown> }>
+    Array<{ code?: string; id?: string; name?: string }>
   >([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
 
@@ -1292,6 +1292,7 @@ function ChromeDesktopInner() {
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+        window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Approved — the bot let them know." } }));
       } else {
         window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: data.error || "Couldn't approve — the code may have expired." } }));
@@ -1315,6 +1316,17 @@ function ChromeDesktopInner() {
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "telegram" } }));
     openApp("settings");
   }, [openApp]);
+
+  // If an approval happens elsewhere (the Settings list), drop that request from
+  // the popup so it doesn't linger.
+  useEffect(() => {
+    const onApproved = (e: Event) => {
+      const code = (e as CustomEvent<{ code?: string }>).detail?.code;
+      if (code) setPairingRequests((prev) => prev.filter((r) => (r.code || "").toUpperCase() !== code.toUpperCase()));
+    };
+    window.addEventListener("clawbox:telegram-approved", onApproved);
+    return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
+  }, []);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -1753,8 +1765,7 @@ function ChromeDesktopInner() {
 
           {/* New Telegram access request popup(s) */}
           {pairingRequests.map((req) => {
-            const uname = typeof req.meta?.username === "string" ? req.meta.username : "";
-            const label = uname ? `@${uname}` : (req.id || "A Telegram user");
+            const label = req.name || req.id || "A Telegram user";
             const code = req.code || "";
             return (
               <div

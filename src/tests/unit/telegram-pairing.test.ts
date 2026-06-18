@@ -111,6 +111,13 @@ describe("readTelegramPairingRequests", () => {
     expect(await readTelegramPairingRequests()).toEqual([{ code: "ABCD2345", id: "42" }]);
   });
 
+  it("derives a display name from meta.firstName/lastName", async () => {
+    await writePairing(JSON.stringify({ version: 1, requests: [{ code: "ABCD2345", id: "42", meta: { firstName: "Krasi", lastName: "K" } }] }));
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    const [req] = await readTelegramPairingRequests();
+    expect(req.name).toBe("Krasi K");
+  });
+
   it("returns [] when the file is missing", async () => {
     const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
     expect(await readTelegramPairingRequests()).toEqual([]);
@@ -120,5 +127,42 @@ describe("readTelegramPairingRequests", () => {
     await writePairing("{not json");
     const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
     expect(await readTelegramPairingRequests()).toEqual([]);
+  });
+});
+
+describe("clearTelegramPairingState", () => {
+  let tmpHome: string;
+  const origHome = process.env.OPENCLAW_HOME;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "oc-home-"));
+    process.env.OPENCLAW_HOME = tmpHome;
+    await fs.mkdir(path.join(tmpHome, "credentials"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (origHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = origHome;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it("removes the allowlist + pending store files", async () => {
+    const creds = path.join(tmpHome, "credentials");
+    const allowFile = path.join(creds, "telegram-default-allowFrom.json");
+    const pairingFile = path.join(creds, "telegram-pairing.json");
+    await fs.writeFile(allowFile, JSON.stringify({ version: 1, allowFrom: ["111"] }), "utf-8");
+    await fs.writeFile(pairingFile, JSON.stringify({ version: 1, requests: [] }), "utf-8");
+
+    const { clearTelegramPairingState } = await import("@/lib/openclaw-config");
+    await clearTelegramPairingState();
+
+    await expect(fs.access(allowFile)).rejects.toThrow();
+    await expect(fs.access(pairingFile)).rejects.toThrow();
+  });
+
+  it("is a no-op when the files are already absent", async () => {
+    const { clearTelegramPairingState } = await import("@/lib/openclaw-config");
+    await expect(clearTelegramPairingState()).resolves.toBeUndefined();
   });
 });

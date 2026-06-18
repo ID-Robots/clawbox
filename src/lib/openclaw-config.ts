@@ -625,10 +625,30 @@ export interface TelegramPairingRequest {
   code?: string;
   /** Sender id — the Telegram user id that lands in the allowlist on approval. */
   id?: string;
-  /** Free-form sender metadata OpenClaw attaches (e.g. username / name). */
-  meta?: Record<string, unknown>;
+  /** Sender metadata OpenClaw attaches — `firstName`/`lastName` are the Telegram name. */
+  meta?: { firstName?: string; lastName?: string; [key: string]: unknown };
+  /** Display name, derived from `meta` once at the read boundary so callers (the
+   *  popup, Settings list, and approve route) don't each re-derive it. */
+  name?: string;
   createdAt?: string;
   [key: string]: unknown;
+}
+
+/** Build a display name from a pairing request's meta (Telegram first/last name). */
+function deriveTelegramName(meta: TelegramPairingRequest["meta"]): string | undefined {
+  const name = [meta?.firstName, meta?.lastName]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ");
+  return name || undefined;
+}
+
+/** Normalise a raw `requests` array, attaching a derived `name` to each entry. */
+function withDerivedNames(requests: unknown): TelegramPairingRequest[] {
+  if (!Array.isArray(requests)) return [];
+  return (requests as TelegramPairingRequest[]).map((r) => ({
+    ...r,
+    name: r.name ?? deriveTelegramName(r.meta),
+  }));
 }
 
 /** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json` (authoritative). */
@@ -636,7 +656,7 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
   const out = await spawnOpenclaw(["pairing", "list", "telegram", "--json"], { captureStdout: true });
   try {
     const parsed = JSON.parse(out) as { requests?: unknown };
-    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+    return withDerivedNames(parsed.requests);
   } catch {
     return [];
   }
@@ -655,7 +675,7 @@ export async function readTelegramPairingRequests(account = "default"): Promise<
   );
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { requests?: unknown };
-    return Array.isArray(parsed.requests) ? (parsed.requests as TelegramPairingRequest[]) : [];
+    return withDerivedNames(parsed.requests);
   } catch {
     return [];
   }
@@ -689,6 +709,19 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
   } catch {
     return [];
   }
+}
+
+/**
+ * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
+ * token changes: previously-approved senders belong to the old bot, so a new
+ * bot should start with a fresh allowlist. Best-effort — missing files are fine.
+ */
+export async function clearTelegramPairingState(account = "default"): Promise<void> {
+  const files = [
+    path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
+    path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),
+  ];
+  await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
 }
 
 // Toggles `plugins.entries.anthropic.enabled` in lock-step with the active

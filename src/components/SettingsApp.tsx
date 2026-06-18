@@ -1076,8 +1076,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
   // Telegram pairing / user-access state.
-  const [tgApproved, setTgApproved] = useState<string[]>([]);
-  const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; meta?: Record<string, unknown>; createdAt?: string }> | null>(null);
+  const [tgApproved, setTgApproved] = useState<Array<{ id: string; name?: string }>>([]);
+  const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; name?: string; createdAt?: string }> | null>(null);
   const [tgPendingLoading, setTgPendingLoading] = useState(false);
   const [tgPairingCode, setTgPairingCode] = useState("");
   const [tgApproving, setTgApproving] = useState(false);
@@ -1126,6 +1126,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
   }, [section, isMobile, refreshTelegramStatus, refreshPairing]);
+
+  // Refresh the approved/pending lists when an approval happens anywhere (e.g.
+  // the desktop popup) so the Settings list updates without a manual reload.
+  useEffect(() => {
+    const onApproved = (e: Event) => {
+      const code = (e as CustomEvent<{ code?: string }>).detail?.code;
+      refreshPairing();
+      if (code) setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code.toUpperCase()) : prev));
+    };
+    window.addEventListener("clawbox:telegram-approved", onApproved);
+    return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
+  }, [refreshPairing]);
 
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
@@ -1187,6 +1199,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (Array.isArray(d.approved)) setTgApproved(d.approved);
         setTgPairingCode("");
         setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
       } else {
         setTgPairingStatus({ type: "error", message: d.error || t("settings.pairingApproveFailed") });
@@ -1254,6 +1267,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
+        // A token change resets the allowlist server-side; clear the lists
+        // optimistically and re-fetch so the UI reflects the fresh bot without
+        // a manual reload.
+        if (data.reset) {
+          setTgApproved([]);
+          setTgPending(null);
+          setTgPairingStatus(null);
+        }
+        refreshPairing();
       } else {
         configureReject(new Error(data.error || "configure returned success=false"));
         setTgConfiguring(false);
@@ -2482,13 +2504,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       ) : (
                         <ul className="space-y-2 list-none p-0 m-0">
                           {tgPending.map((req, i) => {
-                            const uname = typeof req.meta?.username === "string" ? req.meta.username : "";
-                            const label = uname ? `@${uname}` : (req.id || req.code || `#${i + 1}`);
+                            const label = req.name || req.id || req.code || `#${i + 1}`;
                             return (
                               <li key={req.code || req.id || i} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
                                 <div className="min-w-0">
                                   <div className="text-sm text-[var(--text-primary)] truncate">{label}</div>
-                                  {req.id && <div className="text-xs text-[var(--text-muted)] font-mono truncate">{req.id}</div>}
+                                  {req.id && label !== req.id && <div className="text-xs text-[var(--text-muted)] font-mono truncate">{req.id}</div>}
                                 </div>
                                 {req.code && (
                                   <button
@@ -2516,10 +2537,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <p className="text-xs text-[var(--text-muted)] mt-1">{t("settings.pairingNoApproved")}</p>
                   ) : (
                     <ul className="mt-2 flex flex-wrap gap-2 list-none p-0 m-0">
-                      {tgApproved.map((id) => (
-                        <li key={id} className="inline-flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-full px-3 py-1 text-xs text-[var(--text-secondary)] font-mono">
+                      {tgApproved.map((u) => (
+                        <li key={u.id} className="inline-flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-full px-3 py-1 text-xs text-[var(--text-secondary)]">
                           <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }} aria-hidden="true">check</span>
-                          {id}
+                          {u.name ? (
+                            <>
+                              <span>{u.name}</span>
+                              <span className="text-[10px] text-[var(--text-muted)] font-mono">{u.id}</span>
+                            </>
+                          ) : (
+                            <span className="font-mono">{u.id}</span>
+                          )}
                         </li>
                       ))}
                     </ul>
