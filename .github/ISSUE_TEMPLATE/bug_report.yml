@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in ClawBox isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. Please fill in as much as you
+        can — versions and logs make bugs far faster to fix.
+
+        ⚠️ **Do not report security vulnerabilities here.** See our
+        [Security Policy](../security/policy) for private reporting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I tap Update in the portal, the gateway keeps the old version…
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can a maintainer reproduce this?
+      placeholder: |
+        1. Open Settings → System Update
+        2. Tap Update
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: clawbox-version
+    attributes:
+      label: ClawBox version
+      description: Settings → System (or the footer of the setup wizard).
+      placeholder: "3.1.4"
+    validations:
+      required: true
+  - type: input
+    id: openclaw-version
+    attributes:
+      label: OpenClaw version
+      description: Shown in Settings → System, or run `openclaw --version`.
+      placeholder: "2026.6.8"
+    validations:
+      required: false
+  - type: input
+    id: hardware
+    attributes:
+      label: Jetson model / JetPack
+      description: Which device and JetPack/L4T version.
+      placeholder: "Jetson Orin Nano, JetPack 6.2"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: |
+        Relevant output — e.g. `journalctl -u clawbox-gateway -n 200`,
+        `journalctl -u clawbox-setup -n 200`, or the installer output.
+        **Redact tokens, passwords, and device IPs.**
+      render: shell
+    validations:
+      required: false
