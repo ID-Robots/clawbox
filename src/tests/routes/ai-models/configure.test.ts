@@ -770,4 +770,36 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(400);
     expect(body.error).toMatch(/Invalid OpenRouter model ID/);
   });
+
+  it("configures google as an openai-compat provider with the key inline", async () => {
+    // OpenClaw's native google plugin fails auth at call time on 2026.6.8, so
+    // ClawBox routes google through Google's OpenAI-compatible endpoint with the
+    // key inline (the proven openai-completions path) rather than the plugin.
+    const res = await configurePost(jsonRequest({
+      provider: "google",
+      apiKey: "AIzaTestKey123",
+    }));
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((command) => command.includes("config set models.providers.google"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary google/gemini-2.5-flash");
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.google");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    expect(providerDef.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta/openai");
+    expect(providerDef.api).toBe("openai-completions");
+    // Real key inlined (the fix) — not delegated to the native plugin.
+    expect(providerDef.apiKey).toBe("AIzaTestKey123");
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("gemini-2.5-flash");
+    expect(modelIds).toContain("gemini-3.5-flash");
+    expect(modelIds).toContain("gemini-3.1-flash-lite");
+
+    // ...and the managed auth profile is api_key with the inline key.
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["google:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "google", key: "AIzaTestKey123" })
+    );
+  });
 });

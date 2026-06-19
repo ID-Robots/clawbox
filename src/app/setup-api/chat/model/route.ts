@@ -330,51 +330,59 @@ export async function POST(request: Request) {
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
-        // OpenRouter quirk: OpenClaw needs the chosen model to be listed
-        // in `models.providers.openrouter.models`, otherwise the gateway
-        // silently falls back to local with no error message the user can
-        // see. Previously we'd fail-fast here when the slug wasn't in the
-        // configured list — now we auto-extend instead, since the chat
-        // header pulls from the live OpenRouter catalog (340+ models)
-        // and forcing a "Re-save in Settings" round trip on every fresh
-        // pick is hostile UX. Other providers (anthropic/openai/google)
-        // have built-in catalogs in OpenClaw so this dance is OpenRouter-
-        // only.
-        if (parsed.provider === "openrouter") {
-          const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
-          const providerDef = openclawConfig.models?.providers?.openrouter as
+        // OpenAI-compatible providers (openrouter, google) need the chosen
+        // model listed in `models.providers.<p>.models`, otherwise the gateway
+        // silently falls back with no error the user can see. The chat header
+        // pulls from the live catalog, so instead of forcing a "Re-save in
+        // Settings" round trip on every fresh pick we auto-extend the configured
+        // list. clawai/anthropic/openai/codex use OpenClaw's built-in catalogs,
+        // so this is openai-completions-provider-only — google qualifies because
+        // ClawBox routes it through Google's OpenAI-compat endpoint (see
+        // ai-models/configure).
+        if (parsed.provider === "openrouter" || parsed.provider === "google") {
+          const providerId = parsed.provider;
+          let openclawConfig: OpenClawConfig;
+          try {
+            openclawConfig = await readConfig();
+          } catch (err) {
+            // Don't fall back to an empty config: existingModels would be [] and
+            // we'd overwrite models.providers.<p>.models with ONLY the new id,
+            // dropping every other configured model. Fail loud instead.
+            console.error(`[chat/model] readConfig failed during ${providerId} auto-extend:`, err);
+            return NextResponse.json(
+              { error: `Could not read the model configuration to register ${requestedModel}. Please try again.` },
+              { status: 500 },
+            );
+          }
+          const providerDef = openclawConfig.models?.providers?.[providerId] as
             | { models?: { id?: string; name?: string }[] }
             | undefined;
           const existingModels = providerDef?.models ?? [];
           const configuredIds = existingModels
             .map((m) => m?.id)
             .filter((id): id is string => typeof id === "string" && id.length > 0);
-          // Append whenever the requested slug isn't already there — even
-          // for a freshly-configured provider with an empty models[]. The
-          // earlier `configuredIds.length > 0` guard caused the gateway to
-          // silently fall back to local on the first chat-header switch
-          // after a clean openrouter setup, because the seed providerDef
-          // has only the user's chosen default and any other slug would
-          // be skipped by the guard.
+          // Append whenever the requested slug isn't already there — even for a
+          // freshly-configured provider whose seed providerDef has only the
+          // user's chosen default (the earlier `length > 0` guard silently fell
+          // back to local on the first switch after a clean setup).
           if (!configuredIds.includes(parsed.modelId)) {
-            // Append + persist. We emit only `id`+`name` because OpenClaw
-            // looks the rest (contextWindow, modalities, cost) up from
-            // its bundled provider catalog by id.
+            // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
+            // modalities, cost) up from its bundled provider catalog by id.
             const nextModels = [
               ...existingModels,
               { id: parsed.modelId, name: parsed.modelId },
             ];
             try {
               await runOpenclawConfigSet([
-                "models.providers.openrouter.models",
+                `models.providers.${providerId}.models`,
                 JSON.stringify(nextModels),
                 "--json",
               ]);
             } catch (err) {
-              console.error("[chat/model] auto-extend openrouter providerDef failed:", err);
+              console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
               return NextResponse.json(
                 {
-                  error: `Could not register ${requestedModel} with the OpenRouter provider. Re-save OpenRouter in Settings to refresh the model list.`,
+                  error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
                 },
                 { status: 502 },
               );

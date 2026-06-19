@@ -78,8 +78,15 @@ export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
+// Unlike the other picker lists, GOOGLE_MODELS is ALSO the seed for
+// models.providers.google.models (ai-models/configure routes google through
+// Google's OpenAI-compat endpoint), so each id here is selectable AND runnable
+// — not just picker cold-start. Keep to current stable flagships; live
+// /v1beta/models discovery will eventually own the full list.
 export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "Default. Best price-performance." },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "Newest flagship." },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", hint: "Frontier-class, low cost." },
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", hint: "Fastest, budget-friendly." },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", hint: "Complex reasoning." },
 ] as const;
