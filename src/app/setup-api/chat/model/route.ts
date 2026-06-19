@@ -341,7 +341,19 @@ export async function POST(request: Request) {
         // ai-models/configure).
         if (parsed.provider === "openrouter" || parsed.provider === "google") {
           const providerId = parsed.provider;
-          const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
+          let openclawConfig: OpenClawConfig;
+          try {
+            openclawConfig = await readConfig();
+          } catch (err) {
+            // Don't fall back to an empty config: existingModels would be [] and
+            // we'd overwrite models.providers.<p>.models with ONLY the new id,
+            // dropping every other configured model. Fail loud instead.
+            console.error(`[chat/model] readConfig failed during ${providerId} auto-extend:`, err);
+            return NextResponse.json(
+              { error: `Could not read the model configuration to register ${requestedModel}. Please try again.` },
+              { status: 500 },
+            );
+          }
           const providerDef = openclawConfig.models?.providers?.[providerId] as
             | { models?: { id?: string; name?: string }[] }
             | undefined;

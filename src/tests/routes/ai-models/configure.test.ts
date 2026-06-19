@@ -794,6 +794,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("gemini-2.5-flash");
     expect(modelIds).toContain("gemini-3.5-flash");
+    expect(modelIds).toContain("gemini-3.1-flash-lite");
 
     // ...and the managed auth profile is api_key with the inline key.
     const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
