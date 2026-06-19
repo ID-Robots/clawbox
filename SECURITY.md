@@ -22,7 +22,7 @@ Report privately using **GitHub's private vulnerability reporting**:
 the repository **Security** tab → **Report a vulnerability**. This keeps the report
 confidential between you and the maintainers until a fix is available.
 
-If private reporting is unavailable, email **krasi@idrobots.com** instead. Encrypt
+If private reporting is unavailable, email **yanko@idrobots.com** instead. Encrypt
 or omit sensitive details (tokens, device IPs) and we will arrange a secure channel.
 
 Please include, where you can:

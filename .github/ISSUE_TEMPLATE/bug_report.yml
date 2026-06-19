@@ -9,7 +9,7 @@ body:
         can — versions and logs make bugs far faster to fix.
 
         ⚠️ **Do not report security vulnerabilities here.** See our
-        [Security Policy](../security/policy) for private reporting.
+        [Security Policy](https://github.com/ID-Robots/clawbox/security/policy) for private reporting.
   - type: textarea
     id: what-happened
     attributes:
