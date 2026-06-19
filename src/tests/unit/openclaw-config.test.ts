@@ -115,6 +115,23 @@ describe("openclaw-config", () => {
     });
   });
 
+  describe("compactionReserveFloorForContext", () => {
+    it("scales the reserve down for small local windows (Ollama 32K → 8192)", () => {
+      expect(openclawConfig.compactionReserveFloorForContext(32768)).toBe(8192);
+    });
+
+    it("keeps the full default for large/unbounded windows (llama.cpp 128K, cloud)", () => {
+      expect(openclawConfig.compactionReserveFloorForContext(131072)).toBe(24000);
+      expect(openclawConfig.compactionReserveFloorForContext(Number.POSITIVE_INFINITY)).toBe(24000);
+    });
+
+    it("never drops below the 4096 floor and guards invalid input", () => {
+      expect(openclawConfig.compactionReserveFloorForContext(8000)).toBe(4096);
+      expect(openclawConfig.compactionReserveFloorForContext(0)).toBe(24000);
+      expect(openclawConfig.compactionReserveFloorForContext(Number.NaN)).toBe(24000);
+    });
+  });
+
   describe("CONFIG_PATH", () => {
     it("exports CONFIG_PATH pointing to openclaw.json", () => {
       expect(openclawConfig.CONFIG_PATH).toMatch(/openclaw\.json$/);

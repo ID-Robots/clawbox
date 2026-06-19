@@ -459,7 +459,7 @@ describe("OAuth exchange route", () => {
     expect(body.error).toBe("Failed to exchange token");
   });
 
-  it("completes OpenAI two-step exchange and prefers API key token", async () => {
+  it("returns the raw OpenAI OAuth tokens (incl. id_token) without an api-key exchange", async () => {
     await writeState({ provider: "openai" });
     await fs.writeFile(
       ORG_PATH,
@@ -467,27 +467,20 @@ describe("OAuth exchange route", () => {
       "utf-8"
     );
 
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
+    // Only the authorization_code → token exchange runs; Codex needs the JWTs,
+    // so the id_token is preserved and there is NO second (id_token → api-key)
+    // exchange that used to overwrite `access` with a non-JWT sk- key.
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "oauth_access_token",
+          refresh_token: "oauth_refresh_token",
+          expires_in: 3600,
+          id_token: "id-token-123",
+        }),
+        { status: 200 }
       )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "openai_api_key_token",
-            expires_in: 7200,
-          }),
-          { status: 200 }
-        )
-      );
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await exchangePost(jsonRequest({ code: "code-123" }));
@@ -495,11 +488,12 @@ describe("OAuth exchange route", () => {
 
     expect(res.status).toBe(200);
     expect(body).toEqual({
-      access_token: "openai_api_key_token",
+      access_token: "oauth_access_token",
+      id_token: "id-token-123",
       refresh_token: "oauth_refresh_token",
-      expires_in: 7200,
+      expires_in: 3600,
     });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const firstCall = fetchMock.mock.calls[0] as [string, RequestInit];
     const firstBody = String(firstCall[1].body);
@@ -513,138 +507,6 @@ describe("OAuth exchange route", () => {
 
     await expect(fs.readFile(STATE_PATH, "utf-8")).rejects.toBeTruthy();
     await expect(fs.readFile(ORG_PATH, "utf-8")).rejects.toBeTruthy();
-  });
-
-  it("falls back to access_token when OpenAI API-key exchange fails", async () => {
-    await writeState({ provider: "openai" });
-
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: "bad exchange" }), { status: 400 })
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const res = await exchangePost(jsonRequest({ code: "code-123" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "oauth_access_token",
-      refresh_token: "oauth_refresh_token",
-      expires_in: 3600,
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("falls back to oauth access token when second-step JSON is invalid", async () => {
-    await writeState({ provider: "openai" });
-
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
-      )
-      .mockResolvedValueOnce(
-        new Response("not-json", {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        })
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const res = await exchangePost(jsonRequest({ code: "code-123" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "oauth_access_token",
-      refresh_token: "oauth_refresh_token",
-      expires_in: 3600,
-    });
-  });
-
-  it("falls back to oauth access token when second-step request throws", async () => {
-    await writeState({ provider: "openai" });
-
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
-      )
-      .mockRejectedValueOnce(new Error("second step failed"));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const res = await exchangePost(jsonRequest({ code: "code-123" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "oauth_access_token",
-      refresh_token: "oauth_refresh_token",
-      expires_in: 3600,
-    });
-  });
-
-  it("uses api_key when second-step response has no access_token", async () => {
-    await writeState({ provider: "openai" });
-
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            api_key: "openai_generated_api_key",
-            expires_in: 7200,
-          }),
-          { status: 200 }
-        )
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const res = await exchangePost(jsonRequest({ code: "code-123" }));
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "openai_generated_api_key",
-      refresh_token: "oauth_refresh_token",
-      expires_in: 7200,
-    });
   });
 
   it("returns parsed upstream error details when token exchange fails", async () => {
@@ -797,34 +659,24 @@ describe("OAuth exchange route", () => {
     await writeState({ provider: "openai" });
     vi.spyOn(fs, "unlink").mockRejectedValue(new Error("unlink denied"));
 
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "oauth_access_token",
-            refresh_token: "oauth_refresh_token",
-            expires_in: 3600,
-            id_token: "id-token-123",
-          }),
-          { status: 200 }
-        )
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "oauth_access_token",
+          refresh_token: "oauth_refresh_token",
+          expires_in: 3600,
+          id_token: "id-token-123",
+        }),
+        { status: 200 }
       )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "openai_api_key_token",
-            expires_in: 7200,
-          }),
-          { status: 200 }
-        )
-      );
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await exchangePost(jsonRequest({ code: "code-123" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.access_token).toBe("openai_api_key_token");
+    expect(body.access_token).toBe("oauth_access_token");
   });
 });
 

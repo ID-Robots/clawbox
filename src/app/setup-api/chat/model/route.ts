@@ -47,6 +47,11 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+// Providers ClawBox configures as explicit openai-completions entries (see
+// ai-models/configure). Their `models.providers.<p>.models` list must contain
+// the chosen id or the gateway silently falls back, so the chat-header switch
+// below auto-extends that list when a freshly-picked model isn't seeded.
+const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
 // Imported from `@/lib/clawbox-ai-models` so this fallback can't drift away
 // from the configure route's tier→model mapping. Used only when a legacy
 // install has no explicit `models.providers.deepseek.models` entry; new
@@ -330,51 +335,69 @@ export async function POST(request: Request) {
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
-        // OpenRouter quirk: OpenClaw needs the chosen model to be listed
-        // in `models.providers.openrouter.models`, otherwise the gateway
-        // silently falls back to local with no error message the user can
-        // see. Previously we'd fail-fast here when the slug wasn't in the
-        // configured list — now we auto-extend instead, since the chat
-        // header pulls from the live OpenRouter catalog (340+ models)
-        // and forcing a "Re-save in Settings" round trip on every fresh
-        // pick is hostile UX. Other providers (anthropic/openai/google)
-        // have built-in catalogs in OpenClaw so this dance is OpenRouter-
-        // only.
-        if (parsed.provider === "openrouter") {
-          const openclawConfig = await readConfig().catch(() => ({} as OpenClawConfig));
-          const providerDef = openclawConfig.models?.providers?.openrouter as
-            | { models?: { id?: string; name?: string }[] }
+        // OpenAI-compat providers (OPENAI_COMPAT_PROVIDERS: openrouter, google,
+        // anthropic — ClawBox routes them through their OpenAI-compatible
+        // endpoints, see ai-models/configure) need the chosen model listed in
+        // `models.providers.<p>.models`, otherwise the gateway silently falls
+        // back with no error the user can see. The chat header pulls from the
+        // live catalog, so instead of forcing a "Re-save in Settings" round trip
+        // on every fresh pick we auto-extend the configured list. clawai/openai/
+        // codex use OpenClaw's built-in catalogs, so they don't need this.
+        if (OPENAI_COMPAT_PROVIDERS.has(parsed.provider)) {
+          const providerId = parsed.provider;
+          let openclawConfig: OpenClawConfig;
+          try {
+            openclawConfig = await readConfig();
+          } catch (err) {
+            // Don't fall back to an empty config: existingModels would be [] and
+            // we'd overwrite models.providers.<p>.models with ONLY the new id,
+            // dropping every other configured model. Fail loud instead.
+            console.error(`[chat/model] readConfig failed during ${providerId} auto-extend:`, err);
+            return NextResponse.json(
+              { error: `Could not read the model configuration to register ${requestedModel}. Please try again.` },
+              { status: 500 },
+            );
+          }
+          const providerDef = openclawConfig.models?.providers?.[providerId] as
+            | { models?: { id?: string; name?: string }[]; apiKey?: string; baseUrl?: string; api?: string }
             | undefined;
-          const existingModels = providerDef?.models ?? [];
+          // The reroute (ai-models/configure) writes baseUrl + api + apiKey
+          // alongside models. If the endpoint, api type, or inline key is missing
+          // (legacy or half-written state), appending only `.models` would leave
+          // a provider that can't authenticate — make the user re-save rather
+          // than switch the primary onto an incomplete provider.
+          if (!providerDef?.apiKey || !providerDef?.baseUrl || !providerDef?.api) {
+            return NextResponse.json(
+              { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
+              { status: 409 },
+            );
+          }
+          const existingModels = providerDef.models ?? [];
           const configuredIds = existingModels
             .map((m) => m?.id)
             .filter((id): id is string => typeof id === "string" && id.length > 0);
-          // Append whenever the requested slug isn't already there — even
-          // for a freshly-configured provider with an empty models[]. The
-          // earlier `configuredIds.length > 0` guard caused the gateway to
-          // silently fall back to local on the first chat-header switch
-          // after a clean openrouter setup, because the seed providerDef
-          // has only the user's chosen default and any other slug would
-          // be skipped by the guard.
+          // Append whenever the requested slug isn't already there — even for a
+          // freshly-configured provider whose seed providerDef has only the
+          // user's chosen default (the earlier `length > 0` guard silently fell
+          // back to local on the first switch after a clean setup).
           if (!configuredIds.includes(parsed.modelId)) {
-            // Append + persist. We emit only `id`+`name` because OpenClaw
-            // looks the rest (contextWindow, modalities, cost) up from
-            // its bundled provider catalog by id.
+            // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
+            // modalities, cost) up from its bundled provider catalog by id.
             const nextModels = [
               ...existingModels,
               { id: parsed.modelId, name: parsed.modelId },
             ];
             try {
               await runOpenclawConfigSet([
-                "models.providers.openrouter.models",
+                `models.providers.${providerId}.models`,
                 JSON.stringify(nextModels),
                 "--json",
               ]);
             } catch (err) {
-              console.error("[chat/model] auto-extend openrouter providerDef failed:", err);
+              console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
               return NextResponse.json(
                 {
-                  error: `Could not register ${requestedModel} with the OpenRouter provider. Re-save OpenRouter in Settings to refresh the model list.`,
+                  error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
                 },
                 { status: 502 },
               );

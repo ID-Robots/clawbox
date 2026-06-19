@@ -48,6 +48,12 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
 
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
+  // Pure helper — mirror the real implementation (unit-tested in
+  // openclaw-config.test.ts) so the configure route computes a real reserve.
+  compactionReserveFloorForContext: (contextWindow: number) =>
+    Number.isFinite(contextWindow) && contextWindow > 0
+      ? Math.min(24000, Math.max(4096, Math.round(contextWindow / 4)))
+      : 24000,
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
@@ -371,6 +377,13 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+
+    // Ollama's 32K window gets a context-scaled reserve (32768/4 = 8192), not
+    // the flat 24000 default — a 24000 floor leaves too little usable input for
+    // the agent's system prompt + tools, so every turn overflows before the
+    // model runs.
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
   });
 
   it("configures llama.cpp without apiKey", async () => {
@@ -443,7 +456,11 @@ describe("POST /setup-api/ai-models/configure", () => {
   it("configures subscription auth mode for oauth", async () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
-      apiKey: "access-token",
+      // Codex subscription credentials must be JWT-shaped (3 dot-segments) —
+      // the configure route rejects non-JWT tokens to avoid recreating the
+      // "invalid ID token format" failure.
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
       authMode: "subscription",
       refreshToken: "refresh-token",
       expiresIn: 3600,
@@ -509,7 +526,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
   });
 
-  it("writes auth profile with correct structure for token auth", async () => {
+  it("writes an api_key auth profile for key-based providers", async () => {
+    // Key providers must use type:"api_key" (not the legacy "token", which
+    // OpenClaw 2026.6.8 no longer turns into an Authorization header).
     await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-test",
@@ -520,7 +539,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     const writtenContent = JSON.parse(writeCall[1] as string);
 
     expect(writtenContent.profiles["anthropic:default"]).toBeDefined();
-    expect(writtenContent.profiles["anthropic:default"].type).toBe("token");
+    expect(writtenContent.profiles["anthropic:default"].type).toBe("api_key");
+    expect(writtenContent.profiles["anthropic:default"].key).toBe("sk-test");
   });
 
   it("writes auth profile with the local-ai bearer for Ollama", async () => {
@@ -712,6 +732,18 @@ describe("POST /setup-api/ai-models/configure", () => {
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("anthropic/claude-haiku-4.5");
     expect(modelIds.length).toBeGreaterThanOrEqual(1);
+
+    // The real key must be inlined on the provider, not the old "openrouter-ref"
+    // placeholder: OpenClaw 2026.6.8 sends models.providers.*.apiKey verbatim, so
+    // the placeholder went out as the bearer and OpenRouter 401'd.
+    expect(providerDef.apiKey).toBe("sk-or-v1-test");
+
+    // ...and the managed auth profile uses api_key (not the legacy token mode
+    // that 6.8 no longer turns into an Authorization header).
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["openrouter:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "openrouter", key: "sk-or-v1-test" })
+    );
   });
 
   it("honors an openrouter model picked by the user", async () => {
@@ -737,5 +769,84 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(400);
     expect(body.error).toMatch(/Invalid OpenRouter model ID/);
+  });
+
+  it("configures google as an openai-compat provider with the key inline", async () => {
+    // OpenClaw's native google plugin fails auth at call time on 2026.6.8, so
+    // ClawBox routes google through Google's OpenAI-compatible endpoint with the
+    // key inline (the proven openai-completions path) rather than the plugin.
+    const res = await configurePost(jsonRequest({
+      provider: "google",
+      apiKey: "AIzaTestKey123",
+    }));
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((command) => command.includes("config set models.providers.google"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary google/gemini-2.5-flash");
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.google");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    expect(providerDef.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta/openai");
+    expect(providerDef.api).toBe("openai-completions");
+    // Real key inlined (the fix) — not delegated to the native plugin.
+    expect(providerDef.apiKey).toBe("AIzaTestKey123");
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("gemini-2.5-flash");
+    expect(modelIds).toContain("gemini-3.5-flash");
+    expect(modelIds).toContain("gemini-3.1-flash-lite");
+
+    // ...and the managed auth profile is api_key with the inline key.
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["google:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "google", key: "AIzaTestKey123" })
+    );
+  });
+
+  it("configures anthropic as an openai-compat provider with the key inline", async () => {
+    // Native anthropic plugin reads a per-agent sqlite auth store ClawBox
+    // doesn't populate ("No API key found" at call time), so route it through
+    // Anthropic's OpenAI-compatible endpoint with the key inline.
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+    }));
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    expect(providerDef.baseUrl).toBe("https://api.anthropic.com/v1");
+    expect(providerDef.api).toBe("openai-completions");
+    expect(providerDef.apiKey).toBe("sk-ant-test123");
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("claude-sonnet-4-6");
+
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["anthropic:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
+    );
+  });
+
+  it("seeds a user-picked non-curated model into the provider entry", async () => {
+    // claude-opus-4-8 is newer than ANTHROPIC_MODELS — the helper must still
+    // seed the user's pick (via defaultModel) so the gateway can resolve it.
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+      model: "claude-opus-4-8",
+    }));
+    expect(res.status).toBe(200);
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("claude-opus-4-8");
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
   });
 });

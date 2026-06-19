@@ -85,31 +85,49 @@ export async function runOpenclawConfigSet(
   throw lastError ?? new Error("runOpenclawConfigSet exhausted retries");
 }
 
-function spawnOpenclawConfigSet(
-  args: string[],
-  options: OpenclawConfigSetOptions & { timeoutMs: number },
-): Promise<void> {
+interface SpawnOpenclawOptions {
+  /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
+  timeoutMs?: number;
+  /** Capture and resolve stdout (needed to read `--json` output). Default false. */
+  captureStdout?: boolean;
+  uid?: number;
+  gid?: number;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Spawn the `openclaw` CLI with a per-call timeout and uniform error handling,
+ * resolving with stdout (empty unless `captureStdout` is set).
+ *
+ * stdout is left "ignore" unless a caller asks for it: OpenClaw's CLI can emit a
+ * lot of stdout under verbose/debug modes and, with a full kernel pipe buffer
+ * and no one draining it, the child would deadlock. stderr is always captured —
+ * it carries the ConfigMutationConflictError signature used for retry.
+ */
+function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
-  const { timeoutMs, uid, gid } = options;
+  const { uid, gid, captureStdout = false } = options;
+  const timeoutMs = options.timeoutMs ?? 30_000;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
+  const label = `${bin} ${args.join(" ")}`;
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    // stdin + stdout are "ignore" so the child isn't blocked writing into a
-    // pipe no one is reading — OpenClaw's CLI can produce a lot of stdout
-    // under verbose/debug modes, and with a full kernel pipe buffer it would
-    // deadlock waiting for someone to drain it. We only care about stderr,
-    // which carries the ConfigMutationConflictError signature used for retry.
-    const child = spawn(bin, ["config", "set", ...args], {
-      stdio: ["ignore", "ignore", "pipe"],
+    const child = spawn(bin, args, {
+      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
       env,
     });
 
+    let stdout = "";
     let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
@@ -118,7 +136,7 @@ function spawnOpenclawConfigSet(
       if (!settled) {
         settled = true;
         child.kill("SIGKILL");
-        reject(new Error(`${bin} config set timed out after ${timeoutMs}ms`));
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
       }
     }, timeoutMs);
 
@@ -134,16 +152,48 @@ function spawnOpenclawConfigSet(
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        if (code === 0) resolve();
-        else reject(new Error(stderr.trim() || `${bin} config set exited with code ${code}`));
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.trim() || stdout.trim() || `${label} exited with code ${code}`));
       }
     });
   });
+}
+
+function spawnOpenclawConfigSet(
+  args: string[],
+  options: OpenclawConfigSetOptions & { timeoutMs: number },
+): Promise<void> {
+  return spawnOpenclaw(["config", "set", ...args], {
+    timeoutMs: options.timeoutMs,
+    uid: options.uid,
+    gid: options.gid,
+    cwd: options.cwd,
+    env: options.env,
+  }).then(() => undefined);
 }
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
+// Smallest reserve worth keeping — roughly one summary's worth of headroom.
+const MIN_COMPACTION_RESERVE_TOKENS_FLOOR = 4096;
+
+// Size the compaction reserve to a model's context window. The 24000 default
+// suits large-context cloud models, but it swallows most of a small local
+// window — Ollama caps at 32K, so a flat 24000 leaves only ~8.7K of usable
+// input, less than the agent's ~20K-token system prompt + tool schemas. Every
+// turn then fails before the model runs ("context overflow" / unrecoverable
+// auto-compaction). A quarter of the window, clamped to [MIN, default], keeps
+// small local models usable while large windows still get the full default.
+export function compactionReserveFloorForContext(contextWindow: number): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR;
+  }
+  return Math.min(
+    DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+    Math.max(MIN_COMPACTION_RESERVE_TOKENS_FLOOR, Math.round(contextWindow / 4)),
+  );
+}
 
 // Fields on each entry of `<agents-dir>/<agent>/sessions/sessions.json`
 // that OpenClaw reads to decide which provider/model a running session
@@ -556,6 +606,122 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
   // a preference toggle, not a token re-secure; gateway-pre-start.sh already
   // strips those on every boot.
   await writeConfig(config);
+}
+
+// === Telegram pairing (DM sender approval) ===
+//
+// OpenClaw's default `dmPolicy: "pairing"` makes an unknown Telegram sender's
+// first message inert until the owner approves their 8-char code. OpenClaw
+// persists approvals in `~/.openclaw/credentials/telegram-<account>-allowFrom.json`
+// (a string array of user ids) — a *different* file from `openclaw.json`, so the
+// boot-time `channels.telegram.allowFrom` strip in gateway-pre-start.sh never
+// touches them. We only ever approve specific senders; we never widen dmPolicy.
+
+const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
+export const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
+
+export interface TelegramPairingRequest {
+  /** The 8-char pairing code. */
+  code?: string;
+  /** Sender id — the Telegram user id that lands in the allowlist on approval. */
+  id?: string;
+  /** Sender metadata OpenClaw attaches — `firstName`/`lastName` are the Telegram name. */
+  meta?: { firstName?: string; lastName?: string; [key: string]: unknown };
+  /** Display name, derived from `meta` once at the read boundary so callers (the
+   *  popup, Settings list, and approve route) don't each re-derive it. */
+  name?: string;
+  createdAt?: string;
+  [key: string]: unknown;
+}
+
+/** Build a display name from a pairing request's meta (Telegram first/last name). */
+function deriveTelegramName(meta: TelegramPairingRequest["meta"]): string | undefined {
+  const name = [meta?.firstName, meta?.lastName]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ");
+  return name || undefined;
+}
+
+/** Normalise a raw `requests` array, attaching a derived `name` to each entry. */
+function withDerivedNames(requests: unknown): TelegramPairingRequest[] {
+  if (!Array.isArray(requests)) return [];
+  return (requests as TelegramPairingRequest[]).map((r) => ({
+    ...r,
+    name: r.name ?? deriveTelegramName(r.meta),
+  }));
+}
+
+/** Pending Telegram DM pairing requests, via `openclaw pairing list telegram --json` (authoritative). */
+export async function listTelegramPairingRequests(): Promise<TelegramPairingRequest[]> {
+  const out = await spawnOpenclaw(["pairing", "list", "telegram", "--json"], { captureStdout: true });
+  try {
+    const parsed = JSON.parse(out) as { requests?: unknown };
+    return withDerivedNames(parsed.requests);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
+ * store file — a plain read with no CLI cold-start, so it's cheap enough to poll
+ * for the desktop "new request" popup. The store path mirrors the allowFrom
+ * store; the default account is unsuffixed (`telegram-pairing.json`).
+ */
+export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+  const file = path.join(
+    CREDENTIALS_DIR,
+    account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`,
+  );
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { requests?: unknown };
+    return withDerivedNames(parsed.requests);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Approve a pending pairing code and notify the requester on Telegram
+ * (`openclaw pairing approve telegram <CODE> --notify`). The `--notify` flag
+ * makes OpenClaw send the "you're approved" confirmation to the user itself.
+ * Throws on an invalid format or a non-zero CLI exit (e.g. expired/unknown code).
+ */
+export async function approveTelegramPairing(code: string): Promise<void> {
+  const normalized = code.trim().toUpperCase();
+  if (!PAIRING_CODE_RE.test(normalized)) {
+    throw new Error("Invalid pairing code format");
+  }
+  await spawnOpenclaw(["pairing", "approve", "telegram", normalized, "--notify"]);
+}
+
+/**
+ * Approved Telegram sender ids, read from the allowFrom store (empty on any
+ * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
+ * so it defaults to "default" (file `telegram-default-allowFrom.json`).
+ */
+export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+  const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
+    if (!Array.isArray(parsed.allowFrom)) return [];
+    return parsed.allowFrom.filter((v): v is string => typeof v === "string");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
+ * token changes: previously-approved senders belong to the old bot, so a new
+ * bot should start with a fresh allowlist. Best-effort — missing files are fine.
+ */
+export async function clearTelegramPairingState(account = "default"): Promise<void> {
+  const files = [
+    path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
+    path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),
+  ];
+  await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
 }
 
 // Toggles `plugins.entries.anthropic.enabled` in lock-step with the active

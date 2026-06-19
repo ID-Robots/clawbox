@@ -2,10 +2,10 @@ import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
 test("setup skips the Local AI step and goes straight from AI provider to Telegram", async ({ page }) => {
-  // The Local AI step was deliberately removed from the initial setup
-  // wizard (see SetupWizard.tsx — owners now reach Gemma/Ollama via
-  // Settings → Local AI on demand). This test guards that decision so a
-  // re-introduction would have to update the test along with the wizard.
+  // There is no separate Local AI step: Gemma 4 is folded into the AI
+  // Provider step (see SetupWizard.tsx), so a customer picks a cloud
+  // provider or goes local from the same step. This test guards that the
+  // wizard goes AI provider -> Telegram with no intervening Local AI step.
   await installClawboxMocks(page);
 
   await page.goto("/setup");
@@ -25,8 +25,8 @@ test("setup skips the Local AI step and goes straight from AI provider to Telegr
   await expect(providerStep).toBeVisible();
   await expect(providerGroup.locator("label", { hasText: "ClawBox AI" })).toBeVisible();
   await expect(providerGroup.locator("label", { hasText: "OpenAI GPT" })).toBeVisible();
-  // Local-only providers must NOT appear in the cloud-providers radiogroup.
-  await expect(providerGroup.getByText("Gemma 4")).toHaveCount(0);
+  // Gemma 4 is folded into this step as the local option; Ollama is retired.
+  await expect(providerGroup.locator("label", { hasText: "Gemma 4" })).toBeVisible();
   await expect(providerGroup.getByText("Ollama")).toHaveCount(0);
 
   await providerStep.getByText("OpenAI GPT").click();

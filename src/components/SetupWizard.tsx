@@ -592,7 +592,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             )}
             {currentStep === 4 && (
               <AIModelsStep
-                providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+                providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "llamacpp"]}
                 defaultProviderId="clawai"
                 title="Connect AI Provider"
                 description={t("ai.description")}

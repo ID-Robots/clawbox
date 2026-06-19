@@ -167,6 +167,17 @@ if isinstance(channels, dict):
             if k in telegram:
                 del telegram[k]
                 changed = True
+        # Config-validity migration: a Telegram bot set up on an older OpenClaw
+        # can carry a channels.telegram.groupPolicy value the current schema no
+        # longer accepts (allowed: open, disabled, allowlist). One invalid value
+        # makes the WHOLE config invalid, so the gateway loads nothing and the
+        # bot goes silent ("Telegram channel active" but never replies). Reset
+        # unknown values to the secure default so the device self-heals on the
+        # next gateway start — ClawBox exposes no group-chat UI, so "disabled"
+        # (bot ignores group chats; owner DMs still work) is the safe choice.
+        if telegram.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
+            telegram["groupPolicy"] = "disabled"
+            changed = True
 
 # Migration: devices that configured OpenRouter before the provider-def
 # fix have `auth.profiles.openrouter:default` set but no

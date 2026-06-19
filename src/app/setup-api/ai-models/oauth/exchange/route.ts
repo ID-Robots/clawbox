@@ -145,53 +145,22 @@ export async function POST(request: Request) {
     const tokenData = await tokenRes.json();
 
     // OpenAI: try second exchange (id_token → API key), fall back to access_token
-    if (provider === "openai" && tokenData.id_token) {
-      let apiKeyToken: string | undefined;
-      let apiKeyExpires: number | undefined;
-
-      try {
-        const exchangeParams: Record<string, string> = {
-          grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-          client_id: config.clientId,
-          requested_token: "openai-api-key",
-          subject_token: tokenData.id_token,
-          subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
-        };
-
-        const apiKeyRes = await fetch(config.tokenEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams(exchangeParams).toString(),
-          signal: AbortSignal.timeout(30_000),
-        });
-
-        if (apiKeyRes.ok) {
-          try {
-            const apiKeyData = await apiKeyRes.json();
-            apiKeyToken = apiKeyData.access_token || apiKeyData.api_key;
-            apiKeyExpires = apiKeyData.expires_in;
-            console.log("[oauth/exchange] API key exchange succeeded");
-          } catch (parseErr) {
-            const raw = await apiKeyRes.text().catch(() => "(unreadable)");
-            console.error("[oauth/exchange] API key exchange JSON parse error:", parseErr, "raw:", raw);
-          }
-        } else {
-          const errBody = await apiKeyRes.text().catch(() => "");
-          console.error("[oauth/exchange] API key exchange failed:", apiKeyRes.status, errBody);
-        }
-      } catch (e) {
-        console.error("[oauth/exchange] API key exchange error, using access_token:", e);
-      }
-
+    // OpenAI/Codex (subscription): keep the raw OAuth JWTs — access_token +
+    // id_token + refresh_token. Do NOT exchange the id_token for an
+    // `openai-api-key`: that returns an `sk-` key (not a JWT) which gets stored
+    // as the codex `access` / synthesized id_token and fails with "invalid ID
+    // token format". Mirrors the device-poll (device-code) flow.
+    if (provider === "openai") {
       await fs.unlink(STATE_PATH).catch(() => {});
       // Clean up saved org file now that exchange succeeded
       const orgPath = path.join(path.dirname(STATE_PATH), "oauth-org.json");
       await fs.unlink(orgPath).catch(() => {});
 
       return NextResponse.json({
-        access_token: apiKeyToken || tokenData.access_token,
+        access_token: tokenData.access_token,
+        id_token: tokenData.id_token,
         refresh_token: tokenData.refresh_token,
-        expires_in: apiKeyExpires || tokenData.expires_in,
+        expires_in: tokenData.expires_in,
       });
     }
 
