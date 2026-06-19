@@ -36,7 +36,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId, isCatalogProvider } from "@/lib/provider-models";
+import { isValidModelId, isCatalogProvider, GOOGLE_MODELS } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -404,6 +404,7 @@ export async function POST(request: Request) {
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
     const isOpenRouter = provider === "openrouter";
+    const isGoogle = provider === "google";
     const isLocalScope = scope === "local";
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
@@ -880,6 +881,38 @@ export async function POST(request: Request) {
       }
       await ensureFallbackModel(config.defaultModel);
       console.log(`[AI Config] Set openrouter provider in openclaw.json: default=${defaultModelId}`);
+    } else if (isGoogle) {
+      // OpenClaw's native google plugin REGISTERS Gemini models but its auth
+      // fails at call time on 2026.6.8 — runs fall back with reason=auth and the
+      // chat silently answers as the fallback model. Route google through
+      // Google's OpenAI-compatible endpoint with the key inline: the same proven
+      // openai-completions path used for openrouter above, so the gateway
+      // actually authenticates the call. Seed with GOOGLE_MODELS (the picker's
+      // curated list) plus the user's pick; the chat-header switch in
+      // /setup-api/chat/model auto-extends this array for any other Gemini id.
+      const defaultModelId = config.defaultModel.replace(/^google\//, "");
+      const modelIds = new Set<string>([
+        defaultModelId,
+        ...GOOGLE_MODELS.map((option) => option.id),
+      ]);
+      const providerDef = JSON.stringify({
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        api: "openai-completions",
+        apiKey: normalizedApiKey,
+        models: Array.from(modelIds).map((id) => ({ id, name: id })),
+      });
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "models.providers.google", providerDef, "--json",
+      ]);
+      try {
+        await runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "merge",
+        ]);
+      } catch {
+        // Non-fatal: merge is the default behavior anyway
+      }
+      await ensureFallbackModel(config.defaultModel);
+      console.log(`[AI Config] Set google provider (openai-compat) in openclaw.json: default=${defaultModelId}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
