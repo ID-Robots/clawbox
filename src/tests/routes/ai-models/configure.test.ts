@@ -526,7 +526,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
   });
 
-  it("writes auth profile with correct structure for token auth", async () => {
+  it("writes an api_key auth profile for key-based providers", async () => {
+    // Key providers must use type:"api_key" (not the legacy "token", which
+    // OpenClaw 2026.6.8 no longer turns into an Authorization header).
     await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-test",
@@ -537,7 +539,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     const writtenContent = JSON.parse(writeCall[1] as string);
 
     expect(writtenContent.profiles["anthropic:default"]).toBeDefined();
-    expect(writtenContent.profiles["anthropic:default"].type).toBe("token");
+    expect(writtenContent.profiles["anthropic:default"].type).toBe("api_key");
+    expect(writtenContent.profiles["anthropic:default"].key).toBe("sk-test");
   });
 
   it("writes auth profile with the local-ai bearer for Ollama", async () => {
@@ -729,6 +732,18 @@ describe("POST /setup-api/ai-models/configure", () => {
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("anthropic/claude-haiku-4.5");
     expect(modelIds.length).toBeGreaterThanOrEqual(1);
+
+    // The real key must be inlined on the provider, not the old "openrouter-ref"
+    // placeholder: OpenClaw 2026.6.8 sends models.providers.*.apiKey verbatim, so
+    // the placeholder went out as the bearer and OpenRouter 401'd.
+    expect(providerDef.apiKey).toBe("sk-or-v1-test");
+
+    // ...and the managed auth profile uses api_key (not the legacy token mode
+    // that 6.8 no longer turns into an Authorization header).
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["openrouter:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "openrouter", key: "sk-or-v1-test" })
+    );
   });
 
   it("honors an openrouter model picked by the user", async () => {

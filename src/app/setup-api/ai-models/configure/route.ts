@@ -625,10 +625,18 @@ export async function POST(request: Request) {
           ...(projectId ? { projectId } : {}),
         };
       } else {
+        // API-key providers (anthropic, openai, google, openrouter) authenticate
+        // with a bearer key. OpenClaw <=2026.6.6 tolerated a `type: "token"`
+        // profile here, but 2026.6.8 reworked auth resolution and no longer
+        // turns a token-mode profile into an Authorization header — the request
+        // goes out unauthenticated and the provider returns "401 Missing
+        // Authentication header". Write the same `type: "api_key"` shape the
+        // working providers above use (clawai/ollama/llamacpp) so the gateway
+        // applies the key on every release.
         authProfiles.profiles[config.profileKey] = {
-          type: "token",
+          type: "api_key",
           provider: ocProvider,
-          token: normalizedApiKey,
+          key: normalizedApiKey,
         };
       }
       await writeAuthProfiles(authProfiles);
@@ -649,9 +657,11 @@ export async function POST(request: Request) {
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify((isOllama || isLlamaCpp || isClawAI)
-        ? { provider: ocProvider, mode: "api_key" }
-        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      // Subscription → "oauth"; every key-based provider → "api_key". The old
+      // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
+      JSON.stringify(authMode === "subscription"
+        ? { provider: ocProvider, mode: "oauth" }
+        : { provider: ocProvider, mode: "api_key" }),
       "--json",
     ]);
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
@@ -852,7 +862,10 @@ export async function POST(request: Request) {
       const providerDef = JSON.stringify({
         baseUrl: "https://openrouter.ai/api/v1",
         api: "openai-completions",
-        apiKey: "openrouter-ref",
+        // Inline the real key (was the placeholder "openrouter-ref"): 2026.6.8
+        // sends models.providers.*.apiKey verbatim, so a ref-placeholder 401s.
+        // Mirrors the clawai/deepseek providerDefs. See the auth-profile note above.
+        apiKey: normalizedApiKey,
         models: Array.from(modelIds).map((id) => ({ id, name: id })),
       });
       await runCommand(OPENCLAW_BIN, [
