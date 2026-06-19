@@ -1784,6 +1784,7 @@ function ChromeDesktopInner() {
                     {req.id && <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">id {req.id}</div>}
                   </div>
                   <button
+                    type="button"
                     onClick={() => dismissPairingRequest(code)}
                     className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
                     aria-label="Dismiss"
@@ -1793,6 +1794,7 @@ function ChromeDesktopInner() {
                 </div>
                 <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
                   <button
+                    type="button"
                     onClick={() => approvePairingRequest(code)}
                     disabled={!code || approvingPairCode === code}
                     className="flex-1 px-3 py-1.5 rounded-md bg-[#229ED9] hover:bg-[#1b87ba] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
@@ -1801,6 +1803,7 @@ function ChromeDesktopInner() {
                     Approve
                   </button>
                   <button
+                    type="button"
                     onClick={openTelegramPairingSettings}
                     className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
                   >

@@ -331,6 +331,13 @@ async function main() {
     // terminal so you can watch each step and see exactly where it fails.
     // Requires root, so it shells out via sudo.
     const projectRoot = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+    // Validate CLAWBOX_ROOT against the same SAFE_PATH guard as
+    // scripts/force-update.sh + updater.ts — a malicious env value would
+    // otherwise let `sudo bash` run an attacker-controlled script.
+    if (!/^[A-Za-z0-9._/-]+$/.test(projectRoot)) {
+      console.error(`Invalid CLAWBOX_ROOT '${projectRoot}' (allowed: A-Z a-z 0-9 . _ / -)`);
+      process.exit(1);
+    }
     const installScript = join(projectRoot, "install.sh");
     if (!existsSync(installScript)) {
       console.error(`install.sh not found at ${installScript} — set CLAWBOX_ROOT to your ClawBox checkout.`);

@@ -2333,7 +2333,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               currentModel={localAiStatus?.model ?? null}
               title="Set Up Local AI"
               description={localAiStatus?.configured
-                ? "Choose a different local engine if you want to switch your on-device fallback."
+                ? "Gemma 4 is configured as your private on-device fallback."
                 : "Turn on a local model so ClawBox always has a private on-device backup."}
               configureScope="local"
               testId="settings-local-ai-step"
@@ -2455,6 +2455,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onChange={(e) => { setTgPairingCode(e.target.value.toUpperCase()); setTgPairingStatus(null); }}
                     onKeyDown={(e) => { if (e.key === "Enter" && !tgApproving) approvePairingCode(tgPairingCode); }}
                     placeholder={t("settings.pairingCodePlaceholder")}
+                    aria-label={t("settings.pairingCodePlaceholder")}
                     maxLength={8}
                     spellCheck={false}
                     autoCapitalize="characters"
