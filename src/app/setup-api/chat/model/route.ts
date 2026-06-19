@@ -359,9 +359,19 @@ export async function POST(request: Request) {
             );
           }
           const providerDef = openclawConfig.models?.providers?.[providerId] as
-            | { models?: { id?: string; name?: string }[] }
+            | { models?: { id?: string; name?: string }[]; apiKey?: string }
             | undefined;
-          const existingModels = providerDef?.models ?? [];
+          // The reroute (ai-models/configure) writes baseUrl/api/apiKey alongside
+          // models. If the inline key is missing (legacy or half-written state),
+          // appending only `.models` would leave a provider that can't
+          // authenticate — make the user re-save rather than switch onto it.
+          if (!providerDef?.apiKey) {
+            return NextResponse.json(
+              { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
+              { status: 409 },
+            );
+          }
+          const existingModels = providerDef.models ?? [];
           const configuredIds = existingModels
             .map((m) => m?.id)
             .filter((id): id is string => typeof id === "string" && id.length > 0);

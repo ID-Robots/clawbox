@@ -830,4 +830,23 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
     );
   });
+
+  it("seeds a user-picked non-curated model into the provider entry", async () => {
+    // claude-opus-4-8 is newer than ANTHROPIC_MODELS — the helper must still
+    // seed the user's pick (via defaultModel) so the gateway can resolve it.
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+      model: "claude-opus-4-8",
+    }));
+    expect(res.status).toBe(200);
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("claude-opus-4-8");
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
+  });
 });
