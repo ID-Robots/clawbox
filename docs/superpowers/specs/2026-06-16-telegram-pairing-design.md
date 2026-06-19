@@ -52,7 +52,13 @@ No revoke (no native CLI for it; out of scope).
 **`src/components/SettingsApp.tsx`** — a "User access" card under the Telegram
 section (only when a bot is configured): approved-users list (loads with status),
 a paste-a-code field, and an opt-in "Check for requests" button that loads pending
-requests with one-click approve. No auto-poll (the list CLI is slow).
+requests with one-click approve. The card itself does not auto-poll — the pending
+CLI is slow, so it only runs on the explicit "Check for requests" click.
+
+**`src/app/page.tsx`** — a desktop notification popup so new pairing requests
+surface even when Settings is closed. It polls `GET …?poll=1` (the fast
+file-read path, not the slow CLI) every 20s, de-dups already-seen/dismissed
+requests via localStorage, and offers inline Approve / Open-in-Settings / Dismiss.
 
 **`src/lib/translations.ts`** — `settings.pairing*` keys across all 10 locales.
 
