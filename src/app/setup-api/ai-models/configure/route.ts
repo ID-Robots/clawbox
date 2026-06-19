@@ -36,7 +36,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId, isCatalogProvider, GOOGLE_MODELS } from "@/lib/provider-models";
+import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -377,6 +377,50 @@ async function ensureFallbackModel(
   }
 }
 
+// Configure a provider through its OpenAI-compatible endpoint with the key
+// inline, instead of OpenClaw's native plugin. On 2026.6.8 the gateway sends
+// models.providers.<p>.apiKey verbatim and authenticates the call itself —
+// the only path that works for these providers: openrouter has no native
+// adapter at all, while google/anthropic native plugins read a per-agent
+// sqlite auth store that ClawBox's file-based auth profile doesn't populate
+// (so they 401 / "No API key found" at call time).
+//
+// The `models` array drives resolution, so we seed the curated picker list +
+// the user's pick; the chat-header switch (/setup-api/chat/model) auto-extends
+// it for any other id, so we don't bake in the provider's full churny
+// catalogue. We emit only id+name — contextWindow/modalities/cost are looked up
+// from OpenClaw's catalog per id (a uniform cap here lied for every model whose
+// real spec differed).
+async function writeOpenAICompatProvider(opts: {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  defaultModel: string; // fully-qualified, e.g. "anthropic/claude-opus-4-8"
+  curatedModels: readonly { id: string }[];
+}): Promise<void> {
+  const defaultModelId =
+    extractProviderModelId(opts.defaultModel, opts.provider) ?? opts.defaultModel;
+  const modelIds = new Set<string>([
+    defaultModelId,
+    ...opts.curatedModels.map((m) => m.id),
+  ]);
+  const providerDef = JSON.stringify({
+    baseUrl: opts.baseUrl,
+    api: "openai-completions",
+    apiKey: opts.apiKey,
+    models: Array.from(modelIds).map((id) => ({ id, name: id })),
+  });
+  await runCommand(OPENCLAW_BIN, [
+    "config", "set", `models.providers.${opts.provider}`, providerDef, "--json",
+  ]);
+  try {
+    await runCommand(OPENCLAW_BIN, ["config", "set", "models.mode", "merge"]);
+  } catch {
+    // Non-fatal: merge is the default behavior anyway
+  }
+  await ensureFallbackModel(opts.defaultModel);
+}
+
 export async function POST(request: Request) {
   try {
     let body: {
@@ -405,6 +449,7 @@ export async function POST(request: Request) {
     const isClawAI = provider === "clawai";
     const isOpenRouter = provider === "openrouter";
     const isGoogle = provider === "google";
+    const isAnthropic = provider === "anthropic";
     const isLocalScope = scope === "local";
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
@@ -831,88 +876,41 @@ export async function POST(request: Request) {
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
-      // OpenClaw has no built-in provider adapter for OpenRouter the way it
-      // does for openai / anthropic / google, so without this explicit
-      // provider definition the runtime has no baseUrl to call — the chat
-      // turn silently returns `usage: 0/0/0` and the UI appears dead.
-      // Writing this entry restores the full OpenAI-compatible path.
-      //
-      // The `models` array drives model resolution: OpenClaw needs every
-      // selectable id present here, otherwise mid-conversation switches
-      // (curated or custom) fail silently because the runtime can't
-      // resolve the new slug. We seed with the user-picked id plus a
-      // tiny static fallback (cold-start coverage). The chat-header
-      // model switch in /setup-api/chat/model auto-extends this array
-      // when the user picks a model that isn't already in it, so we
-      // don't need to bake in OpenRouter's full 340+ catalogue at save
-      // time — that catalogue churns and the seed-everything strategy
-      // bit us four times during the original PR.
-      //
-      // We intentionally emit only `id` + `name`. contextWindow,
-      // maxTokens, input modalities and cost are looked up from
-      // OpenClaw's bundled provider catalog per model id — the previous
-      // uniform 131K/8K caps lied for every model whose real spec
-      // differed (Kimi K2 256K, GPT-5 400K, Claude Haiku 200K, etc.),
-      // triggering compaction far too early and silently truncating
-      // long outputs on capable models.
-      const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
-      const modelIds = new Set<string>([
-        defaultModelId,
-        ...OPENROUTER_CURATED_MODELS.map((option) => option.id),
-      ]);
-      const providerDef = JSON.stringify({
+      // OpenRouter has no native OpenClaw adapter, so without this explicit
+      // provider entry the chat turn silently returns usage 0/0/0.
+      await writeOpenAICompatProvider({
+        provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
-        api: "openai-completions",
-        // Inline the real key (was the placeholder "openrouter-ref"): 2026.6.8
-        // sends models.providers.*.apiKey verbatim, so a ref-placeholder 401s.
-        // Mirrors the clawai/deepseek providerDefs. See the auth-profile note above.
         apiKey: normalizedApiKey,
-        models: Array.from(modelIds).map((id) => ({ id, name: id })),
+        defaultModel: config.defaultModel,
+        curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.openrouter", providerDef, "--json",
-      ]);
-      try {
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "merge",
-        ]);
-      } catch {
-        // Non-fatal: merge is the default behavior anyway
-      }
-      await ensureFallbackModel(config.defaultModel);
-      console.log(`[AI Config] Set openrouter provider in openclaw.json: default=${defaultModelId}`);
+      console.log(`[AI Config] Set openrouter provider (openai-compat): ${config.defaultModel}`);
     } else if (isGoogle) {
-      // OpenClaw's native google plugin REGISTERS Gemini models but its auth
-      // fails at call time on 2026.6.8 — runs fall back with reason=auth and the
-      // chat silently answers as the fallback model. Route google through
-      // Google's OpenAI-compatible endpoint with the key inline: the same proven
-      // openai-completions path used for openrouter above, so the gateway
-      // actually authenticates the call. Seed with GOOGLE_MODELS (the picker's
-      // curated list) plus the user's pick; the chat-header switch in
-      // /setup-api/chat/model auto-extends this array for any other Gemini id.
-      const defaultModelId = config.defaultModel.replace(/^google\//, "");
-      const modelIds = new Set<string>([
-        defaultModelId,
-        ...GOOGLE_MODELS.map((option) => option.id),
-      ]);
-      const providerDef = JSON.stringify({
+      // Native google plugin registers Gemini models but its 2026.6.8 auth
+      // fails at call time (runs fall back with reason=auth). Route through
+      // Google's OpenAI-compat endpoint instead.
+      await writeOpenAICompatProvider({
+        provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-        api: "openai-completions",
         apiKey: normalizedApiKey,
-        models: Array.from(modelIds).map((id) => ({ id, name: id })),
+        defaultModel: config.defaultModel,
+        curatedModels: GOOGLE_MODELS,
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.google", providerDef, "--json",
-      ]);
-      try {
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "merge",
-        ]);
-      } catch {
-        // Non-fatal: merge is the default behavior anyway
-      }
-      await ensureFallbackModel(config.defaultModel);
-      console.log(`[AI Config] Set google provider (openai-compat) in openclaw.json: default=${defaultModelId}`);
+      console.log(`[AI Config] Set google provider (openai-compat): ${config.defaultModel}`);
+    } else if (isAnthropic) {
+      // Native anthropic plugin reads a per-agent sqlite auth store that
+      // ClawBox's file auth profile doesn't populate, so it fails with
+      // "No API key found" at call time. Route through Anthropic's OpenAI-compat
+      // endpoint with the key inline instead.
+      await writeOpenAICompatProvider({
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKey: normalizedApiKey,
+        defaultModel: config.defaultModel,
+        curatedModels: ANTHROPIC_MODELS,
+      });
+      console.log(`[AI Config] Set anthropic provider (openai-compat): ${config.defaultModel}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.

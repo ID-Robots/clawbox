@@ -47,6 +47,11 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+// Providers ClawBox configures as explicit openai-completions entries (see
+// ai-models/configure). Their `models.providers.<p>.models` list must contain
+// the chosen id or the gateway silently falls back, so the chat-header switch
+// below auto-extends that list when a freshly-picked model isn't seeded.
+const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
 // Imported from `@/lib/clawbox-ai-models` so this fallback can't drift away
 // from the configure route's tier→model mapping. Used only when a legacy
 // install has no explicit `models.providers.deepseek.models` entry; new
@@ -330,16 +335,15 @@ export async function POST(request: Request) {
         if (!providerConfigured) {
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
-        // OpenAI-compatible providers (openrouter, google) need the chosen
-        // model listed in `models.providers.<p>.models`, otherwise the gateway
-        // silently falls back with no error the user can see. The chat header
-        // pulls from the live catalog, so instead of forcing a "Re-save in
-        // Settings" round trip on every fresh pick we auto-extend the configured
-        // list. clawai/anthropic/openai/codex use OpenClaw's built-in catalogs,
-        // so this is openai-completions-provider-only — google qualifies because
-        // ClawBox routes it through Google's OpenAI-compat endpoint (see
-        // ai-models/configure).
-        if (parsed.provider === "openrouter" || parsed.provider === "google") {
+        // OpenAI-compat providers (OPENAI_COMPAT_PROVIDERS: openrouter, google,
+        // anthropic — ClawBox routes them through their OpenAI-compatible
+        // endpoints, see ai-models/configure) need the chosen model listed in
+        // `models.providers.<p>.models`, otherwise the gateway silently falls
+        // back with no error the user can see. The chat header pulls from the
+        // live catalog, so instead of forcing a "Re-save in Settings" round trip
+        // on every fresh pick we auto-extend the configured list. clawai/openai/
+        // codex use OpenClaw's built-in catalogs, so they don't need this.
+        if (OPENAI_COMPAT_PROVIDERS.has(parsed.provider)) {
           const providerId = parsed.provider;
           let openclawConfig: OpenClawConfig;
           try {
