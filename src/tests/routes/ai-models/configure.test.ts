@@ -802,4 +802,51 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect.objectContaining({ type: "api_key", provider: "google", key: "AIzaTestKey123" })
     );
   });
+
+  it("configures anthropic as an openai-compat provider with the key inline", async () => {
+    // Native anthropic plugin reads a per-agent sqlite auth store ClawBox
+    // doesn't populate ("No API key found" at call time), so route it through
+    // Anthropic's OpenAI-compatible endpoint with the key inline.
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+    }));
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(true);
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    expect(providerDef.baseUrl).toBe("https://api.anthropic.com/v1");
+    expect(providerDef.api).toBe("openai-completions");
+    expect(providerDef.apiKey).toBe("sk-ant-test123");
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("claude-sonnet-4-6");
+
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["anthropic:default"]).toEqual(
+      expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
+    );
+  });
+
+  it("seeds a user-picked non-curated model into the provider entry", async () => {
+    // claude-opus-4-8 is newer than ANTHROPIC_MODELS — the helper must still
+    // seed the user's pick (via defaultModel) so the gateway can resolve it.
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+      model: "claude-opus-4-8",
+    }));
+    expect(res.status).toBe(200);
+
+    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
+    expect(modelIds).toContain("claude-opus-4-8");
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
+  });
 });
