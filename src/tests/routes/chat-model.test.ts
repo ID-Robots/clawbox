@@ -334,6 +334,16 @@ describe("/setup-api/chat/model", () => {
             "openrouter:default": { provider: "openrouter", mode: "token" },
           },
         },
+        models: {
+          providers: {
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              api: "openai-completions",
+              apiKey: "sk-or-v1-test",
+              models: [{ id: "anthropic/claude-haiku-4-5", name: "anthropic/claude-haiku-4-5" }],
+            },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -348,6 +358,16 @@ describe("/setup-api/chat/model", () => {
             "openrouter:default": { provider: "openrouter", mode: "token" },
           },
         },
+        models: {
+          providers: {
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              api: "openai-completions",
+              apiKey: "sk-or-v1-test",
+              models: [{ id: "anthropic/claude-haiku-4-5", name: "anthropic/claude-haiku-4-5" }],
+            },
+          },
+        },
         agents: {
           defaults: {
             model: {
@@ -360,6 +380,16 @@ describe("/setup-api/chat/model", () => {
         auth: {
           profiles: {
             "openrouter:default": { provider: "openrouter", mode: "token" },
+          },
+        },
+        models: {
+          providers: {
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              api: "openai-completions",
+              apiKey: "sk-or-v1-test",
+              models: [{ id: "anthropic/claude-haiku-4-5", name: "anthropic/claude-haiku-4-5" }],
+            },
           },
         },
         agents: {
