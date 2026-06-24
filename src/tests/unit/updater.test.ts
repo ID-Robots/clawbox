@@ -530,5 +530,39 @@ describe("updater", () => {
       expect(info.clawbox.target).toBe(null);
       expect(info.openclaw.current).toBe(null);
     });
+
+    it("reports diverged when HEAD has local commits the channel lacks", async () => {
+      setupExecMock({
+        "ls-remote": { stdout: "abc\trefs/tags/v2.0.0\n", stderr: "" },
+        // `rev-list --left-right --count origin/main...HEAD` -> "<behind>\t<ahead>"
+        "origin/main...HEAD": { stdout: "18\t3\n", stderr: "" }, // behind 18, ahead 3
+      });
+      setupExecFileMock({ openclaw: { stdout: "1.0.0", stderr: "" } });
+
+      vi.resetModules();
+      mockReadFile.mockRejectedValue(new Error("ENOENT")); // no .update-branch -> channel = main
+      const freshUpdater = await import("@/lib/updater");
+
+      const info = await freshUpdater.getVersionInfo();
+      expect(info.diverged).toBe(true);
+      expect(info.channel).toBe("main");
+      expect(info.pausedReason).toContain("3 commits ahead of main");
+    });
+
+    it("is not diverged when HEAD is merely behind (a normal update) or ahead-only", async () => {
+      setupExecMock({
+        "ls-remote": { stdout: "abc\trefs/tags/v2.0.0\n", stderr: "" },
+        "origin/main...HEAD": { stdout: "5\t0\n", stderr: "" }, // behind 5, ahead 0 -> normal
+      });
+      setupExecFileMock({ openclaw: { stdout: "1.0.0", stderr: "" } });
+
+      vi.resetModules();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      const freshUpdater = await import("@/lib/updater");
+
+      const info = await freshUpdater.getVersionInfo();
+      expect(info.diverged).toBe(false);
+      expect(info.pausedReason).toBe(null);
+    });
   });
 });
