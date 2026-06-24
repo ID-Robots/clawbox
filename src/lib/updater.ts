@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
 import { findOpenclawBin, restartGateway } from "./openclaw-config";
@@ -229,6 +229,59 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
   return main;
 }
 
+/**
+ * The release channel the device should track: the `.update-branch` pin, else
+ * "main". Unlike resolveUpdateBranch this deliberately IGNORES the current
+ * branch — a diverged box's current branch is exactly what "Reset to channel"
+ * escapes from, so we must not let it win here.
+ */
+async function resolveChannelBranch(): Promise<string> {
+  try {
+    const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+    if (pinned && SAFE_BRANCH.test(pinned)) return pinned;
+  } catch { /* no pin → default channel */ }
+  return "main";
+}
+
+export interface Divergence {
+  diverged: boolean;
+  reason: string | null;
+  /** The channel a "Reset to channel & update" would target (the pin, else main). */
+  channel: string;
+}
+
+/**
+ * Detect when the device has local commits the release channel lacks — the case
+ * that makes `getTargetVersion` silently withhold the update (it never offers a
+ * tag that isn't a forward-ancestor of HEAD, so a diverged box looks identical
+ * to an up-to-date one). Requires `ahead > 0 && behind > 0`: a box merely AHEAD
+ * of the channel (e.g. a dev box on a local tag) has nothing newer to install,
+ * so we don't nag it to reset. Relies on the `fetch` getTargetVersion already
+ * ran in the same getVersionInfo() pass, so it adds no network I/O of its own.
+ */
+async function getChannelDivergence(): Promise<Divergence> {
+  const channel = await resolveChannelBranch();
+  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
+  try {
+    // One walk for both counts: `--left-right --count A...B` prints
+    // "<left>\t<right>" = "<behind>\t<ahead>" (left = commits only on the
+    // channel, right = commits only on HEAD).
+    const out = (await execShell(
+      `${gitCmd} rev-list --left-right --count origin/${channel}...HEAD`,
+      { timeout: 10_000 },
+    )).stdout.trim();
+    const [behind, ahead] = out.split(/\s+/).map((n) => Number(n) || 0);
+    if (ahead > 0 && behind > 0) {
+      return {
+        diverged: true,
+        reason: `This device is on a non-release branch with local changes (${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${channel}). Reset to ${channel} to resume updates.`,
+        channel,
+      };
+    }
+  } catch { /* origin/<channel> missing, offline, etc. → treat as not diverged */ }
+  return { diverged: false, reason: null, channel };
+}
+
 async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
@@ -415,6 +468,12 @@ const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
   openclaw: { current: string | null; target: string | null };
+  /** True when local commits keep the release channel's updates from being
+   *  offered (the silent "up to date" trap); `pausedReason` explains it. */
+  diverged: boolean;
+  pausedReason: string | null;
+  /** The channel a "Reset to channel & update" would target (the pin, else main). */
+  channel: string;
 }
 
 let cachedVersionInfo: VersionInfo | null = null;
@@ -512,6 +571,12 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     ? targetVersion
     : null;
 
+  // Surface the "updates paused" state. MUST run after the Promise.all above —
+  // not inside it — so getTargetVersion's fetch has already refreshed
+  // origin/<channel>; reordering it earlier would read a stale ref. Adds no
+  // fetch of its own.
+  const divergence = await getChannelDivergence();
+
   cachedVersionInfo = {
     clawbox: {
       current: rawVersion,
@@ -521,6 +586,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       current: openclawCurrent,
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
     },
+    diverged: divergence.diverged,
+    pausedReason: divergence.reason,
+    channel: divergence.channel,
   };
   versionInfoCacheTime = Date.now();
   return cachedVersionInfo;
@@ -689,6 +757,22 @@ export function startUpdate(): { started: boolean; error?: string } {
 
   launchUpdate(UPDATE_STEPS, 0, { markCompleted: true });
   return { started: true };
+}
+
+/**
+ * "Reset to channel & update": pin `.update-branch` to the release channel
+ * (the existing pin, else "main") so the hard-sync in updateClawBoxAndReboot
+ * targets the channel instead of the diverged current branch, then run the
+ * normal update. The pin also stops the device silently re-diverging later.
+ *
+ * DESTRUCTIVE: the update's `git reset --hard origin/<channel>` discards local
+ * commits/changes — the UI gates this behind a confirmation.
+ */
+export async function forceResetToChannel(): Promise<{ started: boolean; error?: string; channel: string }> {
+  const channel = await resolveChannelBranch();
+  await writeFile(UPDATE_BRANCH_FILE, channel, "utf-8");
+  invalidateVersionCache();
+  return { ...startUpdate(), channel };
 }
 
 // Scoped update path: re-installs OpenClaw + re-applies the gateway patch

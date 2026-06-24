@@ -8,6 +8,9 @@ import { cleanVersion } from "@/lib/version-utils";
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
   openclaw: { current: string | null; target: string | null };
+  diverged?: boolean;
+  pausedReason?: string | null;
+  channel?: string;
 }
 
 interface BranchInfo {
@@ -39,7 +42,7 @@ function isUpdateAvailable(current: string | null | undefined, target: string | 
   return compareSemver(target, current) > 0;
 }
 
-type Status = "loading" | "up-to-date" | "available" | "updating" | "completed" | "failed" | "fetch-error";
+type Status = "loading" | "up-to-date" | "available" | "paused" | "updating" | "completed" | "failed" | "fetch-error";
 
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "completed") {
@@ -81,6 +84,7 @@ export default function SystemUpdateApp() {
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -224,6 +228,27 @@ export default function SystemUpdateApp() {
     }
   }, [startPolling]);
 
+  // "Reset to channel & update" — for a device stranded on a non-release branch.
+  // The backend pins .update-branch to the channel and runs the normal update,
+  // whose hard-sync discards the local commits. Destructive → gated by a modal.
+  const resetAndUpdate = useCallback(async () => {
+    setResetConfirm(false);
+    setUpdateStarted(true);
+    setUpdateError(null);
+    setUpdateState(null);
+    try {
+      const res = await fetch("/setup-api/update/reset", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setUpdateError(typeof data.error === "string" ? data.error : `Failed to reset (HTTP ${res.status})`);
+        return;
+      }
+      startPolling();
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : "Failed to reset to channel");
+    }
+  }, [startPolling]);
+
   const dismissResult = useCallback(() => {
     setUpdateStarted(false);
     setUpdateError(null);
@@ -259,6 +284,9 @@ export default function SystemUpdateApp() {
     }
     if (versionsError && !versions) return "fetch-error";
     if (!versions) return "loading";
+    // Local commits the channel lacks make the backend withhold the offer;
+    // surface that instead of a misleading "up to date".
+    if (versions.diverged) return "paused";
     // Only ClawBox drives availability now — OpenClaw is bumped as part
     // of the ClawBox update, so an OpenClaw-pin delta without a ClawBox
     // delta means a ClawBox release hasn't been cut yet and there's
@@ -300,6 +328,13 @@ export default function SystemUpdateApp() {
           tone: "available" as const,
         };
       }
+      case "paused":
+        return {
+          icon: "pause_circle", iconClass: "text-amber-300",
+          headline: "Updates paused",
+          subhead: versions?.pausedReason ?? "Updates are paused while this device has local changes.",
+          tone: "warn" as const,
+        };
       case "updating":
         return {
           icon: "downloading", iconClass: "text-orange-300",
@@ -333,6 +368,7 @@ export default function SystemUpdateApp() {
   }[hero.tone];
 
   const clawboxAvail = !!versions && isUpdateAvailable(versions.clawbox.current, versions.clawbox.target);
+  const resetChannel = versions?.channel ?? "main";
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
@@ -389,6 +425,26 @@ export default function SystemUpdateApp() {
               </div>
             )}
 
+            {status === "paused" && (
+              <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setResetConfirm(true)}
+                  className="px-6 py-2.5 rounded-full bg-amber-500 hover:bg-amber-400 text-black text-sm font-semibold shadow-lg cursor-pointer"
+                >
+                  Reset to {resetChannel} &amp; update
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetchVersions(true)}
+                  disabled={refreshing}
+                  className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
+                >
+                  {refreshing ? "Checking…" : "Re-check"}
+                </button>
+              </div>
+            )}
+
             {status === "fetch-error" && (
               <button
                 type="button"
@@ -410,7 +466,7 @@ export default function SystemUpdateApp() {
               whatever was last published to npm, which is what we just
               moved away from. The OpenClaw version is still shown in the
               ClawBox card's release notes / version-info section. */}
-          {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
+          {versions && status !== "updating" && status !== "completed" && status !== "failed" && status !== "paused" && (
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
                 name="ClawBox"
@@ -551,6 +607,50 @@ export default function SystemUpdateApp() {
                 className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
               >
                 Enable beta
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resetConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setResetConfirm(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 px-5 pt-5">
+              <div className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-500/15 text-amber-300">
+                <span className="material-symbols-rounded" style={{ fontSize: 22 }}>warning</span>
+              </div>
+              <h2 id="reset-confirm-title" className="text-base font-semibold text-gray-100">Reset to {resetChannel} &amp; update?</h2>
+            </div>
+            <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
+              <p>
+                This device has local changes that aren&apos;t on <code className="bg-black/30 px-1 rounded">{resetChannel}</code>. Resetting <strong>discards those local commits</strong>, syncs the device to <code className="bg-black/30 px-1 rounded">{resetChannel}</code>, then updates and reboots. Your settings, files, and AI/Telegram config are kept — they live outside the code.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+              <button
+                type="button"
+                onClick={() => setResetConfirm(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => void resetAndUpdate()}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
+              >
+                Reset &amp; update
               </button>
             </div>
           </div>
