@@ -529,6 +529,7 @@ for (const dir of targets) {
   fs.mkdirSync(dir, { recursive: true });
   try { fs.chmodSync(dir, 0o700); } catch {} // holds OAuth tokens — keep owner-only
   fs.writeFileSync(file, JSON.stringify(oauth, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch {} // writeFileSync's mode is ignored when OVERWRITING an existing (stale) file — enforce owner-only on the tokens
   console.log("  Codex auth.json synced -> " + file + " (account_id " + (oauth.tokens.account_id ? "resolved" : "missing") + ")");
 }
 NODE
