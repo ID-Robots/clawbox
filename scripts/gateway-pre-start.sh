@@ -469,39 +469,78 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
     || echo "  WARN: openclaw plugins install $CODEX_SPEC failed; Codex chats will fail until resolved"
 fi
 
-# Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
-# ~/.codex/auth.json (not the openclaw profile) — without it the app-server
-# falls back to api.openai.com with no bearer -> 401. Synthesize it from the
-# codex OAuth profile (account_id decoded from the access JWT). Write-if-
-# missing: the app-server owns refresh once it exists, so we don't clobber it.
+# Codex 2026.6.x authenticates from an auth.json the app-server reads at the
+# AGENT-SCOPED <OPENCLAW_HOME>/agents/<agent>/agent/codex-home/auth.json (CODEX_HOME);
+# the Codex CLI also reads ~/.codex/auth.json. Without a valid OAuth file the
+# app-server falls back to api.openai.com — and if a STALE key-only auth.json is
+# present (left from an earlier API-key-mode setup), it sends that dead key and
+# every turn 401s ("Incorrect API key … sk-proj-…" / "invalid ID token format").
+# Synthesize the session from the codex OAuth profile and sync it to ~/.codex AND
+# every agent's codex-home, OVERWRITING stale-key-only/corrupt files so a device
+# that switched API-key -> OAuth self-heals on the next boot. A HEALTHY OAuth file
+# (no key, has id_token) is left untouched — the app-server owns refresh once good.
 if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
-  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
-  if [ ! -f "$CODEX_AUTH_FILE" ]; then
-    node - "$OPENCLAW_HOME_DIR/agents/main/agent/auth-profiles.json" "$CODEX_AUTH_FILE" <<'NODE'
+  node - "$OPENCLAW_HOME_DIR/agents/main/agent/auth-profiles.json" "$OPENCLAW_HOME_DIR" "$HOME/.codex" <<'NODE'
 const fs = require("fs"), path = require("path");
-const [apPath, outPath] = process.argv.slice(2);
+const [apPath, openclawHome, dotCodexDir] = process.argv.slice(2);
+// A JWT is three non-empty dot-separated segments. The Codex app-server rejects
+// a non-JWT id_token with "invalid ID token format", so we neither write nor
+// preserve one (configure/route.ts enforces the same contract upstream).
+const isJwtLike = (v) => typeof v === "string" && v.split(".").length === 3 && v.split(".").every((s) => s.length > 0);
+
+// 1. Build the OAuth auth.json from the codex profile (account_id from the JWT).
+let oauth;
 try {
   const data = JSON.parse(fs.readFileSync(apPath, "utf8"));
   const profiles = data.profiles || {};
   const p = profiles["codex:default"] || profiles["openai-codex:default"];
   if (!p || !p.access) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+  const idToken = p.id || p.access;
+  if (!isJwtLike(idToken)) { console.log("  Codex auth.json: profile id_token is not a JWT — skipping (re-auth needed)"); process.exit(0); }
   let accountId = null;
   try {
     const claims = JSON.parse(Buffer.from(p.access.split(".")[1], "base64url").toString());
     const auth = claims["https://api.openai.com/auth"] || {};
     accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
   } catch { /* opaque token — leave accountId null */ }
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.chmodSync(path.dirname(outPath), 0o700); // ~/.codex holds OAuth tokens — keep it owner-only (not just the 0600 file)
-  fs.writeFileSync(outPath, JSON.stringify({
+  oauth = {
     OPENAI_API_KEY: null,
-    tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
+    tokens: { id_token: idToken, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
     last_refresh: new Date().toISOString(),
-  }, null, 2), { mode: 0o600 });
-  console.log("  Wrote ~/.codex/auth.json for the Codex app-server (account_id " + (accountId ? "resolved" : "missing") + ")");
-} catch (e) { console.log("  Codex auth.json: " + e.message); }
+  };
+} catch (e) { console.log("  Codex auth.json: " + e.message); process.exit(0); }
+
+// 2. Targets: the Codex CLI dir + every agent's codex-home dir.
+const targets = [dotCodexDir];
+try {
+  const agentsDir = path.join(openclawHome, "agents");
+  for (const a of fs.readdirSync(agentsDir)) {
+    if (fs.existsSync(path.join(agentsDir, a, "agent")))
+      targets.push(path.join(agentsDir, a, "agent", "codex-home"));
+  }
+} catch { /* no agents dir yet */ }
+
+// 3. Sync — heal stale/corrupt, never clobber a healthy OAuth session.
+const isHealthyOAuth = (file) => {
+  try {
+    const cur = JSON.parse(fs.readFileSync(file, "utf8"));
+    const hasKey = typeof cur.OPENAI_API_KEY === "string" && cur.OPENAI_API_KEY.length > 0;
+    const hasJwtIdToken = cur.tokens && isJwtLike(cur.tokens.id_token);
+    return !hasKey && hasJwtIdToken; // OAuth-only with a real JWT -> leave alone; a stale key OR a non-JWT token -> re-heal
+  } catch { return false; } // missing/corrupt -> (re)write
+};
+for (const dir of targets) {
+  const file = path.join(dir, "auth.json");
+  try {
+    if (fs.existsSync(file) && isHealthyOAuth(file)) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    try { fs.chmodSync(dir, 0o700); } catch {} // holds OAuth tokens — keep owner-only
+    fs.writeFileSync(file, JSON.stringify(oauth, null, 2), { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch {} // writeFileSync's mode is ignored when OVERWRITING an existing (stale) file — enforce owner-only on the tokens
+    console.log("  Codex auth.json synced -> " + file + " (account_id " + (oauth.tokens.account_id ? "resolved" : "missing") + ")");
+  } catch (e) { console.log("  Codex auth.json: skipped " + file + " (" + e.message + ")"); } // one bad target must not fail the gateway boot (set -e)
+}
 NODE
-  fi
 fi
 
 # Ensure the per-install MCP bearer token exists and is wired into the
