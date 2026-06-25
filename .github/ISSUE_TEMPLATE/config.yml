@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: OpenClaw Hardware
+    url: https://openclawhardware.dev/
+    about: Product information, setup guides, and documentation for the device.
+  - name: Security vulnerability
+    url: https://github.com/ID-Robots/clawbox/security/policy
+    about: Please report security issues privately — do not open a public issue.
