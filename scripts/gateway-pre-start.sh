@@ -208,6 +208,27 @@ if has_openrouter_auth and not models_providers.get("openrouter"):
     }
     changed = True
 
+# Migration: a device that switched OpenAI from API-key mode to the ChatGPT
+# subscription but whose agent stayed pinned to the dead openai/* lane — the
+# "Mark Spivey" class. The primary openai/<model> keeps calling api.openai.com
+# with a now-invalid sk-proj key (401 every turn) while the working subscription
+# (codex) sits unused. If a codex OAuth profile is configured (subscription
+# active), repoint the primary to codex/<same-model> and drop the stale openai
+# direct-API provider + profile + openai/* fallbacks so the dead key can't win.
+has_codex_auth = isinstance(auth_profiles, dict) and "codex:default" in auth_profiles
+agents_model = cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
+primary = agents_model.get("primary")
+if has_codex_auth and isinstance(primary, str) and primary.startswith("openai/"):
+    model_id = primary[len("openai/"):]
+    agents_model["primary"] = "codex/" + model_id
+    models_providers.pop("openai", None)
+    auth_profiles.pop("openai:default", None)
+    fb = agents_model.get("fallbacks")
+    if isinstance(fb, list):
+        agents_model["fallbacks"] = [m for m in fb if not (isinstance(m, str) and m.startswith("openai/"))]
+    changed = True
+    print("  Migrated stale openai/" + model_id + " primary -> codex/" + model_id + " (codex subscription active)")
+
 gateway = cfg.setdefault("gateway", {})
 control_ui = gateway.setdefault("controlUi", {})
 auth = gateway.setdefault("auth", {})
