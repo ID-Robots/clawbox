@@ -1,0 +1,86 @@
+---
+title: "OpenClaw Setup Guide"
+summary: "Configure OpenClaw on your ClawBox — channels, voice, AI models, and advanced options."
+---
+
+# OpenClaw Setup Guide
+
+ClawBox ships with OpenClaw pre-installed, so most of this is already done for you.
+This guide is the full reference for configuring channels, voice, models, and advanced
+options — whether you're on a ClawBox or a DIY install.
+
+## Prerequisites
+
+- **Node.js 18+** installed (pre-installed on ClawBox)
+- **4 GB+ RAM** recommended
+- Linux, macOS, or Windows
+- Always-on internet connection
+
+## Telegram
+
+<Steps>
+  <Step title="Create a bot">
+    Open Telegram and search **@BotFather**.
+  </Step>
+  <Step title="Name it">
+    Send `/newbot` and follow the prompts to create your bot.
+  </Step>
+  <Step title="Copy the token">
+    BotFather gives you an **API token** — copy it.
+  </Step>
+  <Step title="Add it to OpenClaw">
+    Paste the token into your OpenClaw config (Channels → Telegram).
+  </Step>
+</Steps>
+
+## Discord
+
+<Steps>
+  <Step title="Create an application">
+    Go to the **Discord Developer Portal** and create a new application.
+  </Step>
+  <Step title="Create a bot">
+    Add a bot to the application and copy its **token**.
+  </Step>
+  <Step title="Enable intents">
+    Turn on the required gateway intents for the bot.
+  </Step>
+  <Step title="Add it to OpenClaw">
+    Paste the token into your OpenClaw config (Channels → Discord).
+  </Step>
+</Steps>
+
+## Voice pipeline
+
+- Install **Whisper** for speech-to-text
+- Install **Kokoro TTS** for text-to-speech
+- Configure your audio devices
+
+## AI models
+
+- Add your **API key** (Anthropic, OpenAI, Google, OpenRouter), **or** download local models
+- Configure model preferences
+- Test with a simple prompt
+
+See [Choose Your AI Provider](/setup/choose-ai-provider) for the full provider list.
+
+## Advanced configuration
+
+- Set up **systemd** for auto-start (pre-configured on ClawBox)
+- Configure **browser automation**
+- Set up **cron jobs** for monitoring and scheduled tasks
+
+## Pro tips
+
+<Tip>
+- Run `openclaw status` to check that all services are running.
+- Use `systemctl restart openclaw` if something misbehaves after a config change.
+- Tail logs in real time with `journalctl -u openclaw -f`.
+- Enable automatic updates for the latest features and security patches.
+</Tip>
+
+## Skip the setup
+
+<Card title="Get ClawBox — OpenClaw pre-installed" href="https://clawbox.tech" icon="bolt" horizontal>
+  Plug in, connect Wi-Fi, scan a QR code. Done in 5 minutes — channels, voice, and models ready.
+</Card>

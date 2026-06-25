@@ -1,0 +1,52 @@
+---
+title: "Choose Your AI Provider"
+summary: "Use ClawBox AI out of the box, or connect Claude, GPT, Gemini, OpenRouter, or a local model."
+---
+
+# Choose Your AI Provider
+
+ClawBox is flexible about which AI model powers your assistant. You pick during setup
+and can change it later.
+
+## ClawBox AI (default)
+
+Works immediately, no keys to manage. The simplest way to get started — and a great
+default for most people.
+
+## Bring your own provider
+
+Prefer a specific model? ClawBox treats these as first-class options:
+
+<Columns cols={2}>
+  <Card title="Anthropic Claude" icon="a">
+    Add your Anthropic API key to drive ClawBox with Claude models.
+  </Card>
+  <Card title="OpenAI GPT" icon="o">
+    Use your OpenAI API key for GPT models.
+  </Card>
+  <Card title="Google Gemini" icon="g">
+    Connect Gemini with a Google AI API key.
+  </Card>
+  <Card title="OpenRouter" icon="route">
+    One key, many models — route across providers.
+  </Card>
+</Columns>
+
+To connect one, open the **AI provider** section of setup, choose the provider, and
+paste your API key. ClawBox stores it on the device.
+
+## Local models
+
+For fully on-device inference, ClawBox supports local **Ollama** and **llama.cpp**
+models. This is an option for users who want it rather than the default path.
+
+<Note>
+Local model performance depends on your hardware. **ClawBox Workstation** (DGX Spark,
+128 GB unified memory) can run models up to ~200B parameters locally; **ClawBox
+Connect** (Jetson Orin Nano) is best paired with cloud providers or smaller local models.
+See [Hardware](/hardware/clawbox-connect).
+</Note>
+
+## Switching later
+
+You can change provider any time from the device settings — no re-setup required.
