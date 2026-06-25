@@ -639,6 +639,7 @@ export default function SystemUpdateApp() {
             <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
               <button
                 type="button"
+                autoFocus
                 onClick={() => setResetConfirm(false)}
                 className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
               >
@@ -646,7 +647,6 @@ export default function SystemUpdateApp() {
               </button>
               <button
                 type="button"
-                autoFocus
                 onClick={() => void resetAndUpdate()}
                 className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
               >

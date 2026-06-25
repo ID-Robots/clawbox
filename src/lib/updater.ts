@@ -770,9 +770,18 @@ export function startUpdate(): { started: boolean; error?: string } {
  */
 export async function forceResetToChannel(): Promise<{ started: boolean; error?: string; channel: string }> {
   const channel = await resolveChannelBranch();
+  // Try to start the update FIRST. If one is already running, startUpdate()
+  // refuses (started: false) — in that case we must not write the channel pin,
+  // or the device stays pinned to the channel for a future update it never
+  // asked for. The pin is only read by the hard-sync step, which runs well
+  // after this write, so persisting it after a successful start is safe.
+  const result = startUpdate();
+  if (!result.started) {
+    return { ...result, channel };
+  }
   await writeFile(UPDATE_BRANCH_FILE, channel, "utf-8");
   invalidateVersionCache();
-  return { ...startUpdate(), channel };
+  return { ...result, channel };
 }
 
 // Scoped update path: re-installs OpenClaw + re-applies the gateway patch

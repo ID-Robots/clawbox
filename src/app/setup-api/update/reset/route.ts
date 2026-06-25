@@ -12,6 +12,11 @@ import { forceResetToChannel } from "@/lib/updater";
 export async function POST() {
   try {
     const result = await forceResetToChannel();
+    if (!result.started) {
+      // e.g. an update is already running — don't let clients that check
+      // res.ok treat this as a successful reset.
+      return NextResponse.json(result, { status: 409 });
+    }
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(
