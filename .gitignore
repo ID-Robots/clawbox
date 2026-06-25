@@ -2,5 +2,6 @@
 export.zip
 _site/
 _site_preview/
+_chk/
 .mintlify/
 node_modules/
