@@ -208,6 +208,33 @@ if has_openrouter_auth and not models_providers.get("openrouter"):
     }
     changed = True
 
+# Migration: a device that switched OpenAI from API-key mode to the ChatGPT
+# subscription but whose agent stayed pinned to the dead openai/* lane. The
+# primary openai/<model> keeps calling api.openai.com with a now-invalid
+# sk-proj key (401 every turn) while the working subscription (codex) sits
+# unused. If a codex OAuth profile is configured (subscription active), repoint
+# the primary to the codex equivalent and drop the stale openai direct-API
+# provider + profile + openai/* fallbacks so the dead key can't win.
+# openai-direct and codex have DIFFERENT catalogs (gpt-5 is openai-only,
+# gpt-5.4 is codex-only), so keep the model id only when codex actually serves
+# it; otherwise fall back to codex's default. Keep CODEX_MODELS in sync with
+# src/lib/provider-models.ts (ChatGPT-account auth: gpt-5.5, gpt-5.4, gpt-5.4-mini).
+CODEX_MODELS = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
+has_codex_auth = isinstance(auth_profiles, dict) and "codex:default" in auth_profiles
+agents_model = cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
+primary = agents_model.get("primary")
+if has_codex_auth and isinstance(primary, str) and primary.startswith("openai/"):
+    model_id = primary[len("openai/"):]
+    target_model = model_id if model_id in CODEX_MODELS else "gpt-5.4"
+    agents_model["primary"] = "codex/" + target_model
+    models_providers.pop("openai", None)
+    auth_profiles.pop("openai:default", None)
+    fb = agents_model.get("fallbacks")
+    if isinstance(fb, list):
+        agents_model["fallbacks"] = [m for m in fb if not (isinstance(m, str) and m.startswith("openai/"))]
+    changed = True
+    print("  Migrated stale openai/" + model_id + " primary -> codex/" + target_model + " (codex subscription active)")
+
 gateway = cfg.setdefault("gateway", {})
 control_ui = gateway.setdefault("controlUi", {})
 auth = gateway.setdefault("auth", {})
