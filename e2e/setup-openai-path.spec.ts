@@ -7,10 +7,7 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
   await page.goto("/setup");
 
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
-  await page.getByRole("button", { name: "Connect to WiFi" }).click();
-  await page.getByRole("button", { name: "Clawbox Lab" }).click();
-  await page.locator("#wifi-password").fill("wireless-pass");
-  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Continue with Ethernet" }).click();
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await page.locator("#cred-password").fill("clawbox-pass");

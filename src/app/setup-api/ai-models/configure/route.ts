@@ -9,7 +9,7 @@ import {
   restartGateway,
   findOpenclawBin,
   runOpenclawConfigSet,
-  DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+  compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
   applyModelOverrideToAllAgentSessions,
@@ -23,6 +23,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
 import {
@@ -35,7 +36,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId, isCatalogProvider } from "@/lib/provider-models";
+import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -87,8 +88,8 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
-      defaultModel: "openai-codex/gpt-5.4",
-      profileKey: "openai-codex:default",
+      defaultModel: "codex/gpt-5.4",
+      profileKey: "codex:default",
     },
   },
   google: {
@@ -376,12 +377,57 @@ async function ensureFallbackModel(
   }
 }
 
+// Configure a provider through its OpenAI-compatible endpoint with the key
+// inline, instead of OpenClaw's native plugin. On 2026.6.8 the gateway sends
+// models.providers.<p>.apiKey verbatim and authenticates the call itself —
+// the only path that works for these providers: openrouter has no native
+// adapter at all, while google/anthropic native plugins read a per-agent
+// sqlite auth store that ClawBox's file-based auth profile doesn't populate
+// (so they 401 / "No API key found" at call time).
+//
+// The `models` array drives resolution, so we seed the curated picker list +
+// the user's pick; the chat-header switch (/setup-api/chat/model) auto-extends
+// it for any other id, so we don't bake in the provider's full churny
+// catalogue. We emit only id+name — contextWindow/modalities/cost are looked up
+// from OpenClaw's catalog per id (a uniform cap here lied for every model whose
+// real spec differed).
+async function writeOpenAICompatProvider(opts: {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  defaultModel: string; // fully-qualified, e.g. "anthropic/claude-opus-4-8"
+  curatedModels: readonly { id: string }[];
+}): Promise<void> {
+  const defaultModelId =
+    extractProviderModelId(opts.defaultModel, opts.provider) ?? opts.defaultModel;
+  const modelIds = new Set<string>([
+    defaultModelId,
+    ...opts.curatedModels.map((m) => m.id),
+  ]);
+  const providerDef = JSON.stringify({
+    baseUrl: opts.baseUrl,
+    api: "openai-completions",
+    apiKey: opts.apiKey,
+    models: Array.from(modelIds).map((id) => ({ id, name: id })),
+  });
+  await runCommand(OPENCLAW_BIN, [
+    "config", "set", `models.providers.${opts.provider}`, providerDef, "--json",
+  ]);
+  try {
+    await runCommand(OPENCLAW_BIN, ["config", "set", "models.mode", "merge"]);
+  } catch {
+    // Non-fatal: merge is the default behavior anyway
+  }
+  await ensureFallbackModel(opts.defaultModel);
+}
+
 export async function POST(request: Request) {
   try {
     let body: {
       provider?: string;
       apiKey?: string;
       authMode?: string;
+      idToken?: string;
       refreshToken?: string;
       expiresIn?: number;
       projectId?: string;
@@ -395,13 +441,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const { provider, apiKey, authMode = "token", refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
     const isOpenRouter = provider === "openrouter";
+    const isGoogle = provider === "google";
+    const isAnthropic = provider === "anthropic";
     const isLocalScope = scope === "local";
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
@@ -428,7 +476,29 @@ export async function POST(request: Request) {
     const config = (authMode === "subscription" && baseConfig.subscriptionOverride)
       ? { ...baseConfig, ...baseConfig.subscriptionOverride }
       : { ...baseConfig };
-    const configStore = await getAll().catch(() => ({} as Awaited<ReturnType<typeof getAll>>));
+    // Don't fail open on a config read error for ClawBox AI: previousClawaiToken
+    // would silently become "" and the account-switch unpair guard below would
+    // be skipped, potentially leaving ClawKeep paired to the previous account.
+    // For other providers a missing config is harmless, so keep the soft default.
+    let configStore: Awaited<ReturnType<typeof getAll>>;
+    try {
+      configStore = await getAll();
+    } catch {
+      if (isClawAI) {
+        return NextResponse.json(
+          { error: "Failed to read existing ClawBox AI configuration. Please retry." },
+          { status: 503 },
+        );
+      }
+      configStore = {} as Awaited<ReturnType<typeof getAll>>;
+    }
+    // Capture the previously-stored ClawBox AI token *before* it gets
+    // overwritten below, so the isClawAI block can detect an account switch
+    // (token change) and unpair ClawKeep.
+    const previousClawaiToken =
+      typeof configStore[CLAWBOX_AI_TOKEN_CONFIG_KEY] === "string"
+        ? (configStore[CLAWBOX_AI_TOKEN_CONFIG_KEY] as string)
+        : "";
     const clawboxAiToken = isClawAI
       ? await getConfiguredClawboxAiToken(normalizedApiKey)
       : "";
@@ -441,6 +511,28 @@ export async function POST(request: Request) {
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+
+    // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
+    // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
+    // `access`). If neither is JWT-shaped, that synthesis produces an invalid
+    // id_token and every request fails with "invalid ID token format" — reject
+    // the save here so the failure surfaces at config time, not in the chat.
+    const normalizedIdToken = typeof idToken === "string" ? idToken.trim() : "";
+    const isJwtLike = (value: string) => value.split(".").length === 3;
+    if (
+      authMode === "subscription" &&
+      ocProvider === "codex" &&
+      !isJwtLike(normalizedIdToken || normalizedApiKey)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "OpenAI subscription OAuth did not return a valid JWT credential. Please restart the authorization flow.",
+        },
+        { status: 502 },
+      );
+    }
+
     const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
@@ -471,9 +563,9 @@ export async function POST(request: Request) {
       //
       // Provider namespace differs between auth modes:
       //   openai + token        → openai/<id>       (api.openai.com)
-      //   openai + subscription → openai-codex/<id> (chatgpt.com backend)
+      //   openai + subscription → codex/<id>        (chatgpt.com backend)
       // The two catalogs are NOT the same — `gpt-5.4` only exists on
-      // openai-codex; `gpt-5` only exists on openai direct. The
+      // codex; `gpt-5` only exists on openai direct. The
       // `config.defaultModel` was already set to the correct namespace
       // above by applying subscriptionOverride, so we derive the
       // target provider from the existing default instead of `provider`.
@@ -483,7 +575,7 @@ export async function POST(request: Request) {
         "openrouter",
         "anthropic",
         "openai",
-        "openai-codex",
+        "codex",
         "google",
       ]);
       if (supportedProviders.has(targetProvider)) {
@@ -517,7 +609,7 @@ export async function POST(request: Request) {
     //
     //   * anthropic     → --auth-choice apiKey --anthropic-api-key
     //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
-    //   * openai-codex  → --auth-choice openai-codex (OAuth flow)
+    //   * codex         → ChatGPT app-server auth (~/.codex/auth.json, written by gateway-pre-start.sh)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
@@ -562,11 +654,16 @@ export async function POST(request: Request) {
         markLocalAiTokenMigrated();
       } else if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
-        // { type: "oauth", provider, access, refresh, expires, projectId? }
+        // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
+        // `id` is the OAuth id_token (a JWT). The Codex app-server authenticates
+        // with it, and gateway-pre-start's ~/.codex/auth.json synthesis uses
+        // `id` (falling back to `access`). Persisting it keeps the synthesized
+        // id_token a valid JWT instead of whatever `access` happens to be.
         authProfiles.profiles[config.profileKey] = {
           type: "oauth",
           provider: ocProvider,
           access: normalizedApiKey,
+          ...(normalizedIdToken ? { id: normalizedIdToken } : {}),
           refresh: refreshToken || "",
           expires: expiresIn
             ? Date.now() + expiresIn * 1000
@@ -574,10 +671,18 @@ export async function POST(request: Request) {
           ...(projectId ? { projectId } : {}),
         };
       } else {
+        // API-key providers (anthropic, openai, google, openrouter) authenticate
+        // with a bearer key. OpenClaw <=2026.6.6 tolerated a `type: "token"`
+        // profile here, but 2026.6.8 reworked auth resolution and no longer
+        // turns a token-mode profile into an Authorization header — the request
+        // goes out unauthenticated and the provider returns "401 Missing
+        // Authentication header". Write the same `type: "api_key"` shape the
+        // working providers above use (clawai/ollama/llamacpp) so the gateway
+        // applies the key on every release.
         authProfiles.profiles[config.profileKey] = {
-          type: "token",
+          type: "api_key",
           provider: ocProvider,
-          token: normalizedApiKey,
+          key: normalizedApiKey,
         };
       }
       await writeAuthProfiles(authProfiles);
@@ -598,9 +703,11 @@ export async function POST(request: Request) {
       "config",
       "set",
       `auth.profiles.${config.profileKey}`,
-      JSON.stringify((isOllama || isLlamaCpp || isClawAI)
-        ? { provider: ocProvider, mode: "api_key" }
-        : { provider: ocProvider, mode: authMode === "subscription" ? "oauth" : "token" }),
+      // Subscription → "oauth"; every key-based provider → "api_key". The old
+      // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
+      JSON.stringify(authMode === "subscription"
+        ? { provider: ocProvider, mode: "oauth" }
+        : { provider: ocProvider, mode: "api_key" }),
       "--json",
     ]);
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
@@ -614,11 +721,21 @@ export async function POST(request: Request) {
         console.log(`[AI Config] Promoted local model to active primary: ${config.defaultModel}`);
       }
     }
+    // Reserve sized to the active model's context window. Local models run on
+    // small windows (Ollama 32K) where the flat default leaves no room for the
+    // agent's heavy system prompt + tools; cloud models (unbounded window)
+    // fall through to the full default.
+    const activeContextWindow = isOllama
+      ? OLLAMA_CONTEXT_WINDOW
+      : isLlamaCpp
+        ? llamaCppContextWindow
+        : Number.POSITIVE_INFINITY;
+    const compactionReserveFloor = compactionReserveFloorForContext(activeContextWindow);
     await runCommand(OPENCLAW_BIN, [
       "config",
       "set",
       "agents.defaults.compaction.reserveTokensFloor",
-      `${DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR}`,
+      `${compactionReserveFloor}`,
     ]);
 
     // 4c. Local device gateway setup: keep token auth enabled for LAN binding,
@@ -684,6 +801,25 @@ export async function POST(request: Request) {
       ]);
       await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
       console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL}`);
+
+      // Account-switch safety: ClawKeep pairs separately and is bound to its
+      // own token (the portal resolves token -> account -> storage prefix), so
+      // after switching ClawBox AI accounts it would keep backing up to the
+      // OLD account's cloud storage. When the clawai token changes from a
+      // previously-stored one, the user has switched accounts — unpair ClawKeep
+      // locally so it re-pairs against the current account. The clawai token is
+      // opaque (no embedded account id), so a changed token is the only signal
+      // available; in this flow that means the account changed.
+      if (previousClawaiToken && previousClawaiToken !== clawboxAiToken) {
+        try {
+          // clearStats: the old account's backup history doesn't belong to the
+          // new account, so wipe it rather than leave it on the dashboard.
+          await unpairClawKeep({ clearStats: true });
+          console.log("[AI Config] ClawBox AI account changed — unpaired ClawKeep so it reconnects to the new account");
+        } catch (err) {
+          console.error("[AI Config] Failed to unpair ClawKeep after account change:", err);
+        }
+      }
     } else if (isOllama) {
       const modelName = config.defaultModel.replace(/^ollama\//, "");
       const providerDef = JSON.stringify({
@@ -740,53 +876,41 @@ export async function POST(request: Request) {
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
-      // OpenClaw has no built-in provider adapter for OpenRouter the way it
-      // does for openai / anthropic / google, so without this explicit
-      // provider definition the runtime has no baseUrl to call — the chat
-      // turn silently returns `usage: 0/0/0` and the UI appears dead.
-      // Writing this entry restores the full OpenAI-compatible path.
-      //
-      // The `models` array drives model resolution: OpenClaw needs every
-      // selectable id present here, otherwise mid-conversation switches
-      // (curated or custom) fail silently because the runtime can't
-      // resolve the new slug. We seed with the user-picked id plus a
-      // tiny static fallback (cold-start coverage). The chat-header
-      // model switch in /setup-api/chat/model auto-extends this array
-      // when the user picks a model that isn't already in it, so we
-      // don't need to bake in OpenRouter's full 340+ catalogue at save
-      // time — that catalogue churns and the seed-everything strategy
-      // bit us four times during the original PR.
-      //
-      // We intentionally emit only `id` + `name`. contextWindow,
-      // maxTokens, input modalities and cost are looked up from
-      // OpenClaw's bundled provider catalog per model id — the previous
-      // uniform 131K/8K caps lied for every model whose real spec
-      // differed (Kimi K2 256K, GPT-5 400K, Claude Haiku 200K, etc.),
-      // triggering compaction far too early and silently truncating
-      // long outputs on capable models.
-      const defaultModelId = config.defaultModel.replace(/^openrouter\//, "");
-      const modelIds = new Set<string>([
-        defaultModelId,
-        ...OPENROUTER_CURATED_MODELS.map((option) => option.id),
-      ]);
-      const providerDef = JSON.stringify({
+      // OpenRouter has no native OpenClaw adapter, so without this explicit
+      // provider entry the chat turn silently returns usage 0/0/0.
+      await writeOpenAICompatProvider({
+        provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
-        api: "openai-completions",
-        apiKey: "openrouter-ref",
-        models: Array.from(modelIds).map((id) => ({ id, name: id })),
+        apiKey: normalizedApiKey,
+        defaultModel: config.defaultModel,
+        curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.openrouter", providerDef, "--json",
-      ]);
-      try {
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "merge",
-        ]);
-      } catch {
-        // Non-fatal: merge is the default behavior anyway
-      }
-      await ensureFallbackModel(config.defaultModel);
-      console.log(`[AI Config] Set openrouter provider in openclaw.json: default=${defaultModelId}`);
+      console.log(`[AI Config] Set openrouter provider (openai-compat): ${config.defaultModel}`);
+    } else if (isGoogle) {
+      // Native google plugin registers Gemini models but its 2026.6.8 auth
+      // fails at call time (runs fall back with reason=auth). Route through
+      // Google's OpenAI-compat endpoint instead.
+      await writeOpenAICompatProvider({
+        provider: "google",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        apiKey: normalizedApiKey,
+        defaultModel: config.defaultModel,
+        curatedModels: GOOGLE_MODELS,
+      });
+      console.log(`[AI Config] Set google provider (openai-compat): ${config.defaultModel}`);
+    } else if (isAnthropic) {
+      // Native anthropic plugin reads a per-agent sqlite auth store that
+      // ClawBox's file auth profile doesn't populate, so it fails with
+      // "No API key found" at call time. Route through Anthropic's OpenAI-compat
+      // endpoint with the key inline instead.
+      await writeOpenAICompatProvider({
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKey: normalizedApiKey,
+        defaultModel: config.defaultModel,
+        curatedModels: ANTHROPIC_MODELS,
+      });
+      console.log(`[AI Config] Set anthropic provider (openai-compat): ${config.defaultModel}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
@@ -805,8 +929,8 @@ export async function POST(request: Request) {
     //    primary model, tagged `source: "user"` so OpenClaw's per-turn
     //    model resolver returns early and doesn't flip the session back
     //    to the previous provider on the first message after the switch.
-    //    Without this, a session that was bound to e.g. openai-codex
-    //    keeps routing to openai-codex even after the user changes the
+    //    Without this, a session that was bound to e.g. codex
+    //    keeps routing to codex even after the user changes the
     //    primary provider to ClawBox AI / DeepSeek / etc. — the new
     //    default only seeds future sessions. Mirror of the sweep in
     //    /setup-api/chat/model (see PR #73 for context on why "user" is
@@ -851,12 +975,24 @@ export async function POST(request: Request) {
     //     calls collapse to one openclaw fork.
     //
     //     `ocProvider` is the openclaw-side provider id (e.g. "anthropic",
-    //     "openai", "openai-codex", "google", "deepseek"). The catalog uses
+    //     "openai", "codex", "google", "deepseek"). The catalog uses
     //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
     //     Skip providers that aren't part of the catalog (local-only, llamacpp).
     const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
     if (isCatalogProvider(catalogProvider)) {
       refreshCatalogInBackground(catalogProvider);
+    }
+
+    // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
+    // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this
+    // OAuth profile (write-if-missing). On an explicit (re)login, clear the
+    // stale file so the restart below regenerates it with the fresh token —
+    // afterward the Codex app-server owns its own refresh, so we don't touch
+    // it again.
+    if (ocProvider === "codex") {
+      await fs
+        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
+        .catch(() => {});
     }
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model

@@ -1,0 +1,12 @@
+[Unit]
+Description=ClawBox setup hotspot watchdog (re-raises ClawBox-Setup until setup completes)
+After=NetworkManager.service clawbox-ap.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/home/clawbox/clawbox/data/network.env
+# Runs as root: re-raising the AP needs nmcli/iptables privileges, same as
+# clawbox-ap.service. The script itself is a no-op unless the hotspot is down
+# AND setup is incomplete AND no client-connect handoff holds the lock.
+ExecStart=/home/clawbox/clawbox/scripts/ap-watchdog.sh

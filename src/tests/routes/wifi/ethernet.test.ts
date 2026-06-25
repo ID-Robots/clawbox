@@ -18,16 +18,16 @@ describe("/setup-api/wifi/ethernet", () => {
   });
 
   it("returns ethernet status", async () => {
-    mockGetEthernetStatus.mockResolvedValue({ connected: true, iface: "eth0" });
+    mockGetEthernetStatus.mockResolvedValue({ connected: true, cable: true, iface: "eth0" });
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ connected: true, iface: "eth0" });
+    expect(body).toEqual({ connected: true, cable: true, iface: "eth0" });
   });
 
   it("returns disconnected on error", async () => {
     mockGetEthernetStatus.mockRejectedValue(new Error("fail"));
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ connected: false, iface: null });
+    expect(body).toEqual({ connected: false, cable: false, iface: null });
   });
 });

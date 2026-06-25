@@ -65,7 +65,7 @@ const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   clawai: "deepseek-v4-flash",
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5.4",
-  "openai-codex": "gpt-5.4",
+  codex: "gpt-5.4",
   google: "gemini-2.5-flash",
   openrouter: "anthropic/claude-haiku-4.5",
 };
@@ -171,7 +171,7 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 // openai (API-key auth): all 5.4 + 5.5 SKUs including -pro variants.
 //   Pros require an API key and DO work on the api.openai.com path.
 //
-// openai-codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5 only — NO
+// codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5 only — NO
 //   -pro variants. Per developers.openai.com/codex/models, the Pro
 //   models are API-key-only and the Codex/ChatGPT-account auth path
 //   400s with "model not supported when using Codex with a ChatGPT
@@ -188,7 +188,7 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
   // and would 400 the same way gpt-5.4-pro did). Per
   // developers.openai.com/codex/models the supported set under
   // ChatGPT-account auth is exactly gpt-5.4, gpt-5.4-mini, gpt-5.5.
-  "openai-codex": /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/,
+  codex: /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/,
 };
 
 // Newest-first ordering: bigger context generally means newer model on

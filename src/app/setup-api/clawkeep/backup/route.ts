@@ -37,7 +37,19 @@ export async function POST(request: NextRequest) {
       }
       idle = obj.idle;
     }
-    const result = await runBackup({ idle });
+    // Optional "Name this backup" label. Reject a non-string so a malformed
+    // form can't smuggle an object/array into the daemon's argv.
+    let label: string | undefined;
+    if (obj.label !== undefined && obj.label !== null) {
+      if (typeof obj.label !== "string") {
+        return NextResponse.json(
+          { error: "'label' must be a string when provided" },
+          { status: 400, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+      label = obj.label;
+    }
+    const result = await runBackup({ idle, label });
     return NextResponse.json(
       {
         exitCode: result.exitCode,

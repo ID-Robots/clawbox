@@ -8,6 +8,6 @@ export async function GET() {
     const status = await getEthernetStatus();
     return NextResponse.json(status);
   } catch {
-    return NextResponse.json({ connected: false, iface: null });
+    return NextResponse.json({ connected: false, cable: false, iface: null });
   }
 }

@@ -16,7 +16,7 @@ describe("provider-models", () => {
   describe("getProviderCatalog", () => {
     it("returns configured provider catalogs", () => {
       expect(getProviderCatalog("openai")?.defaultModelId).toBe("gpt-5.4");
-      expect(getProviderCatalog("openai-codex")?.defaultModelId).toBe("gpt-5.4");
+      expect(getProviderCatalog("codex")?.defaultModelId).toBe("gpt-5.4");
     });
 
     it("does not return inherited Object prototype members", () => {

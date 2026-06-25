@@ -305,9 +305,11 @@ function ChromeDesktopInner() {
         if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
         // Open windows
         if (Array.isArray(data.desktop_open_windows)) {
+          // Restore the workspace but minimized — windows return to the taskbar
+          // instead of popping open over a fresh desktop on every reload/reboot.
           const restored = (data.desktop_open_windows as Array<{ appId: string; minimized: boolean; x?: number; y?: number; width?: number; height?: number }>)
             .filter((w) => w.appId !== "setup")
-            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height }));
+            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: true, x: w.x, y: w.y, width: w.width, height: w.height }));
           if (restored.length > 0) {
             setOpenWindows(restored);
             setNextZIndex(100 + restored.length);
@@ -1108,11 +1110,14 @@ function ChromeDesktopInner() {
             // Skip if already processed
             if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
             lastProcessedTs = ts;
-            // Delete before processing to prevent re-reads
+            // Delete before processing to prevent re-reads. The KV route's
+            // delete contract is { delete: "<key>" } — sending { delete: true }
+            // silently 400s, leaving the action in KV so it re-fires (and
+            // reopens the app) on every reload.
             await fetch("/setup-api/kv", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ key: "ui:pending-action", delete: true }),
+              body: JSON.stringify({ delete: "ui:pending-action" }),
             }).catch(() => {});
             if (action.type === "open_app" && action.appId) {
               openAppRef.current(action.appId);
@@ -1233,6 +1238,95 @@ function ChromeDesktopInner() {
     }
     openClawAiProviderSettings();
   }, [clawAiAuthenticated, openApp, openClawAiProviderSettings]);
+
+  // ─── Telegram pairing: desktop popup when a new access request lands ───
+  // Polls the pairing store (a fast file read) so a new request surfaces even
+  // when Settings is closed. De-duped by code via localStorage so a dismissed
+  // request doesn't pop again.
+  const [pairingRequests, setPairingRequests] = useState<
+    Array<{ code?: string; id?: string; name?: string }>
+  >([]);
+  const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
+
+  const loadDismissedPairCodes = useCallback((): Set<string> => {
+    try { return new Set(JSON.parse(localStorage.getItem("clawbox:telegram-pairing-dismissed") || "[]")); }
+    catch { return new Set(); }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    const poll = async () => {
+      if (!active || polling) return;
+      polling = true;
+      try {
+        const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.configured && Array.isArray(data.pending)) {
+            const dismissed = loadDismissedPairCodes();
+            setPairingRequests(
+              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code)),
+            );
+          } else {
+            setPairingRequests([]);
+          }
+        }
+      } catch {}
+      polling = false;
+    };
+    poll();
+    const id = setInterval(poll, 20000);
+    return () => { active = false; clearInterval(id); };
+  }, [loadDismissedPairCodes]);
+
+  const approvePairingRequest = useCallback(async (code: string) => {
+    if (!code) return;
+    setApprovingPairCode(code);
+    try {
+      const res = await fetch("/setup-api/telegram/pairing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+        window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Approved — the bot let them know." } }));
+      } else {
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: data.error || "Couldn't approve — the code may have expired." } }));
+      }
+    } catch {
+      window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Couldn't approve — please try again." } }));
+    } finally {
+      setApprovingPairCode(null);
+    }
+  }, []);
+
+  const dismissPairingRequest = useCallback((code: string) => {
+    const dismissed = loadDismissedPairCodes();
+    if (code) dismissed.add(code);
+    try { localStorage.setItem("clawbox:telegram-pairing-dismissed", JSON.stringify([...dismissed])); } catch {}
+    setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+  }, [loadDismissedPairCodes]);
+
+  const openTelegramPairingSettings = useCallback(() => {
+    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = "telegram";
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "telegram" } }));
+    openApp("settings");
+  }, [openApp]);
+
+  // If an approval happens elsewhere (the Settings list), drop that request from
+  // the popup so it doesn't linger.
+  useEffect(() => {
+    const onApproved = (e: Event) => {
+      const code = (e as CustomEvent<{ code?: string }>).detail?.code;
+      if (code) setPairingRequests((prev) => prev.filter((r) => (r.code || "").toUpperCase() !== code.toUpperCase()));
+    };
+    window.addEventListener("clawbox:telegram-approved", onApproved);
+    return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
+  }, []);
 
   const updateWindowGeometry = useCallback((windowId: string, geo: { x: number; y: number; width: number; height: number }) => {
     setOpenWindows((prev) =>
@@ -1556,7 +1650,7 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {(updateAvailable || showClawAiOfferNotification) && (
+      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
           {updateAvailable && (() => {
@@ -1668,6 +1762,57 @@ function ChromeDesktopInner() {
               </div>
             </div>
           )}
+
+          {/* New Telegram access request popup(s) */}
+          {pairingRequests.map((req) => {
+            const label = req.name || req.id || "A Telegram user";
+            const code = req.code || "";
+            return (
+              <div
+                key={code || req.id}
+                className="rounded-xl bg-[#1e2030] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-full bg-[#229ED9]/15 border border-[#229ED9]/30 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[#5eb8e6]" style={{ fontSize: 20 }}>person_add</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white">New Telegram access request</div>
+                    <div className="text-xs text-white/60 mt-0.5 truncate">{label} wants to chat with your bot.</div>
+                    {req.id && <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">id {req.id}</div>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => dismissPairingRequest(code)}
+                    className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    aria-label="Dismiss"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                  </button>
+                </div>
+                <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => approvePairingRequest(code)}
+                    disabled={!code || approvingPairCode === code}
+                    className="flex-1 px-3 py-1.5 rounded-md bg-[#229ED9] hover:bg-[#1b87ba] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
+                  >
+                    {approvingPairCode === code && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>}
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openTelegramPairingSettings}
+                    className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
+                  >
+                    Open
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
       {/* Desktop wallpaper background */}

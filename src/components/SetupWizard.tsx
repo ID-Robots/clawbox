@@ -10,6 +10,7 @@ import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
 import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
+import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider } from "@/lib/i18n";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
@@ -57,7 +58,7 @@ function applyStatusData(
 
 /* ── Power menu ── */
 
-function PowerMenu({ onClose, t }: { onClose: () => void; t: (key: string) => string }) {
+function PowerMenu({ onClose, onRestart, t }: { onClose: () => void; onRestart: () => void; t: (key: string) => string }) {
   const [confirming, setConfirming] = useState<"restart" | "shutdown" | null>(null);
   const [acting, setActing] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -72,6 +73,19 @@ function PowerMenu({ onClose, t }: { onClose: () => void; t: (key: string) => st
 
   const execute = async (action: "restart" | "shutdown") => {
     setActing(true);
+    // For a restart, hand off to the full-screen reconnecting overlay so the
+    // customer stays in an animated loop while the connection drops and comes
+    // back — rather than being stranded on a dying page. Fire-and-forget the
+    // request: the device may tear down the connection before it responds.
+    if (action === "restart") {
+      void fetch("/setup-api/system/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      }).catch(() => {});
+      onRestart();
+      return;
+    }
     try {
       await fetch("/setup-api/system/power", {
         method: "POST",
@@ -311,6 +325,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [retryCount, setRetryCount] = useState(0);
   const [showPower, setShowPower] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
   const persistSetupProgress = useCallback(async (step: number) => {
     try {
@@ -493,6 +508,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
   return (
     <>
+      {restarting && <ReconnectingOverlay redirectTo="/setup" />}
       <header className="px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
         <Link href="/" className="flex items-center gap-2 shrink-0">
           <Image
@@ -534,7 +550,13 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             >
               <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
             </button>
-            {showPower && <PowerMenu onClose={() => setShowPower(false)} t={t} />}
+            {showPower && (
+              <PowerMenu
+                onClose={() => setShowPower(false)}
+                onRestart={() => { setShowPower(false); setRestarting(true); }}
+                t={t}
+              />
+            )}
           </div>
         </div>
       </header>
@@ -570,7 +592,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             )}
             {currentStep === 4 && (
               <AIModelsStep
-                providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+                providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "llamacpp"]}
                 defaultProviderId="clawai"
                 title="Connect AI Provider"
                 description={t("ai.description")}

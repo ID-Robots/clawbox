@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
+import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
+import { getSystemUsername } from "@/lib/auth";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -18,15 +21,31 @@ const PRESERVE_FILES = new Set(["network.env"]);
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
   const OLLAMA = "http://127.0.0.1:11434";
-  let models: { name: string }[];
+  // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
+  // runtime shuts it down while llama.cpp is active), and its models live
+  // under /usr/share/ollama — out of reach of the home wipe. Start it
+  // best-effort so the API deletes below actually run; the polkit grant
+  // already allows the clawbox user to manage units.
   try {
-    const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) return;
-    const data = await res.json();
-    models = data.models ?? [];
+    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 30_000 });
   } catch {
-    // Ollama not running — nothing to clean
-    return;
+    // Not installed / failed to start — the fetch below decides what's cleanable.
+  }
+  let models: { name: string }[] = [];
+  // The API needs a moment after a cold start; retry briefly.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+      if (res.ok) {
+        const data = await res.json();
+        models = data.models ?? [];
+        break;
+      }
+    } catch {
+      // Ollama not (yet) answering.
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1_500));
+    else return; // never came up — nothing reachable to clean
   }
   for (const { name } of models) {
     try {
@@ -135,6 +154,121 @@ async function unmaskGateway(): Promise<void> {
   }
 }
 
+const HOME_DIR = process.env.HOME || "/home/clawbox";
+
+// Personal state OUTSIDE data/ and ~/.openclaw that a used device accumulates.
+// Removed entirely on factory reset. A REMOVE-list (not a KEEP-list) on
+// purpose: a stale entry here is a no-op (`force: true`), while a wrong
+// KEEP-list would delete bun/openclaw/voice models on a box that reboots
+// into AP mode with no internet to re-download them — a reflash.
+const HOME_REMOVE_PATHS = [
+  // authorized_keys would let the previous owner SSH back in even after the
+  // password reset below; private keys/known_hosts identify the prior owner.
+  ".ssh",
+  // OAuth tokens synthesized by gateway-pre-start.sh for the codex app-server.
+  ".codex",
+  // AI-browser Chromium profile: cookies, logged-in sessions, history
+  // (PROFILE in scripts/launch-browser.sh).
+  ".config/clawbox-browser",
+  // Shell/REPL histories and identity the TerminalApp + agent run_command
+  // accumulate; .netrc/.npmrc can carry plaintext credentials.
+  ".bash_history",
+  ".zsh_history",
+  ".python_history",
+  ".node_repl_history",
+  ".lesshst",
+  ".viminfo",
+  ".wget-hsts",
+  ".gitconfig",
+  ".netrc",
+  ".npmrc",
+  // `hf auth login` token — surgical file removals; the surrounding
+  // ~/.cache/huggingface keeps the as-flashed Whisper/Kokoro voice models,
+  // which can't be re-downloaded once the box is back in AP mode.
+  ".cache/huggingface/token",
+  ".cache/huggingface/stored_tokens",
+  // VS Code server state/extensions from the VSCode app.
+  ".local/share/code-server",
+];
+// User-visible folders the Files app exposes (and recreates empty on demand):
+// wipe the contents, keep the directories.
+const HOME_CONTENT_WIPE_DIRS = ["Documents", "Downloads", "Desktop"];
+
+/**
+ * Wipe previous-owner state from the home directory so a factory-reset
+ * device matches a fresh flash, not just a fresh ClawBox config. Returns
+ * failure strings (same contract as removeDirectoryContents) — a survivor
+ * in ~/.ssh is a security problem the caller must surface, not swallow.
+ */
+async function wipeHomeUserState(): Promise<string[]> {
+  const failures: string[] = [];
+  await Promise.all(
+    HOME_REMOVE_PATHS.map((rel) =>
+      fs.rm(path.join(HOME_DIR, rel), { recursive: true, force: true }).catch((err) => {
+        failures.push(`${rel}: ${err}`);
+      }),
+    ),
+  );
+  for (const rel of HOME_CONTENT_WIPE_DIRS) {
+    const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel));
+    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+  }
+  // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
+  // crontab — that's the desired end state, not a failure; anything else
+  // (missing binary, cron.deny) leaves a persistence vector and gets logged.
+  await execFile("crontab", ["-r"], { timeout: 10_000 }).catch((err) => {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    if (!/no crontab/i.test(stderr)) {
+      console.warn("[Reset] Failed to clear crontab:", err instanceof Error ? err.message : err);
+    }
+  });
+  return failures;
+}
+
+/**
+ * Reset the Linux user password back to the shipping default ("clawbox"), so
+ * a factory-reset device matches its as-flashed state. Without this, the only
+ * thing the reset clears is the `password_configured` flag — the SSH/sudo
+ * password stays whatever the previous owner set, leaving the device's
+ * sentinel "factory" state still owned by the prior user.
+ *
+ * Best-effort: if the chpasswd service fails (rare — same path the wizard's
+ * credentials route uses), the reset still proceeds so the device isn't
+ * stuck. The wizard's CredentialsStep on first boot will re-prompt and
+ * overwrite the password, so a stale value is never load-bearing.
+ *
+ * Runs AFTER the data/ wipe so the input file lands in a freshly-recreated
+ * directory the wizard then writes its own state into.
+ */
+async function resetSystemPasswordToDefault(): Promise<void> {
+  const DEFAULT_PASSWORD = "clawbox";
+  try {
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
+    await fs.writeFile(
+      CHPASSWD_INPUT_PATH,
+      chpasswdRecord(getSystemUsername(), DEFAULT_PASSWORD),
+      { mode: 0o600 },
+    );
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
+      timeout: 10_000,
+    }).catch(() => {});
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
+      timeout: 30_000,
+    });
+    console.log("[Reset] System password reset to factory default");
+  } catch (err) {
+    // The input file carries a plaintext credential — scrub it on failure.
+    await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
+    // Error, not warn: a failed reset leaves the device in a security
+    // regression (factory-reset but still owned with the prior password)
+    // until the wizard's CredentialsStep runs on next boot and overwrites.
+    console.error(
+      "[Reset][SECURITY] System password NOT reset — prior password still active until CredentialsStep runs:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 function scheduleReboot(): void {
   setTimeout(async () => {
     try {
@@ -167,7 +301,14 @@ export async function POST() {
     }
 
     const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
-    const allFailures = [...dataFailures, ...openclawFailures];
+    // ClawKeep state (token, config, passphrase, schedule) lives in its own
+    // dir (~/.clawkeep), outside DATA_DIR and ~/.openclaw — so without this a
+    // factory reset would leave the device still paired to the previous
+    // account's cloud backups. Wipe it too.
+    const clawkeepFailures = await removeDirectoryContents(CLAWKEEP_DATA_DIR);
+    // Previous-owner home-dir state (SSH keys, browser profile, user files…).
+    const homeFailures = await wipeHomeUserState();
+    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures];
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly
@@ -216,6 +357,9 @@ export async function POST() {
     await deleteWifiConnections().catch((err) => {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
+
+    // 6a. Reset the Linux user password to the shipping default.
+    await resetSystemPasswordToDefault();
 
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
     // already wiped, so clawbox-root-update@set_hostname.service will read the

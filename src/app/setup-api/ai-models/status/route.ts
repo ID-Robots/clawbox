@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
-import { get as getConfigValue } from "@/lib/config-store";
+import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
 
 export const dynamic = "force-dynamic";
@@ -204,7 +204,10 @@ function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   if (normalized === "deepseek" || normalized === "clawai") return "clawai";
-  if (normalized.startsWith("openai")) return "openai";
+  // `codex` is the ChatGPT-subscription provider id (was `openai-codex`
+  // on OpenClaw <=2026.5.x); collapse it under openai for the UI like the
+  // openai* prefixes above.
+  if (normalized.startsWith("openai") || normalized === "codex") return "openai";
   if (normalized.startsWith("google")) return "google";
   if (normalized.startsWith("anthropic")) return "anthropic";
   if (normalized.startsWith("openrouter")) return "openrouter";
@@ -287,6 +290,13 @@ export async function GET() {
         if (lookup.source === "portal") {
           clawaiAccountTier = lookup.tier;
           accountTierSource = "portal";
+          // Persist the portal-confirmed tier so the portal-unreachable
+          // fallback reflects the last *confirmed* tier, not a stale
+          // configure-time value (which flapped a Free badge to Pro and
+          // re-fired the celebration). Write only on change to avoid churn.
+          if (lookup.tier !== localTier) {
+            await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
+          }
         }
       }
     }

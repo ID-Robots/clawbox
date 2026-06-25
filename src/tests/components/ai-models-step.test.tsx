@@ -26,6 +26,7 @@ vi.mock("@/lib/i18n", () => ({
         "ai.skipClawai": "Skip — set up ClawBox AI with a portal token",
         skip: "Skip",
         recommended: "Recommended",
+        "ai.fullyLocal": "Fully local",
         connecting: "Connecting...",
         "settings.connect": "Connect",
         "settings.aiProvider": "AI Provider",
@@ -94,11 +95,11 @@ describe("AIModelsStep variants", () => {
     }));
   });
 
-  it("renders only local providers in Local AI mode and defaults to llama.cpp", async () => {
+  it("renders only Gemma in Local AI mode and defaults to llama.cpp", async () => {
     const { getByRole, getByText, queryByText } = render(
       <AIModelsStep
         embedded
-        providerIds={["llamacpp", "ollama"]}
+        providerIds={["llamacpp"]}
         defaultProviderId="llamacpp"
         title="Set Up Local AI"
         description="Local models first"
@@ -119,10 +120,12 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Set Up Local AI")).toBeInTheDocument();
     const providerGroup = getByRole("radiogroup", { name: "AI Provider" });
     expect(providerGroup).toHaveTextContent("Gemma 4");
-    expect(providerGroup).toHaveTextContent("Ollama");
+    // Gemma is now the sole local engine — Ollama is no longer offered.
+    expect(queryByText("Ollama")).not.toBeInTheDocument();
     expect(queryByText("ClawBox AI")).not.toBeInTheDocument();
     expect(queryByText("OpenAI GPT")).not.toBeInTheDocument();
-    expect(getByText("Recommended")).toBeInTheDocument();
+    // Gemma carries the "Fully local" badge (not "Recommended").
+    expect(getByText("Fully local")).toBeInTheDocument();
     expect(getByText("Gemma 4 is already configured")).toBeInTheDocument();
   });
 
@@ -131,7 +134,7 @@ describe("AIModelsStep variants", () => {
     const fetchMock = vi.mocked(fetch);
     const { getByRole } = render(
       <AIModelsStep
-        providerIds={["llamacpp", "ollama"]}
+        providerIds={["llamacpp"]}
         defaultProviderId="llamacpp"
         title="Set Up Local AI"
         description="Local models first"

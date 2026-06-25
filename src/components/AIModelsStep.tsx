@@ -150,7 +150,9 @@ function normalizeSelectableProvider(provider: string | null | undefined): strin
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   if (normalized === "deepseek" || normalized === "clawai") return "clawai";
-  if (normalized.startsWith("openai")) return "openai";
+  // `codex` is the ChatGPT-subscription provider id (was `openai-codex` on
+  // OpenClaw <=2026.5.x); maps to the OpenAI radio like the openai* ids.
+  if (normalized.startsWith("openai") || normalized === "codex") return "openai";
   if (normalized.startsWith("google")) return "google";
   if (normalized.startsWith("anthropic")) return "anthropic";
   if (normalized.startsWith("openrouter")) return "openrouter";
@@ -318,7 +320,7 @@ function ConfiguringOverlay({
   );
 }
 
-const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic"]);
+const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic", "llamacpp"]);
 
 const PROVIDERS: Provider[] = [
   {
@@ -547,18 +549,18 @@ export default function AIModelsStep({
   // if the current model isn't in the catalog (user typed a custom ID),
   // we flip into custom-input mode so it isn't silently overwritten.
   // Provider+authMode selects the effective catalog. Subscription mode for
-  // OpenAI routes through the `openai-codex` namespace (ChatGPT backend),
+  // OpenAI routes through the `codex` namespace (ChatGPT backend),
   // whose catalog is completely different from the token-mode `openai`
   // API catalog — `gpt-5.4` only exists via codex, `gpt-5` only via the
   // public API. Matching the catalog to the actual namespace prevents
   // the picker from offering IDs that the upstream will reject.
   // Resolve which catalog namespace the picker should pull from. Differs
   // from `selectedProvider` for OpenAI in subscription/OAuth mode, where
-  // the routeable namespace is `openai-codex` (ChatGPT backend) rather
+  // the routeable namespace is `codex` (ChatGPT backend) rather
   // than `openai` (api.openai.com). Same swap the configure route applies.
   const catalogProvider = useMemo<string | null>(() => {
     if (selectedProvider === "openai" && authMode === "subscription") {
-      return "openai-codex";
+      return "codex";
     }
     return isCatalogProvider(selectedProvider) ? selectedProvider : null;
   }, [selectedProvider, authMode]);
@@ -580,7 +582,7 @@ export default function AIModelsStep({
     if (modelTouched) return;
     // Extract modelId under the catalog's namespace, NOT the selected
     // provider's name — for openai+subscription these differ
-    // (openai-codex vs openai).
+    // (codex vs openai).
     const currentModelId = extractProviderModelId(currentModel, activeCatalog.provider);
     if (!currentModelId) {
       setSelectedModelId(activeCatalog.defaultModelId);
@@ -1170,7 +1172,7 @@ export default function AIModelsStep({
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; refresh_token?: string; expires_in?: number; projectId?: string }
+    tokenData: { access_token: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string }
   ) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1180,7 +1182,7 @@ export default function AIModelsStep({
 
     try {
       // For subscription flows (ChatGPT/Codex OAuth), include the
-      // user's model pick so the backend writes openai-codex/<chosen>
+      // user's model pick so the backend writes codex/<chosen>
       // instead of the PROVIDERS subscriptionOverride default. Without
       // this, picking a model in the wizard would silently be ignored
       // for OAuth providers.
@@ -1193,6 +1195,7 @@ export default function AIModelsStep({
           provider: selectedProvider,
           apiKey: tokenData.access_token,
           authMode: "subscription",
+          idToken: tokenData.id_token,
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
           ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
@@ -1748,9 +1751,14 @@ export default function AIModelsStep({
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {(provider.id === "clawai" || provider.id === "llamacpp") && (
+                    {provider.id === "clawai" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
                         {t("recommended")}
+                      </span>
+                    )}
+                    {provider.id === "llamacpp" && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
+                        {t("ai.fullyLocal")}
                       </span>
                     )}
                   </span>

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig as readOpenClawConfig } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
@@ -8,10 +8,20 @@ export async function GET() {
   try {
     const [config, openclawConfig] = await Promise.all([
       getAll(),
-      readOpenClawConfig().catch(() => ({})),
+      readOpenClawConfig().catch(() => ({} as OpenClawConfig)),
     ]);
     const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(config, "local_ai_configured");
     const inferredLocal = inferConfiguredLocalModel(openclawConfig);
+    // Provider from the live OpenClaw primary model (e.g. "deepseek/..." →
+    // "deepseek"), preferred over the ClawBox config store, which only
+    // refreshes at configure-time and can drift when the model changes
+    // elsewhere (#162). Local models (llamacpp/ollama) carry their own provider.
+    const livePrimaryModel = typeof openclawConfig.agents?.defaults?.model?.primary === "string"
+      ? openclawConfig.agents.defaults.model.primary
+      : null;
+    const liveCloudProvider = livePrimaryModel && !/^(llamacpp|ollama)\//i.test(livePrimaryModel)
+      ? livePrimaryModel.split("/")[0]
+      : null;
     const localAiConfigured = hasExplicitLocalAiFlag ? !!config.local_ai_configured : !!inferredLocal;
     const localAiProvider = hasExplicitLocalAiFlag
       ? (config.local_ai_provider || null)
@@ -32,7 +42,7 @@ export async function GET() {
       local_ai_provider: localAiProvider,
       local_ai_model: localAiModel,
       ai_model_configured: !!config.ai_model_configured,
-      ai_model_provider: config.ai_model_provider || null,
+      ai_model_provider: liveCloudProvider || config.ai_model_provider || null,
       telegram_configured: !!config.telegram_bot_token,
     }, {
       headers: {
