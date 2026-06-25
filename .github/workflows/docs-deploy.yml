@@ -1,0 +1,54 @@
+name: Deploy ClawBox Docs
+
+# Rebuilds the Mintlify docs in docs-site/ and publishes the static export
+# to the gh-pages branch, which GitHub Pages serves at docs.clawbox.tech.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/docs-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Export static docs
+        working-directory: docs-site
+        run: |
+          # IMPORTANT: export must run against source only — any leftover build
+          # artifacts in this dir get recursively inlined into every page (huge HTML).
+          rm -rf _site _chk _site_preview export.zip
+          # Pinned for reproducible builds — bump deliberately (no lockfile here).
+          npx -y mint@4.2.639 export
+          rm -rf _site
+          mkdir _site
+          unzip -q export.zip -d _site
+          # GitHub Pages essentials
+          touch _site/.nojekyll
+          echo "docs.clawbox.tech" > _site/CNAME
+          # strip air-gapped helper files
+          rm -f "_site/serve.js" "_site/Start Docs.bat" "_site/Start Docs.command"
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs-site/_site
+          publish_branch: gh-pages
+          cname: docs.clawbox.tech

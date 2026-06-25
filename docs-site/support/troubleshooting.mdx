@@ -1,0 +1,52 @@
+---
+title: "Troubleshooting"
+summary: "Fixes for the most common ClawBox issues — can't reach the device, no internet, no replies."
+---
+
+# Troubleshooting
+
+Quick fixes for the most common issues.
+
+## I can't reach `clawbox.local`
+
+<AccordionGroup>
+  <Accordion title="Try the device IP directly">
+    Some networks block mDNS. Find the ClawBox in your router's connected-devices list
+    and browse to `http://<device-ip>`.
+  </Accordion>
+  <Accordion title="Use Ethernet">
+    Connect an Ethernet cable and power-cycle. Wired setup is the most reliable.
+  </Accordion>
+  <Accordion title="Same network?">
+    Make sure your phone/laptop is on the **same** network as the ClawBox (not a guest
+    Wi-Fi or VPN).
+  </Accordion>
+</AccordionGroup>
+
+## Wi-Fi won't connect
+
+- Re-enter the password carefully — a wrong password is the most common cause.
+- Move the device closer to the router for the first connection.
+- If it still fails, connect over Ethernet to finish setup, then retry Wi-Fi.
+
+## My assistant isn't replying
+
+<AccordionGroup>
+  <Accordion title="Check the channel link">
+    Re-open the **Channels** page and confirm the app is still linked. Re-pair if needed.
+    See [Messaging Channels](/guides/messaging-channels).
+  </Accordion>
+  <Accordion title="Check the AI provider">
+    If you're using your own API key, confirm it's valid and has quota. See
+    [Choose Your AI Provider](/setup/choose-ai-provider).
+  </Accordion>
+  <Accordion title="Check internet">
+    Confirm the device is online. See [Connect to a Network](/setup/connect-network).
+  </Accordion>
+</AccordionGroup>
+
+## Still stuck?
+
+<Card title="Contact support" href="mailto:yanko@idrobots.com" icon="life-ring" horizontal>
+  Tell us what you tried and where it's blocked — include any error you see on screen.
+</Card>

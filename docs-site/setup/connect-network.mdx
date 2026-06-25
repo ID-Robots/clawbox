@@ -1,0 +1,43 @@
+---
+title: "Connect to a Network"
+summary: "Get your ClawBox online over Ethernet or Wi-Fi."
+---
+
+# Connect to a Network
+
+ClawBox needs an internet connection to reach your AI provider and chat channels.
+
+## Ethernet (recommended for setup)
+
+Plug an Ethernet cable into the ClawBox before powering on. It connects automatically —
+no configuration needed. This is the most reliable path for first-time setup.
+
+## Wi-Fi
+
+From the setup page at `http://clawbox.local`:
+
+<Steps>
+  <Step title="Open network settings">
+    Go to the **Network** section of the setup wizard or settings.
+  </Step>
+  <Step title="Select your network">
+    Choose your Wi-Fi network from the list and enter the password.
+  </Step>
+  <Step title="Confirm">
+    Wait for the connection to confirm. The device keeps your network saved for next boot.
+  </Step>
+</Steps>
+
+<Warning>
+Double-check the Wi-Fi password if the connection fails — a wrong password is the most
+common cause. The setup page will tell you when authentication fails.
+</Warning>
+
+## Finding the device IP
+
+If `clawbox.local` won't resolve on your network, locate the ClawBox in your router's
+connected-devices list to get its IP address, then browse to `http://<device-ip>`.
+
+## Still offline?
+
+See [Troubleshooting](/support/troubleshooting) or [contact support](mailto:yanko@idrobots.com).

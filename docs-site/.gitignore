@@ -1,0 +1,7 @@
+# Mintlify build artifacts — not committed; produced by `mint export`
+export.zip
+_site/
+_site_preview/
+_chk/
+.mintlify/
+node_modules/
