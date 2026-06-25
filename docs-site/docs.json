@@ -53,6 +53,7 @@
           {
             "group": "Support",
             "pages": [
+              "support/updating",
               "support/troubleshooting",
               "support/faq"
             ]
