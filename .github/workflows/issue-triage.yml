@@ -23,6 +23,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The script auths to GitHub via GH_TOKEN only — no need to persist
+          # GITHUB_TOKEN into the runner's git config.
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -30,7 +34,9 @@ jobs:
           node-version: 22
 
       - name: Install Anthropic SDK
-        run: npm install --no-save @anthropic-ai/sdk
+        # Pinned — the script depends on the output_config + messages.create
+        # shapes; a floating latest could shift them. Bump deliberately.
+        run: npm install --no-save @anthropic-ai/sdk@0.106.0
 
       - name: Triage with Claude
         env:

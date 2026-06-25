@@ -70,6 +70,11 @@ async function main() {
   const prioColor = t.priority === "high" ? "b60205" : t.priority === "medium" ? "fbca04" : "0e8a16";
   ensure(`priority: ${t.priority}`, prioColor, "Auto-triage priority");
   ensure(`area: ${t.area}`, "c5def5", "Auto-triage area");
+  // `gh issue edit` applies all labels in one call and fails the whole command
+  // if ANY is missing — so the category label must exist too, even though
+  // bug/enhancement/etc. are GitHub defaults (a repo may have deleted them).
+  const catColor = { bug: "d73a4a", enhancement: "a2eeef", documentation: "0075ca", question: "d876e3", invalid: "e4e669" }[t.category] ?? "ededed";
+  ensure(t.category, catColor, "Auto-triage category");
 
   const labels = [t.category, `priority: ${t.priority}`, `area: ${t.area}`];
   gh(["issue", "edit", String(number), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);

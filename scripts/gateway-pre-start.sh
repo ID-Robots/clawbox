@@ -220,7 +220,28 @@ if has_openrouter_auth and not models_providers.get("openrouter"):
 # it; otherwise fall back to codex's default. Keep CODEX_MODELS in sync with
 # src/lib/provider-models.ts (ChatGPT-account auth: gpt-5.5, gpt-5.4, gpt-5.4-mini).
 CODEX_MODELS = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
-has_codex_auth = isinstance(auth_profiles, dict) and "codex:default" in auth_profiles
+# Only migrate if the codex subscription is actually USABLE. openclaw.json's
+# auth.profiles holds metadata only (mode/provider) — the OAuth tokens live in
+# the agent's auth-profiles.json. A configured-but-unauthenticated codex profile
+# (no JWT id_token) must NOT trigger the switch, or we'd drop the working openai
+# lane and strand the device. Mirror the JWT gate the codex auth.json synthesis
+# below uses, and accept the legacy openai-codex:default key too.
+def _is_jwt_like(v):
+    if not isinstance(v, str):
+        return False
+    parts = v.split(".")
+    return len(parts) == 3 and all(parts)
+
+has_codex_auth = False
+try:
+    _ap_path = os.path.join(os.path.dirname(cfg_path), "agents", "main", "agent", "auth-profiles.json")
+    with open(_ap_path) as _f:
+        _ap_profiles = (json.load(_f) or {}).get("profiles", {}) or {}
+    _cp = _ap_profiles.get("codex:default") or _ap_profiles.get("openai-codex:default")
+    if isinstance(_cp, dict):
+        has_codex_auth = _is_jwt_like(_cp.get("id") or _cp.get("access"))
+except Exception:
+    pass
 agents_model = cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
 primary = agents_model.get("primary")
 if has_codex_auth and isinstance(primary, str) and primary.startswith("openai/"):
@@ -521,7 +542,9 @@ try {
   const data = JSON.parse(fs.readFileSync(apPath, "utf8"));
   const profiles = data.profiles || {};
   const p = profiles["codex:default"] || profiles["openai-codex:default"];
-  if (!p || !p.access) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+  // Need the full OAuth set: a partial profile (e.g. missing refresh) yields an
+  // auth.json that survives boot but fails once the access token expires.
+  if (!p || !p.access || !p.refresh) { console.log("  Codex auth.json: no usable codex OAuth profile (need access + refresh), skipping"); process.exit(0); }
   const idToken = p.id || p.access;
   if (!isJwtLike(idToken)) { console.log("  Codex auth.json: profile id_token is not a JWT — skipping (re-auth needed)"); process.exit(0); }
   let accountId = null;
@@ -552,9 +575,13 @@ const isHealthyOAuth = (file) => {
   try {
     const cur = JSON.parse(fs.readFileSync(file, "utf8"));
     const hasKey = typeof cur.OPENAI_API_KEY === "string" && cur.OPENAI_API_KEY.length > 0;
-    const hasJwtIdToken = cur.tokens && isJwtLike(cur.tokens.id_token);
-    return !hasKey && hasJwtIdToken; // OAuth-only with a real JWT -> leave alone; a stale key OR a non-JWT token -> re-heal
-  } catch { return false; } // missing/corrupt -> (re)write
+    const t = cur.tokens || {};
+    const hasAccess = typeof t.access_token === "string" && t.access_token.length > 0;
+    const hasRefresh = typeof t.refresh_token === "string" && t.refresh_token.length > 0;
+    // Healthy only with the FULL OAuth set and no stale key. A partial file
+    // (missing access/refresh) or a stale key OR a non-JWT id_token -> re-heal.
+    return !hasKey && isJwtLike(t.id_token) && hasAccess && hasRefresh;
+  } catch { return false; } // missing/corrupt/partial -> (re)write
 };
 for (const dir of targets) {
   const file = path.join(dir, "auth.json");
