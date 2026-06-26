@@ -37,7 +37,18 @@ interface UpdateStepDef {
   requiresRoot?: boolean;
   failFast?: boolean;
   customRun?: () => Promise<void>;
+  /**
+   * A budget overrun doesn't fail the update for this step — it's marked
+   * completed and the run carries on. For steps whose content is non-fatal
+   * by design (post_update: every fixup inside is `|| warn`), an overrun
+   * painting "Update failed" on a successful update is worse than letting
+   * the unit finish in the background. Genuine unit failures still fail.
+   */
+  advisoryOnOverrun?: boolean;
 }
+
+/** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
+class BudgetOverrunError extends Error {}
 
 export type StepStatus =
   | "pending"
@@ -68,9 +79,67 @@ export interface UpdateState {
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
 
-/** Wait indefinitely for systemd to SIGTERM us (during rebuild/reboot). */
-function waitForTermination(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 30_000));
+// Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
+// Jetson, plus the config/redeploy steps before it and the reboot after.
+const REBUILD_TAKEOVER_TIMEOUT_MS = 900_000;
+
+// The root unit that performs the rebuild + restart. Distinct from
+// RESTART_STEP_ID ("restart"), which is the UI step's identity — querying
+// `clawbox-root-update@restart.service` would hit a unit that doesn't exist
+// (and `systemctl show -p Result` reports "success" for unloaded units, which
+// would silently disable the failure detection below).
+const REBUILD_ROOT_STEP = "rebuild_reboot";
+
+/** `systemctl show <unit> -p Result --value`, or null if unqueryable. */
+async function getRootStepResult(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", `clawbox-root-update@${stepId}.service`, "-p", "Result", "--value"],
+      { timeout: 10_000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read .next/BUILD_ID — regenerated on every successful `next build`. */
+async function readBuildId(): Promise<string> {
+  try {
+    return (await readFile(path.join(PROJECT_DIR, ".next", "BUILD_ID"), "utf-8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Wait for the rebuild_reboot root unit to take this process down (it
+ * restarts clawbox-setup / reboots the box on success). The old
+ * implementation was a blind 30s sleep that resolved SUCCESS — so a rebuild
+ * that failed (or merely outlived the sleep) let the update march on to
+ * "Update complete" while the box kept serving the old build, with the
+ * promised restart never coming. Watch the unit instead: a failure surfaces
+ * as a failed step with the real error, and only systemd killing us counts
+ * as success — this function never returns normally.
+ */
+async function waitForRebuildToTakeOver(): Promise<never> {
+  const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
+  let message = "Rebuild did not restart the device within the expected window";
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    if ((await getRootStepResult(REBUILD_ROOT_STEP)) === "failed") {
+      const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP);
+      message = lastLog
+        ? `Rebuild failed: ${lastLog}`
+        : "Rebuild failed — see clawbox-root-update@rebuild_reboot logs";
+      break;
+    }
+  }
+  // Either way the restart isn't coming — clear the flag so the next server
+  // start doesn't "continue" a rebuild that never happened.
+  await set("update_needs_continuation", undefined);
+  throw new Error(message);
 }
 
 function getLastLogLine(logText: string): string | null {
@@ -200,9 +269,14 @@ async function updateClawBoxAndReboot(): Promise<void> {
     ` && ${gitCmd} clean -fd`,
     { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
   );
-  await set("update_needs_continuation", true);
-  await startRootServiceFireAndForget("rebuild_reboot");
-  await waitForTermination();
+  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
+  // every successful `next build`, so the continuation can demand positive
+  // evidence the rebuild actually happened. Without it, a power cycle in the
+  // few seconds between unit failure and our watcher noticing would reset the
+  // unit's systemd state and let the continuation fake a completed update.
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  await waitForRebuildToTakeOver();
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -269,16 +343,31 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: RESTART_STEP_ID,
     label: "Updating ClawBox and restarting",
-    timeoutMs: 90_000,
+    // timeoutMs is unenforced for customRun steps; the real budget lives in
+    // REBUILD_TAKEOVER_TIMEOUT_MS inside waitForRebuildToTakeOver — same
+    // constant, so it can't drift.
+    timeoutMs: REBUILD_TAKEOVER_TIMEOUT_MS,
     customRun: updateClawBoxAndReboot,
+    // If the rebuild failed, the new install.sh never deployed — running
+    // post_update fixups from a half-applied state helps nobody. Stop here
+    // and surface the error.
+    failFast: true,
   },
   {
     // Runs after reboot via checkContinuation — picks up dispatcher scripts,
     // sysctls, and other root fixups that landed in the new install.sh.
+    // 5 min, not 60s: on a freshly-installed device the fixups run on cold
+    // caches (clawkeep pip force-reinstall, vnc apt work) and routinely
+    // outlive a 1-minute budget — which painted a false-red step on an
+    // otherwise successful update. The fixups can legitimately wait even
+    // longer (wait_for_apt alone allows 900s), so an overrun past these 5
+    // minutes is advisory: the unit finishes on its own (TimeoutStartSec is
+    // 30 min) and everything inside it is non-fatal by design.
     id: "post_update",
     label: "Applying system fixups",
-    timeoutMs: 60_000,
+    timeoutMs: 300_000,
     requiresRoot: true,
+    advisoryOnOverrun: true,
   },
 ];
 
@@ -293,9 +382,26 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   await execFile("/usr/bin/systemctl", ["reset-failed", serviceName], {
     timeout: 10_000,
   }).catch(() => {});
-  await execFile("/usr/bin/systemctl", ["start", serviceName], {
-    timeout: timeoutMs + 30_000,
-  });
+  const startedAt = Date.now();
+  try {
+    await execFile("/usr/bin/systemctl", ["start", serviceName], {
+      timeout: timeoutMs + 30_000,
+    });
+  } catch (err) {
+    // When OUR timeout kills the blocking `systemctl start`, the unit itself
+    // usually keeps running (it has its own much larger TimeoutStartSec) and
+    // often finishes fine in the background. Report that as a budget overrun
+    // — otherwise the caller dresses up the unit's most recent (often
+    // successful) log line as the failure, which is how a healthy update
+    // once showed "failed: Linkdown routing sysctl installed".
+    if ((err as { killed?: boolean }).killed) {
+      const waitedS = Math.round((Date.now() - startedAt) / 1000);
+      throw new BudgetOverrunError(
+        `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
+      );
+    }
+    throw err;
+  }
 }
 
 let cachedTargetVersion: string | null = null;
@@ -304,6 +410,7 @@ const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repe
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
+const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 
 interface VersionInfo {
   clawbox: { current: string; target: string | null };
@@ -342,21 +449,43 @@ function compareSemverTags(a: string, b: string): number {
   return 0;
 }
 
+/** Read the `version` field from a package.json, or null if unreadable. */
+async function readPkgVersion(pkgPath: string): Promise<string | null> {
+  try {
+    const raw = await readFile(pkgPath, "utf-8");
+    return (JSON.parse(raw) as { version?: string }).version ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The installed ClawBox version, read from package.json at runtime.
+ *
+ * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time from
+ * `git describe`, so when a device syncs new code + package.json without a
+ * clean Next rebuild, the baked value goes stale — the device then mis-reports
+ * its own version and keeps offering an update it already installed. package.json
+ * is rewritten by the git sync, so it always reflects the running release.
+ * Falls back to the build-time value, then "unknown", if the file is unreadable.
+ */
+async function readClawboxVersion(): Promise<string> {
+  const v = await readPkgVersion(CLAWBOX_PKG);
+  if (v) return v.startsWith("v") ? v : `v${v}`;
+  return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
+}
+
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
     return cachedVersionInfo;
   }
 
-  const [targetVersion, openclawCurrent, openclawTarget] = await Promise.all([
+  const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
     execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
       .then(({ stdout }) => stdout.trim() || null)
-      .catch(() =>
-        // Fallback: read version from installed package.json
-        readFile(OPENCLAW_PKG, "utf-8")
-          .then((raw) => (JSON.parse(raw) as { version?: string }).version ?? null)
-          .catch(() => null)
-      ),
+      // Fallback: read version from the installed package.json
+      .catch(() => readPkgVersion(OPENCLAW_PKG)),
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
@@ -370,11 +499,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
         return OPENCLAW_VERSION_FALLBACK;
       }
     })(),
+    readClawboxVersion(),
   ]);
 
-  // git describe gives "v2.2.0-3-gad4bf5a" for commits after a tag;
-  // extract the base tag so we can compare properly with the target tag
-  const rawVersion = process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
+  // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
+  // so it compares cleanly against the target tag.
   const baseTag = rawVersion.match(/^(v\d+\.\d+\.\d+)/)?.[1] ?? rawVersion;
 
   // Only report a target if it's strictly newer than the device's base tag.
@@ -509,6 +638,33 @@ export async function checkContinuation(): Promise<boolean> {
   const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
 
+  // The flag only proves the rebuild unit was STARTED, not that it rebuilt
+  // and restarted anything. Resuming blindly would stamp "Update complete"
+  // on a box still running its old build. Demand evidence the rebuild
+  // happened: the unit must not sit in `failed`, and the on-disk BUILD_ID
+  // must differ from the one recorded before the rebuild (systemd unit state
+  // resets across reboots, so the Result check alone can be erased by a
+  // power cycle; the BUILD_ID can't). Legacy boolean flags (written by the
+  // previous updater version) carry no build identity — for those only the
+  // unit check applies.
+  const unitFailed = (await getRootStepResult(REBUILD_ROOT_STEP)) === "failed";
+  const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
+  const buildUnchanged = recordedBuildId !== null && recordedBuildId === (await readBuildId());
+  if (unitFailed || buildUnchanged) {
+    const message = unitFailed
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
+      : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+    state = createInitialState();
+    state.phase = "failed";
+    for (let i = 0; i < restartIndex; i++) {
+      state.steps[i].status = "completed";
+    }
+    state.steps[restartIndex].status = "failed";
+    state.steps[restartIndex].error = message;
+    state.error = message;
+    return false;
+  }
+
   running = true;
   state = createInitialState();
   state.phase = "running";
@@ -632,7 +788,19 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
-      if (step.requiresRoot) {
+      // An overrun on an advisory step doesn't fail the update: the unit is
+      // still running and will finish on its own — mark the step completed
+      // and move on, instead of painting "Update failed" (with a Retry that
+      // would re-run the whole update) over a successful one.
+      if (err instanceof BudgetOverrunError && step.advisoryOnOverrun) {
+        state.steps[i].status = "completed";
+        console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
+        continue;
+      }
+      // Only let the unit's journal override the error when the unit actually
+      // FAILED — on a budget overrun it's still running, and its last log line
+      // is just whatever fixup happened to finish most recently.
+      if (step.requiresRoot && (await getRootStepResult(step.id)) === "failed") {
         const rootFailure = await readRootStepFailure(step.id);
         if (rootFailure) message = rootFailure;
       }

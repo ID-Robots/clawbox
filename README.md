@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://openclawhardware.dev"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-openclawhardware.dev-orange?style=flat-square" /></a>
+  <a href="https://clawbox.tech"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-clawbox.tech-orange?style=flat-square" /></a>
   <a href="https://discord.gg/FbKmnxYnpq"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-NVIDIA_Jetson-76b900?style=flat-square&logo=nvidia" />
@@ -26,7 +26,7 @@
 
 ## What is ClawBox?
 
-ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://openclawhardware.dev/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). Unlike cloud AI, your data never leaves your device. It manages the full device lifecycle: broadcasts a WiFi access point for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps.
+ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://clawbox.tech/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). Unlike cloud AI, your data never leaves your device. It manages the full device lifecycle: broadcasts a WiFi access point for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps.
 
 The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
 
@@ -60,11 +60,34 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ## 🚀 Quick Start
 
+### Requirements
+
+| | Supported |
+|---|---|
+| **Device** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **OS image** | **JetPack 6.2** (Ubuntu 22.04 / L4T R36.x) — [download](https://developer.nvidia.com/embedded/jetpack-sdk-62) |
+
+> ⚠️ **JetPack 7.x (Ubuntu 24.04) is not supported yet.** NVIDIA's newest images
+> default to JetPack 7 — flash **JetPack 6.2** instead. On 24.04 the installer
+> fails on Python's externally-managed-environment policy (PEP 668), among
+> other differences. JetPack 6.2 is the platform every shipped ClawBox runs.
+
+### Install
+
+The installer expects to run from `/home/clawbox/clawbox` as the `clawbox`
+user's checkout (the same layout shipped devices use):
+
 ```bash
+id -u clawbox >/dev/null 2>&1 || sudo useradd -m -s /bin/bash clawbox
+sudo git clone https://github.com/ID-Robots/clawbox.git /home/clawbox/clawbox
+sudo chown -R clawbox:clawbox /home/clawbox/clawbox
+cd /home/clawbox/clawbox
 sudo bash install.sh
 ```
 
-Connect to the **ClawBox-Setup** WiFi network (open, no password) and navigate to:
+The install provisions everything from scratch (20–40 min on a fresh image).
+When it finishes, connect to the **ClawBox-Setup** WiFi network (open, no
+password) and navigate to:
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
@@ -269,21 +292,21 @@ bun run test             # Unit tests (Vitest)
 
 ## 🌍 Community & Links
 
-- **🌐 Website:** [openclawhardware.dev](https://openclawhardware.dev)
+- **🌐 Website:** [clawbox.tech](https://clawbox.tech)
 - **💬 Discord:** [discord.gg/FbKmnxYnpq](https://discord.gg/FbKmnxYnpq)
-- **📖 Docs:** [openclawhardware.dev/docs](https://openclawhardware.dev/docs)
-- **🛒 Buy ClawBox:** [openclawhardware.dev](https://openclawhardware.dev)
+- **📖 Docs:** [docs.clawbox.tech](https://docs.clawbox.tech)
+- **🛒 Buy ClawBox:** [clawbox.tech](https://clawbox.tech)
 - **🤖 Powered by:** [OpenClaw](https://github.com/openclaw/openclaw)
 
 ---
 
 ## 📄 License
 
-ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://openclawhardware.dev/) — contact yanko@idrobots.com.
+ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://clawbox.tech/) — contact yanko@idrobots.com.
 
 ---
 
 <p align="center">
-  <a href="https://openclawhardware.dev/">openclawhardware.dev</a><br/>
+  <a href="https://clawbox.tech/">clawbox.tech</a><br/>
   Built with ❤️ by <a href="https://github.com/ID-Robots">ID Robots</a> in the EU 🇪🇺 — source available
 </p>

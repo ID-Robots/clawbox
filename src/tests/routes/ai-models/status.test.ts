@@ -6,13 +6,15 @@ vi.mock("@/lib/openclaw-config", () => ({
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
+  set: vi.fn(),
 }));
 
 import { readConfig } from "@/lib/openclaw-config";
-import { get as getConfigValue } from "@/lib/config-store";
+import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 
 const mockReadConfig = vi.mocked(readConfig);
 const mockGetConfigValue = vi.mocked(getConfigValue);
+const mockSetConfigValue = vi.mocked(setConfigValue);
 
 describe("/setup-api/ai-models/status", () => {
   let GET: () => Promise<Response>;
@@ -23,6 +25,7 @@ describe("/setup-api/ai-models/status", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockGetConfigValue.mockResolvedValue(null);
+    mockSetConfigValue.mockResolvedValue(undefined);
     fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const mod = await import("@/app/setup-api/ai-models/status/route");
@@ -175,6 +178,36 @@ describe("/setup-api/ai-models/status", () => {
 
       expect(body.clawaiTier).toBeNull();
       expect(body.tierSource).toBe("portal");
+    });
+
+    it("persists the portal-confirmed tier so the unreachable-fallback stops flapping", async () => {
+      // Free account whose stored clawai_tier is a stale "flash" (paid badge).
+      // The portal confirms Free, so we persist null — a later portal blip
+      // then falls back to Free instead of resurfacing the paid badge and
+      // re-firing the tier-upgrade celebration.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_tier", null);
+    });
+
+    it("does not rewrite clawai_tier when the portal confirms the stored tier", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalled();
     });
 
     it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {
@@ -455,15 +488,15 @@ describe("/setup-api/ai-models/status", () => {
     });
   });
 
-  it("normalizes provider aliases like openai-codex for the UI", async () => {
+  it("normalizes the codex provider (and legacy openai-codex) for the UI", async () => {
     mockReadConfig.mockResolvedValue({
       auth: {
         profiles: {
-          "openai-codex:default": { provider: "openai-codex", mode: "oauth" },
+          "codex:default": { provider: "codex", mode: "oauth" },
         },
       },
       agents: {
-        defaults: { model: { primary: "openai-codex/gpt-5.4" } },
+        defaults: { model: { primary: "codex/gpt-5.4" } },
       },
     } as never);
 
@@ -472,6 +505,6 @@ describe("/setup-api/ai-models/status", () => {
 
     expect(body.provider).toBe("openai");
     expect(body.providerLabel).toBe("OpenAI GPT");
-    expect(body.model).toBe("openai-codex/gpt-5.4");
+    expect(body.model).toBe("codex/gpt-5.4");
   });
 });

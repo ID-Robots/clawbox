@@ -114,14 +114,27 @@ export async function POST(request: Request) {
       mode: 0o600,
     });
 
-    // Start or stop the AP service based on enabled state
+    // Start or stop the AP service based on enabled state.
+    let apRestarted = false;
     try {
       if (isEnabled) {
-        await execFileAsync("/usr/bin/sudo", [
-          "/usr/bin/systemctl",
-          "start",
-          "clawbox-root-update@restart_ap.service",
-        ]);
+        // Single-radio guard: if the box is currently a WiFi *client* (it joined
+        // a network back at Step 1), starting the AP would tear the radio off
+        // that network and sever this very connection. Defer — the saved
+        // settings apply on the next AP start (e.g. the end-of-setup reboot).
+        const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
+        if (await isWifiClient(iface)) {
+          console.warn(
+            "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
+          );
+        } else {
+          await execFileAsync("/usr/bin/sudo", [
+            "/usr/bin/systemctl",
+            "start",
+            "clawbox-root-update@restart_ap.service",
+          ]);
+          apRestarted = true;
+        }
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
         const stopScript = path.join(
@@ -136,7 +149,9 @@ export async function POST(request: Request) {
       // Non-fatal: settings are saved for next AP start
     }
 
-    return NextResponse.json({ success: true });
+    // apRestarted tells the wizard whether the connection was actually dropped
+    // (so it should show the reconnect handoff) vs. saved without disruption.
+    return NextResponse.json({ success: true, apRestarted });
   } catch (err) {
     return NextResponse.json(
       {
@@ -150,4 +165,23 @@ export async function POST(request: Request) {
 /** Safely quote a value for shell assignment */
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** Is the WiFi radio currently a client on a network (i.e. NOT hosting the setup
+ *  AP)? Starting the AP in that state drops the existing client connection, so
+ *  the caller defers the restart. Mirrors the GET handler's blockedBy probe. */
+async function isWifiClient(iface: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      "nmcli",
+      ["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+      { timeout: 3_000 }
+    );
+    const rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
+    return rows.some(
+      (r) => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup"
+    );
+  } catch {
+    return false;
+  }
 }

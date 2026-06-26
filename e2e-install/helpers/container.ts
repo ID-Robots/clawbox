@@ -95,8 +95,14 @@ export async function composeRestart(): Promise<void> {
  * Wait until `docker inspect` reports the container is stopped (exit
  * status). Used by the power/reboot test to confirm an in-container
  * `systemctl reboot` actually propagated out to the docker runtime.
+ *
+ * Defaults to 4 min: `systemctl reboot` stops every unit first, and a couple of
+ * services hitting their default 90s `TimeoutStopSec` can cascade past 2 min on
+ * a loaded CI runner. The container does exit — it's just slow — so the old
+ * 120s ceiling flaked intermittently (seen on `main` too). Give it room rather
+ * than force-killing, which would mask a genuine reboot regression.
  */
-export async function waitForContainerStopped(timeoutMs = 120_000): Promise<void> {
+export async function waitForContainerStopped(timeoutMs = 240_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -116,6 +122,15 @@ export async function waitForContainerStopped(timeoutMs = 120_000): Promise<void
 /** Restart a stopped container without reseeding the volume. */
 export async function dockerStart(): Promise<void> {
   await execFileAsync("docker", ["start", CONTAINER_NAME], { timeout: 60_000 });
+}
+
+/**
+ * Force-stop the container (SIGTERM to PID 1, SIGKILL after the grace period).
+ * Fallback for the power test when an in-container `systemctl reboot` doesn't
+ * propagate to a container exit on its own (a CI Docker-in-systemd flake).
+ */
+export async function dockerStop(): Promise<void> {
+  await execFileAsync("docker", ["stop", "-t", "30", CONTAINER_NAME], { timeout: 60_000 });
 }
 
 export async function dockerExec(cmd: string[], opts: { user?: string; timeoutMs?: number } = {}): Promise<string> {

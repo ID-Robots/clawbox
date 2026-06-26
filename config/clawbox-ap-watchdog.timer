@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically re-raise the ClawBox setup hotspot if it drops
+Requires=clawbox-ap-watchdog.service
+
+[Timer]
+# Give clawbox-ap.service a chance to bring the hotspot up first on boot.
+OnBootSec=45s
+# Check often enough that a dropped hotspot is restored within ~20s — short
+# enough to feel self-healing, long enough not to thrash the radio.
+OnUnitActiveSec=20s
+AccuracySec=5s
+Unit=clawbox-ap-watchdog.service
+
+[Install]
+WantedBy=timers.target

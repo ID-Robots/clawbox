@@ -68,6 +68,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
     return NextResponse.json({
       status: "complete",
       access_token: pollData.access_token,
+      id_token: pollData.id_token,
       refresh_token: pollData.refresh_token,
       expires_in: pollData.expires_in,
     });
@@ -121,55 +122,18 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
 
     const tokenData = await exchangeRes.json();
 
-    // Try id_token → API key exchange
-    if (tokenData.id_token) {
-      try {
-        const apiKeyRes = await fetch(OPENAI_TOKEN_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            grant_type:
-              "urn:ietf:params:oauth:grant-type:token-exchange",
-            client_id: OPENAI_CLIENT_ID,
-            requested_token: "openai-api-key",
-            subject_token: tokenData.id_token,
-            subject_token_type:
-              "urn:ietf:params:oauth:token-type:id_token",
-          }).toString(),
-          signal: AbortSignal.timeout(30_000),
-        });
-
-        if (apiKeyRes.ok) {
-          const apiKeyData = await apiKeyRes.json();
-          console.log("[device-poll/openai] API key exchange succeeded");
-          await fs.unlink(STATE_PATH).catch(() => {});
-          return NextResponse.json({
-            status: "complete",
-            access_token:
-              apiKeyData.access_token ||
-              apiKeyData.api_key ||
-              tokenData.access_token,
-            refresh_token: tokenData.refresh_token,
-            expires_in: apiKeyData.expires_in || tokenData.expires_in,
-          });
-        }
-        console.log(
-          "[device-poll/openai] API key exchange failed, using access_token"
-        );
-      } catch (e) {
-        console.log(
-          "[device-poll/openai] API key exchange error, using access_token:",
-          e
-        );
-      }
-    }
-
+    // Codex (subscription) needs the raw OAuth JWTs — id_token + access_token +
+    // refresh_token — which get synthesized into ~/.codex/auth.json for the
+    // codex app-server. Do NOT exchange the id_token for an `openai-api-key`:
+    // that returns an `sk-` key (not a JWT), which then gets stored as the
+    // codex `access` and used as the id_token, producing "invalid ID token
+    // format" on every message — and poisoning even the API-key OpenAI path,
+    // since ~/.codex/auth.json is shared and rebuilt on every gateway start.
     await fs.unlink(STATE_PATH).catch(() => {});
     return NextResponse.json({
       status: "complete",
       access_token: tokenData.access_token,
+      id_token: tokenData.id_token,
       refresh_token: tokenData.refresh_token,
       expires_in: tokenData.expires_in,
     });

@@ -10,6 +10,8 @@ interface ClawKeepSchedule {
   frequency: ScheduleFrequency;
   timeOfDay: string;
   weekday: number;
+  /** Auto-cleanup window: keep the newest N unlocked snapshots. 0 disables. */
+  retentionKeepLast: number;
 }
 interface ClawKeepStatus {
   paired: boolean;
@@ -73,6 +75,10 @@ interface CloudSnapshot {
   name: string;
   size_bytes: number;
   last_modified_ms: number;
+  /** Human label from the manifest; null/absent = unnamed. */
+  label?: string | null;
+  /** Protected flag — locked snapshots can't be deleted or auto-pruned. */
+  locked?: boolean;
 }
 
 interface RestoreResponse {
@@ -199,14 +205,25 @@ export default function ClawKeepApp() {
     refresh();
   }, [refresh]);
 
-  // Poll the dashboard every 3s while a backup is in progress. The server
-  // is the source of truth, so reopening the window mid-run still picks up
-  // the live "running" state and shows the right step.
+  // Poll the dashboard at a cadence that depends on whether a backup is
+  // running: fast (3s) during a backup so the live "running" step stays
+  // current, slow (10s) otherwise so an already-open window still reflects
+  // state changed elsewhere — e.g. switching the ClawBox AI account unpairs
+  // ClawKeep server-side, and without this the window keeps showing the stale
+  // "you're protected" screen until the user clicks something. getStatus() is
+  // a cheap local-file read (no portal call). The effect re-runs whenever
+  // `status` changes, so the period re-evaluates the moment a backup starts or
+  // ends.
   useEffect(() => {
-    if (!isBackupRunning(status)) return;
+    const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    // Skip a tick if the previous refresh is still in flight, so a slow/hung
+    // fetch can't stack concurrent requests on the Jetson.
+    let inFlight = false;
     const id = window.setInterval(() => {
-      void refresh();
-    }, 3000);
+      if (inFlight) return;
+      inFlight = true;
+      void refresh().finally(() => { inFlight = false; });
+    }, intervalMs);
     return () => window.clearInterval(id);
   }, [status, refresh]);
 
@@ -315,16 +332,17 @@ export default function ClawKeepApp() {
     });
   }, [refresh, t]);
 
-  const runBackupNow = useCallback(async () => {
+  const runBackupNow = useCallback(async (label?: string) => {
     setBusy("backup");
     setError(null);
     setBackupResult(null);
     try {
+      const trimmed = label?.trim();
       const result = await jsonOrError<BackupResponse>(
         await fetch("/setup-api/clawkeep/backup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify(trimmed ? { label: trimmed } : {}),
         }),
       );
       setBackupResult(result);
@@ -359,16 +377,16 @@ export default function ClawKeepApp() {
     });
   }, [refresh, t]);
 
-  const onBackup = useCallback(async () => {
+  const onBackup = useCallback(async (label?: string) => {
     // First-backup gate: encryption must be configured before we let the
     // runner upload anything. Without a device-local passphrase the runner
     // exits early with NEED_PASSPHRASE, but we'd rather surface that as a
     // friendly modal than as a red error banner.
     if (!status?.encryptionConfigured) {
-      setPassphraseSetup({ onSaved: () => { void runBackupNow(); } });
+      setPassphraseSetup({ onSaved: () => { void runBackupNow(label); } });
       return;
     }
-    void runBackupNow();
+    void runBackupNow(label);
   }, [status?.encryptionConfigured, runBackupNow]);
 
   // Inner restore call shared between the regular confirm flow and the
@@ -666,7 +684,8 @@ function ScheduleCard({
     draft.enabled !== schedule.enabled
     || draft.frequency !== schedule.frequency
     || draft.timeOfDay !== schedule.timeOfDay
-    || draft.weekday !== schedule.weekday;
+    || draft.weekday !== schedule.weekday
+    || draft.retentionKeepLast !== schedule.retentionKeepLast;
 
   const save = async (override?: ClawKeepSchedule) => {
     const payload = override ?? draft;
@@ -767,19 +786,49 @@ function ScheduleCard({
               </div>
             </div>
           )}
+        </div>
+      )}
 
-          {dirty && (
-            <div className="flex justify-end">
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => save()}
-                className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
-              >
-                {saving ? t("clawkeep.schedule.saving") : t("clawkeep.schedule.save")}
-              </button>
-            </div>
-          )}
+      {/* Retention applies to every backup (manual or scheduled), so it lives
+          outside the enabled-only block. */}
+      <div className="space-y-1.5 pt-1 border-t border-white/5">
+        <div className="flex items-center gap-3 flex-wrap">
+          <label htmlFor="clawkeep-keep-last" className="text-xs text-[var(--text-muted)]">
+            {t("clawkeep.schedule.keepLast")}
+          </label>
+          <input
+            id="clawkeep-keep-last"
+            type="number"
+            min={0}
+            max={9999}
+            value={draft.retentionKeepLast}
+            onChange={(e) => {
+              const n = Math.max(0, Math.floor(Number(e.target.value)));
+              setDraft((d) => ({ ...d, retentionKeepLast: Number.isFinite(n) ? n : 0 }));
+            }}
+            className="w-20 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+          />
+          <span className="text-xs text-[var(--text-muted)]">
+            {t("clawkeep.schedule.keepLastUnit")}
+          </span>
+        </div>
+        <p className="text-[11px] text-[var(--text-muted)]">
+          {draft.retentionKeepLast === 0
+            ? t("clawkeep.schedule.keepLastOff")
+            : t("clawkeep.schedule.keepLastHelp")}
+        </p>
+      </div>
+
+      {dirty && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => save()}
+            className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
+          >
+            {saving ? t("clawkeep.schedule.saving") : t("clawkeep.schedule.save")}
+          </button>
         </div>
       )}
     </div>
@@ -1265,12 +1314,15 @@ function DashboardCard({
   busyKind,
 }: {
   status: ClawKeepStatus;
-  onBackup: () => void;
+  onBackup: (label?: string) => void;
   onOpenRestore: () => void;
   onResetStuck: () => void;
   busyKind: "backup" | "restore" | null;
 }) {
   const { t } = useT();
+  // Optional "Name this backup" field for the manual run — passed to the
+  // daemon as the snapshot label. Cleared after we hand it off.
+  const [backupName, setBackupName] = useState("");
   if (busyKind) {
     const stepKey = busyKind === "backup" ? STEP_LABEL_KEYS[status.currentStep] : undefined;
     return (
@@ -1348,11 +1400,32 @@ function DashboardCard({
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
 
+      {/* Optional name for this backup → becomes the snapshot's label */}
+      {!disabled && (
+        <div className="relative mt-6 w-full max-w-xs">
+          <label
+            htmlFor="clawkeep-backup-name"
+            className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1"
+          >
+            {t("clawkeep.backup.nameLabel")}
+          </label>
+          <input
+            id="clawkeep-backup-name"
+            type="text"
+            value={backupName}
+            maxLength={120}
+            onChange={(e) => setBackupName(e.target.value)}
+            placeholder={t("clawkeep.backup.namePlaceholder")}
+            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-emerald-500/50"
+          />
+        </div>
+      )}
+
       {/* Action row */}
-      <div className="relative mt-7 flex flex-wrap items-center justify-center gap-3">
+      <div className="relative mt-5 flex flex-wrap items-center justify-center gap-3">
         <button
           type="button"
-          onClick={onBackup}
+          onClick={() => onBackup(backupName)}
           disabled={disabled}
           className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
         >
@@ -1494,6 +1567,11 @@ function RestoreModal({
   const { t } = useT();
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
   const [loading, setLoading] = useState(true);
+  // Per-row action state: which snapshot is being renamed (+ its draft text),
+  // which is pending a delete confirm, and which has an in-flight mutation.
+  const [editing, setEditing] = useState<{ name: string; text: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [busyName, setBusyName] = useState<string | null>(null);
   // Pin the callbacks to refs so the fetch effect doesn't refire when the
   // parent passes inline arrows that change identity on every render.
   const onCloseRef = useRef(onClose);
@@ -1501,27 +1579,85 @@ function RestoreModal({
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const data = await jsonOrError<{ snapshots: CloudSnapshot[] }>(
-          await fetch("/setup-api/clawkeep/snapshots", { cache: "no-store" }),
-        );
-        if (!cancelled) setSnapshots(data.snapshots);
-      } catch (e) {
-        if (!cancelled) {
-          onErrorRef.current((e as Error).message);
-          onCloseRef.current();
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const load = useCallback(async (opts: { initial?: boolean } = {}) => {
+    if (opts.initial) setLoading(true);
+    try {
+      const data = await jsonOrError<{ snapshots: CloudSnapshot[] }>(
+        await fetch("/setup-api/clawkeep/snapshots", { cache: "no-store" }),
+      );
+      setSnapshots(data.snapshots);
+    } catch (e) {
+      onErrorRef.current((e as Error).message);
+      // Only bail out of the modal on the very first load — a transient
+      // refetch failure after an action shouldn't yank the dialog closed.
+      if (opts.initial) onCloseRef.current();
+    } finally {
+      if (opts.initial) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void load({ initial: true });
+  }, [load]);
+
+  // Rename a snapshot (empty text clears the label back to the timestamp).
+  const doRename = useCallback(async (name: string, text: string) => {
+    setBusyName(name);
+    try {
+      await jsonOrError(
+        await fetch("/setup-api/clawkeep/snapshots/label", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, label: text }),
+        }),
+      );
+      setEditing(null);
+      await load();
+    } catch (e) {
+      onErrorRef.current((e as Error).message);
+    } finally {
+      setBusyName(null);
+    }
+  }, [load]);
+
+  const doToggleLock = useCallback(async (s: CloudSnapshot) => {
+    setBusyName(s.name);
+    try {
+      await jsonOrError(
+        await fetch("/setup-api/clawkeep/snapshots/lock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: s.name, locked: !s.locked }),
+        }),
+      );
+      await load();
+    } catch (e) {
+      onErrorRef.current((e as Error).message);
+    } finally {
+      setBusyName(null);
+    }
+  }, [load]);
+
+  const doDelete = useCallback(async (name: string) => {
+    setBusyName(name);
+    try {
+      const res = await fetch("/setup-api/clawkeep/snapshots/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      setConfirmDelete(null);
+      await load();
+    } catch (e) {
+      onErrorRef.current((e as Error).message);
+    } finally {
+      setBusyName(null);
+    }
+  }, [load]);
 
   // Esc closes the modal — basic dialog hygiene; the click-on-backdrop
   // handler covers the mouse path.
@@ -1612,47 +1748,159 @@ function RestoreModal({
               {snapshots.map((s, idx) => {
                 const parsed = parseSnapshotName(s.name);
                 const newest = idx === 0;
+                const locked = !!s.locked;
+                const rowBusy = busyName === s.name;
+                const timestampLabel = parsed ? `${parsed.date} · ${parsed.time}` : s.name;
+                // Prefer the human label; fall back to the formatted timestamp.
+                const title = s.label && s.label.trim() ? s.label : timestampLabel;
+                const isEditing = editing?.name === s.name;
+                const isConfirmingDelete = confirmDelete === s.name;
                 return (
-                  <li key={s.name}>
-                    <button
-                      type="button"
-                      onClick={() => onPick(s.name)}
-                      className="group w-full text-left rounded-xl border border-white/10 bg-white/[0.02] hover:bg-emerald-500/[0.08] hover:border-emerald-500/40 px-4 py-3 cursor-pointer transition-colors flex items-center gap-3"
-                    >
-                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] group-hover:bg-emerald-500/15 border border-white/5 group-hover:border-emerald-500/30 flex items-center justify-center transition-colors">
+                  <li
+                    key={s.name}
+                    className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] border border-white/5 flex items-center justify-center">
                         <span
-                          className="material-symbols-rounded text-[var(--text-muted)] group-hover:text-emerald-300"
+                          className={`material-symbols-rounded ${locked ? "text-amber-300" : "text-[var(--text-muted)]"}`}
                           style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }}
                           aria-hidden="true"
                         >
-                          inventory_2
+                          {locked ? "lock" : "inventory_2"}
                         </span>
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-gray-100 truncate">
-                            {parsed ? `${parsed.date} · ${parsed.time}` : s.name}
-                          </span>
-                          {newest && (
-                            <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[9px] font-bold tracking-wider border border-emerald-500/30">
-                              {t("clawkeep.restoreModal.latest")}
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
-                          <span>{formatBytes(s.size_bytes)}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{timeAgo(s.last_modified_ms, t)}</span>
-                        </div>
+                        {isEditing ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              autoFocus
+                              value={editing.text}
+                              maxLength={120}
+                              onChange={(e) => setEditing({ name: s.name, text: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void doRename(s.name, editing.text);
+                                if (e.key === "Escape") setEditing(null);
+                              }}
+                              placeholder={t("clawkeep.snapshot.renamePlaceholder")}
+                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                            />
+                            <button
+                              type="button"
+                              disabled={rowBusy}
+                              onClick={() => void doRename(s.name, editing.text)}
+                              className="shrink-0 px-2.5 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
+                            >
+                              {t("clawkeep.snapshot.save")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditing(null)}
+                              className="shrink-0 px-2.5 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                            >
+                              {t("clawkeep.cancel")}
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-semibold text-gray-100 truncate">
+                                {title}
+                              </span>
+                              {locked && (
+                                <span
+                                  className="shrink-0 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 text-[9px] font-bold tracking-wider border border-amber-500/30"
+                                  title={t("clawkeep.snapshot.locked")}
+                                >
+                                  🔒 {t("clawkeep.snapshot.locked")}
+                                </span>
+                              )}
+                              {newest && (
+                                <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[9px] font-bold tracking-wider border border-emerald-500/30">
+                                  {t("clawkeep.restoreModal.latest")}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+                              {/* When a custom label is shown above, surface the
+                                  timestamp here so the user still sees when it ran. */}
+                              {s.label && s.label.trim() && (
+                                <>
+                                  <span>{timestampLabel}</span>
+                                  <span aria-hidden="true">·</span>
+                                </>
+                              )}
+                              <span>{formatBytes(s.size_bytes)}</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{timeAgo(s.last_modified_ms, t)}</span>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      <span
-                        className="shrink-0 material-symbols-rounded text-[var(--text-muted)]/50 group-hover:text-emerald-400 transition-colors"
-                        style={{ fontSize: 18 }}
-                        aria-hidden="true"
-                      >
-                        chevron_right
-                      </span>
-                    </button>
+                    </div>
+
+                    {!isEditing && (
+                      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onPick(s.name)}
+                          className="px-3 py-1.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 text-xs font-semibold hover:bg-emerald-500/25 cursor-pointer flex items-center gap-1.5"
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+                            cloud_download
+                          </span>
+                          {t("clawkeep.restoreButton")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() =>
+                            setEditing({ name: s.name, text: s.label && s.label.trim() ? s.label : "" })
+                          }
+                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                        >
+                          {t("clawkeep.snapshot.rename")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() => void doToggleLock(s)}
+                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                        >
+                          {locked ? t("clawkeep.snapshot.unlock") : t("clawkeep.snapshot.lock")}
+                        </button>
+                        {isConfirmingDelete ? (
+                          <span className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={rowBusy}
+                              onClick={() => void doDelete(s.name)}
+                              className="px-3 py-1.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white text-xs font-semibold disabled:opacity-50 cursor-pointer"
+                            >
+                              {t("clawkeep.snapshot.confirmDelete")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDelete(null)}
+                              className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                            >
+                              {t("clawkeep.cancel")}
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={rowBusy || locked}
+                            title={locked ? t("clawkeep.snapshot.deleteLockedTooltip") : undefined}
+                            onClick={() => setConfirmDelete(s.name)}
+                            className="px-3 py-1.5 rounded-md border border-red-500/20 text-xs text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            {t("clawkeep.snapshot.delete")}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </li>
                 );
               })}

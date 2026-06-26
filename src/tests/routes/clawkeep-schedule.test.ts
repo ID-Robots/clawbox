@@ -74,6 +74,7 @@ describe("/setup-api/clawkeep/schedule", () => {
         frequency: "daily",
         timeOfDay: `${hh}:${mm}`,
         weekday: 0,
+        retentionKeepLast: 10,
       });
       const res = await GET();
       const body = await res.json();
@@ -90,6 +91,7 @@ describe("/setup-api/clawkeep/schedule", () => {
         frequency: "weekly",
         timeOfDay: "03:15",
         weekday: 4,
+        retentionKeepLast: 7,
       }));
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -98,6 +100,7 @@ describe("/setup-api/clawkeep/schedule", () => {
         frequency: "weekly",
         timeOfDay: "03:15",
         weekday: 4,
+        retentionKeepLast: 7,
       });
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
 

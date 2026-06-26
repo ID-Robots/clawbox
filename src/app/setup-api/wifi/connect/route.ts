@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
-import { switchToClient } from "@/lib/network";
-import { set, setMany, get } from "@/lib/config-store";
+import {
+  switchToClient,
+  setConnectStatus,
+  WifiAuthError,
+  type ConnectFailReason,
+} from "@/lib/network";
+import { set, setMany } from "@/lib/config-store";
 
 export const dynamic = "force-dynamic";
 
@@ -26,26 +31,33 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Password must be a string" }, { status: 400 });
   }
 
-  try {
-    await set("wifi_ssid", ssid);
+  await set("wifi_ssid", ssid);
 
-    // Actually attempt connection before responding
-    await switchToClient(ssid, password as string | undefined);
+  // Single-radio handoff: switchToClient tears down the setup hotspot to join
+  // the home network, so the browser loses us mid-connect and a synchronous
+  // response can never arrive. Run it in the background, record a pollable
+  // status, and return immediately — the wizard polls /wifi/connect-status
+  // once the AP comes back (failure) or it reaches us on the home network.
+  setConnectStatus({ phase: "connecting", ssid, reason: null, message: "", at: Date.now() });
+  void (async () => {
+    // Grace period so this response is flushed before the AP drops underneath us.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      const { message } = await switchToClient(ssid, password as string | undefined);
+      await setMany({ wifi_configured: true, hotspot_enabled: false }).catch(() => {});
+      setConnectStatus({ phase: "connected", ssid, reason: null, message, at: Date.now() });
+    } catch (err) {
+      await set("wifi_configured", false).catch(() => {});
+      const reason: ConnectFailReason = err instanceof WifiAuthError ? "wrong-password" : "other";
+      setConnectStatus({
+        phase: "failed",
+        ssid,
+        reason,
+        message: err instanceof Error ? err.message : "Connection failed",
+        at: Date.now(),
+      });
+    }
+  })();
 
-    await setMany({ wifi_configured: true, hotspot_enabled: false });
-
-    const hostname = ((await get("hostname")) as string | undefined) || "clawbox";
-    return NextResponse.json({
-      success: true,
-      message: `Connected! Reconnect to your home WiFi and visit http://${hostname}.local to continue.`,
-    });
-  } catch (err) {
-    // switchToClient already restores the AP on failure
-    await set("wifi_configured", false).catch(() => {});
-
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Connection failed" },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({ status: "connecting" });
 }

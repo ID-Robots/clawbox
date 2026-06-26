@@ -61,7 +61,8 @@ test("settings covers appearance, network, local AI, telegram, system, and about
   await expect(settingsWindow.getByText("gemma4-e2b-it-q4_0").first()).toBeVisible();
   const localProviderGroup = settingsWindow.getByRole("radiogroup", { name: "AI Provider" });
   await expect(localProviderGroup.getByText("Gemma 4")).toBeVisible();
-  await expect(localProviderGroup.getByText("Ollama")).toBeVisible();
+  // Gemma is now the sole local engine — Ollama is no longer offered here.
+  await expect(localProviderGroup.getByText("Ollama")).toHaveCount(0);
   await expect(localProviderGroup.getByText("ClawBox AI")).toHaveCount(0);
 
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();

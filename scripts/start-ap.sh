@@ -48,9 +48,41 @@ if [ "$setup_complete" = true ] && [ "${HOTSPOT_DISABLED:-}" = "1" ]; then
   exit 0
 fi
 
-# After setup is complete, try to connect to saved WiFi instead of starting AP.
-# If WiFi connect fails (e.g. out of range), fall through to AP mode as fallback.
-if [ "$setup_complete" = true ]; then
+# NetworkManager being "started" (the unit's After=) does NOT mean it has
+# finished bringing the radio under management. At boot the wifi device can
+# still be initialising, and bringing the AP up against an unready NM fails —
+# which is exactly why the hotspot would only appear after a manual
+# `systemctl restart` once NM had settled. Wait for NM to report ready first.
+wait_for_nm() {
+  local elapsed=0
+  local timeout="${NM_READY_TIMEOUT:-30}"
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
+      echo "[AP] NetworkManager is ready (after ${elapsed}s)"
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "[AP] Warning: NetworkManager not ready after ${timeout}s; proceeding anyway"
+  return 1
+}
+wait_for_nm || true
+
+# Single WiFi radio: it can host the AP or join a WiFi network, but not both. If
+# a wired (Ethernet) uplink is present the device already has connectivity, so we
+# keep the radio for the hotspot instead of joining saved WiFi. This is what lets
+# "just plug in Ethernet" bring the hotspot up — no need to forget the network.
+ethernet_connected() {
+  nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^ethernet:connected'
+}
+
+# After setup is complete, prefer joining saved WiFi over starting the AP — UNLESS
+# an Ethernet cable provides the uplink, in which case host the hotspot and let
+# release_wifi_for_ap() (below) drop the active WiFi client to free the radio.
+if [ "$setup_complete" = true ] && ethernet_connected; then
+  echo "[AP] Ethernet uplink present — keeping the radio for the hotspot (not joining saved WiFi)"
+elif [ "$setup_complete" = true ]; then
   # Try all saved WiFi profiles (exclude the AP itself) until one connects
   while IFS= read -r profile; do
     [ -z "$profile" ] && continue
@@ -90,11 +122,42 @@ wait_for_interface() {
   return 1
 }
 
+# Free the radio so the AP can own it. Any wifi *client* profile that
+# auto-connected at boot (e.g. a network saved during a failed/aborted setup
+# attempt) holds $IFACE in station mode, making `nmcli connection up
+# ClawBox-Setup` fail with "device busy" — the classic "AP only appears after a
+# manual restart" boot race. We tear those down before claiming the radio.
+release_wifi_for_ap() {
+  local con ctype
+  while IFS=: read -r con ctype; do
+    [ -z "$con" ] && continue
+    case "$ctype" in wifi|802-11-wireless) ;; *) continue ;; esac
+    [ "$con" = "$CON_NAME" ] && continue
+    # Stop these client profiles auto-grabbing the radio back from the AP. We do
+    # this pre-setup (the radio must be dedicated to the AP), and also post-setup
+    # when an Ethernet uplink means we've deliberately chosen the hotspot over
+    # WiFi. Either way it's safe: the saved-WiFi block reconnects them via an
+    # explicit `nmcli connection up`, which doesn't depend on autoconnect.
+    if [ "$setup_complete" != true ] || ethernet_connected; then
+      nmcli connection modify "$con" connection.autoconnect no 2>/dev/null || true
+    fi
+    nmcli connection down "$con" 2>/dev/null || true
+  done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null || true)
+  # Make sure the device itself isn't mid-association before we re-up the AP.
+  nmcli device disconnect "$IFACE" 2>/dev/null || true
+}
+
 # ─── Pre-AP WiFi scan ────────────────────────────────────────────────────────
 # The interface is free right now (not in AP mode), so scan for nearby networks
 # and cache the results. The setup wizard uses this cached list so users can
 # pick their network from a list instead of typing the SSID manually.
 SCAN_CACHE="/home/clawbox/clawbox/data/wifi-scan-cache.json"
+# SKIP_PRESCAN=1 (set when restoring the AP after a failed client connect) skips
+# the ~20s scan poll and keeps the existing cache — the radio was just in use
+# and we only need the hotspot back up fast so the wizard can report the result.
+if [ "${SKIP_PRESCAN:-}" = "1" ]; then
+  echo "[AP] SKIP_PRESCAN=1 — fast AP restore, keeping existing scan cache"
+else
 echo "[AP] Scanning for nearby WiFi networks before starting AP..."
 # Make sure the interface is actually up before scanning — early in boot it may
 # still be initializing, and scanning a down interface returns nothing.
@@ -161,12 +224,18 @@ if [ -n "$SCAN_OUTPUT" ]; then
     }
     END { print "]" }
   ' > "$SCAN_CACHE"
-  NETWORK_COUNT=$(grep -o '"ssid"' "$SCAN_CACHE" 2>/dev/null | wc -l)
+  # grep returns 1 when there are no matches, and `pipefail` propagates that
+  # through `| wc -l`, which combined with `set -e` aborts the script before
+  # the AP creation steps run. Catch the non-zero pipeline exit with a
+  # post-substitution `||` so an empty cache yields NETWORK_COUNT=0 rather
+  # than killing the AP startup.
+  NETWORK_COUNT=$(grep -o '"ssid"' "$SCAN_CACHE" 2>/dev/null | wc -l) || NETWORK_COUNT=0
   echo "[AP] Cached $NETWORK_COUNT networks to $SCAN_CACHE"
 else
   echo "[]" > "$SCAN_CACHE"
   echo "[AP] No networks found during pre-scan"
 fi
+fi  # end SKIP_PRESCAN guard
 
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
@@ -214,10 +283,33 @@ else
 fi
 
 echo "[AP] Activating access point..."
-nmcli connection up "$CON_NAME"
+# Retry the bring-up: at boot the first attempt can lose a race with NM (radio
+# still settling, or a client profile briefly holding the device). A oneshot
+# service can't restart itself, so the resilience has to live here — free the
+# radio and retry a few times, confirming the interface actually entered AP mode
+# rather than trusting nmcli's exit code alone.
+AP_UP_RETRIES="${AP_UP_RETRIES:-5}"
+ap_up_ok=false
+for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
+  release_wifi_for_ap
+  if nmcli connection up "$CON_NAME" 2>&1; then
+    wait_for_interface || true
+    if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
+      echo "[AP] Access point active (attempt $ap_attempt)"
+      ap_up_ok=true
+      break
+    fi
+    echo "[AP] 'up' succeeded but $IFACE not in AP mode yet (attempt $ap_attempt)"
+  else
+    echo "[AP] Activation attempt $ap_attempt failed (radio may be busy with a client connection)"
+  fi
+  [ "$ap_attempt" -lt "$AP_UP_RETRIES" ] && sleep 3
+done
 
-# Wait for interface readiness instead of fixed sleep
-wait_for_interface || echo "[AP] Continuing despite interface timeout"
+if [ "$ap_up_ok" != true ]; then
+  echo "[AP] ERROR: access point did not come up after ${AP_UP_RETRIES} attempts" >&2
+  exit 1
+fi
 
 # Remove any leftover captive portal iptables redirect
 iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null || true

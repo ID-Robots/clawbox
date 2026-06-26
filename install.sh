@@ -18,6 +18,41 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
+# Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
+# checkout by flash.sh) parses old EXPECTED_*_SERVICES while step_git_pull
+# later refreshes config/ on disk to a newer set of unit files. The drift
+# guard in step_systemd_services then fires on units the up-to-date install.sh
+# already registers. Pulling and re-exec'ing up-front (before constants are
+# parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
+
+if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
+  _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # Resolve the branch like resolve_update_branch() does below — explicit
+  # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
+  # else main. Defaulting straight to main (Gap 1) force-reset a beta (or any
+  # non-main) box toward main on a bare `install.sh`. is_safe_git_ref() isn't
+  # defined this early, so validate inline before the value reaches a git ref.
+  _br="${CLAWBOX_BRANCH:-}"
+  if [ -z "$_br" ] && [ -f "$_b/.update-branch" ]; then
+    _br="$(head -n 1 "$_b/.update-branch" | tr -d '[:space:]')"
+  fi
+  if [ -z "$_br" ]; then
+    _br="$(git -C "$_b" -c safe.directory="$_b" symbolic-ref --short HEAD 2>/dev/null || true)"
+  fi
+  # Empty (no env/file/branch) or unsafe (defends against a malicious
+  # .update-branch — the value is interpolated into a git ref below) → main.
+  case "$_br" in ""|*[!A-Za-z0-9._/-]*) _br="main" ;; esac
+  echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
+  git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+  if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+    chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+    echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
+    exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+  fi
+  echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+fi
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
@@ -29,6 +64,19 @@ CLAWBOX_HOME="/home/clawbox"
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
 # llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
 # installer can run inside a CI container. See e2e-install/README.md.
+#
+# The e2e-install entrypoint seeds /etc/clawbox/test-mode.env before any
+# install.sh runs. Source it so EVERY invocation detects test mode up front —
+# not just the first-boot bootstrap (which gets CLAWBOX_TEST_MODE in its
+# service env), but also the updater-triggered `install.sh --step` runs via
+# clawbox-root-update@.service, which otherwise inherit only
+# /etc/clawbox/network.env (populated late, during step_network_setup) and so
+# hit the real Jetson/WiFi steps and fail on a non-Tegra CI host. The file
+# exists only in the test container, so this is a no-op on real devices.
+if [ -f /etc/clawbox/test-mode.env ]; then
+  # shellcheck disable=SC1091
+  source /etc/clawbox/test-mode.env
+fi
 CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
 is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
@@ -54,12 +102,14 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-gateway.service
   clawbox-performance.service
   clawbox-heartbeat.timer
+  clawbox-ap-watchdog.timer
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-heartbeat.service
   clawbox-browser.service
   clawbox-tunnel.service
   "clawbox-root-update@.service"
+  clawbox-ap-watchdog.service
 )
 
 # Load persisted WiFi interface if available
@@ -555,6 +605,13 @@ resolve_update_branch() {
   UPDATE_TARGET_LOCAL="main"
   UPDATE_TARGET_UPSTREAM="origin/main"
 
+  # An explicit CLAWBOX_BRANCH (CLI or systemd env) wins over everything else.
+  if [ -n "${CLAWBOX_BRANCH:-}" ] && is_safe_git_ref "${CLAWBOX_BRANCH}"; then
+    UPDATE_TARGET_LOCAL="$CLAWBOX_BRANCH"
+    UPDATE_TARGET_UPSTREAM="origin/$CLAWBOX_BRANCH"
+    return 0
+  fi
+
   local pinned=""
   if [ -f "$PROJECT_DIR/.update-branch" ]; then
     pinned=$(head -n 1 "$PROJECT_DIR/.update-branch" | tr -d '[:space:]')
@@ -618,26 +675,16 @@ step_git_pull() {
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
   else
-    local CURRENT_BRANCH
-    CURRENT_BRANCH=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" branch --show-current)
-    # Only switch branches if CLAWBOX_BRANCH was explicitly set
-    local TARGET_BRANCH="${CLAWBOX_BRANCH:-$CURRENT_BRANCH}"
-    echo "  Repository exists, pulling latest on branch '$TARGET_BRANCH'..."
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
-    if [ "$TARGET_BRANCH" != "$CURRENT_BRANCH" ]; then
-      if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$TARGET_BRANCH" 2>/dev/null; then
-        # Try creating a tracking branch from origin if it only exists remotely
-        if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH" 2>/dev/null; then
-          echo "Error: failed to checkout branch '$TARGET_BRANCH'" >&2
-          exit 1
-        fi
-      fi
-    fi
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
-    # Fix project ownership — git operations run as root can leave both git
-    # metadata and working-tree files owned by root, which blocks later pulls
-    # and writes by the clawbox user.
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+    # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
+    # current branch > main) instead of a fast-forward-only merge. The old
+    # `merge --ff-only ... || echo continuing` silently kept stale code whenever
+    # the box had any local divergence, which then pinned config/openclaw-target.txt,
+    # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
+    # robust path the in-app updater takes: fetch, drop local changes, checkout,
+    # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
+    resolve_update_branch
+    echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+    sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
   fi
 }
 
@@ -940,24 +987,46 @@ step_openclaw_patch() {
   echo "  Device identity bypass patch applied and verified"
 }
 
+# `openclaw config set` (OpenClaw 2026.6.x) does an optimistic-concurrency
+# check: if anything else writes openclaw.json between its load and write —
+# the live gateway, or the CLI's own state migrations triggered by the
+# PREVIOUS call — it dies with ConfigMutationConflictError. Under
+# `set -euo pipefail` that aborted the whole step mid-update and left
+# devices half-updated: rebuild_reboot never reached the rebuild, while the
+# updater still reported success (see fix in src/lib/updater.ts). Each retry
+# reloads the config fresh, so a transient conflict resolves itself.
+oc_config_set() {
+  local attempt
+  for attempt in 1 2 3; do
+    if as_clawbox "$OPENCLAW_BIN" config set "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      sleep 2
+    fi
+  done
+  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  return 1
+}
+
 step_openclaw_config() {
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local CLAWBOX_AI_ENV="$PROJECT_DIR/.env"
   local CLAWBOX_AI_KEY="${CLAWBOX_AI_API_KEY:-}"
   local AUTH_PROFILES="$CLAWBOX_HOME/.openclaw/agents/main/agent/auth-profiles.json"
 
-  # Sequential config set calls to avoid ConfigMutationConflictError
   # Only seed the primary model if unset — preserves the user's provider choice
   # across updates (rebuild_reboot re-invokes this step).
   local CURRENT_PRIMARY
   CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
-    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+    oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
     echo "  Default model set"
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi
-  as_clawbox "$OPENCLAW_BIN" config set agents.defaults.compaction.reserveTokensFloor 24000
+  oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
   echo "  Compaction reserve floor set"
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
@@ -968,44 +1037,21 @@ step_openclaw_config() {
     CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
     mkdir -p "$(dirname "$AUTH_PROFILES")"
     CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
-    as_clawbox "$OPENCLAW_BIN" config set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
-    as_clawbox "$OPENCLAW_BIN" config set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
-    as_clawbox "$OPENCLAW_BIN" config set agents.defaults.model.fallback "deepseek/deepseek-chat"
+    oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
+    oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
     echo "  ClawBox AI fallback model configured"
   fi
 
-  as_clawbox "$OPENCLAW_BIN" config set gateway.auth.mode token
-  # Seed a strong per-device gateway token (not the public legacy literal).
-  # gateway-pre-start.sh preserves it on every start; the gateway resolves it
-  # from config (no --token flag). Only seed when missing/weak so re-runs of
-  # the installer don't rotate a token a device is already using.
-  # Strong = a `${ENV}` interpolation or a >=32-char non-legacy string
-  # (kept in lockstep with is_strong_gateway_token in gateway-pre-start.sh).
-  # `|| true`: on a fresh install the token key doesn't exist yet, so
-  # `config get` exits non-zero — without this, set -euo pipefail would abort
-  # the whole installer here (caught by the e2e-install harness).
-  EXISTING_GW_TOKEN=$(as_clawbox "$OPENCLAW_BIN" config get gateway.auth.token 2>/dev/null | tr -d '"[:space:]') || true
-  if [[ "$EXISTING_GW_TOKEN" =~ ^\$\{.+\}$ ]]; then
-    GW_TOKEN_STRONG=1
-  elif [ -n "$EXISTING_GW_TOKEN" ] && [ "$EXISTING_GW_TOKEN" != "clawbox" ] && [ "${#EXISTING_GW_TOKEN}" -ge 32 ]; then
-    GW_TOKEN_STRONG=1
-  else
-    GW_TOKEN_STRONG=0
-  fi
-  if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
-    GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    as_clawbox "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN"
-    echo "  Gateway auth token generated (per-device)"
-  else
-    echo "  Gateway auth token preserved (already strong)"
-  fi
-  echo "  Gateway auth mode set to token"
-
-  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
-  echo "  allowInsecureAuth enabled"
-
-  as_clawbox "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json
-  echo "  dangerouslyDisableDeviceAuth enabled"
+  # gateway.auth.mode/token and gateway.controlUi.{allowInsecureAuth,
+  # dangerouslyDisableDeviceAuth} are deliberately NOT set here:
+  # gateway-pre-start.sh owns them, enforcing all four atomically (single
+  # read-modify-write on openclaw.json) on every gateway start — including
+  # the start right after this installer/updater finishes. Setting them here
+  # too made two writers race the live gateway; the controlUi pair was the
+  # exact `config set` that died with ConfigMutationConflictError mid-update
+  # and aborted rebuild_reboot before the rebuild.
+  echo "  Gateway auth/controlUi config deferred to gateway-pre-start.sh"
 
   # Register Telegram channel (if token exists)
   if [ -f "$CLAWBOX_CONFIG" ]; then
@@ -1177,11 +1223,16 @@ step_systemd_services() {
     [[ "$svc" == "clawbox-browser.service" ]] && continue
     [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
+    # Timer-driven one-shot (no [Install]); enabled via its .timer below.
+    [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
   # transition to Online without waiting for the next reboot.
   systemctl enable --now clawbox-heartbeat.timer
+  # Start the AP watchdog immediately so a dropped setup hotspot self-heals
+  # without waiting for a reboot.
+  systemctl enable --now clawbox-ap-watchdog.timer
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Migration: prior installs enabled clawbox-tunnel by default, which loops
@@ -2134,10 +2185,7 @@ log "Installing Ollama..."
 step_ollama_install
 
 log "Installing llama.cpp runtime..."
-# TEMP: skip llama.cpp + Gemma download during flash to speed up install.
-# User installs from Settings UI → Install llama.cpp (or: bash install.sh --step llamacpp_install)
-echo "  SKIPPED — install from Settings UI post-install"
-# step_llamacpp_install
+step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
