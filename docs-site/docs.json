@@ -1,6 +1,9 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
+  "appearance": {
+    "default": "light"
+  },
   "name": "ClawBox Docs",
   "description": "Official documentation for ClawBox — pre-configured AI hardware running OpenClaw. Setup guides, hardware specs, messaging channels, and troubleshooting.",
   "colors": {
@@ -10,8 +13,8 @@
   },
   "favicon": "/favicon.png",
   "logo": {
-    "light": "/logo/light.png",
-    "dark": "/logo/dark.png",
+    "light": "/logo/light-wordmark.png",
+    "dark": "/logo/dark-wordmark.png",
     "href": "https://clawbox.tech"
   },
   "navigation": {
