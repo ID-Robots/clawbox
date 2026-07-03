@@ -840,7 +840,10 @@ export async function syncStateFromCloud(): Promise<void> {
 // hostile/garbled name is bounced with a clean 400 before we shell out — it
 // could never escape the portal-issued prefix anyway, but the early reject is
 // clearer for the user.
-const SNAPSHOT_NAME_RE = /^[A-Za-z0-9._-]+\.tar\.gz(\.enc)?$/;
+// NOTE: names include a `+` from the ISO timestamp's tz offset (e.g.
+// `...57.761+03-00-openclaw-backup.tar.gz.enc`), so `+` must be allowed or
+// every real snapshot is bounced with "invalid snapshot name" on restore.
+const SNAPSHOT_NAME_RE = /^[A-Za-z0-9._+-]+\.tar\.gz(\.enc)?$/;
 
 function assertSnapshotName(name: string): void {
   if (!SNAPSHOT_NAME_RE.test(name)) {
@@ -936,9 +939,7 @@ export async function runRestore(
   // side) but bouncing it early gives the user a clearer error. Accept both
   // the new encrypted form (`.tar.gz.enc`) and the legacy unencrypted one
   // (`.tar.gz`); the daemon detects which is which on its end too.
-  if (!/^[A-Za-z0-9._-]+\.tar\.gz(\.enc)?$/.test(name)) {
-    throw new ClawKeepError("invalid snapshot name", 400);
-  }
+  assertSnapshotName(name);
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   await setRestoring(true);
   try {
