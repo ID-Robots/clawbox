@@ -939,9 +939,7 @@ export async function runRestore(
   // side) but bouncing it early gives the user a clearer error. Accept both
   // the new encrypted form (`.tar.gz.enc`) and the legacy unencrypted one
   // (`.tar.gz`); the daemon detects which is which on its end too.
-  if (!/^[A-Za-z0-9._+-]+\.tar\.gz(\.enc)?$/.test(name)) {
-    throw new ClawKeepError("invalid snapshot name", 400);
-  }
+  assertSnapshotName(name);
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   await setRestoring(true);
   try {
