@@ -58,6 +58,7 @@ Found a vulnerability? **Do not open a public issue.** Email **yanko@idrobots.co
 
 ## Review process
 
+- Every PR gets two automated advisory reviews within minutes: **ClawReview** 🦀 (our bot — repo-policy checks, duplicate detection, ClawBox-convention review) and **CodeRabbit** (line-level review). Address or discuss their findings; they advise, humans decide.
 - 1 approving review from a code owner (`@ID-Robots/id-robots-core-team`) is required
 - All CI checks must pass
 - All review conversations must be resolved

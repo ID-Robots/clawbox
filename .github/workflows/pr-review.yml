@@ -1,0 +1,49 @@
+name: ClawReview
+
+# ClawBox's own PR bot 🦀 — structured advisory review + repo-policy checks +
+# duplicate detection on every PR. Complements CodeRabbit. See
+# scripts/pr-review.mjs.
+#
+# SECURITY: pull_request_target grants secret access on fork PRs, so this
+# workflow must NEVER check out or execute PR code. The checkout below is the
+# BASE repo (our trusted main); the PR is reviewed as data via the API diff.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: clawreview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Job-scoped so future jobs don't inherit write access.
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+    # Bot PRs (dependabot etc.) get CI + human review; ClawReview skips them.
+    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') }}
+    steps:
+      - name: Checkout (base repo only — never the PR head)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install Anthropic SDK
+        # Pinned + scoped to scripts/ (root install would reify the whole
+        # bun-managed tree — see issue-triage.yml for the full rationale).
+        run: npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
+
+      - name: Review with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/pr-review.mjs
