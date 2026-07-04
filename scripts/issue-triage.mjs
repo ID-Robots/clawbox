@@ -56,7 +56,11 @@ async function main() {
     ],
   });
 
-  const text = resp.content.find((b) => b.type === "text")?.text ?? "{}";
+  const text = resp.content.find((b) => b.type === "text")?.text;
+  // Throw rather than default to "{}" — an empty object here would create
+  // and apply labels literally named "undefined"; the outer catch logs and
+  // exits 0 (triage must never fail issue creation).
+  if (!text) throw new Error("no text block in model response");
   const t = JSON.parse(text);
 
   // Ensure the priority/area labels exist (idempotent), then apply.
