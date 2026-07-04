@@ -65,7 +65,7 @@ Found a vulnerability? **Do not open a public issue.** Email **yanko@idrobots.co
 
 ## Community
 
-- [Discord](https://discord.gg/FbKmnxYnpq) — get help, share your setup
+- [Discord](https://discord.gg/vsTsaY4Tuk) — get help, share your setup
 - [Discussions](https://github.com/ID-Robots/clawbox/discussions) — ideas and Q&A
 
 ## Code of Conduct
