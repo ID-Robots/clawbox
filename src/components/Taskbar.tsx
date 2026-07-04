@@ -61,7 +61,7 @@ export default function Taskbar({ windows, onWindowClick, onExternalLink }: Task
             />
           </button>
           <button
-            onClick={() => onExternalLink("https://discord.gg/FbKmnxYnpq")}
+            onClick={() => onExternalLink("https://discord.gg/vsTsaY4Tuk")}
             aria-label="Join our Discord"
             className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[#5865F2] transition transform hover:scale-110"
             title="Discord"

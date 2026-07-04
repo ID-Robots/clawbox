@@ -622,7 +622,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
           <Image src="/clawbox-logo.png" alt="ClawBox" width={28} height={28} className="w-7 h-7 object-contain" />
         </a>
         <a
-          href="https://discord.gg/FbKmnxYnpq"
+          href="https://discord.gg/vsTsaY4Tuk"
           target="_blank"
           rel="noopener noreferrer"
           aria-label="Join our Discord"
