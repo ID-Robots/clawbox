@@ -7,10 +7,6 @@ on:
   issues:
     types: [opened, reopened]
 
-permissions:
-  issues: write
-  contents: read
-
 concurrency:
   group: issue-triage-${{ github.event.issue.number }}
   cancel-in-progress: true
@@ -18,18 +14,25 @@ concurrency:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    # Job-scoped (not workflow-scoped) so future jobs don't inherit write
+    # access: the triage script labels + comments via GH_TOKEN.
+    permissions:
+      issues: write
+      contents: read
     # Skip issues opened by bots to avoid loops.
     if: ${{ !endsWith(github.actor, '[bot]') }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # SHA-pinned: this workflow runs on every opened issue with
+        # issues:write and a paid API secret in scope.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # The script auths to GitHub via GH_TOKEN only — no need to persist
           # GITHUB_TOKEN into the runner's git config.
           persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 

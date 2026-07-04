@@ -67,8 +67,11 @@ async function main() {
   const ensure = (name, color, desc) => {
     try {
       gh(["label", "create", name, "--color", color, "--description", desc, "--repo", REPO]);
-    } catch {
-      /* label already exists — fine */
+    } catch (err) {
+      // Usually "label already exists" (fine); log the message so a real
+      // failure (auth, rate limit) is diagnosable instead of silently
+      // degrading into an `issue edit` error with no context.
+      console.log(`label ensure '${name}':`, err?.message?.split("\n")[0] ?? err);
     }
   };
   const prioColor = t.priority === "high" ? "b60205" : t.priority === "medium" ? "fbca04" : "0e8a16";
