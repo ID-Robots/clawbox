@@ -24,7 +24,7 @@ Started from the **System Update** app (or Settings). Steps, in order — each p
 | `nvidia_jetpack` | Jetson components |
 | `performance_mode` | Max-performance profile |
 | `chromium_install` / `vnc_install` | Desktop browser + remote display stack |
-| `openclaw_install` | OpenClaw core → **pinned** version from `config/openclaw-target.txt`, plus re-pins all `@openclaw/*` plugins to match |
+| `openclaw_install` | OpenClaw core → **pinned** version from `config/openclaw-target.txt`, plus re-pins all `@openclaw/*` plugins to match (the fleet never floats on `@latest` — version skew between core and the `@openclaw/codex` plugin breaks ChatGPT-subscription chats; pin bumps ship via the normal PR → beta → release flow) |
 | `openclaw_patch` | Applies ClawBox's gateway patches |
 | `gateway_setup` | (Re)installs the gateway service file + drop-ins |
 | `restart` | **The hard-sync + rebuild**: `git fetch` → `git reset --hard HEAD` → checkout channel branch → `git reset --hard origin/<channel>` → `git clean -fd` → full `bun install` + `next build` → **reboot** |
@@ -67,10 +67,6 @@ On the **beta channel** (and the next stable release), this state is detected ex
 > **Updates paused** — this device is on a non-release branch with local changes (N commits ahead of main). Reset to main to resume updates.
 
 …with a one-click **Reset to `<channel>` & update** button (confirmation-gated — it discards local *code* commits, keeps all data) that pins the channel and runs the normal update. The equivalent manual fix is the hard-sync in [Recovery → Safe reinstall](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss).
-
-## OpenClaw version pinning
-
-The fleet never floats on `openclaw@latest`. `config/openclaw-target.txt` pins the exact core version; the same value pins every `@openclaw/*` plugin (version skew between core and the `@openclaw/codex` plugin breaks ChatGPT-subscription chats). Bumping the pin is a normal PR → beta-validation → release flow.
 
 ## Related endpoints
 

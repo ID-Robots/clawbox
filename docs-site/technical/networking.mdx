@@ -46,7 +46,7 @@ The box already ships mitigations (avahi tuned for Windows quirks, re-announce o
 |---|---|---|
 | **80** | ClawBox web OS (login, desktop, wizard, `/setup-api/*`) | LAN |
 | 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN |
-| **18789** | OpenClaw gateway | **loopback only** — proxied through port 80; opening it directly in a browser is a common mistake (it won't accept your password) |
+| **18789** | OpenClaw gateway | LAN, **token-gated** — the page loads, but never browse it directly: it won't accept your password. Everything goes through port 80 |
 | 3006 | Terminal (xterm.js) WebSocket PTY | LAN (proxied at `/terminal-ws`) |
 | 5900 / 6080 | x11vnc / noVNC websockify (Remote Desktop app) | localhost / proxied at `/novnc-ws` |
 | 18800 | Chromium DevTools Protocol (AI browser control) | localhost |

@@ -1,74 +1,70 @@
 ---
 title: "Updating ClawBox"
 icon: "download"
-summary: "The reliable way to update your ClawBox to the latest version — and how to recover if an update gets stuck."
+summary: "How to update your ClawBox — the System Update app, the SSH alternative, and the recovery updater for stuck boxes."
 ---
 
-Keeping your ClawBox current gets you the newest features and fixes. This page covers the **most reliable way to update** and how to recover if an in‑app update ever gets stuck.
+Keeping your ClawBox current gets you the newest features and fixes. Updates never touch your data — settings, AI keys, chats, and channel tokens live outside the app code and are preserved.
 
-<Note>
-Your data, settings and channel tokens live in `~/.openclaw`, separate from the app code. Updating the app does not touch them — and the steps below make a backup first, just in case.
-</Note>
-
-## Update safely (recommended)
-
-This one‑line updater syncs your box cleanly to the latest version. It works on **any** ClawBox version and is the method we recommend — especially for older boxes, where the in‑app **System Update** button can stall.
-
-Open the **Terminal** app on the ClawBox desktop, or connect over SSH from your computer:
+## Update from the ClawBox screen (recommended)
 
 <Steps>
-  <Step title="Connect (if using SSH)">
-    Use the device's **IP address** (the same one you use for `:18789`), not `clawbox.local`:
-    ```bash
-    ssh clawbox@YOUR_BOX_IP
-    ```
-    The password is the system password you set during setup (the screen won't show characters as you type — that's normal).
+  <Step title="Open System Update">
+    Browse to `http://YOUR_BOX_IP`, log in, and open the **System Update** app (also reachable from **Settings**).
   </Step>
-  <Step title="Back up your settings">
-    ```bash
-    cp -r ~/.openclaw ~/.openclaw.backup-$(date +%F)
-    ```
-    This keeps a dated copy of your data, settings and channel tokens.
+  <Step title="Start the update">
+    If a new version is available, click **Update**. The app shows live progress through every step.
   </Step>
-  <Step title="Run the updater (one line)">
-    ```bash
-    bash <(curl -fsSL https://raw.githubusercontent.com/id-robots/clawbox/main/scripts/force-update.sh)
-    ```
-    Let it finish — it fetches the latest version, rebuilds, and restarts the services. This takes a few minutes.
-  </Step>
-  <Step title="Confirm it's back">
-    Open `http://YOUR_BOX_IP` for the desktop and click **Connect** at `http://YOUR_BOX_IP:18789`. Both should work, and you'll be on the latest version.
+  <Step title="Let it reboot">
+    The final step **reboots the box** — it's offline for a minute or two. That's normal, not a hang. When it's back, the update is done.
   </Step>
 </Steps>
 
-## Always use the device IP, not `clawbox.local`
+<Tip>
+Optional, for extra peace of mind before any update — make a dated backup of your settings (over SSH or the Terminal app):
 
-`clawbox.local` relies on **mDNS** (Bonjour), which many Windows setups and home routers don't handle reliably — guest networks, "client isolation", VPNs and some mesh systems block it. The device's **IP address** always works because it's a direct connection.
+```bash
+cp -r ~/.openclaw ~/.openclaw.backup-$(date +%F)
+```
+</Tip>
 
-Find the IP in your router's connected‑devices list (it's the same address you use for the `:18789` dashboard), then browse to `http://YOUR_BOX_IP`.
+## Update over SSH (headless alternative)
 
-## An update got stuck, or I can't access the UI afterward
+Same update, no browser needed:
 
-On older versions, the in‑app **System Update** can stop midway if the device has local changes — the dashboard still loads at `:18789` but **Connect** does nothing. The fix is the same safe updater above, which syncs cleanly and bypasses the issue:
+```bash
+ssh clawbox@YOUR_BOX_IP        # your system password from setup
+sudo clawbox update
+```
+
+The password prompt won't show characters as you type — that's normal. Let the installer finish completely (it prints numbered steps), then the box reboots.
+
+## An update got stuck, or the box misbehaves afterward
+
+On older versions the in-app update could stall midway (usually when the device had local code changes). The fix is the **recovery updater** — a standalone one-liner that hard-syncs the box to the latest release and rebuilds everything, keeping your data:
 
 <Steps>
-  <Step title="Connect over SSH (use the IP)">
+  <Step title="Connect over SSH">
     ```bash
     ssh clawbox@YOUR_BOX_IP
     ```
+    Use the device's **IP address** rather than `clawbox.local` — the name relies on mDNS, which many Windows machines and routers handle unreliably (find the IP in your router's connected-devices list).
   </Step>
   <Step title="Run the recovery updater">
     ```bash
-    bash <(curl -fsSL https://raw.githubusercontent.com/id-robots/clawbox/main/scripts/force-update.sh)
+    bash <(curl -fsSL https://raw.githubusercontent.com/ID-Robots/clawbox/main/scripts/force-update.sh)
     ```
+    Takes 10–15 minutes — let it finish completely.
   </Step>
-  <Step title="Check the services are running">
+  <Step title="Confirm it's back">
     ```bash
-    systemctl is-active clawbox-gateway.service clawbox-setup.service
+    systemctl is-active clawbox-setup clawbox-gateway
     ```
-    Both should print `active`. Then reload `http://YOUR_BOX_IP` and click **Connect** at `:18789`.
+    Both should print `active`. Then reload `http://YOUR_BOX_IP` and send your assistant a message — a reply confirms everything is running.
   </Step>
 </Steps>
+
+More recovery options (password reset, safe reinstall, factory reset) are on the [Recovery](/support/recovery) page; deeper diagnosis lives in [Troubleshooting](/support/troubleshooting#update-finished-but-the-box-misbehaves). For how updates work under the hood (release channels, what survives, version pinning), see the [Update System](/technical/update-system) reference.
 
 <Warning>
 If any step returns an error, stop there rather than forcing it — reach out and we'll finish it together: email [yanko@idrobots.com](mailto:yanko@idrobots.com) or join our [Discord community](https://discord.gg/vsTsaY4Tuk).

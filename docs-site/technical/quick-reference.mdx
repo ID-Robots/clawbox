@@ -22,10 +22,10 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 | Port | Service | Exposure |
 |---|---|---|
 | 80 | Web OS (`clawbox-setup`) — UI, login, `/setup-api/*`, proxies to gateway | LAN |
-| 18789 | OpenClaw gateway | **loopback only** — never browse it directly |
+| 18789 | OpenClaw gateway | LAN, token-gated — **never browse it directly** |
 | 22 | SSH | LAN |
-| 3006 | Terminal WS (proxied at `/terminal-ws`) | via 80 |
-| 5900/6080 | VNC / noVNC (proxied at `/novnc-ws`) | via 80 |
+| 3006 | Terminal WS (proxied at `/terminal-ws`) | LAN |
+| 5900/6080 | VNC (localhost) / noVNC (proxied at `/novnc-ws`) | localhost / LAN |
 | 18800 | Chromium CDP (AI browser) | localhost |
 | 11434 | Ollama | localhost |
 | 8080 / 8880 | llama.cpp / Kokoro TTS | localhost |

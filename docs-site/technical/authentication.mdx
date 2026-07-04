@@ -58,11 +58,11 @@ All are per-install random values with `0600` permissions, seeded/re-hardened au
 
 ## Provider credentials
 
-AI provider keys and OAuth sessions live in `~/.openclaw/agents/main/agent/auth-profiles.json` — **not** in `openclaw.json` (which only holds `{provider, mode}` metadata). The ChatGPT-subscription session is additionally mirrored to each agent's `codex-home/auth.json`. See [AI Providers](/technical/ai-providers) for the full credential-flow map.
+AI provider keys and OAuth sessions are separate from all of the above — see [AI Providers → Where credentials actually go](/technical/ai-providers#where-credentials-actually-go) for the full map.
 
 ## Security posture summary
 
-- Gateway is **loopback-only**; all LAN traffic passes the authenticated web app.
+- The gateway listens on the LAN but is **token-gated** (per-device random token); users go through the authenticated web app on port 80, which injects the token for them.
 - Web login is rate-limited with lockout; passwords are never logged; control characters are rejected.
 - Privileged operations run through an allowlisted systemd template (polkit + narrow sudoers), never arbitrary root exec from the web process.
 - Telegram DMs default to **pairing** mode — unknown senders are inert until the owner approves their 8-character code. Config that would open DMs to everyone (`dmPolicy:"open"` + `allowFrom:["*"]`) is actively stripped on boot.

@@ -16,7 +16,7 @@ Everything ClawBox cares about lives under `/home/clawbox`. The app itself is a 
 | `…/clawbox/.update-branch` | Update-channel pin (`beta` etc.) — survives updates *and* factory reset |
 | `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version for the fleet |
 | `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
-| `~/.openclaw/` | **OpenClaw state**: `openclaw.json` (gateway config), `agents/<agent>/agent/auth-profiles.json` (**provider credentials**), `agents/<agent>/agent/codex-home/auth.json` (ChatGPT-subscription session), `credentials/telegram-*.json` (pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
+| `~/.openclaw/` | **OpenClaw state**: `openclaw.json` (gateway config), `agents/` (per-agent credentials — exact paths in the table below), `credentials/` (Telegram pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
 | `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
 | `~/.clawkeep/` | ClawKeep backup state: portal `token`, `config.toml`, `state.json`, encryption `passphrase`, `schedule.json` |
 | `~/.npm-global/` | OpenClaw install (`bin/openclaw`) |

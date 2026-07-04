@@ -2,7 +2,7 @@
 
 > ClawBox is pre-configured AI hardware (NVIDIA Jetson) running OpenClaw OS — a self-hosted AI assistant reachable from Telegram and the web. This documentation covers consumer setup, deep technical reference, troubleshooting, and recovery. Site: https://docs.clawbox.tech · Source: https://github.com/ID-Robots/clawbox (docs live in docs-site/, releases are vX.Y.Z tags on main, integration branch is beta).
 
-Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the loopback gateway); one Linux password (`clawbox` user) for both SSH and browser login; device state in /home/clawbox/clawbox/data and ~/.openclaw (survives updates; wiped by factory reset); updates are git-tag based and reboot the box at the end; provider credentials live in ~/.openclaw/agents/main/agent/auth-profiles.json.
+Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-gated gateway; it loads but rejects passwords); one Linux password (`clawbox` user) for both SSH and browser login; device state in /home/clawbox/clawbox/data and ~/.openclaw (survives updates; wiped by factory reset); updates are git-tag based and reboot the box at the end; provider credentials live in ~/.openclaw/agents/main/agent/auth-profiles.json.
 
 ## Start Here
 
@@ -12,8 +12,8 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the loopba
 
 ## Setup
 
-- [First Boot](https://docs.clawbox.tech/setup/first-boot): the on-device setup wizard
-- [Connect to a Network](https://docs.clawbox.tech/setup/connect-network): Wi-Fi/Ethernet, ClawBox-Setup hotspot (10.42.0.1)
+- [First Boot](https://docs.clawbox.tech/setup/first-boot): unbox, connect, pair via QR code — the first-run guide
+- [Connect to a Network](https://docs.clawbox.tech/setup/connect-network): joining Wi-Fi or Ethernet after setup
 - [Choose Your AI Provider](https://docs.clawbox.tech/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models
 - [OpenClaw Setup](https://docs.clawbox.tech/setup/openclaw-setup): gateway configuration
 

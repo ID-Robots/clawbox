@@ -87,24 +87,15 @@ There is **no separate admin password** — the browser login uses the same syst
     sudo systemctl restart clawbox-setup
     ```
   </Step>
-  <Step title="Rebuild the web app (a half-finished update can serve a stale build)">
-    ```bash
-    cd /home/clawbox/clawbox
-    git fetch origin
-    git checkout -f main
-    git reset --hard origin/main
-    sudo bash install.sh
-    sudo reboot
-    ```
-
-    Takes 10–15 minutes; settings and keys are kept. Retest in a private window after the reboot.
-  </Step>
-  <Step title="Last resort — set a fresh password">
+  <Step title="Set a fresh password (10 seconds, no data loss)">
     ```bash
     sudo passwd clawbox
     ```
 
-    Sets a brand-new password (10 seconds, no data loss) that both SSH and the browser use immediately. If even a fresh simple password fails in a private window, see [Recovery](/support/recovery) for the factory-reset option, and contact support with the outputs of steps 3–5.
+    Sets a brand-new password that both SSH and the browser use immediately. Use simple ASCII characters, then retest in a private window.
+  </Step>
+  <Step title="Rebuild the web app (a half-finished update can serve a stale build)">
+    Run the safe reinstall — [Recovery, option C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss) (10–15 minutes; settings and keys are kept) — then retest in a private window after the reboot. If even a fresh password on a fresh build fails, contact support with the outputs of steps 3–5.
   </Step>
 </Steps>
 
@@ -129,13 +120,13 @@ The updater only offers a release when the device's code history matches the off
     Run the safe reinstall — [Recovery, option C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss) — which hard-syncs the code to the release line and rebuilds everything.
   </Accordion>
   <Accordion title="On the beta channel this is automatic">
-    Devices on the beta channel (and the next stable release) detect divergence and show **"Updates paused — this device is on a non-release branch with local changes"** with a one-click **Reset to channel &amp; update** button that performs the hard-sync above for you.
+    Devices on the beta channel (and the next stable release) detect this state and show **"Updates paused"** with a one-click reset — see [Update System → Divergence](/technical/update-system#divergence-updates-paused).
   </Accordion>
 </AccordionGroup>
 
 ## Update finished but the box misbehaves
 
-A ClawBox update is more than `git pull` — the installer also refreshes the **systemd service files** and the **OpenClaw core**. Manual or interrupted updates can leave those stale. Symptoms and their fixes:
+A ClawBox update is more than `git pull` — the installer also refreshes the **systemd service files** and the **OpenClaw core**, and manual or interrupted updates can leave those stale. **The easiest fix is always the full installer** — re-run the update from the **System Update** app, or `sudo bash /home/clawbox/clawbox/install.sh` over SSH — which runs every step. The targeted repairs below are the faster, surgical alternatives:
 
 <AccordionGroup>
   <Accordion title="Chat shows 'unauthorized: gateway token mismatch' or 'too many failed authentication attempts'">
@@ -164,18 +155,15 @@ A ClawBox update is more than `git pull` — the installer also refreshes the **
     cd /home/clawbox/clawbox && sudo bash install.sh && sudo reboot
     ```
   </Accordion>
-  <Accordion title="Rule of thumb">
-    The **in-UI updater** (System Update app) and full `sudo bash install.sh` run every step — build, OpenClaw core, service files. Ad-hoc `git pull` + restarts do not. When in doubt, run the full installer.
-  </Accordion>
 </AccordionGroup>
 
-## AI provider errors (401 / "Incorrect API key")
+## AI provider errors (401 "Incorrect API key")
 
 <AccordionGroup>
   <Accordion title="'Incorrect API key … sk-proj-…' after switching OpenAI to the ChatGPT subscription">
-    ClawBox has **two separate OpenAI lanes**: the *API-key* lane (`openai/…` models, calls `api.openai.com`, billed per token) and the *ChatGPT subscription* lane (`codex/…` models, uses your ChatGPT plan). If a device was first set up with an API key and later switched to the subscription, an old dead key could keep being used — recurring `401 Incorrect API key` on every reply, coming back after each restart.
+    Cause: OpenAI has two separate lanes with different credentials, and after a switch an old dead API key can keep being used — recurring `401` on every reply, returning after each restart. (Full explanation: [AI Providers](/technical/ai-providers).)
 
-    **The beta channel (and the next stable release) self-heals this on boot** — it repoints the agent to the subscription lane and removes the stale key. To fix immediately on any version: open **Settings → AI**, choose **ChatGPT (sign in with ChatGPT)**, and complete the sign-in again — then reboot once and confirm it still works after the restart. If it doesn't stick, contact support.
+    **Fix now, on any version:** open **Settings → AI**, choose **ChatGPT (sign in with ChatGPT)**, complete the sign-in again — then reboot once and confirm it still works after the restart. The beta channel (and the next stable release) [self-heals this on boot](/technical/ai-providers#self-healing-on-boot-beta-channel); if the manual fix doesn't stick, contact support.
   </Accordion>
   <Accordion title="Replies stopped after changing provider or plan">
     Re-save the provider in **Settings → AI** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
