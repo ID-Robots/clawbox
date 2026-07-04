@@ -1,5 +1,6 @@
 ---
 title: "Troubleshooting"
+icon: "wrench"
 summary: "Symptom-first fixes for ClawBox issues — connection, login, updates, AI provider errors, and gateway problems, with exact diagnostic commands."
 ---
 
@@ -125,14 +126,7 @@ The updater only offers a release when the device's code history matches the off
   <Accordion title="Fix: hard-sync back to the release line">
     <Warning>This discards local **code** changes (commits and edits under `/home/clawbox/clawbox`). Your settings, AI keys, chats, and Telegram pairing live outside the code and are kept.</Warning>
 
-    ```bash
-    cd /home/clawbox/clawbox
-    git fetch origin
-    git checkout -f main
-    git reset --hard origin/main
-    sudo bash install.sh
-    sudo reboot
-    ```
+    Run the safe reinstall — [Recovery, option C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss) — which hard-syncs the code to the release line and rebuilds everything.
   </Accordion>
   <Accordion title="On the beta channel this is automatic">
     Devices on the beta channel (and the next stable release) detect divergence and show **"Updates paused — this device is on a non-release branch with local changes"** with a one-click **Reset to channel &amp; update** button that performs the hard-sync above for you.

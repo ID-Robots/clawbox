@@ -1,5 +1,6 @@
 ---
 title: "System Architecture"
+icon: "sitemap"
 summary: "How a ClawBox works inside — service topology, request routing, boot lifecycle, and the relationship between ClawBox OS and OpenClaw."
 ---
 
@@ -7,25 +8,24 @@ ClawBox is **OpenClaw OS** — a Next.js web OS wrapped around the [OpenClaw](ht
 
 ## The big picture
 
-```
-Your browser / phone
-        │  http://<box-ip>  (port 80)
-        ▼
-┌──────────────────────────────────────────────────────┐
-│  clawbox-setup  (production-server.js → Next.js)     │
-│  · desktop UI, setup wizard, login                    │
-│  · /setup-api/* device APIs                           │
-│  · proxies /api/*, WebSockets → gateway               │
-└──────────────┬───────────────────────────────────────┘
-               │ 127.0.0.1:18789 (loopback only)
-               ▼
-┌──────────────────────────────────────────────────────┐
-│  clawbox-gateway  (OpenClaw)                          │
-│  · AI agent + chat sessions                           │
-│  · providers (Claude/GPT/Gemini/local…)               │
-│  · channels (Telegram)                                │
-│  · MCP → ClawBox device tools                         │
-└──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    U["Your browser / phone"]
+    U -- "http://box-ip &nbsp;·&nbsp; port 80" --> S
+    subgraph S["clawbox-setup — the web OS"]
+        direction TB
+        s1["Desktop UI · setup wizard · login"]
+        s2["/setup-api/* device APIs"]
+        s3["Proxies /api/* + WebSockets to the gateway"]
+    end
+    S -- "127.0.0.1:18789 &nbsp;·&nbsp; loopback only" --> G
+    subgraph G["clawbox-gateway — OpenClaw"]
+        direction TB
+        g1["AI agent + chat sessions"]
+        g2["Providers: Claude · GPT · Gemini · local"]
+        g3["Channels: Telegram"]
+        g4["MCP → ClawBox device tools"]
+    end
 ```
 
 The user never talks to the gateway directly — everything enters through port 80, and the web app proxies chat/WebSocket traffic to the loopback-bound gateway.

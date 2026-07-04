@@ -1,5 +1,6 @@
 ---
 title: "Networking"
+icon: "network-wired"
 summary: "AP setup mode, captive portal, mDNS discovery, finding the device IP, and the complete port map."
 ---
 
@@ -10,10 +11,10 @@ summary: "AP setup mode, captive portal, mDNS discovery, finding the device IP, 
 | Property | Value |
 |---|---|
 | SSID | `ClawBox-Setup` (open by default; WPA-PSK if a hotspot password was configured) |
-| AP address | `10.42.0.1/24` — automatic fallback `10.43.0.1/24` if the primary subnet is already in use upstream |
+| AP address | `10.42.0.1/24` normally; the box automatically falls back to `10.43.0.1/24` if the primary subnet is already in use upstream — the captive portal and wizard follow whichever is active |
 | Wi-Fi interface | `wlP1p1s0` (Jetson default; overridable via `NETWORK_INTERFACE`) |
-| DNS | dnsmasq answers **every** name with the AP address (captive hijack) |
-| Captive portal | OS probe URLs (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) are intercepted by the web app's middleware and redirected to `http://10.42.0.1/` — phones auto-open the wizard |
+| DNS | dnsmasq answers **every** name with the active AP address (captive hijack) |
+| Captive portal | OS probe URLs (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) are intercepted by the web app's middleware and redirected to the active AP address — phones auto-open the wizard |
 | Watchdog | `clawbox-ap-watchdog.timer` re-raises the hotspot every 20 s until setup completes |
 
 If an Ethernet uplink is connected while in AP mode, the box **shares** that internet connection to hotspot clients (IP forwarding + NAT).

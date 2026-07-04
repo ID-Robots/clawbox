@@ -1,5 +1,6 @@
 ---
 title: "Quick Reference"
+icon: "bolt"
 summary: "The one-page fact sheet: ports, paths, services, commands, API endpoints, and known gotchas — optimized for fast scanning by humans and AI agents."
 ---
 
@@ -97,7 +98,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `POST /setup-api/telegram/configure` · `pairing` | Bot token / approve pairing codes |
 | `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token |
 | `POST /setup-api/setup/reset` | **Factory reset** (destructive) |
-| `wifi/*`, `files/*`, `apps/*`, `clawkeep/*`, `code/*`, `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs |
+| `/setup-api/wifi/*` · `files/*` · `apps/*` · `clawkeep/*` · `code/*` · `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs (all under `/setup-api/`) |
 
 ## Gotchas (hard-won)
 
