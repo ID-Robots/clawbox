@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="public/clawbox-logo.png" alt="ClawBox" width="180" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/wordmark-dark.png">
+    <img src=".github/assets/wordmark-light.png" alt="ClawBox" width="280" />
+  </picture>
 </p>
 
 <h3 align="center">OpenClaw OS</h3>
@@ -11,24 +14,36 @@
 
 <p align="center">
   <a href="https://clawbox.tech"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-clawbox.tech-orange?style=flat-square" /></a>
-  <a href="https://discord.gg/FbKmnxYnpq"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
+  <a href="https://docs.clawbox.tech"><img alt="Docs" src="https://img.shields.io/badge/📖_Docs-docs.clawbox.tech-F26B21?style=flat-square" /></a>
+  <a href="https://discord.gg/vsTsaY4Tuk"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
+  <a href="https://github.com/ID-Robots/clawbox/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ID-Robots/clawbox?style=flat-square&color=success" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-NVIDIA_Jetson-76b900?style=flat-square&logo=nvidia" />
 </p>
 
 <p align="center">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-NVIDIA_Jetson-76b900?style=flat-square&logo=nvidia" />
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js_16-black?style=flat-square&logo=next.js" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178c6?style=flat-square&logo=typescript&logoColor=white" />
   <img alt="Bun" src="https://img.shields.io/badge/Bun-fbf0df?style=flat-square&logo=bun&logoColor=black" />
+</p>
+
+<p align="center">
+  <img src=".github/assets/desktop.webp" alt="The ClawBox desktop — a Chrome OS-style environment served straight from the device" width="920" />
 </p>
 
 ---
 
 ## What is ClawBox?
 
-ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://clawbox.tech/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). Unlike cloud AI, your data never leaves your device. It manages the full device lifecycle: broadcasts a WiFi access point for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps.
+ClawBox is **OpenClaw OS** — the operating system for [ClawBox hardware](https://clawbox.tech/), a private AI assistant running on NVIDIA Jetson. Unlike cloud AI, your data never leaves your device. It manages the full device lifecycle: broadcasts a WiFi access point for first-boot setup from any phone, transitions to your home network, then serves a Chrome OS-style desktop with built-in apps.
 
-The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
+The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox **an OS the AI can operate**, not just a UI the user clicks through:
+
+<p align="center">
+  <img src=".github/assets/chat-agent.webp" alt="The on-device agent answering in chat while running real commands on the box (live tool calls visible)" width="820" />
+</p>
+
+<p align="center"><sub><em>A real session: the agent introduces itself while executing live tool calls (<code>exec</code>, <code>glob</code>) on the device.</em></sub></p>
 
 ### Key Features
 
@@ -36,25 +51,44 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 |---------|-------------|
 | 🧙 **5-minute setup** | Guided wizard: WiFi → updates → AI provider → messaging → done |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, and system tray |
-| 🤖 **AI-controlled OS** | 40+ MCP tools let the AI agent operate the entire device |
+| 🤖 **AI-controlled OS** | ~50 MCP tools let the AI agent operate the entire device |
 | 🔒 **Privacy-first** | Everything runs locally. No telemetry. No data collection. |
-| 🧠 **Hybrid AI** | Local models (Llama, Gemma, Mistral) + cloud (Claude, GPT, Gemini) |
+| 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude, GPT (API or ChatGPT plan), Gemini, OpenRouter, local Ollama / llama.cpp |
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
-| 💬 **Multi-platform** | Telegram, web panel, desktop chat |
-| 💻 **Built-in apps** | Terminal, file manager, VS Code, VNC, app store, AI chat |
+| 💬 **Multi-platform** | Telegram (pairing-protected), web panel, desktop chat |
+| 💻 **Built-in apps** | Terminal, file manager, VS Code, remote desktop, app store, AI chat, ClawKeep backups |
 | 🛠️ **Code assistant** | AI builds and deploys desktop webapps through iterative coding |
-| ⚡ **Always-on** | 7-15W power. Runs 24/7 for ~€39/year in electricity |
+| ⚡ **Always-on** | 7–15 W power. Runs 24/7 for ~€39/year in electricity |
 
 ### 🖥️ Hardware
+
+<img align="right" src=".github/assets/clawbox-device.webp" alt="The ClawBox device" width="280" />
 
 | Component | Spec |
 |-----------|------|
 | **Processor** | NVIDIA Jetson Orin Nano 8GB (Super) |
 | **AI Performance** | 67 TOPS |
 | **Storage** | 512GB NVMe SSD |
-| **Power** | 7-15W typical, USB-C |
-| **Size** | 100 × 79 × 31mm |
-| **Case** | Carbon fiber |
+| **Power** | 7–15 W typical, USB-C |
+| **Size** | 100 × 79 × 31 mm |
+
+Also available: **ClawBox Workstation** — NVIDIA DGX Spark, ~1 PFLOP, runs frontier-scale local models. Details on [clawbox.tech](https://clawbox.tech).
+
+<br clear="right"/>
+
+---
+
+## 📖 Documentation
+
+Full documentation lives at **[docs.clawbox.tech](https://docs.clawbox.tech)**:
+
+| | |
+|---|---|
+| [Quickstart](https://docs.clawbox.tech/quickstart) · [First Boot](https://docs.clawbox.tech/setup/first-boot) | Unbox → power → talk, and the setup wizard |
+| [Technical Reference](https://docs.clawbox.tech/technical/quick-reference) | Architecture, networking, filesystem, auth, AI providers, update system — starting with the one-page **Quick Reference** |
+| [Troubleshooting](https://docs.clawbox.tech/support/troubleshooting) · [Recovery](https://docs.clawbox.tech/support/recovery) | Symptom-first diagnostic ladders and ordered recovery options |
+| [Agent Interface (MCP)](https://docs.clawbox.tech/technical/agent-interface) | The full device-tool catalog and the `clawbox` CLI |
+| [llms.txt](https://docs.clawbox.tech/llms.txt) | Machine-readable docs index — point your AI agent here |
 
 ---
 
@@ -91,132 +125,42 @@ password) and navigate to:
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
+### Update
+
+From the UI: open the **System Update** app. Over SSH: `sudo clawbox update`.
+Updates are release-tag based and never touch your data — details in
+[Updating ClawBox](https://docs.clawbox.tech/support/updating).
+
+---
+
 ## How It Works
 
-### Layer 1 — System Bootstrap
+**Layer 1 — System bootstrap.** `install.sh` provisions the Jetson from scratch: system packages, Node.js 22 + Bun, the web OS build, the OpenClaw gateway (version-pinned), systemd services, mDNS, and the captive-portal WiFi access point for first-boot setup.
 
-The installer (`install.sh`) provisions the Jetson from scratch:
-- Installs system packages, Node.js 22, Bun runtime
-- Sets hostname to `clawbox`, enables mDNS discovery
-- Builds the web OS, installs the OpenClaw gateway
-- Configures systemd services and captive-portal DNS
-- Creates the WiFi access point for first-boot setup
+**Layer 2 — Setup wizard.** On first boot (or after factory reset) a guided wizard handles language (10 supported), device password, WiFi, updates, AI provider (API key or OAuth sign-in), and Telegram — about 5 minutes end to end.
 
-Two systemd services run the OS:
+**Layer 3 — Desktop environment.** A Chrome OS-style desktop served from the device: AI chat, terminal (xterm.js over WebSocket PTY), file manager, browser automation, remote desktop (noVNC), VS Code, app store, ClawKeep cloud backups, settings — draggable windows, taskbar, system tray, and a responsive mobile layout.
 
-| Service | Role |
-|---|---|
-| `clawbox-ap` | WiFi access point (SSID: ClawBox-Setup, IP: 10.42.0.1) |
-| `clawbox-setup` | Web server on port 80 (Next.js + WebSocket proxy) |
-
-### Layer 2 — Setup Wizard
-
-On first boot (or after factory reset), the OS presents a 7-step wizard:
-
-1. 🌐 **Welcome** — Language selection (10 languages supported)
-2. 🔒 **Security** — Device password + WiFi hotspot credentials
-3. 📶 **WiFi** — Connect to your home/office network (or use Ethernet)
-4. ⬆️ **Update** — Pull latest system updates
-5. 🧠 **AI Models** — API key or OAuth login for Claude, GPT, Gemini, OpenRouter, ClawBox AI, or local Ollama
-6. 💬 **Telegram** — Optional bot token for remote messaging
-7. ✅ **Done** — System status dashboard and factory reset option
-
-### Layer 3 — Desktop Environment
-
-After setup, ClawBox serves a Chrome OS-style desktop accessible from any browser:
-
-- 🤖 **AI Chat** — Full-window and floating popup chat via the OpenClaw gateway
-- 💻 **Terminal** — xterm.js shell with WebSocket PTY
-- 📁 **File Manager** — Browse, upload, rename, delete files on the device
-- 🌐 **Browser Automation** — Visual Chromium control via DevTools Protocol
-- 🖥️ **Remote Desktop** — NoVNC viewer for VNC sessions
-- 📝 **VS Code** — Integrated code-server IDE
-- 🏪 **App Store** — Discover and install skills from openclawhardware.dev
-- ⚙️ **Settings** — WiFi, AI provider, appearance, Telegram, system management
-- 🦙 **Ollama Models** — Pull, search, and manage local AI models
-- 🦀 **Mascot** — Animated crab companion with personality states
-
-The desktop features draggable/resizable windows, a taskbar with system tray, and a responsive mobile layout for phone access.
-
-### Layer 4 — AI Agent Integration (MCP)
-
-The OpenClaw AI agent controls the device through an MCP (Model Context Protocol) server. This is what makes ClawBox an *OS* rather than just a dashboard — the AI can operate the device autonomously.
-
-**Device control tools:**
-
-```text
-system_stats / system_info / system_power   — monitor and manage the device
-bash                                        — execute shell commands
-read_file / write_file / edit_file          — file operations
-list_directory / glob / grep                — search files and content
-wifi_scan / wifi_status                     — network management
-ui_open_app / ui_notify                     — control the desktop UI
-```
-
-**Browser automation tools:**
-
-```text
-browser_launch / browser_navigate / browser_click / browser_type
-browser_scroll / browser_screenshot / browser_keypress / browser_close
-```
-
-**App management tools:**
-
-```text
-app_search / app_install / app_uninstall     — app store operations
-webapp_create / webapp_update                — create desktop apps from HTML
-preferences_get / preferences_set            — user preferences
-```
-
-**Code assistant tools** (for building new desktop webapps):
-
-```text
-code_project_init    — scaffold a new multi-file webapp project
-code_project_list    — list all projects
-code_project_build   — bundle CSS/JS into HTML, deploy to desktop, open the app
-code_project_delete  — remove a project
-code_file_write      — create or overwrite a project file
-code_file_read       — read a project file
-code_file_edit       — surgical string-replacement edits
-code_file_delete     — remove a file
-code_file_list       — recursive project tree
-code_search          — grep across project files
-```
-
-The code assistant enables the AI to iteratively build, test, and deploy new desktop apps — write code across multiple files, make precise edits, search the codebase, then build a self-contained webapp that appears on the user's desktop.
-
-**CLI wrapper** (`clawbox` command):
-
-```bash
-clawbox webapp create <appId> <name> [color] < file.html
-clawbox app open <appId>
-clawbox app list
-clawbox notify <message>
-clawbox system stats
-clawbox code init <projectId> <name> [template] [color]
-clawbox code build <projectId>
-clawbox code files <projectId>
-clawbox code search <projectId> <pattern>
-```
+**Layer 4 — AI agent integration.** The OpenClaw agent gets ~50 MCP tools to operate the device: shell, files, real-browser control, app installs, system power, preferences, and a code assistant that builds and deploys desktop webapps. A `clawbox` CLI exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.tech/technical/agent-interface).**
 
 ---
 
 ## 🏗️ Architecture
 
 ```text
-Browser (http://clawbox.local)
+Browser (http://<box-ip>)
   │
   ├── Port 80: Next.js (production-server.js)
   │     ├── /setup          → Setup wizard (React SPA)
   │     ├── /login          → Authentication
   │     ├── /               → Desktop environment (post-setup)
-  │     ├── /setup-api/*    → 50+ API routes (system, files, code, browser, etc.)
+  │     ├── /setup-api/*    → 50+ API routes (system, files, code, browser, …)
   │     ├── /api/*          → Proxy to OpenClaw gateway
   │     └── WebSocket       → Proxy to gateway + terminal PTY
   │
   ├── Port 3006: Terminal WebSocket PTY server
   │
-  ├── Port 18789: OpenClaw Gateway (localhost only)
+  ├── Port 18789: OpenClaw Gateway (token-gated; all user traffic goes through port 80)
   │     ├── AI Agent (MCP tools → controls the entire OS)
   │     ├── Control UI
   │     ├── WebSocket (real-time chat)
@@ -225,7 +169,7 @@ Browser (http://clawbox.local)
   └── Port 18800: Chromium CDP (browser automation)
 ```
 
-Node.js is used for the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying.
+Node.js runs the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying. The deep dive lives in the [Architecture reference](https://docs.clawbox.tech/technical/architecture).
 
 ## 🛠️ Tech Stack
 
@@ -236,7 +180,7 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 | **Package Manager** | Bun |
 | **Runtime** | Node.js 22 (production), Bun (dev/build) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) via MCP |
-| **Local Models** | Ollama (Llama, Gemma, Mistral) |
+| **Local Models** | Ollama + llama.cpp (Llama, Gemma, Mistral, …) |
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
 | **Testing** | Vitest + Playwright |
 
@@ -244,6 +188,7 @@ Node.js is used for the production server because Bun doesn't support `http.Serv
 
 ```text
 ├── config/                 Systemd services, captive-portal DNS
+├── docs-site/              docs.clawbox.tech source (Mintlify)
 ├── mcp/                    MCP server + CLI (AI agent interface to the OS)
 ├── scripts/                WiFi AP, terminal server, voice/TTS, Jetson tuning
 ├── src/
@@ -284,17 +229,24 @@ bun run test             # Unit tests (Vitest)
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
 
-## 🌍 Internationalization
+See `.env.example` for the full list.
 
-10 languages: English, German, Spanish, French, Italian, Japanese, Dutch, Swedish, Chinese, Bulgarian. Auto-detected from browser, changeable in settings.
+## 🤝 Contributing
+
+Pull requests are welcome:
+
+- **Target the `beta` branch** — it's the integration branch; `main` carries tagged releases.
+- Every PR runs CI (unit tests + e2e + a full-install e2e) and an automated CodeRabbit review.
+- Keep PRs focused — one issue or feature per PR.
+- 🌍 The UI ships in 10 languages (English, German, Spanish, French, Italian, Japanese, Dutch, Swedish, Chinese, Bulgarian) — string changes go in `src/lib/translations.ts` for all locales.
 
 ---
 
 ## 🌍 Community & Links
 
 - **🌐 Website:** [clawbox.tech](https://clawbox.tech)
-- **💬 Discord:** [discord.gg/FbKmnxYnpq](https://discord.gg/FbKmnxYnpq)
 - **📖 Docs:** [docs.clawbox.tech](https://docs.clawbox.tech)
+- **💬 Discord:** [discord.gg/vsTsaY4Tuk](https://discord.gg/vsTsaY4Tuk)
 - **🛒 Buy ClawBox:** [clawbox.tech](https://clawbox.tech)
 - **🤖 Powered by:** [OpenClaw](https://github.com/openclaw/openclaw)
 
