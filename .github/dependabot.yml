@@ -1,0 +1,31 @@
+# Dependabot: security + freshness monitoring for the two ecosystems that
+# ship to customer devices. Alerts also require "Dependabot alerts" to be
+# enabled in Settings → Code security (admin toggle).
+version: 2
+updates:
+  # npm dependencies (Next.js app + MCP server). Weekly, grouped, so the
+  # update stream doesn't flood the PR list — security advisories still
+  # arrive immediately regardless of this schedule.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    target-branch: "beta"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"
+
+  # GitHub Actions pins (checkout, setup-node, gh-pages, …)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    target-branch: "beta"
+    labels:
+      - "dependencies"
