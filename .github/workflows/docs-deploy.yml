@@ -42,6 +42,8 @@ jobs:
           # GitHub Pages essentials
           touch _site/.nojekyll
           echo "docs.clawbox.tech" > _site/CNAME
+          # llms.txt — agent-discovery index (mint export doesn't emit one)
+          cp llms.txt _site/llms.txt
           # strip air-gapped helper files
           rm -f "_site/serve.js" "_site/Start Docs.bat" "_site/Start Docs.command"
 

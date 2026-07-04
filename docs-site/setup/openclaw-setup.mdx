@@ -1,5 +1,6 @@
 ---
 title: "OpenClaw Setup Guide"
+icon: "sliders"
 summary: "Configure OpenClaw on your ClawBox — channels, voice, AI models, and advanced options."
 ---
 
@@ -9,7 +10,7 @@ options — whether you're on a ClawBox or a DIY install.
 
 ## Prerequisites
 
-- **Node.js 18+** installed (pre-installed on ClawBox)
+- **Node.js 22+** installed (pre-installed on ClawBox)
 - **4 GB+ RAM** recommended
 - Linux, macOS, or Windows
 - Always-on internet connection
@@ -72,9 +73,9 @@ See [Choose Your AI Provider](/setup/choose-ai-provider) for the full provider l
 
 <Tip>
 - Run `openclaw status` to check that all services are running.
-- Use `systemctl restart openclaw` if something misbehaves after a config change.
-- Tail logs in real time with `journalctl -u openclaw -f`.
-- Enable automatic updates for the latest features and security patches.
+- If something misbehaves after a config change, restart the gateway — **on a ClawBox** the service is `sudo systemctl restart clawbox-gateway` (there is no `openclaw` unit); on a DIY install use whatever unit name you created.
+- Tail logs in real time — ClawBox: `journalctl -u clawbox-gateway -f`; DIY: `journalctl -u <your-unit> -f`.
+- Keep the software current for the latest features and security patches — see [Updating ClawBox](/support/updating).
 </Tip>
 
 ## Skip the setup

@@ -1,0 +1,88 @@
+---
+title: "Agent Interface (MCP)"
+icon: "toolbox"
+summary: "The device-control tools the AI agent gets — full MCP tool catalog, the clawbox CLI, and how webapp/code-assistant creation works."
+---
+
+What makes ClawBox an *AI-operated OS* rather than a chat box: the OpenClaw agent is wired to a **ClawBox MCP server** (`mcp/clawbox-mcp.ts`, registered as `mcp.servers.clawbox` on every gateway start) exposing ~50 device tools. The agent can manage files, run commands, browse the real desktop Chromium, install apps, and build webapps — all authenticated back to the device APIs with a per-install bearer token.
+
+## Tool catalog
+
+### Shell & orchestration
+| Tool | Purpose |
+|---|---|
+| `bash` | Run a shell command (30 s default / 10 min max; background mode available). Destructive patterns (`rm -rf /`, `dd`, `mkfs`, force-push, …) are hard-blocked |
+| `agent` | Spawn a background sub-agent running a command sequence |
+| `task_status` | Check a background task's output |
+| `clawbox_health` | Verify the MCP token + device API reachability — "run first when tools fail" |
+
+### Files
+| Tool | Purpose |
+|---|---|
+| `read_file` | Read text/images/PDF/notebooks (line-numbered, offset/limit) |
+| `write_file` / `edit_file` | Create/overwrite or exact-string-replace (staleness-checked, returns diffs) |
+| `list_directory`, `glob`, `grep` | Browse, find by pattern, content-search (ripgrep) |
+| `notebook_edit` | Edit Jupyter cells |
+
+### Web
+| Tool | Purpose |
+|---|---|
+| `web_fetch` | Fetch a URL → readable text/markdown (cached 15 min) |
+| `web_search` | Web search |
+
+### Browser (drives the real desktop Chromium via CDP — visible in Remote Desktop)
+`browser_open` (attach + navigate + screenshot), `browser_navigate`, `browser_click`, `browser_type`, `browser_keypress`, `browser_scroll`, `browser_screenshot`, `browser_close`.
+
+### System, network & UI
+| Tool | Purpose |
+|---|---|
+| `system_stats` / `system_info` | CPU/memory/disk/temperature/GPU, hostname |
+| `system_power` | Restart or shut down the device |
+| `wifi_scan` / `wifi_status` / `vnc_status` | Network + remote-display state |
+| `ui_open_app` / `ui_list_apps` / `ui_notify` | Open desktop apps, list them, send a desktop notification |
+| `preferences_get` / `preferences_set` | Persistent user preferences |
+
+### Apps & webapps
+| Tool | Purpose |
+|---|---|
+| `app_search` / `app_install` / `app_uninstall` | The App Store (apps + skills from the portal) |
+| `webapp_create` / `webapp_update` | Single-file HTML webapps installed straight onto the desktop |
+| `code_project_init` / `code_project_list` / `code_project_build` / `code_project_delete` | Multi-file code-assistant projects — scaffold → edit with the file tools → build deploys to the desktop |
+| `task_create` / `task_update` / `task_get` / `task_list` / `task_stop` | Agent task tracking with dependencies |
+| `clawbox_context` | Returns the on-device field guide (`CLAWBOX.md`) — loaded once at session start |
+
+## The `clawbox` CLI
+
+The same capabilities are shell-callable (used by agents in the Terminal and by admins over SSH):
+
+```bash
+clawbox webapp create <appId> <name> [--html ...]   # install a desktop webapp
+clawbox app open <appId> | app list                 # drive the desktop
+clawbox notify "message"                            # desktop notification
+clawbox system stats | system info                  # metrics
+clawbox code init|build|read|write|edit|search ...  # code-assistant projects
+sudo clawbox update                                 # full system update (runs install.sh)
+```
+
+## How authentication works
+
+- The MCP server talks to the device APIs at `http://127.0.0.1:80/setup-api/*` with the **MCP bearer token** (`data/.mcp-token`, seeded at boot, 0600).
+- The gateway launches the MCP server via bun with that token in its environment — reconciled automatically on every gateway start.
+- If tools suddenly fail with auth errors, `clawbox_health` diagnoses it; a gateway restart re-reconciles the registration.
+
+## Safety rails
+
+- `bash` refuses known-destructive patterns outright and warns on risky git operations.
+- Telegram senders must be pairing-approved before the agent will act for them ([details](/technical/authentication#security-posture-summary)).
+- Webapps persist data through the device KV API (no localStorage) and run as plain HTML on the desktop.
+
+## For agent developers
+
+Working *on* a ClawBox (or building automation against one)? The stable integration surfaces are:
+
+1. **MCP tools** (this page) — through the OpenClaw agent.
+2. **`/setup-api/*` HTTP APIs** — session-cookie or MCP-bearer authenticated; the same APIs the desktop UI uses.
+3. **`clawbox` CLI** — over SSH or the Terminal app.
+4. The agent workspace guide seeded at `~/.openclaw/workspace/CLAWBOX.md` on-device.
+
+See the [Quick Reference](/technical/quick-reference) for the one-page fact sheet (ports, paths, services, commands).

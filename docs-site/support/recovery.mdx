@@ -1,0 +1,104 @@
+---
+title: "Recovery"
+icon: "life-ring"
+summary: "Recovery options ordered from least to most destructive — password reset, service restart, safe reinstall, and full factory reset."
+---
+
+When something is badly wrong, work **top to bottom** — the options are roughly ordered from least to most drastic. Everything here runs over SSH (`ssh clawbox@YOUR_BOX_IP`) unless noted.
+
+<Warning>
+Before anything destructive, note what is safe: your **settings, AI keys, chats, and Telegram pairing** live in `data/` and `~/.openclaw` — they survive options A–C untouched. Only the factory reset (D) erases them.
+</Warning>
+
+## A — Reset the password (10 seconds, no data loss)
+
+For "the box works but won't accept my password" (browser and/or SSH):
+
+```bash
+sudo passwd clawbox
+```
+
+Type your current password once (for `sudo`), then the **new** password twice. Both SSH and the browser login use the new password immediately — no restart needed. Use a simple ASCII password (letters/digits/simple symbols) to avoid keyboard-encoding mismatches between the terminal and the browser.
+
+## B — Restart the services (30 seconds, no data loss)
+
+For a box that's reachable over SSH but the web page or assistant is unresponsive:
+
+```bash
+sudo systemctl restart clawbox-setup clawbox-gateway
+```
+
+Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture logs before the next restart:
+
+```bash
+journalctl -u clawbox-setup -n 50 --no-pager
+journalctl -u clawbox-gateway -n 50 --no-pager
+```
+
+## C — Safe reinstall (10–15 minutes, no data loss)
+
+The universal fix for a half-finished update, stale build, or mysteriously broken web app. Rebuilds the entire software stack from the official release, **keeping all your data**:
+
+```bash
+cd /home/clawbox/clawbox
+git fetch origin
+git checkout -f main
+git reset --hard origin/main
+sudo bash install.sh
+sudo reboot
+```
+
+Let `install.sh` finish completely (it prints numbered steps, `[1/23] … [23/23]`), then reboot. The box is back in ~2 minutes.
+
+<Info>
+Why this works when a normal update didn't: `install.sh` refreshes **everything** — the app build, the OpenClaw core (pinned version), the systemd service files, and system packages. Partial updates (a bare `git pull`, an interrupted updater) can leave those out of sync.
+</Info>
+
+If the box is so broken the commands above fail, there is a standalone recovery script that performs the same hard-sync + rebuild:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ID-Robots/clawbox/main/scripts/force-update.sh)
+```
+
+## D — Factory reset (wipes everything)
+
+<Warning>
+**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
+</Warning>
+
+### From the UI (preferred)
+
+Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot.
+
+### Over SSH (when you can't log in to the UI)
+
+```bash
+sudo systemctl stop clawbox-setup clawbox-gateway
+sudo rm -rf /home/clawbox/clawbox/data/* /home/clawbox/.openclaw/* /home/clawbox/.clawkeep/*
+echo "clawbox:clawbox" | sudo chpasswd
+sudo reboot
+```
+
+### After the reset
+
+<Steps>
+  <Step title="Join the setup hotspot">
+    Wait ~2 minutes, then connect your phone or laptop to the **ClawBox-Setup** Wi-Fi network.
+  </Step>
+  <Step title="Open the wizard">
+    Browse to `http://10.42.0.1`. If a login is requested, the password is `clawbox`.
+  </Step>
+  <Step title="Run through setup">
+    Wi-Fi → new password → AI provider → Telegram — the same flow as [First Boot](/setup/first-boot).
+  </Step>
+</Steps>
+
+## Which option do I need?
+
+| Symptom | Start with |
+|---|---|
+| Password not accepted | **A** (after the [login ladder](/support/troubleshooting#the-browser-rejects-my-password-but-ssh-accepts-it)) |
+| Page won't load / assistant silent | **B**, then **C** |
+| Update failed or box half-updated | **C** |
+| Updates never appear (modified box) | **C** (the hard-sync clears local changes) |
+| Selling the box / start truly fresh / nothing else worked | **D** |
