@@ -12,6 +12,9 @@ on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
 
+# Empty default grant — only the job's explicit scopes apply.
+permissions: {}
+
 concurrency:
   group: clawreview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -39,11 +42,21 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Anthropic SDK
-        # Pinned + scoped to scripts/ (root install would reify the whole
-        # bun-managed tree — see issue-triage.yml for the full rationale).
-        # Keep the version in sync with issue-triage.yml.
-        run: npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
+      - name: Install Claude backend
+        # Two transports, one wins at runtime (script picks by env):
+        #  - CLAUDE_CODE_OAUTH_TOKEN set -> Claude Code CLI (subscription/OAuth,
+        #    the team's preferred path; same runtime as claude-code-action)
+        #  - else ANTHROPIC_API_KEY -> the SDK
+        # Install whichever backend the available secret needs; both pinned.
+        # Keep versions in sync with issue-triage.yml.
+        env:
+          HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$HAS_OAUTH" ]; then
+            npm install -g @anthropic-ai/claude-code@2.1.201
+          else
+            npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
+          fi
 
       - name: Mint ClawReview app token
         # Optional custom identity: when the ClawReview GitHub App is
@@ -62,6 +75,7 @@ jobs:
 
       - name: Review with Claude
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: node scripts/pr-review.mjs
