@@ -35,7 +35,7 @@
 
 ## What is ClawBox?
 
-ClawBox is **OpenClaw OS** — the operating system for [ClawBox hardware](https://clawbox.tech/), a private AI assistant on NVIDIA Jetson. Your data never leaves the device. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
+ClawBox is **OpenClaw OS** — the operating system for [ClawBox hardware](https://clawbox.tech/), a private AI assistant on NVIDIA Jetson. Local-first: your files, chats, and settings live on the box, and with local models nothing leaves it — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
 
 The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox **an OS the AI can operate**, not just a UI the user clicks through:
 
@@ -52,7 +52,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🧙 **5-minute setup** | Guided wizard: WiFi → updates → password → AI provider → messaging → done |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, and system tray |
 | 🤖 **AI-controlled OS** | ~50 MCP tools let the AI agent operate the entire device |
-| 🔒 **Privacy-first** | Everything runs locally. No telemetry. No data collection. |
+| 🔒 **Local-first** | Your data stays on the box; no telemetry, no data collection. Cloud AI only if you opt in |
 | 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude, GPT (API or ChatGPT plan), Gemini, OpenRouter, local Ollama / llama.cpp |
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
 | 💬 **Multi-platform** | Telegram (pairing-protected), web panel, desktop chat |
