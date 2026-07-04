@@ -23,18 +23,27 @@ function getPrNumber() {
   return event.pull_request.number;
 }
 
-function gh(args, opts = {}) {
-  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 32 * 1024 * 1024, ...opts });
+function gh(args) {
+  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 32 * 1024 * 1024 });
 }
 const ghJson = (args) => JSON.parse(gh(args));
+// For --paginate endpoints: a per-page `-q '[...]'` emits one array PER PAGE
+// (unparseable when >100 items). Emitting one object per line instead is
+// page-count-proof — parse as JSONL.
+const ghJsonl = (args) => gh(args).split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-// ---------- data gathering (all via API — PR code is never checked out) ----
+// ---------- path classification ---------------------------------------------
 
 const TEST_PATH_RE = /(^|\/)(tests?|e2e|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 // Paths that may target main directly: docs, repo meta, and the CI-only bot
 // scripts (they run in Actions from the default branch, never on devices).
 const DOCS_ONLY_RE = /^(docs-site\/|docs\/|\.github\/|scripts\/(issue-triage|pr-review)\.mjs$|README|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT|LICENSE|llms)/;
-const SENSITIVE_RE = /^(install(-x64)?\.sh|scripts\/(gateway-pre-start|start-ap|force-update)\.sh|\.github\/workflows\/|src\/middleware\.ts|src\/lib\/(auth|chpasswd|mcp-token|local-ai-token)\.ts|production-server\.js|config\/)/;
+// Security-sensitive paths (attention flag, rendered as ℹ️ note, not ⚠️).
+// config/ is deliberately narrowed to root-privilege files — the whole dir
+// would flag every routine openclaw-target.txt version bump.
+const SENSITIVE_RE = /^(install(-x64)?\.sh|scripts\/(gateway-pre-start|start-ap|force-update|root-update-step|launch-browser|recover)\.sh|\.github\/workflows\/|src\/middleware\.ts|src\/lib\/(auth|chpasswd|mcp-token|local-ai-token|login-rate-limit|rate-limit|oauth-utils|oauth-config)\.ts|src\/app\/login-api\/|src\/app\/setup-api\/system\/credentials\/|production-server\.js|config\/(.*sudoers.*|49-|.*\.(service|rules|pkla)))/;
+// Keep in sync with the `area` enum in scripts/issue-triage.mjs — both bots
+// must emit the same `area: X` label taxonomy.
 const AREA_RULES = [
   ["install", /^(install(-x64)?\.sh|scripts\/|config\/)/],
   ["gateway", /^(src\/lib\/(openclaw-config|gateway-proxy|updater)\.ts|src\/app\/setup-api\/(gateway|ai-models|update)\/)/],
@@ -43,9 +52,14 @@ const AREA_RULES = [
   ["docs", /^(docs-site\/|docs\/|README|CONTRIBUTING)/],
 ];
 
-function gatherPr(n) {
-  const pr = ghJson(["api", `repos/${REPO}/pulls/${n}`]);
-  const files = ghJson(["api", `repos/${REPO}/pulls/${n}/files`, "--paginate", "-q", "[.[] | {filename, additions, deletions, status}]"]);
+// ---------- data gathering (all via API — PR code is never checked out) ------
+
+function fetchPrMeta(n) {
+  return ghJson(["api", `repos/${REPO}/pulls/${n}`]);
+}
+
+function gatherRest(n, pr) {
+  const files = ghJsonl(["api", `repos/${REPO}/pulls/${n}/files`, "--paginate", "-q", ".[] | {filename, additions, deletions}"]);
   let diff = "";
   try {
     diff = gh(["pr", "diff", String(n), "--repo", REPO]);
@@ -56,63 +70,86 @@ function gatherPr(n) {
   const linked = [...(pr.body ?? "").matchAll(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map((m) => Number(m[1]));
   const linkedIssues = linked.slice(0, 5).map((num) => {
     try {
-      const i = ghJson(["api", `repos/${REPO}/issues/${num}`, "-q", "{number, state, title, pull_request: (has(\"pull_request\"))}"]);
-      return i;
+      return ghJson(["api", `repos/${REPO}/issues/${num}`, "-q", "{number, state}"]);
     } catch { return { number: num, state: "not-found" }; }
   });
 
-  const openPrs = ghJson(["pr", "list", "--repo", REPO, "--state", "open", "--json", "number,title,author", "--limit", "30"])
+  const openPrs = ghJson(["pr", "list", "--repo", REPO, "--state", "open", "--json", "number,title", "--limit", "30"])
     .filter((p) => p.number !== n);
 
   return { pr, files, diff, truncated, linkedIssues, openPrs };
 }
 
-// ---------- deterministic policy checks (no AI) ------------------------------
+// ---------- deterministic policy checks (no AI) -------------------------------
+// Tuned against the 40 most recently merged PRs: without the release exemption
+// and the diff-aware lockfile check, 55% of routine merged PRs warned (the
+// release-promotion PR collected 5 warnings at once). Target: warnings rare
+// enough to stay meaningful.
 
-function policyChecks({ pr, files }) {
+function policyChecks({ pr, files, diff }) {
   const checks = [];
   const names = files.map((f) => f.filename);
-  const ok = (label) => checks.push({ ok: true, label });
-  const warn = (label) => checks.push({ ok: false, label });
+  const pass = (label) => checks.push({ level: "pass", label });
+  const warn = (label) => checks.push({ level: "warn", label });
+  const info = (label) => checks.push({ level: "info", label });
 
-  // Beta-first: device code must target beta; repo-meta/docs may target main.
-  const docsOnly = names.every((f) => DOCS_ONLY_RE.test(f));
-  if (pr.base.ref === "beta" || docsOnly) ok(`base \`${pr.base.ref}\` matches the beta-first convention${docsOnly && pr.base.ref === "main" ? " (docs/meta-only change)" : ""}`);
-  else warn(`targets \`${pr.base.ref}\` but touches device code — convention is **beta-first** (main carries tagged releases)`);
+  // Release promotions (beta → main) are the sanctioned path for landing code
+  // on main — exempt from the conventions written for feature PRs.
+  const releasePromotion = pr.head.ref === "beta" && pr.base.ref === "main";
+  if (releasePromotion) {
+    pass("release promotion `beta` → `main` — feature-PR conventions exempt");
+  } else {
+    // Beta-first: device code targets beta; docs/repo-meta may target main.
+    const docsOnly = names.every((f) => DOCS_ONLY_RE.test(f));
+    if (pr.base.ref === "beta" || docsOnly) pass(`base \`${pr.base.ref}\` matches the beta-first convention${docsOnly && pr.base.ref === "main" ? " (docs/meta-only change)" : ""}`);
+    else warn(`targets \`${pr.base.ref}\` but touches device code — convention is **beta-first** (main carries tagged releases)`);
 
-  // bun.lock consistency
-  const touches = (p) => names.includes(p);
-  if (touches("package.json") && !touches("bun.lock")) warn("`package.json` changed without `bun.lock` — CI runs `bun install --frozen-lockfile` and will fail");
-  else if (touches("package.json")) ok("`package.json` + `bun.lock` updated together");
+    // bun.lock consistency — only when package.json's DEPENDENCY sections
+    // change; a version-field-only bump never breaks --frozen-lockfile
+    // (empirically: 6/6 historical warns on the naive check were false).
+    if (names.includes("package.json") && !names.includes("bun.lock")) {
+      const hunk = diff.split(/^diff --git /m).find((h) => h.startsWith("a/package.json"));
+      const depsTouched = hunk && /^[+-].*"(dependencies|devDependencies|peerDependencies|optionalDependencies)"/m.test(hunk)
+        || hunk && hunk.split("\n").some((l) => /^[+-]\s+"[^"]+":\s*"/.test(l) && !/"version":/.test(l));
+      if (depsTouched) warn("`package.json` dependencies changed without `bun.lock` — CI runs `bun install --frozen-lockfile` and will fail");
+    } else if (names.includes("package.json")) {
+      pass("`package.json` + `bun.lock` updated together");
+    }
 
-  // Conventional title
-  if (/^(feat|fix|chore|docs|refactor|test|style|perf|ci|build)(\(.+\))?!?: .+/.test(pr.title)) ok("conventional PR title");
-  else warn("title doesn't follow `type: description` (feat/fix/chore/docs/…)");
+    // Conventional title (release: is the repo's own release convention).
+    if (/^(feat|fix|chore|docs|refactor|test|style|perf|ci|build|release)(\(.+\))?!?: .+/i.test(pr.title)) pass("conventional PR title");
+    else warn("title doesn't follow `type: description` (feat/fix/chore/docs/…)");
 
-  // Tests expectation
-  const srcChanged = names.some((f) => f.startsWith("src/") && !TEST_PATH_RE.test(f));
-  const testChanged = names.some((f) => TEST_PATH_RE.test(f));
-  if (srcChanged && !testChanged) warn("`src/` changes without test changes — add or update tests if behavior changed");
-  else if (srcChanged) ok("source changes come with test changes");
+    // Tests expectation — skipped for tiny changes (string swaps etc.), which
+    // were the main noise source in the historical replay.
+    const srcFiles = files.filter((f) => f.filename.startsWith("src/") && !TEST_PATH_RE.test(f.filename));
+    const srcChurn = srcFiles.reduce((s, f) => s + f.additions + f.deletions, 0);
+    const testChanged = names.some((f) => TEST_PATH_RE.test(f));
+    if (srcFiles.length && !testChanged && srcChurn >= 10) warn("`src/` changes without test changes — add or update tests if behavior changed");
+    else if (srcFiles.length && testChanged) pass("source changes come with test changes");
 
-  // Sensitive paths
+    // Size
+    const churn = files.reduce((s, f) => s + f.additions + f.deletions, 0);
+    if (churn > 800) warn(`large PR (${churn} lines changed) — consider splitting`);
+  }
+
+  // Sensitive paths: an attention flag, not a defect — ℹ️ so ⚠️ keeps meaning.
   const sensitive = names.filter((f) => SENSITIVE_RE.test(f));
-  if (sensitive.length) warn(`touches security-sensitive paths (${sensitive.slice(0, 4).join(", ")}${sensitive.length > 4 ? ", …" : ""}) — review with extra care`);
-
-  // Size
-  const churn = files.reduce((s, f) => s + f.additions + f.deletions, 0);
-  if (churn > 800) warn(`large PR (${churn} lines changed) — consider splitting`);
+  if (sensitive.length) info(`touches security-sensitive paths (${sensitive.slice(0, 4).join(", ")}${sensitive.length > 4 ? ", …" : ""}) — review with extra care`);
 
   return checks;
 }
 
 function surface(files) {
   let src = 0, test = 0;
-  for (const f of files) (TEST_PATH_RE.test(f.filename) ? (test += f.additions) : (src += f.additions));
+  for (const f of files) {
+    if (TEST_PATH_RE.test(f.filename)) test += f.additions;
+    else src += f.additions;
+  }
   return { src, test };
 }
 
-// ---------- the review -------------------------------------------------------
+// ---------- the review ---------------------------------------------------------
 
 const SCHEMA = {
   type: "object",
@@ -165,7 +202,7 @@ async function review(data, checks) {
     `Changed files (${files.length}): ${files.map((f) => `${f.filename}(+${f.additions}/-${f.deletions})`).join(", ").slice(0, 2000)}`,
     `Linked issues: ${linkedIssues.length ? linkedIssues.map((i) => `#${i.number}[${i.state}]`).join(", ") : "none"}`,
     `Other open PRs (duplicate check): ${openPrs.map((p) => `#${p.number} ${p.title}`).join(" | ").slice(0, 1500) || "none"}`,
-    `Policy check results: ${checks.map((c) => `${c.ok ? "PASS" : "WARN"}: ${c.label}`).join("; ")}`,
+    `Policy check results: ${checks.map((c) => `${c.level.toUpperCase()}: ${c.label}`).join("; ")}`,
     `\nUnified diff${truncated ? " (TRUNCATED at 80k chars — judge only what you see)" : ""}:\n${diff}`,
   ].join("\n\n");
 
@@ -181,7 +218,7 @@ async function review(data, checks) {
   return JSON.parse(text);
 }
 
-// ---------- comment + labels -------------------------------------------------
+// ---------- comment + labels ----------------------------------------------------
 
 const VERDICT_BADGE = {
   "looks-good": "🟢 **Looks good**",
@@ -189,6 +226,7 @@ const VERDICT_BADGE = {
   "needs-discussion": "🟡 **Needs discussion**",
   "likely-duplicate": "🔴 **Likely duplicate**",
 };
+const LEVEL_ICON = { pass: "✅", warn: "⚠️", info: "ℹ️" };
 
 function composeComment(data, checks, r) {
   const { src, test } = surface(data.files);
@@ -202,9 +240,9 @@ function composeComment(data, checks, r) {
     r.summary,
     ``,
     `**Repo-policy checks**`,
-    ...checks.map((c) => `- ${c.ok ? "✅" : "⚠️"} ${c.label}`),
+    ...checks.map((c) => `- ${LEVEL_ICON[c.level]} ${c.label}`),
   ];
-  if (r.duplicate.likely) lines.push(``, `**Possible duplicate of ${r.duplicate.of}** — ${r.duplicate.reason}`);
+  if (r.duplicate.likely && r.duplicate.of) lines.push(``, `**Possible duplicate of ${r.duplicate.of}** — ${r.duplicate.reason}`);
   if (r.findings.length) {
     lines.push(``, `**Findings**`);
     for (const f of r.findings) lines.push(`- **${f.severity}** ${f.title}${f.file ? ` (\`${f.file}\`)` : ""} — ${f.detail}`);
@@ -214,8 +252,11 @@ function composeComment(data, checks, r) {
 }
 
 function upsertComment(n, body) {
-  const comments = ghJson(["api", `repos/${REPO}/issues/${n}/comments`, "--paginate", "-q", "[.[] | {id, body: .body[0:40], login: .user.login}]"]);
-  const mine = comments.find((c) => c.body.startsWith(MARKER));
+  // First page only (100 comments): the bot comments within minutes of open,
+  // so its marker comment always lands early. Author-checked so a user
+  // comment that happens to start with the marker can't be overwritten.
+  const comments = ghJson(["api", `repos/${REPO}/issues/${n}/comments`, "-q", "[.[] | {id, login: .user.login, body: .body[0:40]}]"]);
+  const mine = comments.find((c) => c.login === "github-actions[bot]" && c.body.startsWith(MARKER));
   if (mine) gh(["api", "-X", "PATCH", `repos/${REPO}/issues/comments/${mine.id}`, "-f", `body=${body}`]);
   else gh(["api", "-X", "POST", `repos/${REPO}/issues/${n}/comments`, "-f", `body=${body}`]);
 }
@@ -223,29 +264,34 @@ function upsertComment(n, body) {
 function applyAreaLabels(n, files) {
   const areas = new Set();
   for (const f of files) for (const [area, re] of AREA_RULES) if (re.test(f.filename)) areas.add(area);
-  for (const area of [...areas].slice(0, 3)) {
+  const labels = [...areas].slice(0, 3).map((a) => `area: ${a}`);
+  if (!labels.length) return;
+  for (const label of labels) {
     try {
-      gh(["label", "create", `area: ${area}`, "--color", "c5def5", "--description", "Auto-triage area", "--repo", REPO]);
+      gh(["label", "create", label, "--color", "c5def5", "--description", "Auto-triage area", "--repo", REPO]);
     } catch (err) {
-      console.log(`label ensure 'area: ${area}':`, err?.message?.split("\n")[0] ?? err);
+      console.log(`label ensure '${label}':`, err?.message?.split("\n")[0] ?? err);
     }
-    try {
-      gh(["pr", "edit", String(n), "--repo", REPO, "--add-label", `area: ${area}`]);
-    } catch (err) {
-      console.log(`label apply 'area: ${area}':`, err?.message?.split("\n")[0] ?? err);
-    }
+  }
+  try {
+    gh(["pr", "edit", String(n), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);
+  } catch (err) {
+    console.log("label apply:", err?.message?.split("\n")[0] ?? err);
   }
 }
 
-// ---------- main ---------------------------------------------------------------
+// ---------- main -----------------------------------------------------------------
 
 async function main() {
   const n = getPrNumber();
-  const data = gatherPr(n);
-  if (data.pr.user.login.endsWith("[bot]") || data.pr.user.login === "dependabot") {
+  // Cheap skip before the expensive gathering. The workflow-level `if` is the
+  // authoritative bot filter; this guards local PR_NUMBER runs.
+  const pr = fetchPrMeta(n);
+  if (pr.user.login.endsWith("[bot]")) {
     console.log(`skip: bot-authored PR #${n}`);
     return;
   }
+  const data = gatherRest(n, pr);
   const checks = policyChecks(data);
 
   if (process.env.DRY_RUN) {

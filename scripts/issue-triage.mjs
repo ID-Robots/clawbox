@@ -24,6 +24,8 @@ const SCHEMA = {
   properties: {
     category: { type: "string", enum: ["bug", "enhancement", "documentation", "question", "invalid"] },
     priority: { type: "string", enum: ["high", "medium", "low"] },
+    // Keep in sync with AREA_RULES in scripts/pr-review.mjs — both bots
+    // must emit the same `area: X` label taxonomy.
     area: { type: "string", enum: ["install", "ui", "ci-e2e", "gateway", "docs", "other"] },
     summary: { type: "string", description: "One plain-language sentence, <=140 chars." },
     suggested_action: { type: "string", description: "One concrete next step for the maintainer." },

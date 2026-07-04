@@ -10,7 +10,7 @@ name: ClawReview
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, ready_for_review]
 
 concurrency:
   group: clawreview-${{ github.event.pull_request.number }}
@@ -25,7 +25,9 @@ jobs:
       issues: write
       contents: read
     # Bot PRs (dependabot etc.) get CI + human review; ClawReview skips them.
-    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') }}
+    # Drafts are skipped too (reviewed at ready_for_review) — no API spend
+    # while the author is still iterating.
+    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') && !github.event.pull_request.draft }}
     steps:
       - name: Checkout (base repo only — never the PR head)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -40,6 +42,7 @@ jobs:
       - name: Install Anthropic SDK
         # Pinned + scoped to scripts/ (root install would reify the whole
         # bun-managed tree — see issue-triage.yml for the full rationale).
+        # Keep the version in sync with issue-triage.yml.
         run: npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
 
       - name: Review with Claude

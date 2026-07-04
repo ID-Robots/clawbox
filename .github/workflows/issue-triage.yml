@@ -44,6 +44,7 @@ jobs:
         # downloads ≈ minutes per issue, plus flake risk on this bun-managed
         # tree). Scoped to scripts/, only the SDK installs (~5 s); ESM
         # resolution finds scripts/node_modules from the script's own path.
+        # Keep the version in sync with pr-review.yml.
         run: npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
 
       - name: Triage with Claude
