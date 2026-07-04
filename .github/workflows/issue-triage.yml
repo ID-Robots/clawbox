@@ -47,8 +47,22 @@ jobs:
         # Keep the version in sync with pr-review.yml.
         run: npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
 
+      - name: Mint ClawReview app token
+        # Optional custom identity (shared with pr-review.yml): with the
+        # ClawReview App secrets set, triage posts as clawreview[bot] with
+        # the crab avatar; without them this skips and github-actions[bot]
+        # is used. The bot works either way.
+        id: app-token
+        if: env.HAS_APP != ''
+        env:
+          HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.CLAWREVIEW_APP_ID }}
+          private-key: ${{ secrets.CLAWREVIEW_APP_PRIVATE_KEY }}
+
       - name: Triage with Claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: node scripts/issue-triage.mjs

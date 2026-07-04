@@ -283,9 +283,11 @@ function composeComment(data, checks, r) {
 function upsertComment(n, body) {
   // First page only (100 comments): the bot comments within minutes of open,
   // so its marker comment always lands early. Author-checked so a user
-  // comment that happens to start with the marker can't be overwritten.
+  // comment that happens to start with the marker can't be overwritten —
+  // both identities accepted (github-actions fallback / ClawReview app).
+  const BOT_LOGINS = new Set(["github-actions[bot]", "clawreview[bot]"]);
   const comments = ghJson(["api", `repos/${REPO}/issues/${n}/comments`, "-q", "[.[] | {id, login: .user.login, body: .body[0:40]}]"]);
-  const mine = comments.find((c) => c.login === "github-actions[bot]" && c.body.startsWith(MARKER));
+  const mine = comments.find((c) => BOT_LOGINS.has(c.login) && c.body.startsWith(MARKER));
   if (mine) gh(["api", "-X", "PATCH", `repos/${REPO}/issues/comments/${mine.id}`, "-f", `body=${body}`]);
   else gh(["api", "-X", "POST", `repos/${REPO}/issues/${n}/comments`, "-f", `body=${body}`]);
 }
