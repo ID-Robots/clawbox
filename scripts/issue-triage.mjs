@@ -56,15 +56,22 @@ async function main() {
     ],
   });
 
-  const text = resp.content.find((b) => b.type === "text")?.text ?? "{}";
+  const text = resp.content.find((b) => b.type === "text")?.text;
+  // Throw rather than default to "{}" — an empty object here would create
+  // and apply labels literally named "undefined"; the outer catch logs and
+  // exits 0 (triage must never fail issue creation).
+  if (!text) throw new Error("no text block in model response");
   const t = JSON.parse(text);
 
   // Ensure the priority/area labels exist (idempotent), then apply.
   const ensure = (name, color, desc) => {
     try {
       gh(["label", "create", name, "--color", color, "--description", desc, "--repo", REPO]);
-    } catch {
-      /* label already exists — fine */
+    } catch (err) {
+      // Usually "label already exists" (fine); log the message so a real
+      // failure (auth, rate limit) is diagnosable instead of silently
+      // degrading into an `issue edit` error with no context.
+      console.log(`label ensure '${name}':`, err?.message?.split("\n")[0] ?? err);
     }
   };
   const prioColor = t.priority === "high" ? "b60205" : t.priority === "medium" ? "fbca04" : "0e8a16";
