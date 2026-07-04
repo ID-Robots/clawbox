@@ -1,0 +1,36 @@
+# Dependabot version updates. Alerts also require "Dependabot alerts" enabled
+# in Settings → Code security (admin toggle).
+#
+# NOTE: target-branch only affects VERSION updates. Security-update PRs always
+# target main, ignore these labels/groups, and only bump package-lock.json —
+# run `bun install` to refresh bun.lock before merging one.
+version: 2
+updates:
+  # Version updates for the bun-managed app. bun.lock is authoritative
+  # (CI runs `bun install --frozen-lockfile`). Weekly + grouped.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "beta"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # npm entry exists ONLY for security-update PRs (the bun ecosystem doesn't
+  # support them; package-lock.json is kept in sync for this + the dependency
+  # graph). Limit 0 disables version updates to avoid duplicate PRs that
+  # leave bun.lock stale.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+
+  # GitHub Actions pins (checkout, setup-node, gh-pages, …)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    target-branch: "beta"
