@@ -1,0 +1,82 @@
+---
+title: "Update System"
+summary: "How ClawBox updates work: release tags, the update pipeline, channels, what survives, divergence handling, and manual-update pitfalls."
+---
+
+ClawBox updates are **git-based**: the device tracks the [ID-Robots/clawbox](https://github.com/ID-Robots/clawbox) repository, and a release is a `vX.Y.Z` tag on the `main` branch. The updater hard-syncs the code to the release and rebuilds in place.
+
+## How the device decides an update exists
+
+1. Fetch tags from origin.
+2. Consider only tags matching `vX.Y.Z`, newest first.
+3. Offer the newest tag whose history **contains the device's current commit** (a fast-forward). A device whose code has diverged from the release line sees no offer — see [Divergence](#divergence-updates-paused) below.
+4. The "Installed" version is read from `package.json`; OpenClaw's target version comes from the pin file `config/openclaw-target.txt`.
+
+## The update pipeline
+
+Started from the **System Update** app (or Settings). Steps, in order — each privileged step runs as a `clawbox-root-update@<step>` systemd unit:
+
+| Step | What it does |
+|---|---|
+| `bootstrap_updater` | Refreshes `install.sh` itself from origin first (so the rest runs the *new* updater) |
+| `apt_update` | System packages |
+| `nvidia_jetpack` | Jetson components |
+| `performance_mode` | Max-performance profile |
+| `chromium_install` / `vnc_install` | Desktop browser + remote display stack |
+| `openclaw_install` | OpenClaw core → **pinned** version from `config/openclaw-target.txt`, plus re-pins all `@openclaw/*` plugins to match |
+| `openclaw_patch` | Applies ClawBox's gateway patches |
+| `gateway_setup` | (Re)installs the gateway service file + drop-ins |
+| `restart` | **The hard-sync + rebuild**: `git fetch` → `git reset --hard HEAD` → checkout channel branch → `git reset --hard origin/<channel>` → `git clean -fd` → full `bun install` + `next build` → **reboot** |
+| `post_update` | Fixups (hostname, dispatcher, smoke checks) — advisory |
+
+Key properties:
+
+- **`git clean -fd` (no `-x`)** — gitignored paths are never touched, which is what preserves `data/`, `.env`, `node_modules`, and your state. See [what survives](/technical/filesystem#what-survives-what).
+- **The final step reboots the box.** Expect ~1–2 minutes of unreachability; the UI reconnects and resumes progress reporting afterwards.
+- After reboot, completion is only reported if the build fingerprint (`.next/BUILD_ID`) actually changed and the rebuild unit succeeded — a failed rebuild surfaces as a failed step, not a silent "complete".
+
+## Update channels
+
+The channel is a one-line file: `/home/clawbox/clawbox/.update-branch` (absent = `main`).
+
+- **`main`** — stable releases. Default.
+- **`beta`** — the integration branch, for early adopters and testing fixes ahead of release.
+
+Switch in **System Update → Advanced options** (Beta toggle / branch override), or over SSH: `echo beta > /home/clawbox/clawbox/.update-branch`. The pin survives updates **and** factory resets; clear it from the same UI or by deleting the file. All update mechanisms (UI, installer, recovery script) honor it.
+
+## Ways to update
+
+| Method | What it runs | When to use |
+|---|---|---|
+| **System Update app** (UI) | The full pipeline above | Normal case |
+| `sudo clawbox update` (SSH) | Full `install.sh` in place | Headless/remote maintenance |
+| `sudo bash install.sh` | Same as above | After manual git operations |
+| `bash <(curl -fsSL …/scripts/force-update.sh)` | Standalone hard-sync + rebuild | When the updater itself is broken — see [Recovery](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss) |
+
+<Warning>
+**A manual `git pull` + service restart is *not* an update.** It skips `openclaw_install` (core version pin) and `gateway_setup` (service files) — the two most common sources of "updated but broken" states: `gateway token mismatch` errors and `Config validation failed: Unrecognized key`. If you touched the checkout manually, finish with a full `sudo bash install.sh`. Details: [Troubleshooting](/support/troubleshooting#update-finished-but-the-box-misbehaves).
+</Warning>
+
+## Divergence ("Updates paused")
+
+If the device's git history gains **local commits** (an on-box agent committing, manual edits), its HEAD is no longer an ancestor of any release tag → the updater has nothing safe to fast-forward to, and on stable releases the device silently reports "up to date" forever.
+
+On the **beta channel** (and the next stable release), this state is detected explicitly (`ahead > 0 && behind > 0` vs the channel) and surfaced in the System Update app as:
+
+> **Updates paused** — this device is on a non-release branch with local changes (N commits ahead of main). Reset to main to resume updates.
+
+…with a one-click **Reset to `<channel>` & update** button (confirmation-gated — it discards local *code* commits, keeps all data) that pins the channel and runs the normal update. The equivalent manual fix is the hard-sync in [Recovery → Safe reinstall](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss).
+
+## OpenClaw version pinning
+
+The fleet never floats on `openclaw@latest`. `config/openclaw-target.txt` pins the exact core version; the same value pins every `@openclaw/*` plugin (version skew between core and the `@openclaw/codex` plugin breaks ChatGPT-subscription chats). Bumping the pin is a normal PR → beta-validation → release flow.
+
+## Related endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /setup-api/update/versions` | Installed/target versions (add `?force=1` to bypass the 60 s cache) |
+| `POST /setup-api/update/run` | Start the full update |
+| `GET /setup-api/update/status` | Live step progress (polled by the UI) |
+| `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
+| `GET/POST /setup-api/system/update-branch` | Read/set the channel pin |

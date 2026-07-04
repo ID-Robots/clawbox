@@ -1,0 +1,66 @@
+---
+title: "Networking"
+summary: "AP setup mode, captive portal, mDNS discovery, finding the device IP, and the complete port map."
+---
+
+## Two network modes
+
+**Setup mode (AP)** — when unconfigured (or when it can't join a known network), the box hosts its own Wi-Fi:
+
+| Property | Value |
+|---|---|
+| SSID | `ClawBox-Setup` (open by default; WPA-PSK if a hotspot password was configured) |
+| AP address | `10.42.0.1/24` — automatic fallback `10.43.0.1/24` if the primary subnet is already in use upstream |
+| Wi-Fi interface | `wlP1p1s0` (Jetson default; overridable via `NETWORK_INTERFACE`) |
+| DNS | dnsmasq answers **every** name with the AP address (captive hijack) |
+| Captive portal | OS probe URLs (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) are intercepted by the web app's middleware and redirected to `http://10.42.0.1/` — phones auto-open the wizard |
+| Watchdog | `clawbox-ap-watchdog.timer` re-raises the hotspot every 20 s until setup completes |
+
+If an Ethernet uplink is connected while in AP mode, the box **shares** that internet connection to hotspot clients (IP forwarding + NAT).
+
+**Steady state (LAN)** — after setup, the box joins your network and is reachable at:
+
+1. `http://<LAN-IP>` — always works; the canonical fallback.
+2. `http://clawbox.local` — mDNS via avahi (hostname configurable in Settings).
+
+## Why `clawbox.local` sometimes fails — and what to do
+
+mDNS (multicast DNS) is what resolves `.local` names, and it's the least reliable part of consumer networks:
+
+- **Windows** historically resolves mDNS poorly (better in 11, still flaky).
+- **Routers/APs often drop multicast between Wi-Fi and wired segments** — a wired ClawBox may be invisible by name to Wi-Fi laptops (and vice versa) while being perfectly reachable by IP.
+- **Guest networks and VPNs** isolate clients from mDNS entirely.
+
+The box already ships mitigations (avahi tuned for Windows quirks, re-announce on network changes) — but when the name fails, **use the IP**. Find it via:
+
+- Your router's connected-devices list (look for `clawbox`).
+- Over SSH (if `ssh clawbox@clawbox.local` still works in a terminal): `hostname -I` — first entry.
+- The device screen/desktop if a display is attached (System Tray → network).
+
+<Tip>Reserve the box's IP in your router's DHCP settings ("address reservation" / "static lease") so it never changes — then bookmark it.</Tip>
+
+## Port map
+
+| Port | What | Exposure |
+|---|---|---|
+| **80** | ClawBox web OS (login, desktop, wizard, `/setup-api/*`) | LAN |
+| 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN |
+| **18789** | OpenClaw gateway | **loopback only** — proxied through port 80; opening it directly in a browser is a common mistake (it won't accept your password) |
+| 3006 | Terminal (xterm.js) WebSocket PTY | LAN (proxied at `/terminal-ws`) |
+| 5900 / 6080 | x11vnc / noVNC websockify (Remote Desktop app) | localhost / proxied at `/novnc-ws` |
+| 18800 | Chromium DevTools Protocol (AI browser control) | localhost |
+| 11434 | Ollama (local models) | localhost |
+| 8080 | llama.cpp server (optional) | localhost |
+| 8880 | Kokoro TTS (voice) | localhost |
+| 22 | SSH (`ssh clawbox@<ip>`) | LAN |
+
+## Remote access
+
+- **Cloudflare Quick Tunnel** — `clawbox-tunnel.service` (toggle via Settings / `setup-api/tunnel/*`) exposes port 80 through a temporary `*.trycloudflare.com` URL written to `data/cloudflared/tunnel.url`. No port-forwarding required.
+- **SSH** — standard Ubuntu OpenSSH on port 22, user `clawbox`, same password as the browser login.
+- The gateway's allowed origins are managed automatically (localhost, `<hostname>.local`, the AP addresses, and the box's live LAN IPs) — this is refreshed on every gateway start.
+
+## DNS & hostname
+
+- Hostname defaults to `clawbox`; changing it (Settings → System) updates `hostnamectl`, avahi (`<name>.local`), and is persisted in `data/hostname.env`.
+- In AP mode, `clawbox.local` is additionally answered by dnsmasq (mDNS doesn't traverse the hotspot reliably).

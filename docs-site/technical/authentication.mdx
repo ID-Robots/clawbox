@@ -1,0 +1,69 @@
+---
+title: "Authentication & Security"
+summary: "How the browser login, session cookies, gateway token, and service-to-service tokens work — and what each requires to function."
+---
+
+ClawBox has **one human password** and several machine tokens. Understanding which is which resolves most "can't log in" confusion.
+
+## The one password
+
+The browser/desktop login and SSH use the **same Linux system password** (account `clawbox`). There is no separate admin or web password. Changing it anywhere changes it everywhere:
+
+- **Settings → System → Change password** (web) — validated, rate-limited, applied via a privileged `chpasswd` step.
+- `sudo passwd clawbox` (SSH) — takes effect for the browser immediately.
+- Factory reset — resets it to `clawbox`.
+
+## Browser login flow
+
+```
+POST /login-api  { password, duration }
+  → rate limit (lockout on repeated failures — wait ~5 min)
+  → verifyPassword: spawn /usr/sbin/unix_chkpwd <user> nullok  (password on stdin)
+  → exit 0? → Set-Cookie: clawbox_session = base64(payload).HMAC-SHA256(secret)
+```
+
+**Requirements for this to work** (the checklist behind "SSH accepts it, browser doesn't"):
+
+1. The web app must resolve the right **username** — `CLAWBOX_USER` env → `SUDO_USER` → `USER` → OS user, default `clawbox`.
+2. `/usr/sbin/unix_chkpwd` must be **setgid `shadow`** (`-rwxr-sr-x root shadow`) — it's the PAM helper that reads `/etc/shadow` on behalf of the non-root web app. SSH doesn't need this (sshd is root), which is why SSH can work while the browser fails.
+3. The **running build** must be current — a stale build from a half-finished update checks with old logic.
+4. The password bytes the browser sends must match — non-ASCII passwords can be encoded differently by the browser vs the terminal that set them.
+
+The full diagnostic ladder for login failures is in [Troubleshooting](/support/troubleshooting#the-browser-rejects-my-password-but-ssh-accepts-it).
+
+### Session cookies
+
+`clawbox_session` is an HMAC-SHA256-signed expiry token (no server-side session store): `base64url({exp}) + "." + HMAC(payload, secret)`. Durations: 20 min, 6 h, 12 h, or 24 h. The signing secret persists in `data/.session-secret`. Cookies are `httpOnly`, `SameSite=Lax`, and non-`Secure` (the LAN UI is plain HTTP).
+
+Middleware enforces the cookie on every route except the public set (`/login`, `/setup`, static assets, captive-portal probes) — and skips enforcement entirely until first-boot setup completes.
+
+## Gateway token (machine, not human)
+
+The OpenClaw gateway (port 18789) authenticates its WebSocket clients with a **token** stored at `openclaw.json → gateway.auth.token`:
+
+- Per-device **random 32-byte hex** — generated on first boot/reset and preserved thereafter. (Early builds shipped a public literal `"clawbox"`; any such weak token is automatically rotated to a strong one on gateway start.)
+- The ClawBox UI injects this token into the OpenClaw Control UI automatically (via `/setup-api/gateway/ws-config` and injected HTML) — users never type it.
+- The gateway service is started **without** `--token` so the config value is the single source of truth. A stale service file that still passes `--token` causes the classic `unauthorized: gateway token mismatch` error — fix with `sudo bash install.sh --step gateway_setup`.
+
+## Service-to-service tokens
+
+| Token | File | Purpose |
+|---|---|---|
+| MCP bearer | `data/.mcp-token` | The agent's device tools (`mcp/clawbox-mcp.ts`) authenticate back to `/setup-api/*` on port 80 |
+| Local-AI bearer | `data/.local-ai-token` | The gateway's Ollama/llama.cpp calls go through an authenticated local proxy |
+| ClawKeep portal token | `~/.clawkeep/token` | Authenticates cloud backups to the portal |
+
+All are per-install random values with `0600` permissions, seeded/re-hardened automatically at boot.
+
+## Provider credentials
+
+AI provider keys and OAuth sessions live in `~/.openclaw/agents/main/agent/auth-profiles.json` — **not** in `openclaw.json` (which only holds `{provider, mode}` metadata). The ChatGPT-subscription session is additionally mirrored to each agent's `codex-home/auth.json`. See [AI Providers](/technical/ai-providers) for the full credential-flow map.
+
+## Security posture summary
+
+- Gateway is **loopback-only**; all LAN traffic passes the authenticated web app.
+- Web login is rate-limited with lockout; passwords are never logged; control characters are rejected.
+- Privileged operations run through an allowlisted systemd template (polkit + narrow sudoers), never arbitrary root exec from the web process.
+- Telegram DMs default to **pairing** mode — unknown senders are inert until the owner approves their 8-character code. Config that would open DMs to everyone (`dmPolicy:"open"` + `allowFrom:["*"]`) is actively stripped on boot.
+- Factory reset wipes credentials, SSH keys, histories, and browser profiles — see [Recovery](/support/recovery).
+- Vulnerability reports: see [SECURITY.md](https://github.com/ID-Robots/clawbox/blob/main/SECURITY.md).

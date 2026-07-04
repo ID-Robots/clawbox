@@ -1,50 +1,249 @@
 ---
 title: "Troubleshooting"
-summary: "Fixes for the most common ClawBox issues — can't reach the device, no internet, no replies."
+summary: "Symptom-first fixes for ClawBox issues — connection, login, updates, AI provider errors, and gateway problems, with exact diagnostic commands."
 ---
 
-Quick fixes for the most common issues.
+Find your symptom below. Each section starts with the fastest checks and escalates to deeper fixes — run them in order. Commands marked **over SSH** are typed after connecting with `ssh clawbox@YOUR_BOX_IP` (your box password).
 
-## I can't reach `clawbox.local`
+<Tip>
+**Fast triage:** Is the box reachable at all? → [Can't reach the ClawBox](#i-cant-reach-the-clawbox). Reachable but login fails? → [Browser rejects my password](#the-browser-rejects-my-password-but-ssh-accepts-it). Logged in but AI errors? → [AI provider errors](#ai-provider-errors-401-incorrect-api-key). Update problems? → [Updates](#updates-say-up-to-date-but-the-version-is-old).
+</Tip>
+
+## I can't reach the ClawBox
 
 <AccordionGroup>
-  <Accordion title="Try the device IP directly">
-    Some networks block mDNS. Find the ClawBox in your router's connected-devices list
-    and browse to `http://<device-ip>`.
+  <Accordion title="Use the plain IP — not clawbox.local, not :18789">
+    Two very common mistakes:
+
+    1. **`clawbox.local` often fails on Windows** and on routers that block mDNS between Wi-Fi and wired devices. Use the raw IP address instead.
+    2. **Don't add `:18789`** to the address. That port is the internal AI gateway — its page loads but it does not accept your password. The ClawBox screen is served at **`http://YOUR_BOX_IP`** (port 80, nothing after the IP).
   </Accordion>
-  <Accordion title="Use Ethernet">
-    Connect an Ethernet cable and power-cycle. Wired setup is the most reliable.
+  <Accordion title="Find the box's IP address">
+    - **Router method (easiest):** open your router's connected-devices list and look for `clawbox`.
+    - **If SSH by name works** (`ssh clawbox@clawbox.local` connects in a terminal even when the browser fails): run `hostname -I` over SSH — the first address is the box's LAN IP.
+
+    Bookmark the IP once found. It can change after a reboot on dynamic leases — reserve it in your router settings for a permanent address.
   </Accordion>
-  <Accordion title="Same network?">
-    Make sure your phone/laptop is on the **same** network as the ClawBox (not a guest
-    Wi-Fi or VPN).
+  <Accordion title="Nothing loads at the IP either">
+    Over SSH, restart the web services:
+
+    ```bash
+    sudo systemctl restart clawbox-setup clawbox-gateway
+    ```
+
+    Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If SSH doesn't work either, power-cycle the box and wait 2 minutes.
+  </Accordion>
+  <Accordion title="Box reverted to the ClawBox-Setup hotspot">
+    If a network change (new router, changed Wi-Fi password) left the box unable to join your network, it broadcasts its own **ClawBox-Setup** Wi-Fi network. Connect to it from a phone/laptop, open `http://10.42.0.1`, and re-run the network step of the wizard.
   </Accordion>
 </AccordionGroup>
 
-## Wi-Fi won't connect
+## The browser rejects my password (but SSH accepts it)
 
-- Re-enter the password carefully — a wrong password is the most common cause.
-- Move the device closer to the router for the first connection.
-- If it still fails, connect over Ethernet to finish setup, then retry Wi-Fi.
+There is **no separate admin password** — the browser login uses the same system password as SSH. When SSH accepts it but the browser says *Incorrect password*, work down this ladder:
+
+<Steps>
+  <Step title="Confirm you're on the right page">
+    The login must be at `http://YOUR_BOX_IP` (port 80). The `:18789` page is the gateway — it will never accept your system password.
+  </Step>
+  <Step title="Rule out browser autofill">
+    Open a **private/incognito window** (`Ctrl+Shift+N`), type the URL and the password **by hand** — don't let the browser autofill. A stale saved password is the most common cause. If this works, delete the saved password for the box's IP in your browser settings.
+  </Step>
+  <Step title="Test the password exactly as the web app checks it (over SSH)">
+    ```bash
+    read -rsp 'Box password: ' PW; echo; printf '%s\0' "$PW" | /usr/sbin/unix_chkpwd clawbox nullok; echo "RESULT exit=$?"; unset PW
+    ```
+
+    - `RESULT exit=0` → the password itself is fine; continue to the next step.
+    - Any other number → the password check itself fails. If your password contains accented or non-ASCII characters, the browser may encode them differently than the terminal did when the password was set — reset to a simple ASCII password with `sudo passwd clawbox` and retry.
+  </Step>
+  <Step title="Test the login API directly (bypasses the browser)">
+    ```bash
+    read -rsp 'Box password: ' PW; echo; curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' -d "{\"password\":\"$PW\",\"duration\":1200}"; echo; unset PW
+    ```
+
+    - `{"success":true}` → the server accepts it; the problem is browser-side (step 2).
+    - `{"error":"Incorrect password"}` → continue to the next step.
+    - A lockout message → too many attempts; wait 5 minutes and retry.
+  </Step>
+  <Step title="Check the password helper's permissions">
+    ```bash
+    ls -l /usr/sbin/unix_chkpwd /etc/shadow
+    ```
+
+    Expected (note the `s` and the `shadow` group):
+
+    ```
+    -rwxr-sr-x 1 root shadow ... /usr/sbin/unix_chkpwd
+    -rw-r----- 1 root shadow ... /etc/shadow
+    ```
+
+    If `unix_chkpwd` shows `-rwxr-xr-x` (no `s`) or a different group:
+
+    ```bash
+    sudo chgrp shadow /usr/sbin/unix_chkpwd
+    sudo chmod 2755 /usr/sbin/unix_chkpwd
+    sudo systemctl restart clawbox-setup
+    ```
+  </Step>
+  <Step title="Rebuild the web app (a half-finished update can serve a stale build)">
+    ```bash
+    cd /home/clawbox/clawbox
+    git fetch origin
+    git checkout -f main
+    git reset --hard origin/main
+    sudo bash install.sh
+    sudo reboot
+    ```
+
+    Takes 10–15 minutes; settings and keys are kept. Retest in a private window after the reboot.
+  </Step>
+  <Step title="Last resort — set a fresh password">
+    ```bash
+    sudo passwd clawbox
+    ```
+
+    Sets a brand-new password (10 seconds, no data loss) that both SSH and the browser use immediately. If even a fresh simple password fails in a private window, see [Recovery](/support/recovery) for the factory-reset option, and contact support with the outputs of steps 3–5.
+  </Step>
+</Steps>
+
+## Updates say "up to date" but the version is old
+
+The updater only offers a release when the device's code history matches the official release line. A box whose code was modified locally (committed changes — e.g. by an on-box agent or manual edits) **silently stops seeing updates** on v3.1.4 and earlier.
+
+<AccordionGroup>
+  <Accordion title="Check whether the device has diverged (over SSH)">
+    ```bash
+    cd /home/clawbox/clawbox
+    git fetch origin
+    git status
+    git rev-list --left-right --count origin/main...HEAD
+    ```
+
+    Output `X Y` = X commits behind, Y commits ahead. **Y > 0 means local commits are blocking updates.**
+  </Accordion>
+  <Accordion title="Fix: hard-sync back to the release line">
+    <Warning>This discards local **code** changes (commits and edits under `/home/clawbox/clawbox`). Your settings, AI keys, chats, and Telegram pairing live outside the code and are kept.</Warning>
+
+    ```bash
+    cd /home/clawbox/clawbox
+    git fetch origin
+    git checkout -f main
+    git reset --hard origin/main
+    sudo bash install.sh
+    sudo reboot
+    ```
+  </Accordion>
+  <Accordion title="On the beta channel this is automatic">
+    Devices on the beta channel (and the next stable release) detect divergence and show **"Updates paused — this device is on a non-release branch with local changes"** with a one-click **Reset to channel &amp; update** button that performs the hard-sync above for you.
+  </Accordion>
+</AccordionGroup>
+
+## Update finished but the box misbehaves
+
+A ClawBox update is more than `git pull` — the installer also refreshes the **systemd service files** and the **OpenClaw core**. Manual or interrupted updates can leave those stale. Symptoms and their fixes:
+
+<AccordionGroup>
+  <Accordion title="Chat shows 'unauthorized: gateway token mismatch' or 'too many failed authentication attempts'">
+    The gateway service file is stale (it passes an old token style). Over SSH:
+
+    ```bash
+    sudo bash /home/clawbox/clawbox/install.sh --step gateway_setup
+    sudo systemctl restart clawbox-gateway
+    ```
+
+    If you saw *too many failed authentication attempts*, wait ~5 minutes after the restart — the lockout expires on its own.
+  </Accordion>
+  <Accordion title="Errors like 'Config validation failed: … Unrecognized key' when selecting a provider">
+    The OpenClaw core on the device is older than the config ClawBox writes. Refresh it to the pinned version:
+
+    ```bash
+    sudo bash /home/clawbox/clawbox/install.sh --step openclaw_install
+    sudo systemctl restart clawbox-gateway
+    ```
+  </Accordion>
+  <Accordion title="UI shows the new version but behaves like the old one">
+    The version label reads from files on disk; the *running* app may still be the previous build if the rebuild step didn't finish. Verify and fix:
+
+    ```bash
+    ls -la /home/clawbox/clawbox/.next/BUILD_ID   # timestamp = when the running build was made
+    cd /home/clawbox/clawbox && sudo bash install.sh && sudo reboot
+    ```
+  </Accordion>
+  <Accordion title="Rule of thumb">
+    The **in-UI updater** (System Update app) and full `sudo bash install.sh` run every step — build, OpenClaw core, service files. Ad-hoc `git pull` + restarts do not. When in doubt, run the full installer.
+  </Accordion>
+</AccordionGroup>
+
+## AI provider errors (401 / "Incorrect API key")
+
+<AccordionGroup>
+  <Accordion title="'Incorrect API key … sk-proj-…' after switching OpenAI to the ChatGPT subscription">
+    ClawBox has **two separate OpenAI lanes**: the *API-key* lane (`openai/…` models, calls `api.openai.com`, billed per token) and the *ChatGPT subscription* lane (`codex/…` models, uses your ChatGPT plan). If a device was first set up with an API key and later switched to the subscription, an old dead key could keep being used — recurring `401 Incorrect API key` on every reply, coming back after each restart.
+
+    **The beta channel (and the next stable release) self-heals this on boot** — it repoints the agent to the subscription lane and removes the stale key. To fix immediately on any version: open **Settings → AI**, choose **ChatGPT (sign in with ChatGPT)**, and complete the sign-in again — then reboot once and confirm it still works after the restart. If it doesn't stick, contact support.
+  </Accordion>
+  <Accordion title="Replies stopped after changing provider or plan">
+    Re-save the provider in **Settings → AI** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
+  </Accordion>
+  <Accordion title="Local models (Ollama / llama.cpp) not responding">
+    Local models share the Jetson's memory — only one local runtime is active at a time. Check status in **Settings → AI**. Over SSH: `systemctl status ollama` and retry after `sudo systemctl restart ollama`.
+  </Accordion>
+</AccordionGroup>
 
 ## My assistant isn't replying
 
 <AccordionGroup>
   <Accordion title="Check the channel link">
-    Re-open the **Channels** page and confirm the app is still linked. Re-pair if needed.
-    See [Messaging Channels](/guides/messaging-channels).
+    Open the **Channels** page and confirm the app (Telegram etc.) is still linked. Re-pair if needed — see [Messaging Channels](/guides/messaging-channels).
   </Accordion>
   <Accordion title="Check the AI provider">
-    If you're using your own API key, confirm it's valid and has quota. See
-    [Choose Your AI Provider](/setup/choose-ai-provider).
+    A dead key or exhausted quota looks like silence. See [AI provider errors](#ai-provider-errors-401-incorrect-api-key) above.
+  </Accordion>
+  <Accordion title="Check the gateway">
+    Over SSH:
+
+    ```bash
+    systemctl status clawbox-gateway --no-pager | head -12
+    journalctl -u clawbox-gateway -n 40 --no-pager
+    ```
+
+    Look for auth errors (see [Update finished but the box misbehaves](#update-finished-but-the-box-misbehaves)) or provider errors in the log tail. `sudo systemctl restart clawbox-gateway` clears transient wedges.
   </Accordion>
   <Accordion title="Check internet">
-    Confirm the device is online. See [Connect to a Network](/setup/connect-network).
+    `ping -c 3 8.8.8.8` over SSH. If offline, see [Connect to a Network](/setup/connect-network).
   </Accordion>
 </AccordionGroup>
 
+## Telegram-specific issues
+
+<AccordionGroup>
+  <Accordion title="Bot doesn't answer a new person">
+    New Telegram users must be **approved** on the device (a pairing request appears on the ClawBox screen). Until approved, the bot stays silent for that user.
+  </Accordion>
+  <Accordion title="Bot stopped answering after changing the bot token">
+    Changing the bot resets pairing — previously approved users must be re-approved under the new bot.
+  </Accordion>
+</AccordionGroup>
+
+## Reading logs (for bug reports)
+
+When contacting support, include the relevant log tail — it usually pins the cause in one look:
+
+```bash
+journalctl -u clawbox-setup -n 50 --no-pager     # web app / login / setup API
+journalctl -u clawbox-gateway -n 50 --no-pager   # AI gateway / providers / channels
+```
+
+You can also message the assistant `/diagnostics` in chat (if it's responding) to get a self-report.
+
 ## Still stuck?
 
-<Card title="Contact support" href="mailto:yanko@idrobots.com" icon="life-ring" horizontal>
-  Tell us what you tried and where it's blocked — include any error you see on screen.
-</Card>
+<Columns cols={2}>
+  <Card title="Recovery options" href="/support/recovery" icon="life-ring">
+    Password reset, safe reinstall, and full factory reset — ordered from least to most destructive.
+  </Card>
+  <Card title="Contact support" href="mailto:yanko@idrobots.com" icon="envelope">
+    Tell us what you tried and where it's blocked — include the log tails above and any on-screen error.
+  </Card>
+</Columns>

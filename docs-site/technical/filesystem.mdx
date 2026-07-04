@@ -1,0 +1,65 @@
+---
+title: "Filesystem Layout"
+summary: "Where everything lives on the device — app, config, credentials, agent state — and what survives updates and factory resets."
+---
+
+Everything ClawBox cares about lives under `/home/clawbox`. The app itself is a git checkout; all personal state is deliberately kept **outside** tracked files so updates can hard-reset the code without touching your data.
+
+## Map
+
+| Path | What it holds |
+|---|---|
+| `/home/clawbox/clawbox/` | **The app** — git checkout of [ID-Robots/clawbox](https://github.com/ID-Robots/clawbox), branch `main` (or the pinned channel) |
+| `…/clawbox/data/` | **Device state** (gitignored): `config.json` (setup/config KV), `kv.json` (UI state), `.session-secret`, `.mcp-token`, `.local-ai-token`, `network.env`, `hostname.env`, `hotspot.env`, `webapps/`, `code-projects/`, `certs/` |
+| `…/clawbox/.env` | App environment (OAuth client IDs, overrides) — gitignored, survives updates |
+| `…/clawbox/.update-branch` | Update-channel pin (`beta` etc.) — survives updates *and* factory reset |
+| `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version for the fleet |
+| `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
+| `~/.openclaw/` | **OpenClaw state**: `openclaw.json` (gateway config), `agents/<agent>/agent/auth-profiles.json` (**provider credentials**), `agents/<agent>/agent/codex-home/auth.json` (ChatGPT-subscription session), `credentials/telegram-*.json` (pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
+| `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
+| `~/.clawkeep/` | ClawKeep backup state: portal `token`, `config.toml`, `state.json`, encryption `passphrase`, `schedule.json` |
+| `~/.npm-global/` | OpenClaw install (`bin/openclaw`) |
+| `~/.bun/bin/bun` | Bun runtime (builds, MCP server) |
+| `/etc/systemd/system/clawbox-*` | Service units |
+| `/etc/avahi/avahi-daemon.conf` | mDNS config |
+| `/usr/share/ollama/` | Downloaded Ollama models |
+
+## Credentials — exactly where secrets live
+
+| Secret | Location | Notes |
+|---|---|---|
+| Login/SSH password | `/etc/shadow` (system account `clawbox`) | Checked by the web login via `unix_chkpwd` |
+| Session signing secret | `data/.session-secret` (0600) | Signs the `clawbox_session` cookie |
+| AI provider API keys / OAuth | `~/.openclaw/agents/main/agent/auth-profiles.json` (0600) | The real secrets. `openclaw.json`'s `auth.profiles` holds **metadata only** (mode/provider) |
+| ChatGPT subscription session | `~/.openclaw/agents/<agent>/agent/codex-home/auth.json` + `~/.codex/auth.json` | Synthesized/healed on gateway start |
+| Gateway token | `openclaw.json → gateway.auth.token` | Per-device random 32-byte hex |
+| MCP bearer | `data/.mcp-token` | Lets the agent's device tools call `/setup-api/*` |
+| Telegram bot token | `data/config.json` + gateway config | |
+| ClawKeep portal token / passphrase | `~/.clawkeep/token`, `~/.clawkeep/passphrase` (0600) | |
+
+## What survives what
+
+| | System update | Factory reset |
+|---|---|---|
+| App code (`/home/clawbox/clawbox` tracked files) | **hard-reset to the release** | hard-reset + wiped state |
+| `data/` (settings, tokens, webapps) | ✅ kept | ❌ wiped (except `network.env`) |
+| `.env` | ✅ kept | ✅ kept (gitignored, not in wipe list) |
+| `.update-branch` (channel pin) | ✅ kept | ✅ kept |
+| `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
+| `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
+| Ollama models | ✅ kept | ❌ deleted |
+| Saved Wi-Fi networks | ✅ kept | ❌ deleted (box returns to AP mode) |
+| SSH `authorized_keys`, shell history, browser profile | ✅ kept | ❌ wiped |
+| System password | ✅ kept | ❌ reset to `clawbox` |
+| Voice models (Whisper/Kokoro caches) | ✅ kept | ✅ kept (can't re-download in AP mode) |
+
+The update mechanism achieves this with `git reset --hard <release>` + `git clean -fd` (note: no `-x` — gitignored paths like `data/` and `.env` are never cleaned). Details: [Update System](/technical/update-system).
+
+## Logs
+
+| Log | Command |
+|---|---|
+| Web OS / login / setup API | `journalctl -u clawbox-setup -n 50 --no-pager` |
+| AI gateway / providers / channels | `journalctl -u clawbox-gateway -n 50 --no-pager` |
+| Update steps (root) | `journalctl -u clawbox-root-update@<step> -n 40 --no-pager` |
+| AI browser (Chromium/CDP) | `/tmp/clawbox-browser.log` |

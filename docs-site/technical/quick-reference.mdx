@@ -1,0 +1,117 @@
+---
+title: "Quick Reference"
+summary: "The one-page fact sheet: ports, paths, services, commands, API endpoints, and known gotchas — optimized for fast scanning by humans and AI agents."
+---
+
+Everything load-bearing about a ClawBox on one page. Facts only — explanations live in the linked chapters.
+
+## Identity
+
+| Fact | Value |
+|---|---|
+| Product | ClawBox — OpenClaw OS on NVIDIA Jetson (Ubuntu 22.04 aarch64) |
+| Repo | `github.com/ID-Robots/clawbox` · releases = `vX.Y.Z` tags on `main` · integration branch `beta` |
+| System user | `clawbox` (uid 1000) · one password for SSH **and** browser login |
+| Web UI | `http://<box-ip>` (port 80) · `http://clawbox.local` when mDNS works |
+| Setup hotspot | SSID `ClawBox-Setup` → `http://10.42.0.1` (fallback subnet `10.43.0.1`) |
+| Stack | Next.js 16 / React 19 / Node 22 runtime / Bun builds / OpenClaw gateway (npm-pinned) |
+
+## Ports
+
+| Port | Service | Exposure |
+|---|---|---|
+| 80 | Web OS (`clawbox-setup`) — UI, login, `/setup-api/*`, proxies to gateway | LAN |
+| 18789 | OpenClaw gateway | **loopback only** — never browse it directly |
+| 22 | SSH | LAN |
+| 3006 | Terminal WS (proxied at `/terminal-ws`) | via 80 |
+| 5900/6080 | VNC / noVNC (proxied at `/novnc-ws`) | via 80 |
+| 18800 | Chromium CDP (AI browser) | localhost |
+| 11434 | Ollama | localhost |
+| 8080 / 8880 | llama.cpp / Kokoro TTS | localhost |
+
+## Paths
+
+| Path | Contents |
+|---|---|
+| `/home/clawbox/clawbox` | App (git checkout) |
+| `…/clawbox/data/` | Device state: `config.json`, `kv.json`, `.session-secret`, `.mcp-token`, `network.env` — survives updates, wiped by factory reset (except `network.env`) |
+| `…/clawbox/.env` | App env — survives everything |
+| `…/clawbox/.update-branch` | Channel pin (`beta`) — survives everything |
+| `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version |
+| `~/.openclaw/openclaw.json` | Gateway config (auth **metadata** only) |
+| `~/.openclaw/agents/main/agent/auth-profiles.json` | **Real provider credentials** |
+| `~/.openclaw/agents/<agent>/agent/codex-home/auth.json` | ChatGPT-subscription session (synced per-agent) |
+| `~/.openclaw/credentials/telegram-*.json` | Telegram pairing approvals |
+| `~/.clawkeep/` | Backup pairing/config/passphrase |
+| `~/.npm-global/bin/openclaw` | Gateway binary |
+
+## Services (systemd)
+
+`clawbox-setup` (web, port 80) · `clawbox-gateway` (OpenClaw, pre-start self-heal script) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (CDP, on demand) · `clawbox-heartbeat.timer` · `clawbox-tunnel` (optional) · `clawbox-performance` · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
+
+## Commands (over SSH)
+
+```bash
+# Health / logs
+systemctl status clawbox-setup clawbox-gateway --no-pager
+journalctl -u clawbox-setup -n 50 --no-pager      # web/login
+journalctl -u clawbox-gateway -n 50 --no-pager    # AI/providers/channels
+
+# Restart services
+sudo systemctl restart clawbox-setup clawbox-gateway
+
+# Update (full, correct way)
+sudo clawbox update            # == sudo bash /home/clawbox/clawbox/install.sh
+
+# Targeted repairs
+sudo bash install.sh --step gateway_setup     # fixes 'gateway token mismatch'
+sudo bash install.sh --step openclaw_install  # fixes stale core / 'Unrecognized key' / plugin skew
+
+# Password
+sudo passwd clawbox            # new password, effective everywhere immediately
+
+# Channel
+echo beta > /home/clawbox/clawbox/.update-branch   # opt into beta (delete file to leave)
+
+# Login check (exactly what the web app does)
+read -rsp 'PW: ' PW; echo; printf '%s\0' "$PW" | /usr/sbin/unix_chkpwd clawbox nullok; echo "exit=$?"; unset PW
+
+# Login API check (bypasses browser)
+curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' -d '{"password":"…","duration":1200}'
+```
+
+## Key API endpoints (`/setup-api/*`, session-cookie or MCP-bearer auth)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /login-api` `{password,duration}` | Login → `clawbox_session` cookie (durations 1200/21600/43200/86400 s) |
+| `GET /setup-api/system/info` · `system/stats` | Device info / live metrics |
+| `POST /setup-api/system/credentials` | Change password |
+| `POST /setup-api/system/power` | Restart/shutdown |
+| `GET /setup-api/update/versions?force=1` | Version check (fresh) |
+| `POST /setup-api/update/run` · `GET update/status` | Run update / poll progress |
+| `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
+| `GET/POST /setup-api/system/update-branch` | Read/set channel |
+| `POST /setup-api/ai-models/configure` | Write provider config |
+| `GET /setup-api/ai-models/status` · `catalog?provider=…` | Provider status / live model catalog |
+| `POST /setup-api/telegram/configure` · `pairing` | Bot token / approve pairing codes |
+| `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token |
+| `POST /setup-api/setup/reset` | **Factory reset** (destructive) |
+| `wifi/*`, `files/*`, `apps/*`, `clawkeep/*`, `code/*`, `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs |
+
+## Gotchas (hard-won)
+
+1. **`:18789` never accepts your password** — it's the gateway; use plain `http://<ip>`.
+2. **Browser login ≠ separate password** — same Linux password as SSH; failures are usually autofill, `unix_chkpwd` perms (`-rwxr-sr-x root shadow`), a stale build, or password encoding. Ladder: [Troubleshooting](/support/troubleshooting#the-browser-rejects-my-password-but-ssh-accepts-it).
+3. **`git pull` is not an update** — always finish with `sudo bash install.sh`; otherwise service files + OpenClaw core go stale (`token mismatch`, `Unrecognized key`).
+4. **Local commits silently block updates** on stable ≤ current release ("up to date" forever); beta shows "Updates paused" + one-click reset. Manual fix = hard-sync ([Recovery C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss)).
+5. **Two OpenAI lanes**: API key = `openai/…` + `sk-…` key; ChatGPT subscription = `codex/…` + OAuth. Different catalogs (`gpt-5` vs `gpt-5.4/5.5`), different credentials. Stale-key 401s after switching are self-healed on beta.
+6. **Secrets live in `auth-profiles.json`**, not `openclaw.json` (metadata only). The codex session is *additionally* per-agent in `codex-home/auth.json`.
+7. **`clawbox.local` failing ≠ box down** — mDNS/Windows/router multicast issue; the IP always works.
+8. **The last update step reboots the box** — 1–2 min offline is normal, not a hang.
+9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`).
+10. **Version label ≠ running code** — `package.json` is read live; verify actual deployment via `.next/BUILD_ID` mtime.
+
+## Chapter index
+
+[Architecture](/technical/architecture) · [Networking](/technical/networking) · [Filesystem](/technical/filesystem) · [Auth & Security](/technical/authentication) · [AI Providers](/technical/ai-providers) · [Update System](/technical/update-system) · [Agent Interface](/technical/agent-interface) · [Troubleshooting](/support/troubleshooting) · [Recovery](/support/recovery)

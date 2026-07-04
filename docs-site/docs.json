@@ -58,7 +58,43 @@
             "pages": [
               "support/updating",
               "support/troubleshooting",
+              "support/recovery",
               "support/faq"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Technical Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "technical/quick-reference",
+              "technical/architecture"
+            ]
+          },
+          {
+            "group": "Internals",
+            "pages": [
+              "technical/networking",
+              "technical/filesystem",
+              "technical/authentication"
+            ]
+          },
+          {
+            "group": "Systems",
+            "pages": [
+              "technical/ai-providers",
+              "technical/update-system",
+              "technical/agent-interface"
+            ]
+          },
+          {
+            "group": "Deep Support",
+            "pages": [
+              "support/troubleshooting",
+              "support/recovery"
             ]
           }
         ]
