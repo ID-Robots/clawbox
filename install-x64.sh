@@ -60,6 +60,29 @@ as_user_login() {
   sudo -iu "$CLAWBOX_USER" bash -lc "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
 }
 
+# `openclaw config set` (OpenClaw 2026.6.x) does an optimistic-concurrency
+# check and dies with ConfigMutationConflictError if the live gateway or the
+# CLI's own state migrations write openclaw.json between its load and write.
+# Under `set -euo pipefail` an unguarded call aborts the install step
+# mid-update; each retry reloads the config fresh so a transient conflict
+# self-heals. Ported from install.sh's oc_config_set (adapted to as_user) —
+# x64 has no gateway-pre-start.sh to defer these writes to, so retry-in-place
+# is the fix (see issue #193). Returns non-zero only after 3 real failures.
+oc_config_set() {
+  local attempt
+  for attempt in 1 2 3; do
+    if as_user "$OPENCLAW_BIN" config set "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      sleep 2
+    fi
+  done
+  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  return 1
+}
+
 ensure_env_setting() {
   local env_file="$1"
   local key="$2"
@@ -279,7 +302,7 @@ step_openclaw_patch() {
     return
   fi
 
-  as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
+  oc_config_set gateway.controlUi.allowInsecureAuth true --json
   echo "  allowInsecureAuth enabled"
 
   local PATCHED_MARKER='isControlUi && allowControlUiBypass'
@@ -351,7 +374,10 @@ step_openclaw_config() {
     return
   fi
 
-  as_user "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
+  # Best-effort (|| true) but no longer SILENT — oc_config_set retries on a
+  # conflict and logs to stderr if it still can't apply, instead of the old
+  # 2>/dev/null swallow that dropped the config with no trace.
+  oc_config_set gateway.auth.mode token || true
   # Seed a strong per-device token only when missing/weak (see install.sh).
   # A `${ENV}` interpolation counts as strong and must not be rotated.
   # `|| true`: fresh installs have no token key yet, so `config get` exits
@@ -366,10 +392,10 @@ step_openclaw_config() {
   fi
   if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
     GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    as_user "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN" 2>/dev/null || true
+    oc_config_set gateway.auth.token "$GW_TOKEN" || true
   fi
-  as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
-  as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
+  oc_config_set gateway.controlUi.allowInsecureAuth true --json || true
+  oc_config_set gateway.controlUi.dangerouslyDisableDeviceAuth true --json || true
 
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local OPENCLAW_CONFIG="$CLAWBOX_HOME/.openclaw/openclaw.json"
