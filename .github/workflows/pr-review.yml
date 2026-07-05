@@ -1,0 +1,87 @@
+name: ClawReview
+
+# ClawBox's own PR bot 🦀 — structured advisory review + repo-policy checks +
+# duplicate detection on every PR. Complements CodeRabbit. See
+# scripts/pr-review.mjs.
+#
+# SECURITY: pull_request_target grants secret access on fork PRs, so this
+# workflow must NEVER check out or execute PR code. The checkout below is the
+# BASE repo (our trusted main); the PR is reviewed as data via the API diff.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# Empty default grant — only the job's explicit scopes apply.
+permissions: {}
+
+concurrency:
+  group: clawreview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Job-scoped so future jobs don't inherit write access.
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+    # Bot PRs (dependabot etc.) get CI + human review; ClawReview skips them.
+    # Drafts are skipped too (reviewed at ready_for_review) — no API spend
+    # while the author is still iterating.
+    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') && !github.event.pull_request.draft }}
+    # Job-level so a step `if:` can read it — a step cannot see env it sets on
+    # itself. Gates the optional App-token step below.
+    env:
+      HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
+    steps:
+      - name: Checkout (base repo only — never the PR head)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install Claude backend
+        # Two transports, one wins at runtime (script picks by env):
+        #  - CLAUDE_CODE_OAUTH_TOKEN set -> Claude Code CLI (subscription/OAuth,
+        #    the team's preferred path; same runtime as claude-code-action)
+        #  - else ANTHROPIC_API_KEY -> the SDK
+        # Install whichever backend the available secret needs; both pinned.
+        # Keep versions in sync with issue-triage.yml.
+        env:
+          HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$HAS_OAUTH" ]; then
+            npm install -g @anthropic-ai/claude-code@2.1.201
+          else
+            npm install --prefix scripts --no-save @anthropic-ai/sdk@0.106.0
+          fi
+
+      - name: Mint ClawReview app token
+        # Optional custom identity: when the ClawReview GitHub App is
+        # configured (CLAWREVIEW_APP_ID + CLAWREVIEW_APP_PRIVATE_KEY secrets),
+        # comments/labels post as clawreview[bot] with the crab avatar.
+        # Without the secrets this step skips and we fall back to
+        # github-actions[bot] — the bot works either way.
+        id: app-token
+        if: env.HAS_APP != ''
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.CLAWREVIEW_APP_ID }}
+          private-key: ${{ secrets.CLAWREVIEW_APP_PRIVATE_KEY }}
+          # Scope the token to exactly what this bot needs (comments + labels),
+          # not the App's full installation grant.
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Review with Claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: node scripts/pr-review.mjs
