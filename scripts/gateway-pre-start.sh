@@ -74,6 +74,10 @@ fi
 # already matches the target state. The CLI calls below (gateway
 # restart + MCP server) are guarded by their own idempotency checks.
 export CLAWBOX_HOSTNAME="$CONFIGURED_HOSTNAME"
+# Let the inline Python import gateway_origins.py (origin validation for the
+# operator-configurable extra trusted origins — issue #232).
+CLAWBOX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CLAWBOX_SCRIPT_DIR
 # Serialize the LAN_IPS bash array into an env var Python can parse —
 # newline-separated is bash-safe (IPv4s contain no newlines).
 if [ ${#LAN_IPS[@]} -gt 0 ]; then
@@ -85,6 +89,15 @@ export CLAWBOX_LAN_IPS
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
+
+# Origin validation for operator-configured extra trusted origins (issue #232).
+# Imported from scripts/gateway_origins.py so the logic stays unit-testable;
+# fall back to defaults-only if the module can't be found (never block boot).
+sys.path.insert(0, os.environ.get("CLAWBOX_SCRIPT_DIR", ""))
+try:
+    from gateway_origins import merge_extra_origins
+except Exception:
+    merge_extra_origins = None
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -268,11 +281,25 @@ def set_if(obj, key, value):
 
 set_if(control_ui, "allowInsecureAuth", True)
 set_if(control_ui, "dangerouslyDisableDeviceAuth", True)
+# Union in operator-configured extra trusted origins (VPN / MagicDNS names,
+# a stable HTTPS origin) from controlUi.extraAllowedOrigins so deployments
+# don't hand-patch this generated list. Each entry is validated as a full
+# origin; invalid ones are reported here and dropped, never written to the
+# active allowlist. Missing/None config = defaults only (unchanged behavior).
+if merge_extra_origins is not None:
+    effective_origins, invalid_extra = merge_extra_origins(
+        allowed_origins, control_ui.get("extraAllowedOrigins")
+    )
+    for bad in invalid_extra:
+        print("  WARN: ignoring invalid controlUi.extraAllowedOrigins entry: " + repr(bad))
+else:
+    effective_origins = allowed_origins
+
 # Compare allowedOrigins as sets since ordering shouldn't force a
 # rewrite — the gateway doesn't care about the order, and the LAN IP
 # enumeration can reorder entries between boots.
-if set(control_ui.get("allowedOrigins", []) or []) != set(allowed_origins):
-    control_ui["allowedOrigins"] = allowed_origins
+if set(control_ui.get("allowedOrigins", []) or []) != set(effective_origins):
+    control_ui["allowedOrigins"] = effective_origins
     changed = True
 
 # Normalize bind to "lan" if missing or set to something the gateway
