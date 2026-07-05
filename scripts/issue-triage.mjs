@@ -59,17 +59,20 @@ async function main() {
       console.log(`label ensure '${name}':`, err?.message?.split("\n")[0] ?? err);
     }
   };
-  const prioColor = t.priority === "high" ? "b60205" : t.priority === "medium" ? "fbca04" : "0e8a16";
-  ensure(`priority: ${t.priority}`, prioColor, "Auto-triage priority");
-  ensure(`area: ${t.area}`, "c5def5", "Auto-triage area");
-  // `gh issue edit` applies all labels in one call and fails the whole command
-  // if ANY is missing — so the category label must exist too, even though
-  // bug/enhancement/etc. are GitHub defaults (a repo may have deleted them).
-  const catColor = { bug: "d73a4a", enhancement: "a2eeef", documentation: "0075ca", question: "d876e3", invalid: "e4e669" }[t.category] ?? "ededed";
-  ensure(t.category, catColor, "Auto-triage category");
-
-  const labels = [t.category, `priority: ${t.priority}`, `area: ${t.area}`];
-  if (!process.env.DRY_RUN) gh(["issue", "edit", String(number), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);
+  // All label creation + application mutates the repo — gate the whole block
+  // on DRY_RUN so a dry run stays fully read-only.
+  if (!process.env.DRY_RUN) {
+    const prioColor = t.priority === "high" ? "b60205" : t.priority === "medium" ? "fbca04" : "0e8a16";
+    ensure(`priority: ${t.priority}`, prioColor, "Auto-triage priority");
+    ensure(`area: ${t.area}`, "c5def5", "Auto-triage area");
+    // `gh issue edit` applies all labels in one call and fails the whole command
+    // if ANY is missing — so the category label must exist too, even though
+    // bug/enhancement/etc. are GitHub defaults (a repo may have deleted them).
+    const catColor = { bug: "d73a4a", enhancement: "a2eeef", documentation: "0075ca", question: "d876e3", invalid: "e4e669" }[t.category] ?? "ededed";
+    ensure(t.category, catColor, "Auto-triage category");
+    const labels = [t.category, `priority: ${t.priority}`, `area: ${t.area}`];
+    gh(["issue", "edit", String(number), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);
+  }
 
   // Same crab mascot as ClawReview (the PR bot) — one friendly character
   // across issues and PRs. Greeting picked by issue number for stability.

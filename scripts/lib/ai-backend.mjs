@@ -50,7 +50,8 @@ async function viaSdk({ system, schema, userContent, model, maxTokens }) {
   // Throw rather than default to "{}" — an empty object downstream would create
   // and apply labels literally named "undefined". Callers' outer catch exits 0.
   if (!text) throw new Error("no text block in model response");
-  return JSON.parse(text);
+  // Tolerant parse (same as the CLI path) in case the model fences the JSON.
+  return parseModelJson(text);
 }
 
 // Run one structured-output call and return the validated JSON object.
