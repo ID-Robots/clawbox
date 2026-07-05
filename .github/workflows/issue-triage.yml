@@ -21,6 +21,10 @@ jobs:
       contents: read
     # Skip issues opened by bots to avoid loops.
     if: ${{ !endsWith(github.actor, '[bot]') }}
+    # Job-level so a step `if:` can read it — a step cannot see env it sets on
+    # itself. Gates the optional App-token step below.
+    env:
+      HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
     steps:
       - name: Checkout
         # SHA-pinned: this workflow runs on every opened issue with
@@ -63,12 +67,12 @@ jobs:
         # is used. The bot works either way.
         id: app-token
         if: env.HAS_APP != ''
-        env:
-          HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.CLAWREVIEW_APP_ID }}
           private-key: ${{ secrets.CLAWREVIEW_APP_PRIVATE_KEY }}
+          # Triage only labels + comments on issues — scope the token to that.
+          permission-issues: write
 
       - name: Triage with Claude
         env:

@@ -9,9 +9,7 @@
 // Fails soft: any error logs and exits 0 — the mascot must never block a PR.
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-// NB: @anthropic-ai/sdk is imported lazily inside reviewViaSdk() — the OAuth
-// transport installs only the Claude Code CLI, not the SDK, so a static
-// top-level import would ERR_MODULE_NOT_FOUND before any code runs.
+import { callClaude } from "./lib/ai-backend.mjs";
 
 // Sonnet: PR review needs real reasoning; still cents per run at PR-diff sizes.
 const MODEL = "claude-sonnet-4-6";
@@ -213,58 +211,18 @@ function buildUserPrompt(data, checks) {
   ].join("\n\n");
 }
 
-// Extract a JSON object from possibly-fenced/wrapped model text.
-function parseModelJson(text) {
-  const stripped = text.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
-  try { return JSON.parse(stripped); } catch { /* fall through */ }
-  const m = stripped.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("no JSON object in model response");
-  return JSON.parse(m[0]);
-}
-
-// Subscription transport: headless Claude Code CLI (`claude -p`), authed by
-// CLAUDE_CODE_OAUTH_TOKEN — the official Pro/Max path (same runtime as
-// claude-code-action). No tools, pure text in/out.
-function reviewViaClaudeCli(userPrompt) {
-  const prompt = [
-    SYSTEM,
-    "\nRespond with ONLY a JSON object matching this schema (no prose, no fences):",
-    JSON.stringify(SCHEMA),
-    "\n---\n",
-    userPrompt,
-  ].join("\n");
-  const out = execFileSync("claude", ["-p", "--model", MODEL, "--output-format", "json"], {
-    encoding: "utf8",
-    input: prompt,
-    stdio: ["pipe", "pipe", "inherit"],
-    timeout: 240_000,
+async function review(data, checks) {
+  // Transport (OAuth CLI / SDK) lives in the shared backend so both bots stay
+  // in sync. OAuth is preferred; the API-key SDK is the fallback.
+  return callClaude({
+    system: SYSTEM,
+    schema: SCHEMA,
+    userContent: buildUserPrompt(data, checks),
+    model: MODEL,
+    maxTokens: 2500,
+    timeoutMs: 240_000,
     maxBuffer: 16 * 1024 * 1024,
   });
-  const wrapper = JSON.parse(out);
-  if (wrapper.is_error) throw new Error(`claude cli error: ${String(wrapper.result).slice(0, 200)}`);
-  return parseModelJson(String(wrapper.result));
-}
-
-async function reviewViaSdk(userPrompt) {
-  const { default: Anthropic } = await import("@anthropic-ai/sdk");
-  const client = new Anthropic();
-  const resp = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2500,
-    system: SYSTEM,
-    output_config: { format: { type: "json_schema", schema: SCHEMA } },
-    messages: [{ role: "user", content: userPrompt }],
-  });
-  const text = resp.content.find((b) => b.type === "text")?.text;
-  if (!text) throw new Error("no text block in model response");
-  return JSON.parse(text);
-}
-
-async function review(data, checks) {
-  const userPrompt = buildUserPrompt(data, checks);
-  // Subscription OAuth preferred (team choice); API key as fallback backend.
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) return reviewViaClaudeCli(userPrompt);
-  return reviewViaSdk(userPrompt);
 }
 
 // ---------- comment + labels ----------------------------------------------------
