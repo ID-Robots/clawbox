@@ -122,24 +122,37 @@ async function main() {
   ensure(t.category, catColor, "Auto-triage category");
 
   const labels = [t.category, `priority: ${t.priority}`, `area: ${t.area}`];
-  gh(["issue", "edit", String(number), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);
+  if (!process.env.DRY_RUN) gh(["issue", "edit", String(number), "--repo", REPO, ...labels.flatMap((l) => ["--add-label", l])]);
 
+  // Same crab mascot as ClawReview (the PR bot) — one friendly character
+  // across issues and PRs. Greeting picked by issue number for stability.
+  const GREETINGS = [
+    "Scuttled over to help sort this one 🦀",
+    "Your friendly reef crab, here to get this filed.",
+    "Thanks for the report — let me get you oriented.",
+    "Claws on the case. Here's how I've tagged it:",
+  ];
+  const priIcon = { high: "🔴", medium: "🟡", low: "🟢" }[t.priority] ?? "⚪";
   const comment = [
-    "### 🤖 Auto-triage",
+    "## 🦀 ClawReview",
     "",
-    "| | |",
-    "|---|---|",
-    `| **Category** | \`${t.category}\` |`,
-    `| **Priority** | \`${t.priority}\` |`,
-    `| **Area** | \`${t.area}\` |`,
+    `*${GREETINGS[number % GREETINGS.length]}*`,
     "",
-    `**Summary:** ${t.summary}`,
+    t.summary,
+    "",
+    "**At a glance**",
+    `- Category: \`${t.category}\` · Area: \`${t.area}\``,
+    `- Priority: ${priIcon} \`${t.priority}\``,
     "",
     `**Suggested next step:** ${t.suggested_action}`,
     "",
-    "<sub>Auto-classified on open — labels are advisory; adjust as needed.</sub>",
+    "<sub>— ClawReview 🦀. Labels auto-applied on open — advisory, a maintainer will follow up. Conventions: <a href=\"https://docs.clawbox.tech/llms.txt\">docs</a>.</sub>",
   ].join("\n");
 
+  if (process.env.DRY_RUN) {
+    console.log(comment);
+    return;
+  }
   gh(["issue", "comment", String(number), "--repo", REPO, "--body", comment]);
   console.log(`Triaged #${number}: ${t.category} / ${t.priority} / ${t.area}`);
 }
