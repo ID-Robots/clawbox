@@ -4,9 +4,7 @@
 // Needs: ANTHROPIC_API_KEY (repo secret) and GH_TOKEN (the workflow's GITHUB_TOKEN).
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-// NB: @anthropic-ai/sdk is imported lazily inside classifyViaSdk() — the OAuth
-// transport installs only the Claude Code CLI, not the SDK, so a static
-// top-level import would ERR_MODULE_NOT_FOUND before any code runs.
+import { callClaude } from "./lib/ai-backend.mjs";
 
 // Haiku 4.5 — fast and cheap, ideal for a high-volume issue classifier.
 // Switch to "claude-opus-4-8" for maximum classification accuracy.
@@ -44,62 +42,11 @@ function gh(args) {
   return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
 }
 
-// Extract a JSON object from possibly-fenced/wrapped model text.
-function parseModelJson(text) {
-  const stripped = text.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
-  try { return JSON.parse(stripped); } catch { /* fall through */ }
-  const m = stripped.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("no JSON object in model response");
-  return JSON.parse(m[0]);
-}
-
-// Subscription transport: headless Claude Code CLI, authed by
-// CLAUDE_CODE_OAUTH_TOKEN (the official Pro/Max path). Keep in sync with the
-// same pattern in scripts/pr-review.mjs.
-function classifyViaClaudeCli(userContent) {
-  const prompt = [
-    SYSTEM,
-    "\nRespond with ONLY a JSON object matching this schema (no prose, no fences):",
-    JSON.stringify(SCHEMA),
-    "\n---\n",
-    userContent,
-  ].join("\n");
-  const out = execFileSync("claude", ["-p", "--model", MODEL, "--output-format", "json"], {
-    encoding: "utf8",
-    input: prompt,
-    stdio: ["pipe", "pipe", "inherit"],
-    timeout: 180_000,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  const wrapper = JSON.parse(out);
-  if (wrapper.is_error) throw new Error(`claude cli error: ${String(wrapper.result).slice(0, 200)}`);
-  return parseModelJson(String(wrapper.result));
-}
-
-async function classifyViaSdk(userContent) {
-  const { default: Anthropic } = await import("@anthropic-ai/sdk"); // reads ANTHROPIC_API_KEY from env
-  const client = new Anthropic();
-  const resp = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system: SYSTEM,
-    output_config: { format: { type: "json_schema", schema: SCHEMA } },
-    messages: [{ role: "user", content: userContent }],
-  });
-  const text = resp.content.find((b) => b.type === "text")?.text;
-  // Throw rather than default to "{}" — an empty object here would create
-  // and apply labels literally named "undefined"; the outer catch logs and
-  // exits 0 (triage must never fail issue creation).
-  if (!text) throw new Error("no text block in model response");
-  return JSON.parse(text);
-}
-
 async function main() {
   const userContent = `Triage this issue. Respond ONLY with the JSON object.\n\n<title>${title}</title>\n\n<body>\n${body.slice(0, 8000)}\n</body>`;
-  // Subscription OAuth preferred (team choice); API key as fallback backend.
-  const t = process.env.CLAUDE_CODE_OAUTH_TOKEN
-    ? classifyViaClaudeCli(userContent)
-    : await classifyViaSdk(userContent);
+  // Transport (OAuth CLI / SDK) lives in the shared backend so both bots stay
+  // in sync. OAuth is preferred; the API-key SDK is the fallback.
+  const t = await callClaude({ system: SYSTEM, schema: SCHEMA, userContent, model: MODEL, maxTokens: 1024, timeoutMs: 180_000, maxBuffer: 8 * 1024 * 1024 });
 
   // Ensure the priority/area labels exist (idempotent), then apply.
   const ensure = (name, color, desc) => {
