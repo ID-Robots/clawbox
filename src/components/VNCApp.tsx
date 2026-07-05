@@ -4,8 +4,13 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
 import { copyToClipboard } from "@/lib/clipboard";
+import { JSON_ACCEPT_HEADERS, isAuthExpired } from "@/lib/setup-auth";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+
+// Shown whenever a /setup-api/* call comes back 401 or redirected to /login.
+const SESSION_EXPIRED_MESSAGE =
+  "Your setup session has expired. Please sign in again to continue.";
 
 const REMOTE_MODIFIER_RELEASES: TrackedKey[] = [
   { code: "ControlLeft", keysym: 0xffe3 },
@@ -32,6 +37,9 @@ export default function VNCApp() {
   const pressedKeysRef = useRef<Map<string, TrackedKey>>(new Map());
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
+  // Set when a setup-api call reports the session expired — flips the error
+  // panel to a "sign in again" action instead of retry/repair.
+  const [authExpired, setAuthExpired] = useState(false);
   const [vncInfo, setVncInfo] = useState<{ host: string; wsPort: number } | null>(null);
   // Install/repair flow: when the VNC API is unreachable or reports VNC as
   // missing, the user can trigger `install.sh --step vnc_install` through
@@ -73,8 +81,21 @@ export default function VNCApp() {
 
   const checkVnc = useCallback(async () => {
     try {
-      const res = await fetch("/setup-api/vnc");
-      const data = await res.json();
+      const res = await fetch("/setup-api/vnc", { headers: JSON_ACCEPT_HEADERS });
+      if (isAuthExpired(res)) {
+        setAuthExpired(true);
+        setStatus("error");
+        setError(SESSION_EXPIRED_MESSAGE);
+        return;
+      }
+      // Guard the parse: a non-OK/non-JSON body must not throw a confusing
+      // "Unexpected token <" from a login page slipping through.
+      const data = await res.json().catch(() => ({} as { available?: boolean; wsPort?: number; error?: string }));
+      if (!res.ok) {
+        setStatus("error");
+        setError(data.error || `VNC check failed (HTTP ${res.status})`);
+        return;
+      }
       if (data.available) {
         // Keep host/wsPort in the state shape for backwards compatibility but
         // the WebSocket URL is actually built below against same-origin.
@@ -395,6 +416,7 @@ export default function VNCApp() {
   const handleReconnect = useCallback(() => {
     setStatus("connecting");
     setError(null);
+    setAuthExpired(false);
     setVncInfo(null);
     checkVnc();
   }, [checkVnc]);
@@ -405,9 +427,15 @@ export default function VNCApp() {
     try {
       const res = await fetch("/setup-api/install/run-step", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...JSON_ACCEPT_HEADERS },
         body: JSON.stringify({ step: "vnc_install" }),
       });
+      if (isAuthExpired(res)) {
+        setAuthExpired(true);
+        setRepairError(SESSION_EXPIRED_MESSAGE);
+        setRepairState("failed");
+        return;
+      }
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
         setRepairError(data?.error || `vnc_install failed (HTTP ${res.status})`);
@@ -422,9 +450,15 @@ export default function VNCApp() {
       try {
         const rebootRes = await fetch("/setup-api/system/power", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...JSON_ACCEPT_HEADERS },
           body: JSON.stringify({ action: "restart" }),
         });
+        if (isAuthExpired(rebootRes)) {
+          setAuthExpired(true);
+          setRepairError(SESSION_EXPIRED_MESSAGE);
+          setRepairState("failed");
+          return;
+        }
         if (!rebootRes.ok) {
           const body = await rebootRes.json().catch(() => ({}));
           setRepairError(body?.error || `Reboot request failed (HTTP ${rebootRes.status})`);
@@ -447,7 +481,15 @@ export default function VNCApp() {
       while (Date.now() - start < TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
         try {
-          const probe = await fetch("/setup-api/vnc", { cache: "no-store" });
+          const probe = await fetch("/setup-api/vnc", { cache: "no-store", headers: JSON_ACCEPT_HEADERS });
+          if (isAuthExpired(probe)) {
+            // Session expired mid-reboot — stop polling and prompt re-login
+            // rather than spinning to the 5-minute timeout.
+            setAuthExpired(true);
+            setRepairError(SESSION_EXPIRED_MESSAGE);
+            setRepairState("failed");
+            return;
+          }
           if (!probe.ok) continue;
           const data = await probe.json().catch(() => ({}));
           if (data?.available) {
@@ -496,9 +538,14 @@ export default function VNCApp() {
     try {
       const res = await fetch("/setup-api/vnc/clipboard", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...JSON_ACCEPT_HEADERS },
         body: JSON.stringify({ text }),
       });
+      if (isAuthExpired(res)) {
+        setAuthExpired(true);
+        setPasteError(SESSION_EXPIRED_MESSAGE);
+        return false;
+      }
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         setPasteError(body.error || `Clipboard write failed (HTTP ${res.status})`);
@@ -556,7 +603,9 @@ export default function VNCApp() {
     try {
       let text = "";
       try {
-        const res = await fetch("/setup-api/vnc/clipboard", { cache: "no-store" });
+        const res = await fetch("/setup-api/vnc/clipboard", { cache: "no-store", headers: JSON_ACCEPT_HEADERS });
+        // Session expired — never parse a login page as clipboard JSON.
+        if (isAuthExpired(res)) { setAuthExpired(true); return; }
         if (!res.ok) return;
         const body = (await res.json().catch(() => ({}))) as { text?: string };
         text = typeof body.text === "string" ? body.text : "";
@@ -641,6 +690,16 @@ export default function VNCApp() {
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
             <p className="text-sm text-white/80">Installing / repairing Remote Desktop… this may take a few minutes.</p>
+          </div>
+        ) : authExpired ? (
+          <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+            <button
+              onClick={() => window.location.assign("/login")}
+              className="px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer flex items-center gap-2"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>login</span>
+              Sign in again
+            </button>
           </div>
         ) : (
           <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
