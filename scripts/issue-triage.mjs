@@ -4,7 +4,9 @@
 // Needs: ANTHROPIC_API_KEY (repo secret) and GH_TOKEN (the workflow's GITHUB_TOKEN).
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import Anthropic from "@anthropic-ai/sdk";
+// NB: @anthropic-ai/sdk is imported lazily inside classifyViaSdk() — the OAuth
+// transport installs only the Claude Code CLI, not the SDK, so a static
+// top-level import would ERR_MODULE_NOT_FOUND before any code runs.
 
 // Haiku 4.5 — fast and cheap, ideal for a high-volume issue classifier.
 // Switch to "claude-opus-4-8" for maximum classification accuracy.
@@ -75,7 +77,8 @@ function classifyViaClaudeCli(userContent) {
 }
 
 async function classifyViaSdk(userContent) {
-  const client = new Anthropic(); // reads ANTHROPIC_API_KEY from env
+  const { default: Anthropic } = await import("@anthropic-ai/sdk"); // reads ANTHROPIC_API_KEY from env
+  const client = new Anthropic();
   const resp = await client.messages.create({
     model: MODEL,
     max_tokens: 1024,
