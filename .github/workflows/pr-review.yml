@@ -31,6 +31,10 @@ jobs:
     # Drafts are skipped too (reviewed at ready_for_review) — no API spend
     # while the author is still iterating.
     if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') && !github.event.pull_request.draft }}
+    # Job-level so a step `if:` can read it — a step cannot see env it sets on
+    # itself. Gates the optional App-token step below.
+    env:
+      HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
     steps:
       - name: Checkout (base repo only — never the PR head)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -66,12 +70,14 @@ jobs:
         # github-actions[bot] — the bot works either way.
         id: app-token
         if: env.HAS_APP != ''
-        env:
-          HAS_APP: ${{ secrets.CLAWREVIEW_APP_ID }}
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.CLAWREVIEW_APP_ID }}
           private-key: ${{ secrets.CLAWREVIEW_APP_PRIVATE_KEY }}
+          # Scope the token to exactly what this bot needs (comments + labels),
+          # not the App's full installation grant.
+          permission-pull-requests: write
+          permission-issues: write
 
       - name: Review with Claude
         env:
