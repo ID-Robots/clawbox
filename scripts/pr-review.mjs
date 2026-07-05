@@ -8,7 +8,9 @@
 // logs and exits 0 — a broken bot must never block a PR.
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import Anthropic from "@anthropic-ai/sdk";
+// NB: @anthropic-ai/sdk is imported lazily inside reviewViaSdk() — the OAuth
+// transport installs only the Claude Code CLI, not the SDK, so a static
+// top-level import would ERR_MODULE_NOT_FOUND before any code runs.
 
 // Sonnet: PR review needs real reasoning; still cents per run at PR-diff sizes.
 const MODEL = "claude-sonnet-4-6";
@@ -243,6 +245,7 @@ function reviewViaClaudeCli(userPrompt) {
 }
 
 async function reviewViaSdk(userPrompt) {
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const client = new Anthropic();
   const resp = await client.messages.create({
     model: MODEL,
