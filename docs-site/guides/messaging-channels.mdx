@@ -1,53 +1,59 @@
 ---
 title: "Messaging Channels"
 icon: "comments"
-summary: "Connect Telegram, WhatsApp, Discord, and other chat apps to your ClawBox."
+summary: "Connect Telegram, use web chat, and understand which OpenClaw channels are managed by ClawBox versus advanced extensions."
 ---
 
 ClawBox runs OpenClaw, which connects to your favorite chat apps so you can message
-your assistant from anywhere. One device serves multiple channels at once.
+your assistant from anywhere. The managed ClawBox setup path currently focuses on
+Telegram plus the on-device web chat. Other OpenClaw channels may be possible, but
+they are advanced configuration unless they appear in your device UI.
 
 ## Supported channels
 
-<Columns cols={3}>
+<Columns cols={2}>
   <Card title="Telegram" icon="telegram" />
-  <Card title="WhatsApp" icon="whatsapp" />
-  <Card title="Discord" icon="discord" />
   <Card title="Web Chat" icon="globe" />
-  <Card title="Slack" icon="slack" />
-  <Card title="Signal" icon="signal-messenger" />
 </Columns>
 
-...and more, including Google Chat, Microsoft Teams, Matrix, and iMessage.
+Telegram is the first-class ClawBox channel: setup, bot-token validation, pairing
+approvals, and progress streaming are handled by the ClawBox UI. Web chat is built
+into the ClawBox interface.
+
+Advanced users can add other OpenClaw-supported channels manually if their installed
+OpenClaw version and plugins support them. Treat WhatsApp, Discord, Slack, Signal,
+Matrix, Microsoft Teams, Google Chat, and iMessage as extension paths, not guaranteed
+guided setup flows.
 
 ## Linking a channel
 
-From the ClawBox settings page:
+For Telegram, from the ClawBox settings page:
 
 <Steps>
-  <Step title="Open Channels">
-    Go to the **Channels** section in your ClawBox web interface.
+  <Step title="Open Telegram settings">
+    Go to **Settings → Telegram** in your ClawBox web interface.
   </Step>
-  <Step title="Pick a channel">
-    Choose the app you want to link (e.g. Telegram).
+  <Step title="Create a bot">
+    Open Telegram, search **@BotFather**, create a bot, and copy the bot token.
   </Step>
-  <Step title="Authorize">
-    Follow the on-screen pairing flow — usually scanning a QR code or pasting a bot token.
+  <Step title="Paste the token">
+    Paste the token into ClawBox and wait for the gateway restart to finish.
   </Step>
-  <Step title="Message it">
-    Send a message from that app. Your ClawBox replies.
+  <Step title="Approve users">
+    New Telegram users send the bot a message and then approve the pairing request
+    on the ClawBox screen.
   </Step>
 </Steps>
 
 <Tip>
-You can link several channels to the same ClawBox. Messages from each surface route to
-the same assistant.
+Use the web chat when you are on the same ClawBox interface and Telegram when you
+want phone-based access.
 </Tip>
 
 ## Group chats
 
-ClawBox can participate in group chats. It's built to know when to chime in and when to
-stay quiet, so it acts like a helpful participant rather than a noisy bot.
+Telegram group behavior depends on your bot privacy settings and the OpenClaw channel
+configuration. Start with one-to-one pairing first, then test group behavior deliberately.
 
 ## Troubleshooting
 
