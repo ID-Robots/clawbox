@@ -45,18 +45,18 @@ mint broken-links
 
 ## Publishing
 
-The intended public URL is **docs.clawbox.tech**.
+The intended public URL is **docs.clawbox.com**.
 
 Two ways to publish:
 
 1. **Mintlify hosting (matches docs.openclaw.ai).** Install the Mintlify GitHub App on
    the `ID-Robots/clawbox` repo, point it at this `docs-site/` directory, and set the
-   custom domain to `docs.clawbox.tech` in the Mintlify dashboard. Pushes to the docs
+   custom domain to `docs.clawbox.com` in the Mintlify dashboard. Pushes to the docs
    branch auto-deploy. (Custom domain / removing Mintlify branding may require a paid
    plan — confirm current Mintlify pricing.)
 
 2. **Self-host the static build.** Run `mint build` and deploy the output to Vercel (the
-   same place clawbox.tech lives) behind a `docs.clawbox.tech` subdomain. No SaaS fee.
+   same place clawbox.com lives) behind a `docs.clawbox.com` subdomain. No SaaS fee.
 
 > Decision pending: which hosting path. The content/config is identical either way.
 
