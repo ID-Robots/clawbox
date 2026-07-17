@@ -361,6 +361,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  const pendingModelSwitchResetRef = useRef<{ model: string; label: string } | null>(null)
   // Sends queued while the WS handshake hasn't completed yet. Drained by
   // a useEffect when status flips to 'connected' so the user can type and
   // hit Enter before the gateway is ready without seeing a hard error.
@@ -601,6 +602,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // label it. Fire-and-forget — if the fetch fails the worst case is
               // we don't show the banner, not that the chat is broken.
               if (wasProviderChange) {
+                const pendingModelSwitch = pendingModelSwitchResetRef.current
+                pendingModelSwitchResetRef.current = null
+                if (pendingModelSwitch) {
+                  try {
+                    await wsRequest('sessions.reset', { key: mainSessionKey, reason: 'new' })
+                    setMessages([])
+                    greetedRef.current = true
+                  } catch (err) {
+                    setMessages(prev => [...prev, {
+                      role: 'system',
+                      text: `Switched chat to ${pendingModelSwitch.model}, but could not start a fresh chat: ${err instanceof Error ? err.message : 'unknown error'}`,
+                      timestamp: Date.now(),
+                      variant: 'error',
+                    }])
+                  }
+                }
                 try {
                   const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
                   const state = await res.json() as ChatModelState
@@ -608,7 +625,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
                   setMessages(prev => [...prev, {
                     role: 'system',
-                    text: `Switched chat to ${label}.`,
+                    text: pendingModelSwitch
+                      ? `Switched chat to ${label}. Started a fresh chat so the previous model's transcript does not leak into this model.`
+                      : `Switched chat to ${label}.`,
                     timestamp: Date.now(),
                     variant: 'success',
                   }])
@@ -1114,13 +1133,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
 
       setChatModelState(data as ChatModelState)
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: `Switched chat to ${target.model}.`,
-        timestamp: Date.now(),
-        variant: 'success',
-      }])
+      pendingModelSwitchResetRef.current = target
+      skillInstalledRef.current = true
+      reloadReasonRef.current = 'provider'
+      setReloadReason('provider')
+      setReloadingSkill(true)
+      setReloadProgress(0)
       retryCountRef.current = 0
+      startReloadProgressTimer()
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        try { wsRef.current.close() } catch { /* ignore */ }
+      }
       connect()
     } catch (err) {
       setMessages(prev => [...prev, {
