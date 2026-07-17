@@ -140,6 +140,20 @@ for k in ("tools", "systemPromptSuffix"):
         del agents_defaults[k]
         changed = True
 
+# Model migration: some early ClawBox images/configs can leave the active
+# primary on Anthropic's retired May 2025 Sonnet id. New OpenClaw builds no
+# longer recognize it, so every chat turn fails before the agent can reply.
+# Move only those known-dead defaults back to the bundled local model; a user
+# can still re-authorize ClawBox AI / ChatGPT afterward.
+model_defaults = agents_defaults.setdefault("model", {})
+primary_model = model_defaults.get("primary")
+if isinstance(primary_model, str) and primary_model.lower() in (
+    "anthropic/claude-sonnet-4-20250514",
+    "claude-cli/claude-sonnet-4-20250514",
+):
+    model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
+    changed = True
+
 # Strip orphaned per-model keys that a newer-than-pinned plugin wrote and a
 # version downgrade left behind, which fail strict config validation and
 # brick the AI provider page until `openclaw doctor --fix`. `agentRuntime`
