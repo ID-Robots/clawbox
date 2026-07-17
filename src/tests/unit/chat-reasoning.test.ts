@@ -21,6 +21,14 @@ describe("chat-reasoning", () => {
 
     it("returns the upstream-accurate set for cloud providers", () => {
       expect(getProviderReasoningConfig("openai").levels).toContain("xhigh");
+      expect(getProviderReasoningConfig("deepseek")).toEqual({
+        levels: ["off", "high", "xhigh"],
+        default: "off",
+      });
+      expect(getProviderReasoningConfig("clawai")).toEqual({
+        levels: ["off", "high", "xhigh"],
+        default: "off",
+      });
       expect(getProviderReasoningConfig("anthropic").levels).toEqual([
         "low",
         "medium",

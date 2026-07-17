@@ -244,7 +244,7 @@ if not is_strong_gateway_token(auth.get("token")):
     auth["token"] = secrets.token_hex(32)
     changed = True
 
-# Backfill `compat.supportedReasoningEfforts: ["high", "xhigh"]` onto any
+# Backfill `compat.supportedReasoningEfforts: ["off", "high", "xhigh"]` onto any
 # DeepSeek V4 models the configure route wrote before this declaration was
 # added. Without it, the gateway's catalogSupportsXHigh() returns false for
 # the configured deepseek provider and sessions.patch rejects xhigh ("use
@@ -256,8 +256,19 @@ ds_models = (
     cfg.get("models", {}).get("providers", {}).get("deepseek", {}).get("models")
     if isinstance(cfg.get("models"), dict) else None
 )
+deepseek_provider = (
+    cfg.get("models", {}).get("providers", {}).get("deepseek")
+    if isinstance(cfg.get("models"), dict) else None
+)
+if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
+    "https://openclawhardware.dev/api/ai",
+    "https://www.openclawhardware.dev/api/ai",
+):
+    deepseek_provider["baseUrl"] = "https://clawbox.com/api/ai"
+    changed = True
+
 if isinstance(ds_models, list):
-    target_efforts = ["high", "xhigh"]
+    target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:
         if not isinstance(model, dict):
             continue
@@ -296,7 +307,7 @@ else:
 PY
 
 # Patch the installed openclaw deepseek plugin JSON to declare that the
-# DeepSeek V4 models accept `xhigh` reasoning effort. The shipped plugin
+# DeepSeek V4 models accept `off` and `xhigh` reasoning efforts. The shipped plugin
 # only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
 # in openclaw's thinking.ts reads the optional `supportedReasoningEfforts`
 # array — without it, sessions.patch rejects `xhigh` for deepseek-v4-pro
@@ -315,7 +326,7 @@ if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
 import json, os, sys, tempfile
 
 path = sys.argv[1]
-target = ["high", "xhigh"]
+target = ["off", "high", "xhigh"]
 try:
     with open(path) as f:
         cfg = json.load(f)

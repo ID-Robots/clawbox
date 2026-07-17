@@ -1517,7 +1517,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
-              triggerMaxWidth={100}
+              triggerLabel={`Thinking: ${THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}`}
+              triggerMaxWidth={120}
               popoverWidth={180}
             />
           )}

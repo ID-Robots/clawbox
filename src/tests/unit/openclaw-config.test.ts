@@ -424,6 +424,22 @@ describe("openclaw-config", () => {
       );
     });
 
+    it("falls back to the standalone OpenClaw user gateway when the ClawBox unit is missing", async () => {
+      setupExecFileMock({
+        "/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service": new Error("Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service not found."),
+        "systemctl --user restart openclaw-gateway.service": { stdout: "", stderr: "" },
+      });
+
+      await openclawConfig.restartGateway();
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        "systemctl",
+        ["--user", "restart", "openclaw-gateway.service"],
+        expect.objectContaining({ timeout: 60000 }),
+        expect.any(Function)
+      );
+    });
+
     it("throws when restart fails", async () => {
       setupExecFileMock({
         systemctl: new Error("Service not found"),
