@@ -51,12 +51,11 @@ export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   // ignores), -1=adaptive (auto). Picker stays provider-wide; Pro will fall
   // back to adaptive when user picks Off.
   google: { levels: ["off", "low", "medium", "high", "adaptive"], default: "adaptive" },
-  // DeepSeek V4 docs accept low/medium/high/xhigh/max but compatibility layer
-  // maps low+medium→high and xhigh→max upstream, so the user-facing useful
-  // scale is just three.
-  deepseek: { levels: ["low", "medium", "high"], default: "high" },
+  // ClawBox AI/DeepSeek defaults to Off so simple prompts stay fast and do
+  // not burn reasoning tokens. Users opt in when the task actually needs it.
+  deepseek: { levels: ["off", "high", "xhigh"], default: "off" },
   // ClawBox AI routes via DeepSeek today.
-  clawai: { levels: ["low", "medium", "high"], default: "high" },
+  clawai: { levels: ["off", "high", "xhigh"], default: "off" },
   // OpenRouter normalizes per underlying model — surface the full set they
   // document at openrouter.ai/docs/guides/best-practices/reasoning-tokens.
   openrouter: { levels: ["off", "minimal", "low", "medium", "high", "xhigh"], default: "medium" },
