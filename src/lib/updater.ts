@@ -412,9 +412,15 @@ const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 
+interface ComponentVersionInfo {
+  current: string | null;
+  target: string | null;
+  updateAvailable?: boolean;
+}
+
 interface VersionInfo {
-  clawbox: { current: string; target: string | null };
-  openclaw: { current: string | null; target: string | null };
+  clawbox: ComponentVersionInfo & { current: string };
+  openclaw: ComponentVersionInfo;
 }
 
 let cachedVersionInfo: VersionInfo | null = null;
@@ -475,11 +481,40 @@ async function readClawboxVersion(): Promise<string> {
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
 }
 
+async function getPinnedBranchTarget(gitCmd: string): Promise<{
+  branch: string;
+  currentSha: string;
+  targetSha: string;
+} | null> {
+  let branch: string;
+  try {
+    branch = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+  } catch {
+    return null;
+  }
+  if (!branch || !SAFE_BRANCH.test(branch)) return null;
+
+  try {
+    await execShell(`${gitCmd} fetch --quiet origin ${branch}`, { timeout: 20_000 }).catch(() => {});
+    const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
+      execShell(`${gitCmd} rev-parse HEAD`, { timeout: 10_000 }),
+      execShell(`${gitCmd} rev-parse origin/${branch}`, { timeout: 10_000 }),
+    ]);
+    const currentSha = currentOut.trim();
+    const targetSha = targetOut.trim();
+    if (!currentSha || !targetSha || currentSha === targetSha) return null;
+    return { branch, currentSha, targetSha };
+  } catch {
+    return null;
+  }
+}
+
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
     return cachedVersionInfo;
   }
 
+  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
     execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
@@ -501,6 +536,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     })(),
     readClawboxVersion(),
   ]);
+  const pinnedBranchTarget = await getPinnedBranchTarget(gitCmd);
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -508,18 +544,23 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   // Only report a target if it's strictly newer than the device's base tag.
   // (A dev box can sit on a local tag ahead of origin's latest release.)
-  const clawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+  const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
+  const clawboxTarget = pinnedBranchTarget
+    ? `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
+    : taggedClawboxTarget;
 
   cachedVersionInfo = {
     clawbox: {
       current: rawVersion,
       target: clawboxTarget,
+      updateAvailable: !!clawboxTarget,
     },
     openclaw: {
       current: openclawCurrent,
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
+      updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
   };
   versionInfoCacheTime = Date.now();
