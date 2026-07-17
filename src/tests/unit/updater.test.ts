@@ -399,7 +399,7 @@ describe("updater", () => {
 
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
       // The continuation flag only proves the rebuild unit STARTED. If the
-      // server came back without the unit succeeding (georgi: a config-set
+      // server came back without the unit succeeding (for example, a config-set
       // conflict killed it before the build), resuming would stamp "Update
       // complete" on a box still running its old build.
       setupExecFileMock({
@@ -529,6 +529,32 @@ describe("updater", () => {
 
       expect(info.clawbox.target).toBe(null);
       expect(info.openclaw.current).toBe(null);
+    });
+
+    it("surfaces a pinned branch update when origin has a newer commit", async () => {
+      setupExecMock({
+        "ls-remote": { stdout: "abc123\trefs/tags/v2.0.0\n", stderr: "" },
+        "rev-parse HEAD": { stdout: "1111111111111111111111111111111111111111\n", stderr: "" },
+        "rev-parse origin/fix/qa-update": { stdout: "2222222222222222222222222222222222222222\n", stderr: "" },
+        "fetch --quiet origin fix/qa-update": { stdout: "", stderr: "" },
+      });
+      setupExecFileMock({
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockReadFile.mockImplementation(async (file) => {
+        const path = String(file);
+        if (path.endsWith(".update-branch")) return "fix/qa-update\n";
+        if (path.endsWith("package.json")) return JSON.stringify({ version: "1.0.0" });
+        throw new Error("ENOENT");
+      });
+      const freshUpdater = await import("@/lib/updater");
+
+      const info = await freshUpdater.getVersionInfo();
+
+      expect(info.clawbox.updateAvailable).toBe(true);
+      expect(info.clawbox.target).toBe("fix/qa-update@2222222");
     });
   });
 });

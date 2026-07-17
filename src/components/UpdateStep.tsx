@@ -56,8 +56,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
 
   const [versions, setVersions] = useState<{
-    clawbox: { current: string; target: string | null };
-    openclaw: { current: string | null; target: string | null };
+    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -179,7 +179,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }, []);
 
   const isIdle = !state || state.phase === "idle";
-  const isUpToDateEarly = !loading && isIdle && !starting && versions && !versions.clawbox.target && !versions.openclaw.target;
+  const clawboxNeedsUpdate = !!versions && (versions.clawbox.updateAvailable ?? !!versions.clawbox.target);
+  const openclawNeedsUpdate = !!versions && (versions.openclaw.updateAvailable ?? !!versions.openclaw.target);
+  const isUpToDateEarly = !loading && isIdle && !starting && versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   // Auto-advance if already up to date — show brief flash then continue
   const autoAdvancedRef = useRef(false);
@@ -248,7 +250,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }
 
   // Idle state — show trigger button or "up to date"
-  const isUpToDate = versions && !versions.clawbox.target && !versions.openclaw.target;
+  const isUpToDate = versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   const isDowngrade = versions?.clawbox.target
     ? compareVersions(versions.clawbox.current, versions.clawbox.target) > 0

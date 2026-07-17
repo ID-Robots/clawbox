@@ -52,7 +52,7 @@ const AUTH_PROFILES_PATH = path.join(
 );
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
-const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://openclawhardware.dev/api/ai";
+const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
@@ -235,12 +235,12 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
     api: "openai-completions",
     apiKey,
     // `reasoning: true` on both entries is what tells the OpenClaw
-    // gateway to forward `reasoning_effort` (and `thinking: { type:
-    // "disabled" }` for off) to DeepSeek. Both V4 surfaces are
-    // thinking-capable per OpenClaw's built-in catalog; flipping
-    // either to false silently makes the chat's Effort picker a no-op.
+    // gateway to forward explicit thinking controls to DeepSeek. The
+    // cloud proxy disables thinking by default, so `off` must remain
+    // available in the model catalog; users opt into reasoning with
+    // High/X-High from the chat header.
     //
-    // `compat.supportedReasoningEfforts: ["high", "xhigh"]` is what
+    // `compat.supportedReasoningEfforts: ["off", "high", "xhigh"]` is what
     // tells the gateway's `catalogSupportsXHigh()` to append xhigh to
     // each model's allowed-level profile. Without it, sessions.patch
     // rejects xhigh ("use off|minimal|low|medium|high") and the chat
@@ -258,7 +258,7 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
-          supportedReasoningEfforts: ["high", "xhigh"],
+          supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
       {
@@ -268,7 +268,7 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
-          supportedReasoningEfforts: ["high", "xhigh"],
+          supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
     ],
