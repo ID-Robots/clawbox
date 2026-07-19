@@ -108,6 +108,15 @@ function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
   });
 }
 
+function hasCodexOauthProfile(config: OpenClawConfig): boolean {
+  const profiles = config.auth?.profiles ?? {};
+  return Object.values(profiles).some((entry) => {
+    const provider = typeof entry?.provider === "string" ? entry.provider.trim().toLowerCase() : "";
+    const mode = typeof entry?.mode === "string" ? entry.mode.trim().toLowerCase() : "";
+    return provider === "codex" && mode === "oauth";
+  });
+}
+
 function sortPrimaryOptions(options: ChatModelOption[]) {
   return [...options].sort((a, b) => {
     const aRank = PROVIDER_ORDER.indexOf((a.provider ?? "") as typeof PROVIDER_ORDER[number]);
@@ -318,6 +327,13 @@ export async function POST(request: Request) {
 
     const state = await loadChatModelState();
     let targetModel: string | null = null;
+    let authConfig: OpenClawConfig | null | undefined;
+    const getAuthConfig = async () => {
+      if (authConfig === undefined) {
+        authConfig = await readConfig().catch(() => null);
+      }
+      return authConfig;
+    };
 
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
@@ -335,14 +351,28 @@ export async function POST(request: Request) {
         if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
         }
+        let effectiveModel = requestedModel;
+        let effectiveProvider = parsed.provider;
+        let effectiveModelId = parsed.modelId;
         if (parsed.provider === "codex" && !CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
           return NextResponse.json({
             error: `${parsed.modelId} is not supported with ChatGPT subscription auth. Use GPT-5.5, GPT-5.4, or GPT-5.4 Mini, or switch OpenAI to API-key mode for Pro/API-only models.`,
           }, { status: 400 });
         }
-        if (parsed.provider === "openai" && OPENAI_PRO_MODEL_RE.test(parsed.modelId)) {
-          const openclawConfig = await readConfig().catch(() => null);
-          if (!openclawConfig || !hasOpenAiApiKeyProfile(openclawConfig)) {
+        if (parsed.provider === "openai") {
+          const openclawConfig = await getAuthConfig();
+          const hasOpenAiKey = !!openclawConfig && hasOpenAiApiKeyProfile(openclawConfig);
+          const hasCodexOauth = !!openclawConfig && hasCodexOauthProfile(openclawConfig);
+          if (!hasOpenAiKey && hasCodexOauth && CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
+            // Legacy/pre-hotfix UI state sometimes submits openai/gpt-5.5
+            // even though the device is configured with ChatGPT subscription
+            // auth. Sending that to api.openai.com 401s with "Missing bearer"
+            // because there is no OpenAI API key. Route the same visible GPT
+            // choice through Codex, which is the ChatGPT-account provider.
+            effectiveProvider = "codex";
+            effectiveModelId = parsed.modelId;
+            effectiveModel = `codex/${parsed.modelId}`;
+          } else if (!hasOpenAiKey) {
             return NextResponse.json({
               error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
             }, { status: 400 });
@@ -353,7 +383,7 @@ export async function POST(request: Request) {
         // (deepseek → clawai), so a raw `parsed.provider === "deepseek"`
         // would never match a `"clawai"` option even though they refer
         // to the same auth profile.
-        const parsedProviderNormalized = normalizeProvider(parsed.provider);
+        const parsedProviderNormalized = normalizeProvider(effectiveProvider);
         const providerConfigured = state.options.some(
           (option) => option.provider === parsedProviderNormalized && option.available,
         );
@@ -368,8 +398,8 @@ export async function POST(request: Request) {
         // live catalog, so instead of forcing a "Re-save in Settings" round trip
         // on every fresh pick we auto-extend the configured list. clawai/openai/
         // codex use OpenClaw's built-in catalogs, so they don't need this.
-        if (OPENAI_COMPAT_PROVIDERS.has(parsed.provider)) {
-          const providerId = parsed.provider;
+        if (OPENAI_COMPAT_PROVIDERS.has(effectiveProvider)) {
+          const providerId = effectiveProvider;
           let openclawConfig: OpenClawConfig;
           try {
             openclawConfig = await readConfig();
@@ -405,12 +435,12 @@ export async function POST(request: Request) {
           // freshly-configured provider whose seed providerDef has only the
           // user's chosen default (the earlier `length > 0` guard silently fell
           // back to local on the first switch after a clean setup).
-          if (!configuredIds.includes(parsed.modelId)) {
+          if (!configuredIds.includes(effectiveModelId)) {
             // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
             // modalities, cost) up from its bundled provider catalog by id.
             const nextModels = [
               ...existingModels,
-              { id: parsed.modelId, name: parsed.modelId },
+              { id: effectiveModelId, name: effectiveModelId },
             ];
             try {
               await runOpenclawConfigSet([
@@ -429,7 +459,7 @@ export async function POST(request: Request) {
             }
           }
         }
-        targetModel = requestedModel;
+        targetModel = effectiveModel;
       }
     } else {
       if (body.source !== "primary" && body.source !== "local") {
@@ -444,6 +474,20 @@ export async function POST(request: Request) {
         { error: body.source === "primary" ? "AI provider is not configured" : "Local AI is not configured" },
         { status: 400 },
       );
+    }
+
+    const targetParsed = parseModelSlug(targetModel);
+    if (targetParsed?.provider === "openai") {
+      const openclawConfig = await getAuthConfig();
+      const hasOpenAiKey = !!openclawConfig && hasOpenAiApiKeyProfile(openclawConfig);
+      const hasCodexOauth = !!openclawConfig && hasCodexOauthProfile(openclawConfig);
+      if (!hasOpenAiKey && hasCodexOauth && CODEX_SUPPORTED_MODEL_RE.test(targetParsed.modelId)) {
+        targetModel = `codex/${targetParsed.modelId}`;
+      } else if (!hasOpenAiKey) {
+        return NextResponse.json({
+          error: `${targetParsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
+        }, { status: 400 });
+      }
     }
 
     if (state.activeModel === targetModel) {

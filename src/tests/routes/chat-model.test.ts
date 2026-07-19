@@ -459,6 +459,44 @@ describe("/setup-api/chat/model", () => {
     expect(restartGateway).not.toHaveBeenCalled();
   });
 
+  it("routes legacy OpenAI GPT-5.5 picks through Codex when ChatGPT subscription auth is configured", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "codex:default": { provider: "codex", mode: "oauth" },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "codex/gpt-5.4",
+          },
+        },
+      },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.5" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "codex/gpt-5.5",
+    ]);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      {
+        provider: "codex",
+        modelId: "gpt-5.5",
+        source: "user",
+      },
+      { skipUserTagged: false },
+    );
+    expect(restartGateway).toHaveBeenCalled();
+  });
+
   it("rejects a non-openrouter model that is not in state.options", async () => {
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
