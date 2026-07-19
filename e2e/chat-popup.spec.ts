@@ -198,7 +198,7 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await expect(providerTrigger).toBeVisible();
   await providerTrigger.click();
   await page.getByRole("option", { name: /Gemma 4 Local/ }).click();
-  await expect(page.getByText("Switched chat to llamacpp/gemma4-e2b-it-q4_0.")).toBeVisible();
+  await expect(page.getByText(/Switched chat to Gemma 4 Local/)).toBeVisible();
 });
 
 test("chat popup opens Local AI settings when local AI is not configured", async ({ page }) => {

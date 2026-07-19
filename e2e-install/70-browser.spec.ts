@@ -73,15 +73,15 @@ test.describe("browser + VNC happy path", () => {
     expect(state.browser.cdpReady).toBe(true);
   });
 
-  test("launch session and navigate to clawbox.tech", async () => {
+  test("launch session and navigate to clawbox.com", async () => {
     test.setTimeout(180_000);
-    // clawbox.tech is used instead of youtube.com to avoid flakiness
+    // clawbox.com is used instead of youtube.com to avoid flakiness
     // from YouTube's bot detection / region gating. It's also the site this
     // product ships with, so a navigation failure here points at something
     // genuinely broken in ClawBox rather than the target site.
-    const launched = await browserLaunch("https://clawbox.tech/");
+    const launched = await browserLaunch("https://clawbox.com/");
     sessionId = launched.sessionId;
-    expect(launched.url).toContain("clawbox.tech");
+    expect(new URL(launched.url).hostname).toBe("clawbox.com");
     expect(launched.title.length).toBeGreaterThan(0);
     expect(launched.screenshot).toBeTruthy();
   });

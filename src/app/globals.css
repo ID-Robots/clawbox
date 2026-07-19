@@ -135,10 +135,17 @@ h6 {
  * read as separate controls, not as one segmented bar. The rounded-bar
  * variant felt heavy and pinched the labels on narrow chat panels. */
 .chat-header-pills {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+}
+
+.header-dropdown {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 /* Custom popover dropdown — replaces native <select> for the chat
@@ -161,6 +168,7 @@ h6 {
   display: inline-flex;
   align-items: center;
   position: relative;
+  max-width: 100%;
   min-width: 0;
   border-radius: 999px;
 }

@@ -227,6 +227,18 @@ function transformOpenclawEntries(
   return out;
 }
 
+function isAllowedCatalogModel(provider: string, model: CatalogModel): boolean {
+  if (!model.id) return false;
+  const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
+  if (allowed && !allowed.test(model.id)) return false;
+  if (DEPRECATED_MODEL_IDS.has(model.id)) return false;
+  return true;
+}
+
+function sanitizeCatalogModels(provider: string, models: CatalogModel[]): CatalogModel[] {
+  return models.filter((model) => isAllowedCatalogModel(provider, model));
+}
+
 function transformOpenRouterEntries(entries: OpenRouterListResponse["data"]): CatalogModel[] {
   const out: CatalogModel[] = [];
   for (const entry of entries) {
@@ -301,7 +313,11 @@ function augmentWithStaticCatalog(provider: string, live: CatalogModel[]): Catal
 }
 
 function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse {
-  const merged = augmentWithStaticCatalog(provider, models);
+  // Do not trust old disk caches blindly. Earlier builds could persist
+  // Codex/ChatGPT-account models like gpt-5.5-pro that the upstream
+  // rejects at request time. Re-apply the current provider allowlist when
+  // constructing every payload, including cached/stale ones.
+  const merged = sanitizeCatalogModels(provider, augmentWithStaticCatalog(provider, models));
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
   const defaultModelId = merged.find((m) => m.id === fallbackDefault)?.id
     ?? merged[0]?.id
@@ -313,6 +329,16 @@ function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse
     defaultModelId,
     allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
     fetchedAt: Date.now(),
+  };
+}
+
+function sanitizeCachedPayload(provider: string, cached: CatalogResponse): CatalogResponse {
+  const next = buildPayload(provider, cached.models);
+  return {
+    ...next,
+    fetchedAt: cached.fetchedAt,
+    stale: cached.stale,
+    warming: cached.warming,
   };
 }
 
@@ -478,7 +504,9 @@ export async function GET(req: NextRequest) {
   }
 
   if (cached) {
-    const payload: CatalogResponse = isStale ? { ...cached, stale: true } : cached;
+    const sanitized = sanitizeCachedPayload(provider, cached);
+    memCache.set(provider, sanitized);
+    const payload: CatalogResponse = isStale ? { ...sanitized, stale: true } : sanitized;
     return NextResponse.json(payload, { headers: noStore() });
   }
 

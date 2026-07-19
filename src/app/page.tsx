@@ -1149,8 +1149,8 @@ function ChromeDesktopInner() {
   // Dismissals persist per exact target-version pair via SQLite so the user
   // isn't pestered across browsers or after a cache wipe.
   const [updateAvailable, setUpdateAvailable] = useState<{
-    clawbox: { current: string | null; target: string | null };
-    openclaw: { current: string | null; target: string | null };
+    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
   const lastVersionFingerprintRef = useRef<string | null>(null);
 
@@ -1161,8 +1161,8 @@ function ChromeDesktopInner() {
         const versionsRes = await fetch("/setup-api/update/versions");
         if (!active || !versionsRes.ok) return;
         const data = await versionsRes.json();
-        const clawboxNeedsUpdate = !!data.clawbox?.target && data.clawbox.target !== data.clawbox.current;
-        const openclawNeedsUpdate = !!data.openclaw?.target && data.openclaw.target !== data.openclaw.current;
+        const clawboxNeedsUpdate = data.clawbox?.updateAvailable ?? (!!data.clawbox?.target && data.clawbox.target !== data.clawbox.current);
+        const openclawNeedsUpdate = data.openclaw?.updateAvailable ?? (!!data.openclaw?.target && data.openclaw.target !== data.openclaw.current);
         // Fingerprint covers both targets *and* currents — bumping the device
         // version after an update should retire a stale "available" card even
         // if the next-target hasn't shifted yet.
@@ -1204,11 +1204,7 @@ function ChromeDesktopInner() {
   }, []);
 
   const openUpdateSettings = useCallback(() => {
-    // Stash the section before opening so SettingsApp drains it on mount,
-    // and also dispatch the event for already-mounted instances.
-    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = "about";
-    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "about" } }));
-    openAppRef.current("settings");
+    openAppRef.current("system_update");
     dismissUpdateNotification();
   }, [dismissUpdateNotification]);
 
@@ -1656,8 +1652,8 @@ function ChromeDesktopInner() {
           {updateAvailable && (() => {
             const cb = updateAvailable.clawbox;
             const oc = updateAvailable.openclaw;
-            const cbNeeds = !!cb?.target && cb.target !== cb.current;
-            const ocNeeds = !!oc?.target && oc.target !== oc.current;
+            const cbNeeds = cb?.updateAvailable ?? (!!cb?.target && cb.target !== cb.current);
+            const ocNeeds = oc?.updateAvailable ?? (!!oc?.target && oc.target !== oc.current);
             return (
               <div
                 className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"

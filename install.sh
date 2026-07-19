@@ -82,7 +82,7 @@ is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.5.3-1"
+OPENCLAW_VERSION="2026.7.1"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -155,6 +155,45 @@ export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   fi
+}
+
+node_satisfies_openclaw_engine() {
+  local version major
+  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+  [ -n "$version" ] || return 1
+  major="${version%%.*}"
+
+  case "$major" in
+    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
+    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
+    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
+    2[6-9]|[3-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_openclaw_node_engine() {
+  if node_satisfies_openclaw_engine; then
+    echo "  Node.js $(node --version) satisfies OpenClaw engine requirements"
+    return 0
+  fi
+
+  local got
+  got=$(node --version 2>/dev/null || echo "missing")
+  echo "  Node.js $got does not satisfy OpenClaw 2026.7.1 engine requirements; upgrading Node.js 22..."
+  wait_for_apt
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  wait_for_apt
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+
+  if ! node_satisfies_openclaw_engine; then
+    got=$(node --version 2>/dev/null || echo "missing")
+    echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
+    echo "       OpenClaw 2026.7.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    exit 1
+  fi
+
+  echo "  Node.js $(node --version) installed"
 }
 
 ensure_env_setting() {
@@ -399,11 +438,13 @@ step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
-  # Node.js 22 (required for production server — bun doesn't fire upgrade events)
-  if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
-    echo "  Node.js $(node --version) already installed"
+  # Node.js for production server and OpenClaw. OpenClaw 2026.7.1 tightened
+  # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
+  # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
+  if node_satisfies_openclaw_engine; then
+    echo "  Node.js $(node --version) already satisfies OpenClaw engine requirements"
   else
-    echo "  Installing Node.js 22..."
+    echo "  Installing/upgrading Node.js 22..."
     # NodeSource's setup script will silently exit 0 even when its inner
     # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
     # first boot), and apt-get install nodejs then falls back to Ubuntu's
@@ -414,13 +455,13 @@ step_apt_update() {
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
-    if ! node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
+    if ! node_satisfies_openclaw_engine; then
       local got
       got=$(node --version 2>/dev/null || echo "missing")
-      echo "Error: Node.js 22 install failed — \`node --version\` reports $got." >&2
+      echo "Error: Node.js install failed — \`node --version\` reports $got." >&2
       echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
       echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
-      echo "       and apt fell back to Ubuntu's Node 12. flash.sh's Phase 0 should" >&2
+      echo "       or apt kept an older Node.js build. flash.sh's Phase 0 should" >&2
       echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
       echo "       rootfs to prevent this." >&2
       exit 1
@@ -752,6 +793,12 @@ step_openclaw_install() {
   fi
   local TARGET="${PINNED:-$OPENCLAW_VERSION}"
   local CORE_NEEDS_INSTALL=1
+
+  # Keep this guard inside the OpenClaw step too, not only in apt_update:
+  # update retries can start from this step, and old images with Node v22.22.2
+  # otherwise install the npm package but fail as soon as the OpenClaw CLI runs.
+  ensure_openclaw_node_engine
+
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so

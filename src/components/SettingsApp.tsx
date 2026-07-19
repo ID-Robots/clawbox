@@ -286,7 +286,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [updateStarted, setUpdateStarted] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateConfirm, setUpdateConfirm] = useState(false);
-  const [versionInfo, setVersionInfo] = useState<{ clawbox: { current: string; target: string | null }; openclaw: { current: string | null; target: string | null } } | null>(null);
+  const [versionInfo, setVersionInfo] = useState<{
+    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+  } | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
   const [updateBranch, setUpdateBranch] = useState<string | null>(null);
   const [branchInput, setBranchInput] = useState("");
