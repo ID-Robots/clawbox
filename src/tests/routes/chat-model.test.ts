@@ -416,6 +416,49 @@ describe("/setup-api/chat/model", () => {
     expect(body.activeModel).toBe("openrouter/mistralai/mistral-large");
   });
 
+  it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "codex/gpt-5.5-pro" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toContain("not supported with ChatGPT subscription auth");
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy OpenAI Pro picks when only ChatGPT subscription auth is configured", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "codex:default": { provider: "codex", mode: "oauth" },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.5",
+          },
+        },
+      },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.5-pro" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toContain("requires OpenAI API-key mode");
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-openrouter model that is not in state.options", async () => {
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",

@@ -66,6 +66,9 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
+const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+const OPENAI_PRO_MODEL_RE = /^gpt-5\.[45]-pro$/;
+
 function isLocalModel(model: string | null | undefined): boolean {
   return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/"));
 }
@@ -94,6 +97,15 @@ function defaultModelForProvider(provider: string | null): string | null {
   return DEFAULT_PROVIDER_MODELS[normalized]
     ?? DEFAULT_PROVIDER_MODELS[normalizeProvider(provider) ?? ""]
     ?? null;
+}
+
+function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
+  const profiles = config.auth?.profiles ?? {};
+  return Object.values(profiles).some((entry) => {
+    const provider = typeof entry?.provider === "string" ? entry.provider.trim().toLowerCase() : "";
+    const mode = typeof entry?.mode === "string" ? entry.mode.trim().toLowerCase() : "";
+    return provider === "openai" && (mode === "token" || mode === "api_key" || mode === "api-key");
+  });
 }
 
 function sortPrimaryOptions(options: ChatModelOption[]) {
@@ -322,6 +334,19 @@ export async function POST(request: Request) {
         const parsed = parseModelSlug(requestedModel);
         if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
+        }
+        if (parsed.provider === "codex" && !CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
+          return NextResponse.json({
+            error: `${parsed.modelId} is not supported with ChatGPT subscription auth. Use GPT-5.5, GPT-5.4, or GPT-5.4 Mini, or switch OpenAI to API-key mode for Pro/API-only models.`,
+          }, { status: 400 });
+        }
+        if (parsed.provider === "openai" && OPENAI_PRO_MODEL_RE.test(parsed.modelId)) {
+          const openclawConfig = await readConfig().catch(() => null);
+          if (!openclawConfig || !hasOpenAiApiKeyProfile(openclawConfig)) {
+            return NextResponse.json({
+              error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
+            }, { status: 400 });
+          }
         }
         // Normalize the parsed provider so the deepseek/clawai alias
         // comparison works — option.provider was set via normalizeProvider
