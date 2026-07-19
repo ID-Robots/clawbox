@@ -18,7 +18,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // would actually deploy. Without this both sides diverged: the UI returned
 // null and reported "no update", while install.sh would still install
 // 2026.5.3-1 — confusing.
-const OPENCLAW_VERSION_FALLBACK = "2026.5.3-1";
+const OPENCLAW_VERSION_FALLBACK = "2026.7.1";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
