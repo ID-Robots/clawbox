@@ -1,7 +1,7 @@
 'use client'
 
 import type { PointerEvent as ReactPointerEvent } from 'react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 export interface HeaderDropdownOption {
@@ -60,6 +60,7 @@ export function HeaderDropdown({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const activeOption = options.find(o => o.id === value)
+  const listboxId = useId()
 
   const close = useCallback(() => setOpen(false), [])
 
@@ -93,12 +94,13 @@ export function HeaderDropdown({
       const spaceAbove = t.top - gap - margin
       let top: number
       let maxHeight: number
-      if (spaceBelow >= Math.min(maxDesired, 160) || spaceBelow >= spaceAbove) {
+      const minPreferredHeight = 160
+      if (spaceBelow >= minPreferredHeight || spaceBelow >= spaceAbove) {
         top = t.bottom + gap
         maxHeight = Math.min(maxDesired, spaceBelow)
       } else {
         maxHeight = Math.min(maxDesired, spaceAbove)
-        top = t.top - gap - maxHeight
+        top = Math.max(margin, t.top - gap - maxHeight)
       }
 
       setCoords({ left, top, maxHeight: Math.max(maxHeight, 0) })
@@ -150,6 +152,7 @@ export function HeaderDropdown({
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
         disabled={disabled}
         onClick={() => !disabled && setOpen(o => !o)}
         className="header-dropdown-trigger"
@@ -169,6 +172,7 @@ export function HeaderDropdown({
       {open && coords && createPortal(
         <div
           ref={popoverRef}
+          id={listboxId}
           role="listbox"
           aria-label={ariaLabel}
           className="header-dropdown-popover"
