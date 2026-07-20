@@ -59,8 +59,12 @@ describe("GET /setup-api/update/status", () => {
     expect(body.versions).toBeDefined();
   });
 
-  it("returns completed state when update was completed", async () => {
+  it("returns completed state when update was completed and no updates are available", async () => {
     mockIsUpdateCompleted.mockResolvedValue(true);
+    mockGetVersionInfo.mockResolvedValue({
+      clawbox: { current: "1.1.0", target: null, updateAvailable: false },
+      openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+    });
 
     const res = await updateStatusGet();
     const body = await res.json();
@@ -68,6 +72,23 @@ describe("GET /setup-api/update/status", () => {
     expect(res.status).toBe(200);
     expect(body.phase).toBe("completed");
     expect(body.steps.every((s: { status: string }) => s.status === "completed")).toBe(true);
+    expect(body.versions).toBeDefined();
+  });
+
+  it("returns idle version info when a newer update exists despite a stale completion flag", async () => {
+    mockIsUpdateCompleted.mockResolvedValue(true);
+    mockGetVersionInfo.mockResolvedValue({
+      clawbox: { current: "1.0.0", target: "1.1.0", updateAvailable: true },
+      openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+    });
+
+    const res = await updateStatusGet();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.phase).toBe("idle");
+    expect(body.targetVersion).toBe("1.1.0");
+    expect(body.versions.clawbox.updateAvailable).toBe(true);
   });
 
   it("continues from post-restart state", async () => {
