@@ -4,6 +4,7 @@ import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
 import { findOpenclawBin, restartGateway } from "./openclaw-config";
+import { isPortOpen } from "./port-probe";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -283,6 +284,101 @@ async function updateClawBoxAndReboot(): Promise<void> {
 // 2-3 min; shared across both UPDATE_STEPS and OPENCLAW_UPDATE_STEPS so the
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
+const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
+const GATEWAY_WAIT_INTERVAL_MS = 1_500;
+const LEGACY_GATEWAY_BLOCKER_RE =
+  /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForGateway(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortOpen(GATEWAY_PORT, "127.0.0.1", 1_000)) return true;
+    await delay(GATEWAY_WAIT_INTERVAL_MS);
+  }
+  return false;
+}
+
+async function runOpenclawDoctorFix(): Promise<void> {
+  try {
+    await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
+      timeout: 90_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } catch {
+    // Doctor can still repair some state before exiting non-zero. Continue
+    // into a restart + positive gateway probe rather than trusting exit code.
+  }
+}
+
+async function readGatewayJournalTail(): Promise<string> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-u", "clawbox-gateway.service", "-n", "160", "--no-pager"],
+      { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+async function quarantineLegacyOpenclawState(): Promise<void> {
+  const script = `
+set -u
+CLAWBOX_HOME="/home/clawbox"
+TS="$(date +%Y%m%d-%H%M%S)"
+QDIR="$CLAWBOX_HOME/openclaw-legacy-quarantine-$TS"
+mkdir -p "$QDIR"
+/usr/bin/sudo /usr/bin/systemctl stop clawbox-gateway.service || true
+mv -v "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* "$QDIR/" 2>/dev/null || true
+mv -v "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* "$QDIR/" 2>/dev/null || true
+mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$QDIR/" 2>/dev/null || true
+`;
+  await execFile("/bin/bash", ["-lc", script], {
+    timeout: 30_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+  if (options.restartFirst) {
+    await restartGateway();
+  }
+
+  if (await waitForGateway(30_000)) return;
+
+  await runOpenclawDoctorFix();
+  await restartGateway().catch(() => {});
+  if (await waitForGateway(30_000)) return;
+
+  const beforeRecoveryLog = await readGatewayJournalTail();
+  if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
+    const lastLog = getLastLogLine(beforeRecoveryLog);
+    throw new Error(
+      lastLog
+        ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
+        : `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
+    );
+  }
+
+  await quarantineLegacyOpenclawState();
+  await runOpenclawDoctorFix();
+  await restartGateway();
+  if (await waitForGateway(45_000)) return;
+
+  const afterRecoveryLog = await readGatewayJournalTail();
+  const lastLog = getLastLogLine(afterRecoveryLog);
+  throw new Error(
+    lastLog
+      ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
+      : "OpenClaw gateway still offline after legacy state recovery",
+  );
+}
 
 const UPDATE_STEPS: UpdateStepDef[] = [
   {
@@ -368,6 +464,13 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 300_000,
     requiresRoot: true,
     advisoryOnOverrun: true,
+  },
+  {
+    id: "gateway_verify",
+    label: "Verifying gateway health",
+    timeoutMs: 90_000,
+    customRun: () => ensureGatewayHealthy(),
+    failFast: true,
   },
 ];
 
@@ -742,7 +845,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_restart",
     label: "Restarting OpenClaw gateway",
     timeoutMs: 30_000,
-    customRun: () => restartGateway(),
+    customRun: () => ensureGatewayHealthy({ restartFirst: true }),
   },
 ];
 
