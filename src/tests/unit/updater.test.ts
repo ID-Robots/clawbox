@@ -17,7 +17,12 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+vi.mock("@/lib/port-probe", () => ({
+  isPortOpen: vi.fn(),
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
+import { isPortOpen } from "@/lib/port-probe";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -25,6 +30,7 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
+const mockIsPortOpen = vi.mocked(isPortOpen);
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExec.mockImplementation(((
@@ -132,6 +138,7 @@ describe("updater", () => {
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockIsPortOpen.mockResolvedValue(true);
 
     setupExecMock({
       "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\ndef456\trefs/tags/v1.1.0\n", stderr: "" },

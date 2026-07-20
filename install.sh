@@ -1364,7 +1364,70 @@ step_post_update() {
   # same idempotent setup used by fresh installs so a completed update leaves
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
+  step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+}
+
+gateway_port_listening() {
+  local gw_port="${GATEWAY_PORT:-18789}"
+  ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
+}
+
+step_gateway_legacy_state_recovery() {
+  local gw_port="${GATEWAY_PORT:-18789}"
+  if gateway_port_listening; then
+    echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
+    return 0
+  fi
+
+  echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
+  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl restart clawbox-gateway.service || true
+  sleep 8
+  if gateway_port_listening; then
+    echo "  Gateway recovered after doctor --fix"
+    return 0
+  fi
+
+  local journal_tail
+  journal_tail=$(journalctl -u clawbox-gateway.service -n 160 --no-pager 2>/dev/null || true)
+  if ! printf '%s\n' "$journal_tail" | grep -Eq 'installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper'; then
+    echo "  Gateway still offline, but logs do not match known legacy-state blockers"
+    return 0
+  fi
+
+  local ts qdir moved=0
+  ts=$(date +%Y%m%d-%H%M%S)
+  qdir="$CLAWBOX_HOME/openclaw-legacy-quarantine-$ts"
+  mkdir -p "$qdir"
+
+  echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
+  systemctl stop clawbox-gateway.service || true
+  for f in \
+    "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* \
+    "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* \
+    "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"*
+  do
+    if [ -e "$f" ]; then
+      mv -v "$f" "$qdir/" && moved=1
+    fi
+  done
+
+  if [ "$moved" -eq 0 ]; then
+    echo "  No known legacy migration blocker files found to quarantine"
+  fi
+
+  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl start clawbox-gateway.service || true
+  sleep 12
+
+  if gateway_port_listening; then
+    echo "  Gateway recovered after legacy state quarantine"
+    return 0
+  fi
+
+  echo "  Warning: gateway still not listening on ${gw_port} after legacy state recovery"
+  return 1
 }
 
 step_update_smoke() {
