@@ -1357,6 +1357,13 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  # Re-assert the gateway service after an in-app update. The full update
+  # syncs repo files and rebuilds before this continuation runs; older devices
+  # can therefore reach the new UI while the gateway is still using stale
+  # service/drop-in state or is simply down from the reboot handoff. Run the
+  # same idempotent setup used by fresh installs so a completed update leaves
+  # clawbox-gateway as the active single source of truth.
+  step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
 }
 

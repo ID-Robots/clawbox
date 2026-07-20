@@ -465,6 +465,23 @@ describe("updater", () => {
       expect(version).toBe("v2.0.0");
     });
 
+    it("returns latest semver tag even when the current HEAD is not its ancestor", async () => {
+      setupExecMock({
+        "ls-remote": {
+          stdout: "abc123\trefs/tags/v1.0.0\ndef456\trefs/tags/v1.1.0\n",
+          stderr: "",
+        },
+        "merge-base --is-ancestor": new Error("not an ancestor"),
+      });
+
+      vi.resetModules();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      const freshUpdater = await import("@/lib/updater");
+
+      const version = await freshUpdater.getTargetVersion();
+      expect(version).toBe("v1.1.0");
+    });
+
     it("returns null when no semver tags", async () => {
       setupExecMock({
         "ls-remote": { stdout: "abc123\trefs/tags/release-candidate\n", stderr: "" },
