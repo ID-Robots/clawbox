@@ -148,7 +148,7 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await page.getByRole("button", { name: "Chat" }).click();
-  await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+  await expect(page.getByTestId("chat-popup")).toBeVisible();
 
   const chatInput = page.locator("textarea").last();
   await chatInput.fill("What changed?");
@@ -199,6 +199,70 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await providerTrigger.click();
   await page.getByRole("option", { name: /Gemma 4 Local/ }).click();
   await expect(page.getByText(/Switched chat to Gemma 4 Local/)).toBeVisible();
+});
+
+test("chat popup provider dropdown stays visible at viewport edges", async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 260 });
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      telegram_configured: true,
+    },
+    preferences: {
+      ui_mascot_hidden: 1,
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+
+  await page.getByTestId("chat-popup").evaluate((el) => {
+    Object.assign(el.style, {
+      left: "128px",
+      top: "180px",
+      right: "auto",
+      bottom: "auto",
+      width: "416px",
+      height: "220px",
+    });
+  });
+
+  const providerTrigger = page.getByRole("button", { name: "Chat provider" });
+  await providerTrigger.click();
+
+  const listbox = page.getByRole("listbox", { name: "Chat provider" });
+  await expect(listbox).toBeVisible();
+  await expect(providerTrigger).toHaveAttribute("aria-controls", await listbox.getAttribute("id") ?? "");
+  await page.waitForTimeout(150);
+
+  const bounds = await listbox.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    };
+  });
+
+  expect(bounds.left).toBeGreaterThanOrEqual(8);
+  expect(bounds.top).toBeGreaterThanOrEqual(8);
+  expect(bounds.right).toBeLessThanOrEqual(bounds.viewportWidth - 8);
+  expect(bounds.bottom).toBeLessThanOrEqual(bounds.viewportHeight - 8);
 });
 
 test("chat popup opens Local AI settings when local AI is not configured", async ({ page }) => {
