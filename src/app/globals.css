@@ -140,7 +140,10 @@ h6 {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
+  /* Dropdown popovers are absolutely positioned below their trigger pills.
+   * Keep labels truncating on the trigger itself, but do not clip the open
+   * menu to the row height. */
+  overflow: visible;
 }
 
 .header-dropdown {
