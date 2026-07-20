@@ -1,52 +1,52 @@
 # ClawBox Documentation
 
-> ClawBox is pre-configured AI hardware (NVIDIA Jetson) running OpenClaw OS — a self-hosted AI assistant reachable from Telegram and the web. This documentation covers consumer setup, deep technical reference, troubleshooting, and recovery. Site: https://docs.clawbox.tech · Source: https://github.com/ID-Robots/clawbox (docs live in docs-site/, releases are vX.Y.Z tags on main, integration branch is beta).
+> ClawBox is pre-configured AI hardware (NVIDIA Jetson) running OpenClaw OS — a self-hosted AI assistant reachable from Telegram and the web. This documentation covers consumer setup, deep technical reference, troubleshooting, and recovery. Site: https://docs.clawbox.com · Source: https://github.com/ID-Robots/clawbox (docs live in docs-site/, releases are vX.Y.Z tags on main, integration branch is beta).
 
 Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-gated gateway; it loads but rejects passwords); one Linux password (`clawbox` user) for both SSH and browser login; device state in /home/clawbox/clawbox/data and ~/.openclaw (survives updates; wiped by factory reset); updates are git-tag based and reboot the box at the end; provider credentials live in ~/.openclaw/agents/main/agent/auth-profiles.json.
 
 ## Start Here
 
-- [Quick Reference](https://docs.clawbox.tech/technical/quick-reference): the one-page fact sheet — ports, paths, services, commands, endpoints, gotchas. Best single page for agents.
-- [ClawBox Overview](https://docs.clawbox.tech/): what ClawBox is, models, pricing
-- [Quickstart](https://docs.clawbox.tech/quickstart): unbox → power → talk
+- [Quick Reference](https://docs.clawbox.com/technical/quick-reference): the one-page fact sheet — ports, paths, services, commands, endpoints, gotchas. Best single page for agents.
+- [ClawBox Overview](https://docs.clawbox.com/): what ClawBox is, models, pricing
+- [Quickstart](https://docs.clawbox.com/quickstart): unbox → power → talk
 
 ## Setup
 
-- [First Boot](https://docs.clawbox.tech/setup/first-boot): unbox, connect, pair via QR code — the first-run guide
-- [Connect to a Network](https://docs.clawbox.tech/setup/connect-network): joining Wi-Fi or Ethernet after setup
-- [Choose Your AI Provider](https://docs.clawbox.tech/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models
-- [OpenClaw Setup](https://docs.clawbox.tech/setup/openclaw-setup): gateway configuration
+- [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, connect, pair via QR code — the first-run guide
+- [Connect to a Network](https://docs.clawbox.com/setup/connect-network): joining Wi-Fi or Ethernet after setup
+- [Choose Your AI Provider](https://docs.clawbox.com/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models
+- [OpenClaw Setup](https://docs.clawbox.com/setup/openclaw-setup): gateway configuration
 
 ## Technical Reference
 
-- [System Architecture](https://docs.clawbox.tech/technical/architecture): service topology, request routing, boot lifecycle, ClawBox↔OpenClaw relationship
-- [Networking](https://docs.clawbox.tech/technical/networking): AP mode, captive portal, mDNS/clawbox.local reliability, full port map
-- [Filesystem Layout](https://docs.clawbox.tech/technical/filesystem): where everything lives; what survives updates vs factory reset; where secrets are
-- [Authentication & Security](https://docs.clawbox.tech/technical/authentication): browser login flow (unix_chkpwd), session cookies, gateway token, service tokens
-- [AI Providers](https://docs.clawbox.tech/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (openai/ vs codex/), boot-time self-healing
-- [Update System](https://docs.clawbox.tech/technical/update-system): tag-based updates, channels (main/beta), divergence/"Updates paused", manual-update pitfalls
-- [Agent Interface (MCP)](https://docs.clawbox.tech/technical/agent-interface): the ~50 device tools the AI agent gets, clawbox CLI, auth model
+- [System Architecture](https://docs.clawbox.com/technical/architecture): service topology, request routing, boot lifecycle, ClawBox↔OpenClaw relationship
+- [Networking](https://docs.clawbox.com/technical/networking): AP mode, captive portal, mDNS/clawbox.local reliability, full port map
+- [Filesystem Layout](https://docs.clawbox.com/technical/filesystem): where everything lives; what survives updates vs factory reset; where secrets are
+- [Authentication & Security](https://docs.clawbox.com/technical/authentication): browser login flow (unix_chkpwd), session cookies, gateway token, service tokens
+- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (openai/ vs codex/), boot-time self-healing
+- [Update System](https://docs.clawbox.com/technical/update-system): tag-based updates, channels (main/beta), divergence/"Updates paused", manual-update pitfalls
+- [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the ~50 device tools the AI agent gets, clawbox CLI, auth model
 
 ## Troubleshooting & Recovery
 
-- [Troubleshooting](https://docs.clawbox.tech/support/troubleshooting): symptom-first diagnostic ladders — can't reach the box, browser rejects password (SSH works), updates stuck, provider 401s, gateway token mismatch, Telegram
-- [Recovery](https://docs.clawbox.tech/support/recovery): ordered recovery options — password reset (sudo passwd clawbox), service restart, safe reinstall (hard-sync + install.sh), factory reset (password → clawbox, AP mode)
-- [Updating ClawBox](https://docs.clawbox.tech/support/updating): the supported update paths
-- [FAQ](https://docs.clawbox.tech/support/faq)
+- [Troubleshooting](https://docs.clawbox.com/support/troubleshooting): symptom-first diagnostic ladders — can't reach the box, browser rejects password (SSH works), updates stuck, provider 401s, gateway token mismatch, Telegram
+- [Recovery](https://docs.clawbox.com/support/recovery): ordered recovery options — password reset (sudo passwd clawbox), service restart, safe reinstall (hard-sync + install.sh), factory reset (password → clawbox, AP mode)
+- [Updating ClawBox](https://docs.clawbox.com/support/updating): the supported update paths
+- [FAQ](https://docs.clawbox.com/support/faq)
 
 ## Hardware
 
-- [ClawBox Connect](https://docs.clawbox.tech/hardware/clawbox-connect): Jetson Orin Nano model
-- [ClawBox Workstation](https://docs.clawbox.tech/hardware/clawbox-workstation): DGX Spark model
-- [Requirements](https://docs.clawbox.tech/hardware/requirements)
+- [ClawBox Connect](https://docs.clawbox.com/hardware/clawbox-connect): Jetson Orin Nano model
+- [ClawBox Workstation](https://docs.clawbox.com/hardware/clawbox-workstation): DGX Spark model
+- [Requirements](https://docs.clawbox.com/hardware/requirements)
 
 ## Using ClawBox
 
-- [Messaging Channels](https://docs.clawbox.tech/guides/messaging-channels): Telegram (device-managed, pairing-approved) and OpenClaw's wider channel support
-- [Subscriptions](https://docs.clawbox.tech/guides/subscriptions): ClawBox AI plans
+- [Messaging Channels](https://docs.clawbox.com/guides/messaging-channels): Telegram (device-managed, pairing-approved) and OpenClaw's wider channel support
+- [Subscriptions](https://docs.clawbox.com/guides/subscriptions): ClawBox AI plans
 
 ## External
 
 - [OpenClaw Documentation](https://docs.openclaw.ai): the upstream AI gateway ClawBox ships
-- [ClawBox Store](https://clawbox.tech)
+- [ClawBox Store](https://clawbox.com)
 - [Community Discord](https://discord.gg/vsTsaY4Tuk)
