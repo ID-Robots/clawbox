@@ -1384,6 +1384,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ? { right: 8, bottom: 65 }
           : { left: defaultLeft, bottom: 170 }
 
+  // macOS-style open: grow the popup OUT of the mascot. The transform-origin
+  // is pinned to the popup's bottom edge, horizontally aligned with the
+  // mascot, so the scale animation emanates from where the user tapped
+  // instead of from the popup's centre.
+  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
+  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
+  const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
+  const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
+  const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
+
   const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
 
   return (
@@ -1404,10 +1414,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
+        transformOrigin,
         opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.92) translateY(16px)'),
-        transition: dragRef.current ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
+        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.82) translateY(6px)'),
+        // macOS-like: quick opacity, smooth easeOutExpo scale that decelerates
+        // into place. No transition mid-drag so the window tracks the cursor 1:1.
+        transition: dragRef.current ? 'none' : 'opacity 0.22s ease, transform 0.36s cubic-bezier(0.16, 1, 0.3, 1)',
         pointerEvents: visible ? 'auto' : 'none',
+        willChange: 'transform, opacity',
       }}
     >
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
