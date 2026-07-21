@@ -174,6 +174,11 @@ function extractText(msg: unknown): string {
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
+// Floor for the chat window width. Below this the header selector pills would
+// squeeze past a readable size, so the resize handles (floating + docked panel)
+// and the rendered width all clamp here — the chat simply stops getting
+// narrower instead of smashing the pills.
+const MIN_CHAT_WIDTH = 340
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
@@ -273,7 +278,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const newW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       // Direct DOM update during drag — no React re-renders
       if (popupRef.current) popupRef.current.style.width = newW + 'px'
     }
@@ -284,7 +289,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.removeEventListener('touchend', onUp)
       // Commit final width to React state + notify parent
       const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
-      const finalW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       setPanelWidth(finalW)
       onPanelModeChange?.(finalW)
     }
@@ -331,9 +336,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const dx = cx - start.x
       const dy = cy - start.y
       let newW = start.w, newH = start.h, newX = start.left, newY = start.top
-      if (edge.includes('r')) newW = Math.max(280, start.w + dx)
+      if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, start.w + dx)
       if (edge.includes('b')) newH = Math.max(250, start.h + dy)
-      if (edge.includes('l')) { newW = Math.max(280, start.w - dx); newX = start.left + (start.w - newW) }
+      if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, start.w - dx); newX = start.left + (start.w - newW) }
       if (edge.includes('t')) { newH = Math.max(250, start.h - dy); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
@@ -1389,10 +1394,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, height: 'auto', maxHeight: 'none', borderRadius: 0 }
+          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 0 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
-            : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
+            : { width: size.w, minWidth: MIN_CHAT_WIDTH, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
         zIndex: 10010,
         overflow: 'hidden',
         boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
