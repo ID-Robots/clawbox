@@ -1407,7 +1407,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 0 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
-            : { width: size.w, minWidth: MIN_CHAT_WIDTH, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
+            : {
+                width: size.w,
+                minWidth: MIN_CHAT_WIDTH,
+                height: size.h,
+                // The un-dragged popup is anchored from the BOTTOM (bottom:170
+                // above the mascot / bottom:65 in tray mode), so the height
+                // budget must subtract that anchor too — the old flat
+                // `100vh - 60px` let a 500px-tall popup shove its header (pills,
+                // close button) off the TOP of short/zoomed viewports, which
+                // looked completely broken. Reserve anchor + 12px top margin.
+                maxHeight: pos
+                  ? 'calc(100vh - 60px)'
+                  : trayMode
+                    ? 'calc(100vh - 77px)'
+                    : 'calc(100vh - 182px)',
+                borderRadius: 16,
+              }),
         zIndex: 10010,
         overflow: 'hidden',
         boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
