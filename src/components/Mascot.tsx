@@ -998,7 +998,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
         style={{
         position: 'fixed', left: 0,
         bottom: physicsActive ? 0 : 8,
-        transform: physicsActive ? undefined : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
+        // Keep the crab's real translateX (and hop height) while physics/drag is
+        // active instead of dropping to `undefined`. Clearing the transform
+        // reverts the crab to its base `left:0` — so a plain TAP (which flips
+        // physicsActive on pointerdown, before any imperative transform is set)
+        // snapped the crab to the bottom-LEFT corner for the ~100ms the pointer
+        // was held, reading as "the crab teleports to the corner" before the
+        // chat opens. The physics/drag rAF loop still overrides this per-frame.
+        transform: physicsActive
+          ? `translateX(calc(${xRef.current}vw - 50%)) translateY(${-physicsRef.current.posY}px)`
+          : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto',
         cursor: 'grab',
         touchAction: 'none',
