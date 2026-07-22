@@ -2008,9 +2008,13 @@ function ChromeDesktopInner() {
         )}
       </div>
 
-      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel */}
+      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel.
+          mascotX is captured once from onTap; we intentionally do NOT stream the
+          frozen mascot's position while the chat is open — that used to nudge
+          mascotX for a frame right after opening, flashing the popup to the wrong
+          corner before it settled. */}
       {chatPanelWidth === 0 && !isMobile && (
-        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 

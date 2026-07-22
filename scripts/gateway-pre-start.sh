@@ -154,6 +154,70 @@ if isinstance(primary_model, str) and primary_model.lower() in (
     model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
     changed = True
 
+# Model migration: legacy ChatGPT-subscription devices can have their active
+# model — or a fallback — stored as `openai/<gpt>` from before the setup UI
+# routed ChatGPT picks through Codex. On a device with ChatGPT (Codex OAuth)
+# auth and NO OpenAI API key, that id resolves to api.openai.com, which 401s
+# with "Missing bearer or basic authentication in header": either on the
+# active turn, or — more often — only once the OAuth token first refreshes
+# and the failover chain reaches the keyless `openai/*` fallback, which
+# surfaces as a FailoverError days into use. The chat-model pick route already
+# rewrites `openai/<gpt>` -> `codex/<gpt>`, but only when the user re-picks the
+# model; existing configs never re-pick, so migrate primary + fallbacks here on
+# gateway start. Mirrors CODEX_SUPPORTED_MODEL_RE / hasOpenAiApiKeyProfile /
+# hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
+# "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
+# where openai/* is a valid keyed route, are left untouched.
+_CODEX_SUPPORTED = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
+
+def _auth_profiles():
+    _auth = cfg.get("auth")
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    return _profiles.values() if isinstance(_profiles, dict) else []
+
+def _has_openai_api_key_profile():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _p == "openai" and _m in ("token", "api_key", "api-key"):
+            return True
+    return False
+
+def _has_codex_oauth_profile():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _p == "codex" and _m == "oauth":
+            return True
+    return False
+
+def _openai_gpt_to_codex(model_id):
+    # `openai/<codex-supported gpt>` -> `codex/<gpt>`; otherwise None (leave as-is).
+    if not isinstance(model_id, str):
+        return None
+    _m = model_id.strip()
+    if not _m.lower().startswith("openai/"):
+        return None
+    _bare = _m[len("openai/"):]
+    return "codex/" + _bare if _bare.lower() in _CODEX_SUPPORTED else None
+
+if _has_codex_oauth_profile() and not _has_openai_api_key_profile():
+    _migrated_primary = _openai_gpt_to_codex(model_defaults.get("primary"))
+    if _migrated_primary:
+        model_defaults["primary"] = _migrated_primary
+        changed = True
+    _fallbacks = model_defaults.get("fallbacks")
+    if isinstance(_fallbacks, list):
+        for _i, _fb in enumerate(_fallbacks):
+            _migrated_fb = _openai_gpt_to_codex(_fb)
+            if _migrated_fb and _migrated_fb != _fallbacks[_i]:
+                _fallbacks[_i] = _migrated_fb
+                changed = True
+
 # Strip orphaned per-model keys that a newer-than-pinned plugin wrote and a
 # version downgrade left behind, which fail strict config validation and
 # brick the AI provider page until `openclaw doctor --fix`. `agentRuntime`

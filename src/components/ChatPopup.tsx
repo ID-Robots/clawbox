@@ -174,6 +174,11 @@ function extractText(msg: unknown): string {
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
+// Floor for the chat window width. Below this the header selector pills would
+// squeeze past a readable size, so the resize handles (floating + docked panel)
+// and the rendered width all clamp here — the chat simply stops getting
+// narrower instead of smashing the pills.
+const MIN_CHAT_WIDTH = 340
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
@@ -273,7 +278,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const newW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       // Direct DOM update during drag — no React re-renders
       if (popupRef.current) popupRef.current.style.width = newW + 'px'
     }
@@ -284,7 +289,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.removeEventListener('touchend', onUp)
       // Commit final width to React state + notify parent
       const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
-      const finalW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       setPanelWidth(finalW)
       onPanelModeChange?.(finalW)
     }
@@ -331,9 +336,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const dx = cx - start.x
       const dy = cy - start.y
       let newW = start.w, newH = start.h, newX = start.left, newY = start.top
-      if (edge.includes('r')) newW = Math.max(280, start.w + dx)
+      if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, start.w + dx)
       if (edge.includes('b')) newH = Math.max(250, start.h + dy)
-      if (edge.includes('l')) { newW = Math.max(280, start.w - dx); newX = start.left + (start.w - newW) }
+      if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, start.w - dx); newX = start.left + (start.w - newW) }
       if (edge.includes('t')) { newH = Math.max(250, start.h - dy); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
@@ -1379,6 +1384,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ? { right: 8, bottom: 65 }
           : { left: defaultLeft, bottom: 170 }
 
+  // macOS-style open: grow the popup OUT of the mascot. The transform-origin
+  // is pinned to the popup's bottom edge, horizontally aligned with the
+  // mascot, so the scale animation emanates from where the user tapped
+  // instead of from the popup's centre.
+  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
+  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
+  const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
+  const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
+  const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
+
   const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
 
   return (
@@ -1389,20 +1404,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, height: 'auto', maxHeight: 'none', borderRadius: 0 }
+          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 0 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
-            : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
+            : {
+                width: size.w,
+                minWidth: MIN_CHAT_WIDTH,
+                height: size.h,
+                // The un-dragged popup is anchored from the BOTTOM (bottom:170
+                // above the mascot / bottom:65 in tray mode), so the height
+                // budget must subtract that anchor too — the old flat
+                // `100vh - 60px` let a 500px-tall popup shove its header (pills,
+                // close button) off the TOP of short/zoomed viewports, which
+                // looked completely broken. Reserve anchor + 12px top margin.
+                maxHeight: pos
+                  ? 'calc(100vh - 60px)'
+                  : trayMode
+                    ? 'calc(100vh - 77px)'
+                    : 'calc(100vh - 182px)',
+                borderRadius: 16,
+              }),
         zIndex: 10010,
         overflow: 'hidden',
         boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
+        transformOrigin,
         opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.92) translateY(16px)'),
-        transition: dragRef.current ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
+        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.82) translateY(6px)'),
+        // macOS-like: quick opacity, smooth easeOutExpo scale that decelerates
+        // into place. No transition mid-drag so the window tracks the cursor 1:1.
+        transition: dragRef.current ? 'none' : 'opacity 0.22s ease, transform 0.36s cubic-bezier(0.16, 1, 0.3, 1)',
         pointerEvents: visible ? 'auto' : 'none',
+        willChange: 'transform, opacity',
       }}
     >
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
