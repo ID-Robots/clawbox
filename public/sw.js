@@ -3,7 +3,7 @@
 // Bumping CACHE_NAME here is the supported way to invalidate previously
 // cached assets on existing installs — the `activate` handler deletes any
 // cache whose name doesn't match, so users get a clean slate on next visit.
-const CACHE_NAME = 'clawbox-v4'
+const CACHE_NAME = 'clawbox-v5'
 const PRECACHE = [
   '/',
   '/icon-192.png',
