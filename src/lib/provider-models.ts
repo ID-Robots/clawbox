@@ -70,10 +70,16 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
 // key. NO -pro variants — those are API-key only (they 400 with "model
 // not supported when using Codex with a ChatGPT account" on the OAuth
 // path). Per developers.openai.com/codex/models the supported set via
-// ChatGPT-account auth is gpt-5.5, gpt-5.4, gpt-5.4-mini. Filter lives
-// in ALLOWED_MODEL_RE_BY_PROVIDER (catalog route).
+// ChatGPT-account auth is gpt-5.6-{sol,terra,luna}, gpt-5.5, gpt-5.4,
+// gpt-5.4-mini. The gpt-5.6 models are plan-gated upstream (Plus/Pro/Max)
+// — the live catalog only returns them for entitled accounts, so listing
+// them here just gives them stable labels; accounts without the plan
+// never see them. Filter lives in ALLOWED_MODEL_RE_BY_PROVIDER (catalog).
 export const CODEX_MODELS: readonly ProviderModelOption[] = [
-  { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "Newest flagship. Plus/Pro." },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "GPT-5.6. Plus/Pro." },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "GPT-5.6, fast. Plus/Pro." },
+  { id: "gpt-5.5", label: "GPT-5.5", hint: "Flagship." },
   { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;

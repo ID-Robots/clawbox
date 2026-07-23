@@ -171,11 +171,16 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 // openai (API-key auth): all 5.4 + 5.5 SKUs including -pro variants.
 //   Pros require an API key and DO work on the api.openai.com path.
 //
-// codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5 only — NO
-//   -pro variants. Per developers.openai.com/codex/models, the Pro
-//   models are API-key-only and the Codex/ChatGPT-account auth path
-//   400s with "model not supported when using Codex with a ChatGPT
-//   account" if you try gpt-5.4-pro or gpt-5.5-pro.
+// codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5, plus the 5.6
+//   gpt-5.6-{sol,terra,luna} models — NO -pro variants. Per
+//   developers.openai.com/codex/models, the Pro models are API-key-only
+//   and the Codex/ChatGPT-account auth path 400s with "model not
+//   supported when using Codex with a ChatGPT account" if you try
+//   gpt-5.4-pro or gpt-5.5-pro. The gpt-5.6-sol/terra/luna models DO run
+//   on the ChatGPT-account path for accounts whose plan (Plus/Pro/Max)
+//   includes them — the live upstream catalog only returns them for such
+//   accounts, so this allowlist just stops us from stripping them; boxes
+//   on plans without 5.6 never see the entries (no dead buttons).
 //
 // Older generations (4.1, 5.0, 5.1, 5.2, 5.3) are intentionally
 // excluded per user request. New generations matching the pattern
@@ -187,8 +192,10 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
   // accept gpt-5.5-mini (which doesn't exist on the Codex auth path
   // and would 400 the same way gpt-5.4-pro did). Per
   // developers.openai.com/codex/models the supported set under
-  // ChatGPT-account auth is exactly gpt-5.4, gpt-5.4-mini, gpt-5.5.
-  codex: /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/,
+  // ChatGPT-account auth is gpt-5.4, gpt-5.4-mini, gpt-5.5, plus the
+  // gpt-5.6-{sol,terra,luna} models (plan-gated upstream, so they only
+  // appear in the live catalog for accounts entitled to them).
+  codex: /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?|gpt-5\.6-(?:sol|terra|luna))$/,
 };
 
 // Newest-first ordering: bigger context generally means newer model on
