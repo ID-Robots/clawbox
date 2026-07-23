@@ -1262,17 +1262,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // 100). Shared by the skill/provider event handlers and the onClose restart
   // path so the easing curve stays in one place.
   const startReloadProgressTimer = useCallback(() => {
-    if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
-    let progress = 0
-    reloadTimerRef.current = setInterval(() => {
-      progress += (90 - progress) * 0.08
-      const rounded = Math.min(Math.round(progress), 90)
-      setReloadProgress(rounded)
-      if (rounded >= 90 && reloadTimerRef.current) {
-        clearInterval(reloadTimerRef.current)
-        reloadTimerRef.current = null
-      }
-    }, 200)
+    // The reload bar is now driven by a compositor-only CSS transform animation
+    // (`clawReloadFill`, see the overlay below) instead of a JS setInterval.
+    // The old timer fired setReloadProgress every 200ms, and on the Jetson —
+    // where switching provider restarts the gateway and pins the CPU — those
+    // React re-renders plus the `width` transition (which forces layout every
+    // frame) made the bar visibly stutter. A transform:scaleX keyframe runs on
+    // the compositor thread and stays smooth even while the main thread is busy.
+    // We keep `reloadProgress` purely as the 0→100 completion signal. Just clear
+    // any stale timer from an older reload path.
+    if (reloadTimerRef.current) {
+      clearInterval(reloadTimerRef.current)
+      reloadTimerRef.current = null
+    }
   }, [])
   // Tear the reconnect overlay down and reset the reload flags. Called from
   // every terminal-failure path (both retry-exhaustion branches) so the error
@@ -1688,17 +1690,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }}>
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
-            <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } }`}</style>
+            <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } } @keyframes clawReloadFill { from { transform: scaleX(0.04) } to { transform: scaleX(0.9) } }`}</style>
             {reloadingSkill ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
                   <span>{reloadReason === 'provider' ? 'Switching AI provider...' : reloadReason === 'restart' ? 'Restarting chat...' : 'Reloading skills...'}</span>
-                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress >= 100 ? 100 : undefined} aria-busy={reloadProgress < 100} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                    {/* Compositor-only fill: a transform:scaleX keyframe eases
+                        0→90% and holds; when the gateway answers (reloadProgress
+                        hits 100) we drop the animation and transition to full.
+                        No JS ticks, no width/layout thrash — stays smooth even
+                        while the box is pinned restarting the gateway. */}
                     <div style={{
-                      height: '100%', borderRadius: 2, background: '#f97316',
-                      transition: 'width 0.3s ease-out',
-                      width: `${reloadProgress}%`,
+                      height: '100%', width: '100%', borderRadius: 2, background: '#f97316',
+                      transformOrigin: 'left',
+                      transform: reloadProgress >= 100 ? 'scaleX(1)' : 'scaleX(0.04)',
+                      transition: reloadProgress >= 100 ? 'transform 0.3s ease-out' : undefined,
+                      animation: reloadProgress >= 100 ? undefined : 'clawReloadFill 14s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                      willChange: 'transform',
                     }} />
                   </div>
                   <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>This may take up to 30 seconds</span>
