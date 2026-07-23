@@ -19,23 +19,20 @@ describe("chat-reasoning", () => {
       expect(cfg.levels.length).toBe(1);
     });
 
-    it("returns the upstream-accurate set for cloud providers", () => {
-      expect(getProviderReasoningConfig("openai").levels).toContain("xhigh");
-      expect(getProviderReasoningConfig("deepseek")).toEqual({
-        levels: ["off", "high", "xhigh"],
-        default: "off",
-      });
-      expect(getProviderReasoningConfig("clawai")).toEqual({
-        levels: ["off", "high", "xhigh"],
-        default: "off",
-      });
-      expect(getProviderReasoningConfig("anthropic").levels).toEqual([
-        "low",
-        "medium",
-        "high",
-        "max",
-      ]);
-      expect(getProviderReasoningConfig("google").default).toBe("adaptive");
+    it("exposes a uniform off/low/medium/high ladder for every cloud provider", () => {
+      const uniform = ["off", "low", "medium", "high"];
+      for (const provider of ["openai", "codex", "anthropic", "google", "deepseek", "clawai", "openrouter"]) {
+        expect(getProviderReasoningConfig(provider).levels).toEqual(uniform);
+      }
+    });
+
+    it("keeps ClawBox AI / DeepSeek fast-by-default (off) while cloud providers default to medium", () => {
+      expect(getProviderReasoningConfig("deepseek").default).toBe("off");
+      expect(getProviderReasoningConfig("clawai").default).toBe("off");
+      expect(getProviderReasoningConfig("codex").default).toBe("medium");
+      expect(getProviderReasoningConfig("openai").default).toBe("medium");
+      expect(getProviderReasoningConfig("anthropic").default).toBe("medium");
+      expect(getProviderReasoningConfig("google").default).toBe("medium");
     });
 
     it("falls back for unknown or empty providers", () => {
