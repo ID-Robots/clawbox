@@ -1432,14 +1432,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         flexDirection: 'column',
         transformOrigin,
         opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.82) translateY(6px)'),
-        // macOS-like: quick opacity, smooth easeOutExpo scale that decelerates
-        // into place. No transition mid-drag so the window tracks the cursor 1:1.
-        transition: dragRef.current ? 'none' : 'opacity 0.22s ease, transform 0.36s cubic-bezier(0.16, 1, 0.3, 1)',
+        // Resting transform. On desktop the entrance is driven by the
+        // `clawChatBurstIn` keyframes below (a spring burst OUT of the mascot
+        // with an overshoot, a tilt-wobble and an orange energy-glow flash),
+        // which override this while playing and settle back onto scale(1).
+        // Mobile keeps its clean slide-up; a drag pins it to the resting state.
+        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.72) translateY(14px)'),
+        animation: (visible && !mobile && !dragRef.current)
+          ? 'clawChatBurstIn 0.62s cubic-bezier(0.34, 1.56, 0.64, 1) both'
+          : undefined,
+        // Mobile / drag still use a transition; the desktop entrance is the
+        // keyframe animation, so we only transition opacity there to avoid
+        // fighting it. No transition mid-drag so the window tracks 1:1.
+        transition: dragRef.current
+          ? 'none'
+          : mobile
+            ? 'opacity 0.2s ease, transform 0.42s cubic-bezier(0.22, 1.28, 0.36, 1)'
+            : 'opacity 0.18s ease',
         pointerEvents: visible ? 'auto' : 'none',
-        willChange: 'transform, opacity',
+        willChange: 'transform, opacity, filter',
       }}
     >
+      {/* Insane entrance: spring burst out of the mascot with an overshoot,
+          a tilt-wobble, a soft blur-in and an orange energy-glow pulse.
+          transform-origin (set on the container) pins it to where the crab is,
+          so the whole thing erupts from the tapped mascot and settles clean. */}
+      <style>{`@keyframes clawChatBurstIn {
+        0%   { opacity: 0; transform: scale(0.12) translateY(38px) rotate(-8deg); filter: blur(16px) brightness(1.55) drop-shadow(0 0 0 rgba(249,115,22,0)); }
+        45%  { opacity: 1; transform: scale(1.08) translateY(-6px) rotate(2.4deg); filter: blur(0px) brightness(1.18) drop-shadow(0 0 26px rgba(249,115,22,0.6)); }
+        65%  { transform: scale(0.965) translateY(3px) rotate(-1.4deg); filter: brightness(1.05) drop-shadow(0 0 12px rgba(249,115,22,0.32)); }
+        82%  { transform: scale(1.015) translateY(-1px) rotate(0.5deg); filter: drop-shadow(0 0 5px rgba(249,115,22,0.16)); }
+        100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); filter: blur(0px) brightness(1) drop-shadow(0 0 0 rgba(249,115,22,0)); }
+      }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
       <div
         onPointerDown={mobile || panelMode ? undefined : onDragStart}

@@ -317,11 +317,12 @@ function ChromeDesktopInner() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
-        // Chat panel dock state
+        // Chat panel dock state — a docked side panel is a deliberate layout so
+        // we still restore it. The FLOATING chat popup, however, must never
+        // auto-open on load: it should appear only when the user taps the crab.
+        // (We intentionally ignore a persisted `ui_chat_open` here.)
         if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
           setChatPanelWidth(Number(data.ui_chat_panel_width));
-          setChatOpen(true);
-        } else if (data.ui_chat_open) {
           setChatOpen(true);
         }
         // Auto-open chat once after fresh install (no saved preferences yet)
@@ -2008,13 +2009,15 @@ function ChromeDesktopInner() {
         )}
       </div>
 
-      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel.
+      {/* Mascot - tapping toggles chat popup. It stays on the desktop even when
+          the chat is docked as a vertical panel; the Mascot slides itself clear
+          of the panel (rightInset) so it isn't hidden behind it.
           mascotX is captured once from onTap; we intentionally do NOT stream the
           frozen mascot's position while the chat is open — that used to nudge
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
-      {chatPanelWidth === 0 && !isMobile && (
-        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
+      {!isMobile && (
+        <Mascot frozen={chatOpen} rightInset={chatPanelWidth} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 

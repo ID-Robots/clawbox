@@ -35,7 +35,7 @@ const POWER_PARTICLES = [
   { bottom: 30, left: 108, duration: 1.35, delay: 0.95 },
 ]
 
-function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void } = {}) {
+function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
   const { locale } = useT()
   const frozenRef = useRef(false)
   const onPositionChangeRef = useRef(onPositionChange)
@@ -401,7 +401,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     // Right-click — let onContextMenu handle it, don't start drag/tap
     if (e.button === 2) return
     e.preventDefault(); e.stopPropagation()
-    draggingRef.current = true; setPhysicsActive(true)
+    // NOTE: do NOT enter physics mode here. physicsActive makes React render
+    // `transform: undefined`, which strips the crab's translateX and snaps it to
+    // the far-left edge. On a plain tap (no move) pointerMove never re-applies a
+    // transform, so the crab would visibly teleport left then back. We only flip
+    // physicsActive on once a real drag is detected (see handlePointerMove).
+    draggingRef.current = true
     didDragRef.current = false
     dragStartPos.current = { x: e.clientX, y: e.clientY }
     const p = physicsRef.current
@@ -422,7 +427,17 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
     e.preventDefault()
     // Detect actual drag vs tap
     const dx = e.clientX - dragStartPos.current.x, dy = e.clientY - dragStartPos.current.y
-    if (dx * dx + dy * dy > 25) didDragRef.current = true
+    // Below the drag threshold we treat this as a potential tap: keep the crab
+    // perfectly still (no physics mode, no transform rewrite) so clicking to
+    // open the chat never nudges it. Only on crossing the threshold do we enter
+    // physics/drag mode and re-baseline the velocity tracking to here.
+    if (!didDragRef.current) {
+      if (dx * dx + dy * dy <= 25) return
+      didDragRef.current = true
+      setPhysicsActive(true)
+      const pp = physicsRef.current
+      pp.lastPointerX = e.clientX; pp.lastPointerY = e.clientY; pp.lastPointerTime = performance.now()
+    }
     const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
     const p = physicsRef.current
     const dt = (now - p.lastPointerTime) / 1000
@@ -969,6 +984,45 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange }: { onTap?: 
       stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
     }
   }, [frozen])
+
+  // ─── Keep the crab clear of a docked chat panel ───
+  // When the chat opens as a vertical side panel (rightInset = its width in px),
+  // the crab must stay on the visible desktop to the LEFT of the panel — the
+  // panel has a higher z-index, so anything under it is hidden. If the crab (or
+  // its box) would sit behind the panel, glide it into view. When the panel
+  // closes (inset back to 0) we leave the crab where it is — no snapping.
+  useEffect(() => {
+    const inset = rightInset ?? 0
+    if (inset <= 0) return
+    const vw = window.innerWidth
+    const CRAB_HALF = 75 // half the 150px crab image
+    const GAP = 24       // breathing room between crab and panel edge
+    const maxCenterPx = vw - inset - GAP - CRAB_HALF
+    const maxXvw = Math.max(5, (maxCenterPx / vw) * 100)
+
+    const startCrab = xRef.current
+    const startBox = boxXRef.current
+    const targetCrab = Math.min(startCrab, maxXvw)
+    const targetBox = Math.min(startBox, maxXvw)
+    const moveCrab = targetCrab < startCrab
+    const moveBox = targetBox < startBox
+    if (!moveCrab && !moveBox) return
+
+    // Face left as it retreats from the panel so the walk reads naturally.
+    if (moveCrab) setFacingDirect('left')
+    let raf = 0
+    const t0 = performance.now()
+    const dur = 520
+    const step = (now: number) => {
+      const t = Math.min((now - t0) / dur, 1)
+      const e = 1 - Math.pow(1 - t, 3) // easeOutCubic
+      if (moveCrab) { xRef.current = startCrab + (targetCrab - startCrab) * e; updateCrabPos() }
+      if (moveBox) { boxXRef.current = startBox + (targetBox - startBox) * e; updateBoxPos() }
+      if (t < 1) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => { if (raf) cancelAnimationFrame(raf) }
+  }, [rightInset, updateCrabPos, updateBoxPos, setFacingDirect])
 
   // Listen for show/hide mascot events from desktop context menu
   useEffect(() => {
