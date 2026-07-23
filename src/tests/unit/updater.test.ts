@@ -133,6 +133,9 @@ describe("updater", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    process.env.GATEWAY_HEALTH_WAIT_MS = "1";
+    process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
+    process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
 
     mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
@@ -157,6 +160,9 @@ describe("updater", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    delete process.env.GATEWAY_HEALTH_WAIT_MS;
+    delete process.env.GATEWAY_RECOVERY_WAIT_MS;
+    delete process.env.GATEWAY_WAIT_INTERVAL_MS;
   });
 
   describe("getUpdateState", () => {
@@ -336,6 +342,76 @@ describe("updater", () => {
       });
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("completed");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
+    });
+
+    it("fails the continuation when gateway verification still finds no known recovery path", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockIsPortOpen.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      const result = await updater.checkContinuation();
+      expect(result).toBe(true);
+
+      await vi.waitFor(() => {
+        const state = updater.getUpdateState();
+        expect(state.phase).toBe("failed");
+        expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      });
+    });
+
+    it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "conflicting plugin install metadata\nopenclaw-agent.sqlite belongs to agent piper; requested agent carl_pir\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "moved legacy files\n", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockIsPortOpen
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      const result = await updater.checkContinuation();
+      expect(result).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+      const bashCall = mockExecFile.mock.calls.find(([cmd]) => cmd === "/bin/bash");
+      expect(bashCall?.[1]).toEqual(expect.arrayContaining(["-lc", expect.stringContaining("installs.json")]));
+      expect(String((bashCall?.[1] as string[] | undefined)?.[1])).toContain("carl_pir.sqlite");
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
       );
