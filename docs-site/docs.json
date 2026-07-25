@@ -15,7 +15,7 @@
   "logo": {
     "light": "/logo/light-wordmark.png",
     "dark": "/logo/dark-wordmark.png",
-    "href": "https://clawbox.tech"
+    "href": "https://clawbox.com"
   },
   "navigation": {
     "tabs": [
@@ -104,7 +104,7 @@
       "anchors": [
         {
           "anchor": "Buy a ClawBox",
-          "href": "https://clawbox.tech",
+          "href": "https://clawbox.com",
           "icon": "cart-shopping"
         },
         {
@@ -125,12 +125,12 @@
     "primary": {
       "type": "button",
       "label": "Get ClawBox",
-      "href": "https://clawbox.tech"
+      "href": "https://clawbox.com"
     }
   },
   "footer": {
     "socials": {
-      "website": "https://clawbox.tech",
+      "website": "https://clawbox.com",
       "discord": "https://discord.gg/vsTsaY4Tuk",
       "github": "https://github.com/ID-Robots"
     }
