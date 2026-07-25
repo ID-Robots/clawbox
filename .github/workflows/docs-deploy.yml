@@ -1,7 +1,7 @@
 name: Deploy ClawBox Docs
 
 # Rebuilds the Mintlify docs in docs-site/ and publishes the static export
-# to the gh-pages branch, which GitHub Pages serves at docs.clawbox.tech.
+# to the gh-pages branch, which GitHub Pages serves at docs.clawbox.com.
 
 on:
   push:
@@ -41,7 +41,7 @@ jobs:
           unzip -q export.zip -d _site
           # GitHub Pages essentials
           touch _site/.nojekyll
-          echo "docs.clawbox.tech" > _site/CNAME
+          echo "docs.clawbox.com" > _site/CNAME
           # llms.txt — agent-discovery index (mint export doesn't emit one)
           cp llms.txt _site/llms.txt
           # strip air-gapped helper files
@@ -53,4 +53,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: docs-site/_site
           publish_branch: gh-pages
-          cname: docs.clawbox.tech
+          cname: docs.clawbox.com
