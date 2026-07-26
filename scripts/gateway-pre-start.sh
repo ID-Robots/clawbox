@@ -486,7 +486,21 @@ fi
 # resolves to `~/.openclaw`, the same root OpenClaw's own plugin
 # installer writes under (`<openclaw-home>/npm/node_modules/...`).
 OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
+# OpenClaw's plugin install layout changed across versions: older cores wrote
+# the plugin flat under <home>/npm/node_modules/@openclaw/codex, while current
+# cores (2026.7.x) isolate each plugin in its own project dir under
+# <home>/npm/projects/<hash>/node_modules/@openclaw/codex. Hard-coding only the
+# flat path made the "is it installed?" check below read the plugin as ALWAYS
+# missing on newer cores, so pre-start reinstalled codex on EVERY boot (slow,
+# and — before this fix — an unbounded npm install on the blocking boot path,
+# a prime "gateway won't start after update" trigger). Resolve to whichever
+# layout actually holds the package.json; keep the flat path as the default so
+# a first-time install still has a well-known destination.
 CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_DIR_FOUND="$(ls -d "$OPENCLAW_HOME_DIR"/npm/projects/*/node_modules/@openclaw/codex 2>/dev/null | head -1 || true)"
+  [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -540,11 +554,24 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
     # and every Codex chat crashes with "_diagnosticRuntime.
     # createDiagnosticTraceContextFromActiveScope is not a function" (the
     # newer plugin calls a runtime API the pinned core doesn't expose).
-    # Reinstall at the pinned version whenever the two differ.
+    # Reinstall only when the BASE version actually differs.
+    #
+    # Republish-tolerant compare: npm republishes the SAME release with a
+    # -N / -beta.N build suffix (2026.7.1 -> 2026.7.1-1 -> 2026.7.1-2). Those
+    # share the same runtime API as their base version, so an exact-string
+    # `!=` compare would flag `2026.7.1-1` vs pinned `2026.7.1` as a skew and
+    # reinstall the plugin — synchronously, on the gateway boot path — on
+    # EVERY boot. On a Jetson with slow/blocked npm that stalls startup and
+    # the gateway never comes online ("Update failed / gateway still offline").
+    # Strip the build suffix and compare only MAJOR.MINOR.PATCH: a real
+    # API-skew (plugin 2026.7.2 vs core 2026.7.1) still triggers a reinstall,
+    # a mere republish does not.
     CODEX_INSTALLED_VER=$(python3 -c "import json; print(json.load(open('$CODEX_PLUGIN_DIR/package.json')).get('version',''))" 2>/dev/null || echo "")
-    if [ "$CODEX_INSTALLED_VER" != "$OPENCLAW_TARGET" ]; then
+    CODEX_INSTALLED_BASE="${CODEX_INSTALLED_VER%%-*}"
+    OPENCLAW_TARGET_BASE="${OPENCLAW_TARGET%%-*}"
+    if [ "$CODEX_INSTALLED_BASE" != "$OPENCLAW_TARGET_BASE" ]; then
       CODEX_NEEDS_INSTALL=1
-      CODEX_INSTALL_REASON="version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
+      CODEX_INSTALL_REASON="base version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
     fi
   fi
 fi
@@ -554,8 +581,19 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # bare alias only when the pin is unknown, so a needed repair still happens.
   CODEX_SPEC="codex"
   [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
-  "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1 \
-    || echo "  WARN: openclaw plugins install $CODEX_SPEC failed; Codex chats will fail until resolved"
+  # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
+  # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
+  # (slow/blocked/offline registry on a Jetson) would keep the gateway from
+  # ever reaching "listening" — which is exactly the "gateway won't start
+  # after update" failure. Best-effort: if the install fails OR times out we
+  # log a warning and let the gateway start anyway. Codex is one provider;
+  # a degraded Codex is far better than a dead box, and the next boot (or a
+  # manual `openclaw plugins install`) can still repair it.
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1; then
+    echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
+  else
+    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
+  fi
 fi
 
 # Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
