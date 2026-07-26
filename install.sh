@@ -1628,6 +1628,20 @@ step_ollama_install() {
   # Apply Jetson memory optimizations
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   echo "  Ollama installed and running"
+
+  # Local embedding model for semantic memory. OpenClaw's memory search
+  # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
+  # doesn't have (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
+  # "Semantic memory search is still offline ... missing OpenAI provider
+  # auth/API-key access". Pull a small local embedding model so semantic
+  # recall works with zero API key; gateway-pre-start.sh points memorySearch
+  # at it once present. Best-effort: a failed pull must not abort the install
+  # (memory falls back to lexical FTS).
+  if ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
+    echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
+  else
+    echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
+  fi
 }
 
 step_llamacpp_install() {

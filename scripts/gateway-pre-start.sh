@@ -631,6 +631,28 @@ NODE
   fi
 fi
 
+# Semantic memory embeddings default. OpenClaw's memory search defaults to
+# OpenAI embeddings, which need an OPENAI_API_KEY many boxes don't have
+# (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
+# "Semantic memory search is still offline ... missing OpenAI provider
+# auth/API-key access". If the user hasn't deliberately chosen an embeddings
+# provider AND the local model is present in Ollama, point memory search at
+# local Ollama so semantic recall works with zero API key. Self-heals existing
+# boxes on upgrade, not just fresh installs. Gated on the model actually being
+# present so we never leave memorySearch fail-closed on a missing model; only
+# touches an unset/"auto" provider so a deliberate OpenAI/remote setup stays.
+MEM_PROVIDER="$(python3 -c "import json;print(((json.load(open('$OPENCLAW_CONFIG')).get('agents',{}).get('defaults',{}) or {}).get('memorySearch',{}) or {}).get('provider') or '')" 2>/dev/null || echo "")"
+if [ -z "$MEM_PROVIDER" ] || [ "$MEM_PROVIDER" = "auto" ]; then
+  if curl -fsS --max-time 5 http://localhost:11434/api/tags 2>/dev/null | grep -q "qwen3-embedding"; then
+    if "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1 \
+       && "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model qwen3-embedding:0.6b >/dev/null 2>&1; then
+      echo "  Memory search -> local Ollama embeddings (qwen3-embedding:0.6b, no API key needed)"
+    else
+      echo "  WARN: could not set memorySearch to local Ollama embeddings (non-fatal; memory falls back to lexical FTS)"
+    fi
+  fi
+fi
+
 # Ensure the per-install MCP bearer token exists and is wired into the
 # openclaw MCP server registration. The token lets the MCP subprocess
 # (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
