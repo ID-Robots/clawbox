@@ -5,4 +5,9 @@ Description=ClawBox Root Update Step (%i)
 Type=oneshot
 EnvironmentFile=-/etc/clawbox/network.env
 ExecStart=/bin/bash /home/clawbox/clawbox/install.sh --step %i
-TimeoutStartSec=1800
+# 30 min was not enough for llamacpp_install on a cold box: that step builds
+# llama.cpp from source with CUDA on a 6-core Jetson Orin AND downloads the
+# multi-GB Gemma 4 GGUF. systemd killed the unit mid-build, so "Provisioning
+# offline Gemma 4" hung until it failed. Other steps finish in seconds — this
+# is a ceiling, not a wait, so raising it costs nothing.
+TimeoutStartSec=7200
