@@ -174,6 +174,11 @@ function extractText(msg: unknown): string {
 
 const DEFAULT_SIZE = { w: 400, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
+// Floor for the chat window width. Below this the header selector pills would
+// squeeze past a readable size, so the resize handles (floating + docked panel)
+// and the rendered width all clamp here — the chat simply stops getting
+// narrower instead of smashing the pills.
+const MIN_CHAT_WIDTH = 340
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
@@ -273,7 +278,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const newW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       // Direct DOM update during drag — no React re-renders
       if (popupRef.current) popupRef.current.style.width = newW + 'px'
     }
@@ -284,7 +289,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.removeEventListener('touchend', onUp)
       // Commit final width to React state + notify parent
       const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
-      const finalW = Math.max(280, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
       setPanelWidth(finalW)
       onPanelModeChange?.(finalW)
     }
@@ -331,9 +336,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const dx = cx - start.x
       const dy = cy - start.y
       let newW = start.w, newH = start.h, newX = start.left, newY = start.top
-      if (edge.includes('r')) newW = Math.max(280, start.w + dx)
+      if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, start.w + dx)
       if (edge.includes('b')) newH = Math.max(250, start.h + dy)
-      if (edge.includes('l')) { newW = Math.max(280, start.w - dx); newX = start.left + (start.w - newW) }
+      if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, start.w - dx); newX = start.left + (start.w - newW) }
       if (edge.includes('t')) { newH = Math.max(250, start.h - dy); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
@@ -361,6 +366,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  const pendingModelSwitchResetRef = useRef<{ model: string; label: string } | null>(null)
   // Sends queued while the WS handshake hasn't completed yet. Drained by
   // a useEffect when status flips to 'connected' so the user can type and
   // hit Enter before the gateway is ready without seeing a hard error.
@@ -601,6 +607,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // label it. Fire-and-forget — if the fetch fails the worst case is
               // we don't show the banner, not that the chat is broken.
               if (wasProviderChange) {
+                const pendingModelSwitch = pendingModelSwitchResetRef.current
+                pendingModelSwitchResetRef.current = null
+                if (pendingModelSwitch) {
+                  try {
+                    await wsRequest('sessions.reset', { key: mainSessionKey, reason: 'new' })
+                    setMessages([])
+                    greetedRef.current = true
+                  } catch (err) {
+                    setMessages(prev => [...prev, {
+                      role: 'system',
+                      text: `Switched chat to ${pendingModelSwitch.model}, but could not start a fresh chat: ${err instanceof Error ? err.message : 'unknown error'}`,
+                      timestamp: Date.now(),
+                      variant: 'error',
+                    }])
+                  }
+                }
                 try {
                   const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
                   const state = await res.json() as ChatModelState
@@ -608,7 +630,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
                   setMessages(prev => [...prev, {
                     role: 'system',
-                    text: `Switched chat to ${label}.`,
+                    text: pendingModelSwitch
+                      ? `Switched chat to ${label}. Started a fresh chat so the previous model's transcript does not leak into this model.`
+                      : `Switched chat to ${label}.`,
                     timestamp: Date.now(),
                     variant: 'success',
                   }])
@@ -1114,13 +1138,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
 
       setChatModelState(data as ChatModelState)
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: `Switched chat to ${target.model}.`,
-        timestamp: Date.now(),
-        variant: 'success',
-      }])
+      pendingModelSwitchResetRef.current = target
+      skillInstalledRef.current = true
+      reloadReasonRef.current = 'provider'
+      setReloadReason('provider')
+      setReloadingSkill(true)
+      setReloadProgress(0)
       retryCountRef.current = 0
+      startReloadProgressTimer()
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        try { wsRef.current.close() } catch { /* ignore */ }
+      }
       connect()
     } catch (err) {
       setMessages(prev => [...prev, {
@@ -1234,17 +1262,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // 100). Shared by the skill/provider event handlers and the onClose restart
   // path so the easing curve stays in one place.
   const startReloadProgressTimer = useCallback(() => {
-    if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
-    let progress = 0
-    reloadTimerRef.current = setInterval(() => {
-      progress += (90 - progress) * 0.08
-      const rounded = Math.min(Math.round(progress), 90)
-      setReloadProgress(rounded)
-      if (rounded >= 90 && reloadTimerRef.current) {
-        clearInterval(reloadTimerRef.current)
-        reloadTimerRef.current = null
-      }
-    }, 200)
+    // The reload bar is now driven by a compositor-only CSS transform animation
+    // (`clawReloadFill`, see the overlay below) instead of a JS setInterval.
+    // The old timer fired setReloadProgress every 200ms, and on the Jetson —
+    // where switching provider restarts the gateway and pins the CPU — those
+    // React re-renders plus the `width` transition (which forces layout every
+    // frame) made the bar visibly stutter. A transform:scaleX keyframe runs on
+    // the compositor thread and stays smooth even while the main thread is busy.
+    // We keep `reloadProgress` purely as the 0→100 completion signal. Just clear
+    // any stale timer from an older reload path.
+    if (reloadTimerRef.current) {
+      clearInterval(reloadTimerRef.current)
+      reloadTimerRef.current = null
+    }
   }, [])
   // Tear the reconnect overlay down and reset the reload flags. Called from
   // every terminal-failure path (both retry-exhaustion branches) so the error
@@ -1356,6 +1386,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ? { right: 8, bottom: 65 }
           : { left: defaultLeft, bottom: 170 }
 
+  // macOS-style open: grow the popup OUT of the mascot. The transform-origin
+  // is pinned to the popup's bottom edge, horizontally aligned with the
+  // mascot, so the scale animation emanates from where the user tapped
+  // instead of from the popup's centre.
+  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
+  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
+  const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
+  const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
+  const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
+
   const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
 
   return (
@@ -1366,22 +1406,66 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, height: 'auto', maxHeight: 'none', borderRadius: 0 }
+          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 0 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
-            : { width: size.w, height: size.h, maxHeight: 'calc(100vh - 60px)', borderRadius: 16 }),
+            : {
+                width: size.w,
+                minWidth: MIN_CHAT_WIDTH,
+                height: size.h,
+                // The un-dragged popup is anchored from the BOTTOM (bottom:170
+                // above the mascot / bottom:65 in tray mode), so the height
+                // budget must subtract that anchor too — the old flat
+                // `100vh - 60px` let a 500px-tall popup shove its header (pills,
+                // close button) off the TOP of short/zoomed viewports, which
+                // looked completely broken. Reserve anchor + 12px top margin.
+                maxHeight: pos
+                  ? 'calc(100vh - 60px)'
+                  : trayMode
+                    ? 'calc(100vh - 77px)'
+                    : 'calc(100vh - 182px)',
+                borderRadius: 16,
+              }),
         zIndex: 10010,
         overflow: 'hidden',
         boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
+        transformOrigin,
         opacity: visible ? 1 : 0,
-        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.92) translateY(16px)'),
-        transition: dragRef.current ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
+        // Resting transform. On desktop the entrance is driven by the
+        // `clawChatBurstIn` keyframes below (a spring burst OUT of the mascot
+        // with an overshoot, a tilt-wobble and an orange energy-glow flash),
+        // which override this while playing and settle back onto scale(1).
+        // Mobile keeps its clean slide-up; a drag pins it to the resting state.
+        transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.72) translateY(14px)'),
+        animation: (visible && !mobile && !dragRef.current)
+          ? 'clawChatBurstIn 0.62s cubic-bezier(0.34, 1.56, 0.64, 1) both'
+          : undefined,
+        // Mobile / drag still use a transition; the desktop entrance is the
+        // keyframe animation, so we only transition opacity there to avoid
+        // fighting it. No transition mid-drag so the window tracks 1:1.
+        transition: dragRef.current
+          ? 'none'
+          : mobile
+            ? 'opacity 0.2s ease, transform 0.42s cubic-bezier(0.22, 1.28, 0.36, 1)'
+            : 'opacity 0.18s ease',
         pointerEvents: visible ? 'auto' : 'none',
+        willChange: 'transform, opacity, filter',
       }}
     >
+      {/* Insane entrance: spring burst out of the mascot with an overshoot,
+          a tilt-wobble, a soft blur-in and an orange energy-glow pulse.
+          transform-origin (set on the container) pins it to where the crab is,
+          so the whole thing erupts from the tapped mascot and settles clean. */}
+      <style>{`@keyframes clawChatBurstIn {
+        0%   { opacity: 0; transform: scale(0.12) translateY(38px) rotate(-8deg); filter: blur(16px) brightness(1.55) drop-shadow(0 0 0 rgba(249,115,22,0)); }
+        45%  { opacity: 1; transform: scale(1.08) translateY(-6px) rotate(2.4deg); filter: blur(0px) brightness(1.18) drop-shadow(0 0 26px rgba(249,115,22,0.6)); }
+        65%  { transform: scale(0.965) translateY(3px) rotate(-1.4deg); filter: brightness(1.05) drop-shadow(0 0 12px rgba(249,115,22,0.32)); }
+        82%  { transform: scale(1.015) translateY(-1px) rotate(0.5deg); filter: drop-shadow(0 0 5px rgba(249,115,22,0.16)); }
+        100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); filter: blur(0px) brightness(1) drop-shadow(0 0 0 rgba(249,115,22,0)); }
+      }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
       <div
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
@@ -1517,7 +1601,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
-              triggerMaxWidth={100}
+              triggerLabel={`Thinking: ${THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}`}
+              triggerMaxWidth={120}
               popoverWidth={180}
             />
           )}
@@ -1605,17 +1690,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }}>
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
-            <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } }`}</style>
+            <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } } @keyframes clawReloadFill { from { transform: scaleX(0.04) } to { transform: scaleX(0.9) } }`}</style>
             {reloadingSkill ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
                   <span>{reloadReason === 'provider' ? 'Switching AI provider...' : reloadReason === 'restart' ? 'Restarting chat...' : 'Reloading skills...'}</span>
-                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress >= 100 ? 100 : undefined} aria-busy={reloadProgress < 100} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                    {/* Compositor-only fill: a transform:scaleX keyframe eases
+                        0→90% and holds; when the gateway answers (reloadProgress
+                        hits 100) we drop the animation and transition to full.
+                        No JS ticks, no width/layout thrash — stays smooth even
+                        while the box is pinned restarting the gateway. */}
                     <div style={{
-                      height: '100%', borderRadius: 2, background: '#f97316',
-                      transition: 'width 0.3s ease-out',
-                      width: `${reloadProgress}%`,
+                      height: '100%', width: '100%', borderRadius: 2, background: '#f97316',
+                      transformOrigin: 'left',
+                      transform: reloadProgress >= 100 ? 'scaleX(1)' : 'scaleX(0.04)',
+                      transition: reloadProgress >= 100 ? 'transform 0.3s ease-out' : undefined,
+                      animation: reloadProgress >= 100 ? undefined : 'clawReloadFill 14s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                      willChange: 'transform',
                     }} />
                   </div>
                   <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>This may take up to 30 seconds</span>

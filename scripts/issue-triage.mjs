@@ -96,7 +96,7 @@ async function main() {
     "",
     `**Suggested next step:** ${t.suggested_action}`,
     "",
-    "<sub>— ClawReview 🦀. Labels auto-applied on open — advisory, a maintainer will follow up. Conventions: <a href=\"https://docs.clawbox.tech/llms.txt\">docs</a>.</sub>",
+    "<sub>— ClawReview 🦀. Labels auto-applied on open — advisory, a maintainer will follow up. Conventions: <a href=\"https://docs.clawbox.com/llms.txt\">docs</a>.</sub>",
   ].join("\n");
 
   if (process.env.DRY_RUN) {

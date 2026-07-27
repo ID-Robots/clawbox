@@ -17,7 +17,12 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+vi.mock("@/lib/port-probe", () => ({
+  isPortOpen: vi.fn(),
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
+import { isPortOpen } from "@/lib/port-probe";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -25,6 +30,7 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
+const mockIsPortOpen = vi.mocked(isPortOpen);
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExec.mockImplementation(((
@@ -132,6 +138,7 @@ describe("updater", () => {
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockIsPortOpen.mockResolvedValue(true);
 
     setupExecMock({
       "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\ndef456\trefs/tags/v1.1.0\n", stderr: "" },
@@ -465,6 +472,23 @@ describe("updater", () => {
       expect(version).toBe("v2.0.0");
     });
 
+    it("returns latest semver tag even when the current HEAD is not its ancestor", async () => {
+      setupExecMock({
+        "ls-remote": {
+          stdout: "abc123\trefs/tags/v1.0.0\ndef456\trefs/tags/v1.1.0\n",
+          stderr: "",
+        },
+        "merge-base --is-ancestor": new Error("not an ancestor"),
+      });
+
+      vi.resetModules();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      const freshUpdater = await import("@/lib/updater");
+
+      const version = await freshUpdater.getTargetVersion();
+      expect(version).toBe("v1.1.0");
+    });
+
     it("returns null when no semver tags", async () => {
       setupExecMock({
         "ls-remote": { stdout: "abc123\trefs/tags/release-candidate\n", stderr: "" },
@@ -529,6 +553,32 @@ describe("updater", () => {
 
       expect(info.clawbox.target).toBe(null);
       expect(info.openclaw.current).toBe(null);
+    });
+
+    it("surfaces a pinned branch update when origin has a newer commit", async () => {
+      setupExecMock({
+        "ls-remote": { stdout: "abc123\trefs/tags/v2.0.0\n", stderr: "" },
+        "rev-parse HEAD": { stdout: "1111111111111111111111111111111111111111\n", stderr: "" },
+        "rev-parse origin/fix/qa-update": { stdout: "2222222222222222222222222222222222222222\n", stderr: "" },
+        "fetch --quiet origin fix/qa-update": { stdout: "", stderr: "" },
+      });
+      setupExecFileMock({
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockReadFile.mockImplementation(async (file) => {
+        const path = String(file);
+        if (path.endsWith(".update-branch")) return "fix/qa-update\n";
+        if (path.endsWith("package.json")) return JSON.stringify({ version: "1.0.0" });
+        throw new Error("ENOENT");
+      });
+      const freshUpdater = await import("@/lib/updater");
+
+      const info = await freshUpdater.getVersionInfo();
+
+      expect(info.clawbox.updateAvailable).toBe(true);
+      expect(info.clawbox.target).toBe("fix/qa-update@2222222");
     });
   });
 });

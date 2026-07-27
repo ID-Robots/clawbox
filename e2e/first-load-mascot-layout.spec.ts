@@ -1,7 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-test("desktop first render keeps the mascot below an already-open chat popup", async ({ page }) => {
+test("desktop keeps the mascot below the chat popup", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -11,9 +11,19 @@ test("desktop first render keeps the mascot below an already-open chat popup", a
       ai_model_configured: true,
       telegram_configured: true,
     },
+    // A persisted `ui_chat_open` no longer opens the floating popup — that
+    // is deliberately ignored on load now (see src/app/page.tsx), so it
+    // can't set up the state this test measures. Use the one load-time path
+    // that still opens it: the fresh-install greeting, which fires when no
+    // wallpaper and no desktop apps have been saved yet. That matters for
+    // more than convenience — the popup must be open at mount so `frozen`
+    // pins the crab immediately. Opening it later (via a click) races the
+    // mascot's autonomous walk, which starts ~3.5s in and drifts the crab
+    // away from the popup's `mascotX` anchor under CI load.
     preferences: {
       ui_mascot_hidden: 0,
-      ui_chat_open: 1,
+      wp_id: null,
+      desktop_apps: null,
     },
   });
 

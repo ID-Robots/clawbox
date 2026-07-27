@@ -759,9 +759,28 @@ export async function restartGateway(): Promise<void> {
       timeout: 60000,
     });
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/clawbox-gateway\.service.*not found|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+      try {
+        await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
+          timeout: 60000,
+          env: {
+            ...process.env,
+            HOME: process.env.HOME || "/home/clawbox",
+            XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
+          },
+        });
+        return;
+      } catch (fallbackErr) {
+        console.error(
+          "[openclaw-config] Failed to restart fallback OpenClaw user gateway:",
+          fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
+        );
+      }
+    }
     console.error(
       "[openclaw-config] Failed to restart gateway:",
-      err instanceof Error ? err.message : err
+      message
     );
     throw err;
   }

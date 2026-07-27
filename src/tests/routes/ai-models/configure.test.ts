@@ -310,6 +310,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
     expect(providerDef.apiKey).toBe("portal-token-123");
+    expect(providerDef.baseUrl).toBe("https://clawbox.com/api/ai");
+    expect(providerDef.models[0].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
+    expect(providerDef.models[1].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
 
     expect(mockSetMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -656,7 +659,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
 
-    expect(providerDef.baseUrl).toBe("https://openclawhardware.dev/api/ai");
+    expect(providerDef.baseUrl).toBe("https://clawbox.com/api/ai");
     expect(providerDef.apiKey).toBe("stored-portal-token");
   });
 
