@@ -596,39 +596,108 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   fi
 fi
 
-# Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
-# ~/.codex/auth.json (not the openclaw profile) — without it the app-server
-# falls back to api.openai.com with no bearer -> 401. Synthesize it from the
-# codex OAuth profile (account_id decoded from the access JWT). Write-if-
-# missing: the app-server owns refresh once it exists, so we don't clobber it.
+# Codex reads its ChatGPT session from a Codex CLI-style auth.json. Without
+# one the app-server falls back to api.openai.com with no bearer -> 401
+# "Missing bearer or basic authentication in header", which is what users hit
+# as "codex is unusable" on a ChatGPT-subscription box. Two things have to
+# line up, and on current cores neither did:
+#
+#   1. WHERE the app-server reads it. Codex 2026.6.x used the shared
+#      ~/.codex. OpenClaw 2026.7.x spawns the app-server with
+#      CODEX_HOME=<agentDir>/codex-home (confirmed from the live process
+#      environment), so a credential that exists only in ~/.codex is never
+#      seen. Mirror it into every agent's codex-home.
+#   2. WHERE we read the profile from. The tokens used to live in
+#      agents/<id>/agent/auth-profiles.json; on 2026.7.x they moved into the
+#      auth_profile_store table of openclaw-agent.sqlite, so the old
+#      JSON-only lookup silently found nothing and wrote no credential at all.
+#
+# An existing ~/.codex/auth.json is preferred as the source: it comes from a
+# real Codex login and carries a true id_token, whereas a synthesized one can
+# only fall back to the access token. Write-if-missing at every destination —
+# the app-server owns refresh once a file exists, so we never clobber a newer
+# token.
 if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
-  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
-  if [ ! -f "$CODEX_AUTH_FILE" ]; then
-    node - "$OPENCLAW_HOME_DIR/agents/main/agent/auth-profiles.json" "$CODEX_AUTH_FILE" <<'NODE'
+  node - "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" <<'NODE'
 const fs = require("fs"), path = require("path");
-const [apPath, outPath] = process.argv.slice(2);
-try {
-  const data = JSON.parse(fs.readFileSync(apPath, "utf8"));
-  const profiles = data.profiles || {};
-  const p = profiles["codex:default"] || profiles["openai-codex:default"];
-  if (!p || !p.access) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+const [openclawHome, homeAuthPath] = process.argv.slice(2);
+
+function readJson(p) {
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+}
+
+// Prefer a real Codex login if one is already on disk.
+function fromExistingFile() {
+  const d = readJson(homeAuthPath);
+  return d && d.tokens && d.tokens.access_token ? d : null;
+}
+
+// Otherwise synthesize from the OpenClaw codex OAuth profile. Tokens live in
+// auth-profiles.json on older cores and in openclaw-agent.sqlite on 2026.7.x.
+function readProfiles(agentDir) {
+  const j = readJson(path.join(agentDir, "auth-profiles.json"));
+  if (j && j.profiles) return j.profiles;
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"), { readOnly: true });
+    const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary");
+    db.close();
+    const parsed = row && row.store_json ? JSON.parse(row.store_json) : null;
+    return (parsed && parsed.profiles) || null;
+  } catch { return null; } // no node:sqlite, no table, or locked — non-fatal
+}
+
+function synthesize(agentDir) {
+  const profiles = readProfiles(agentDir);
+  const p = profiles && (profiles["codex:default"] || profiles["openai-codex:default"]);
+  if (!p || !p.access) return null;
   let accountId = null;
   try {
     const claims = JSON.parse(Buffer.from(p.access.split(".")[1], "base64url").toString());
     const auth = claims["https://api.openai.com/auth"] || {};
     accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
   } catch { /* opaque token — leave accountId null */ }
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.chmodSync(path.dirname(outPath), 0o700); // ~/.codex holds OAuth tokens — keep it owner-only (not just the 0600 file)
-  fs.writeFileSync(outPath, JSON.stringify({
+  return {
     OPENAI_API_KEY: null,
     tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
     last_refresh: new Date().toISOString(),
-  }, null, 2), { mode: 0o600 });
-  console.log("  Wrote ~/.codex/auth.json for the Codex app-server (account_id " + (accountId ? "resolved" : "missing") + ")");
+  };
+}
+
+function write(dest, cred) {
+  if (fs.existsSync(dest)) return false;
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.chmodSync(path.dirname(dest), 0o700); // holds OAuth tokens — owner-only dir, not just the 0600 file
+  fs.writeFileSync(dest, JSON.stringify(cred, null, 2), { mode: 0o600 });
+  return true;
+}
+
+try {
+  const agentsRoot = path.join(openclawHome, "agents");
+  const agents = fs.existsSync(agentsRoot)
+    ? fs.readdirSync(agentsRoot).map((id) => path.join(agentsRoot, id, "agent")).filter((d) => fs.existsSync(d))
+    : [];
+
+  let cred = fromExistingFile();
+  if (!cred) {
+    // Prefer the main agent's profile store as the synthesis source.
+    const byMainFirst = (a, b) => Number(b.includes("/main/")) - Number(a.includes("/main/"));
+    for (const dir of [...agents].sort(byMainFirst)) {
+      cred = synthesize(dir);
+      if (cred) break;
+    }
+  }
+  if (!cred) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+
+  if (write(homeAuthPath, cred)) console.log("  Wrote ~/.codex/auth.json for the Codex app-server");
+  for (const dir of agents) {
+    // CODEX_HOME the gateway actually passes to the app-server on 2026.7.x.
+    if (write(path.join(dir, "codex-home", "auth.json"), cred)) {
+      console.log("  Wrote " + path.basename(path.dirname(dir)) + " agent codex-home/auth.json");
+    }
+  }
 } catch (e) { console.log("  Codex auth.json: " + e.message); }
 NODE
-  fi
 fi
 
 # Semantic memory embeddings default. OpenClaw's memory search defaults to
