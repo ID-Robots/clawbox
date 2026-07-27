@@ -88,7 +88,7 @@ jobs:
 
       - name: Register qemu-user-static for arm64 (x86 runner only)
         if: runner.arch != 'ARM64'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
