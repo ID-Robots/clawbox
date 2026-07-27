@@ -1628,6 +1628,20 @@ step_ollama_install() {
   # Apply Jetson memory optimizations
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   echo "  Ollama installed and running"
+
+  # Local embedding model for semantic memory. OpenClaw's memory search
+  # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
+  # doesn't have (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
+  # "Semantic memory search is still offline ... missing OpenAI provider
+  # auth/API-key access". Pull a small local embedding model so semantic
+  # recall works with zero API key; gateway-pre-start.sh points memorySearch
+  # at it once present. Best-effort: a failed pull must not abort the install
+  # (memory falls back to lexical FTS).
+  if ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
+    echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
+  else
+    echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
+  fi
 }
 
 step_llamacpp_install() {
@@ -1839,28 +1853,55 @@ step_ai_tools_install() {
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
     return 0
   fi
-  # Claude Code
+  # The AI coding CLIs below are ALL optional — the box boots and runs fine
+  # without any of them. This whole step must therefore be best-effort: no
+  # single tool's install may abort the run. install.sh runs under
+  # `set -euo pipefail`, so every risky command is guarded inside an `if`
+  # (where errexit is suspended) and failures only log a WARN.
+
+  # Claude Code — Anthropic GEO-BLOCKS some regions and serves an HTML
+  # "App unavailable in region" page with HTTP 200 (so `curl -f` does NOT
+  # catch it). Piping that HTML into `bash` yields
+  # `syntax error near unexpected token '<'`, and under `set -euo pipefail`
+  # that aborted the ENTIRE reinstall right here — so the later steps that
+  # (re)start the gateway never ran and the box came up as an nginx 404
+  # (Discord "broke my clawbox", step [18/23]). Guard it: download to a file,
+  # verify it looks like a shell script and not an HTML/region-block page,
+  # only then run it, and never let failure escape this step.
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
     echo "  Claude Code already installed"
   else
-    sudo -u "$CLAWBOX_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-    echo "  Claude Code installed"
+    _claude_installer="$(mktemp)"
+    if curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" 2>/dev/null \
+       && [ -s "$_claude_installer" ] \
+       && ! head -c 512 "$_claude_installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
+      if sudo -u "$CLAWBOX_USER" bash "$_claude_installer" </dev/null; then
+        echo "  Claude Code installed"
+      else
+        echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
+      fi
+    else
+      echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
+    fi
+    rm -f "$_claude_installer"
   fi
 
-  # OpenAI Codex CLI
+  # OpenAI Codex CLI (optional)
   if as_clawbox_login "command -v codex" &>/dev/null; then
     echo "  OpenAI Codex already installed"
-  else
-    as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"
+  elif as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"; then
     echo "  OpenAI Codex installed"
+  else
+    echo "  WARN: OpenAI Codex CLI install failed; skipping (optional, continuing)"
   fi
 
-  # Google Gemini CLI
+  # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
     echo "  Gemini CLI already installed"
-  else
-    as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"
+  elif as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"; then
     echo "  Gemini CLI installed"
+  else
+    echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
   # Make claude / codex / gemini resolvable in the in-UI terminal's interactive
