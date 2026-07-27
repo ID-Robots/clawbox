@@ -36,6 +36,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
@@ -554,6 +555,34 @@ export async function POST(request: Request) {
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
+    } else if (
+      authMode === "subscription"
+      && ocProvider === "codex"
+      && !(typeof bodyModel === "string" && bodyModel.trim())
+    ) {
+      // ChatGPT sign-in with no explicit pick. The hardcoded default is
+      // gpt-5.4, so a Pro account used to land two generations behind and had
+      // to know to change it. We can't read entitlement from a catalog — the
+      // plugin's list is static and identical for every account — so ask the
+      // account directly, newest first.
+      //
+      // Safety: resolveEntitledCodexModel only returns a model on a positive
+      // answer. Gated, ambiguous, rate-limited, offline — all leave us on
+      // gpt-5.4, which every tier can use. Defaulting a non-entitled account
+      // onto a gpt-5.6 model would be far worse than being conservative: the
+      // upstream 400 is a surface error with no failover, so every turn fails.
+      try {
+        const entitled = await resolveEntitledCodexModel({
+          accessToken: normalizedApiKey,
+          onDiagnostic: (message) => console.log(`[configure] ${message}`),
+        });
+        if (entitled) {
+          config.defaultModel = `codex/${entitled}`;
+        }
+      } catch (err) {
+        // Never let model selection break sign-in.
+        console.warn("[configure] codex entitlement probe failed:", err);
+      }
     } else if (typeof bodyModel === "string" && bodyModel.trim()) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
