@@ -480,10 +480,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4");
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
   });
 
-  // A Pro account used to land on gpt-5.4 after sign-in and had to know to
+  // A Pro account used to land on gpt-5.5 after sign-in and had to know to
   // change it. Entitlement isn't readable from any catalog (the plugin list is
   // static and identical for every account), so the route asks the account.
   it("defaults a ChatGPT sign-in to the newest model the account can use", async () => {
@@ -503,9 +503,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.6-sol");
   });
 
-  it("leaves a non-entitled account on gpt-5.4 rather than a model that 400s", async () => {
-    // Every gpt-5.6 id gated, gpt-5.5 too: the safe landing spot is the
-    // fallback, not the newest id in the static catalog.
+  it("leaves a non-entitled account on gpt-5.5 rather than a model that 400s", async () => {
+    // Every gpt-5.6 id gated: the safe landing spot is gpt-5.5, which runs on
+    // every tier including Free, not the newest id in the static catalog.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 403 })));
 
     const res = await configurePost(jsonRequest({
@@ -519,7 +519,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4");
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
   });
 
   it("does not probe when the user picked a model explicitly", async () => {
@@ -533,12 +533,14 @@ describe("POST /setup-api/ai-models/configure", () => {
       authMode: "subscription",
       refreshToken: "refresh-token",
       expiresIn: 3600,
-      model: "gpt-5.5",
+      // Deliberately NOT the subscription default (gpt-5.5) — otherwise this
+      // assertion would pass even if the probe ran and found nothing.
+      model: "gpt-5.4-mini",
     }));
 
     expect(res.status).toBe(200);
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4-mini");
     const probedCodex = fetchMock.mock.calls.some(([url]) => String(url).includes("backend-api/codex/responses"));
     expect(probedCodex).toBe(false);
   });

@@ -108,11 +108,10 @@ describe("resolveEntitledCodexModel", () => {
   });
 
   it("walks down to the newest model the account actually has", async () => {
-    // Free/Plus-without-5.6: the three gpt-5.6 ids are gated, gpt-5.5 is not.
+    // Partial 5.6 entitlement: sol and terra gated, luna not.
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(jsonResponse(400, { error: { message: "requires a newer version of Codex" } }))
       .mockResolvedValueOnce(jsonResponse(403, ""))
-      .mockResolvedValueOnce(jsonResponse(404, ""))
       .mockResolvedValueOnce(jsonResponse(200, {}));
 
     const model = await resolveEntitledCodexModel({
@@ -120,8 +119,19 @@ describe("resolveEntitledCodexModel", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(model).toBe("gpt-5.5");
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(model).toBe("gpt-5.6-luna");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("only probes plan-gated models — gpt-5.5 is the floor, not a candidate", () => {
+    // gpt-5.5 runs on every ChatGPT tier including Free. Probing it would spend
+    // a setup round-trip to confirm something we already hold.
+    expect([...CODEX_MODEL_PREFERENCE]).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+    ]);
+    expect(CODEX_FALLBACK_MODEL).toBe("gpt-5.5");
   });
 
   it("keeps the caller's default when nothing is available", async () => {

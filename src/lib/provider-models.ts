@@ -79,8 +79,8 @@ export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "Newest flagship. Plus/Pro." },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "GPT-5.6. Plus/Pro." },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "GPT-5.6, fast. Plus/Pro." },
-  { id: "gpt-5.5", label: "GPT-5.5", hint: "Flagship." },
-  { id: "gpt-5.4", label: "GPT-5.4", hint: "Default. 1M context." },
+  { id: "gpt-5.5", label: "GPT-5.5", hint: "Default. Every tier." },
+  { id: "gpt-5.4", label: "GPT-5.4", hint: "Previous gen. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
@@ -141,9 +141,13 @@ export const PROVIDER_CATALOGS = Object.freeze({
     allowCustom: true,
   },
   codex: {
+    // gpt-5.5 is the newest model available on every ChatGPT tier including
+    // Free — only the gpt-5.6 generation is plan-gated — so it is the right
+    // cold-start default. Entitled accounts get moved up to gpt-5.6 by the
+    // sign-in probe (src/lib/codex-model-probe.ts).
     provider: "codex",
     models: CODEX_MODELS,
-    defaultModelId: "gpt-5.4",
+    defaultModelId: "gpt-5.5",
     allowCustom: true,
   },
   google: {

@@ -61,7 +61,8 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5.4",
-  codex: "codex/gpt-5.4",
+  // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
+  codex: "codex/gpt-5.5",
   google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
