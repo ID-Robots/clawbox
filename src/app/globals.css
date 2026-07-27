@@ -140,14 +140,20 @@ h6 {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  /* Dropdown popovers are absolutely positioned below their trigger pills.
-   * Keep labels truncating on the trigger itself, but do not clip the open
-   * menu to the row height. */
-  overflow: visible;
+  /* Keep the pills on a SINGLE row: as the chat panel narrows they squeeze
+   * and their labels truncate with "..." (each trigger reserves 24px on the
+   * right so the chevron never disappears) — they never wrap to a second row
+   * or overlap. overflow:hidden clips any final overshoot cleanly; the chat
+   * window enforces a min-width (see ChatPopup) so the pills can't be
+   * squeezed past a readable size. The open menu is portaled to <body>
+   * (see HeaderDropdown), so clipping the row here can't hide the popover. */
+  overflow: hidden;
 }
 
 .header-dropdown {
   min-width: 0;
+  /* No grow (keep natural width when there's room, like the wide layout),
+   * shrink when the row runs out of space so all pills give ground evenly. */
   flex: 0 1 auto;
 }
 
@@ -171,6 +177,13 @@ h6 {
   display: inline-flex;
   align-items: center;
   position: relative;
+  /* Fill the (flex-shrinking) .header-dropdown so the button shrinks WITH its
+   * parent instead of keeping its content width and spilling out. Without
+   * this the pills stay full-width on a narrow header and overlap / get clipped
+   * by .chat-header-pills' overflow:hidden; with it, each pill gives ground
+   * evenly and its label truncates with "...". max-width still caps the roomy
+   * width so a long model name can't dominate the row. */
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   border-radius: 999px;

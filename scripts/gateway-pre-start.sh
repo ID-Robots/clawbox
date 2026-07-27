@@ -154,6 +154,70 @@ if isinstance(primary_model, str) and primary_model.lower() in (
     model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
     changed = True
 
+# Model migration: legacy ChatGPT-subscription devices can have their active
+# model — or a fallback — stored as `openai/<gpt>` from before the setup UI
+# routed ChatGPT picks through Codex. On a device with ChatGPT (Codex OAuth)
+# auth and NO OpenAI API key, that id resolves to api.openai.com, which 401s
+# with "Missing bearer or basic authentication in header": either on the
+# active turn, or — more often — only once the OAuth token first refreshes
+# and the failover chain reaches the keyless `openai/*` fallback, which
+# surfaces as a FailoverError days into use. The chat-model pick route already
+# rewrites `openai/<gpt>` -> `codex/<gpt>`, but only when the user re-picks the
+# model; existing configs never re-pick, so migrate primary + fallbacks here on
+# gateway start. Mirrors CODEX_SUPPORTED_MODEL_RE / hasOpenAiApiKeyProfile /
+# hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
+# "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
+# where openai/* is a valid keyed route, are left untouched.
+_CODEX_SUPPORTED = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
+
+def _auth_profiles():
+    _auth = cfg.get("auth")
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    return _profiles.values() if isinstance(_profiles, dict) else []
+
+def _has_openai_api_key_profile():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _p == "openai" and _m in ("token", "api_key", "api-key"):
+            return True
+    return False
+
+def _has_codex_oauth_profile():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _p == "codex" and _m == "oauth":
+            return True
+    return False
+
+def _openai_gpt_to_codex(model_id):
+    # `openai/<codex-supported gpt>` -> `codex/<gpt>`; otherwise None (leave as-is).
+    if not isinstance(model_id, str):
+        return None
+    _m = model_id.strip()
+    if not _m.lower().startswith("openai/"):
+        return None
+    _bare = _m[len("openai/"):]
+    return "codex/" + _bare if _bare.lower() in _CODEX_SUPPORTED else None
+
+if _has_codex_oauth_profile() and not _has_openai_api_key_profile():
+    _migrated_primary = _openai_gpt_to_codex(model_defaults.get("primary"))
+    if _migrated_primary:
+        model_defaults["primary"] = _migrated_primary
+        changed = True
+    _fallbacks = model_defaults.get("fallbacks")
+    if isinstance(_fallbacks, list):
+        for _i, _fb in enumerate(_fallbacks):
+            _migrated_fb = _openai_gpt_to_codex(_fb)
+            if _migrated_fb and _migrated_fb != _fallbacks[_i]:
+                _fallbacks[_i] = _migrated_fb
+                changed = True
+
 # Strip orphaned per-model keys that a newer-than-pinned plugin wrote and a
 # version downgrade left behind, which fail strict config validation and
 # brick the AI provider page until `openclaw doctor --fix`. `agentRuntime`
@@ -422,7 +486,21 @@ fi
 # resolves to `~/.openclaw`, the same root OpenClaw's own plugin
 # installer writes under (`<openclaw-home>/npm/node_modules/...`).
 OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
+# OpenClaw's plugin install layout changed across versions: older cores wrote
+# the plugin flat under <home>/npm/node_modules/@openclaw/codex, while current
+# cores (2026.7.x) isolate each plugin in its own project dir under
+# <home>/npm/projects/<hash>/node_modules/@openclaw/codex. Hard-coding only the
+# flat path made the "is it installed?" check below read the plugin as ALWAYS
+# missing on newer cores, so pre-start reinstalled codex on EVERY boot (slow,
+# and — before this fix — an unbounded npm install on the blocking boot path,
+# a prime "gateway won't start after update" trigger). Resolve to whichever
+# layout actually holds the package.json; keep the flat path as the default so
+# a first-time install still has a well-known destination.
 CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_DIR_FOUND="$(ls -d "$OPENCLAW_HOME_DIR"/npm/projects/*/node_modules/@openclaw/codex 2>/dev/null | head -1 || true)"
+  [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -476,11 +554,24 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
     # and every Codex chat crashes with "_diagnosticRuntime.
     # createDiagnosticTraceContextFromActiveScope is not a function" (the
     # newer plugin calls a runtime API the pinned core doesn't expose).
-    # Reinstall at the pinned version whenever the two differ.
+    # Reinstall only when the BASE version actually differs.
+    #
+    # Republish-tolerant compare: npm republishes the SAME release with a
+    # -N / -beta.N build suffix (2026.7.1 -> 2026.7.1-1 -> 2026.7.1-2). Those
+    # share the same runtime API as their base version, so an exact-string
+    # `!=` compare would flag `2026.7.1-1` vs pinned `2026.7.1` as a skew and
+    # reinstall the plugin — synchronously, on the gateway boot path — on
+    # EVERY boot. On a Jetson with slow/blocked npm that stalls startup and
+    # the gateway never comes online ("Update failed / gateway still offline").
+    # Strip the build suffix and compare only MAJOR.MINOR.PATCH: a real
+    # API-skew (plugin 2026.7.2 vs core 2026.7.1) still triggers a reinstall,
+    # a mere republish does not.
     CODEX_INSTALLED_VER=$(python3 -c "import json; print(json.load(open('$CODEX_PLUGIN_DIR/package.json')).get('version',''))" 2>/dev/null || echo "")
-    if [ "$CODEX_INSTALLED_VER" != "$OPENCLAW_TARGET" ]; then
+    CODEX_INSTALLED_BASE="${CODEX_INSTALLED_VER%%-*}"
+    OPENCLAW_TARGET_BASE="${OPENCLAW_TARGET%%-*}"
+    if [ "$CODEX_INSTALLED_BASE" != "$OPENCLAW_TARGET_BASE" ]; then
       CODEX_NEEDS_INSTALL=1
-      CODEX_INSTALL_REASON="version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
+      CODEX_INSTALL_REASON="base version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
     fi
   fi
 fi
@@ -490,42 +581,144 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # bare alias only when the pin is unknown, so a needed repair still happens.
   CODEX_SPEC="codex"
   [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
-  "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1 \
-    || echo "  WARN: openclaw plugins install $CODEX_SPEC failed; Codex chats will fail until resolved"
+  # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
+  # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
+  # (slow/blocked/offline registry on a Jetson) would keep the gateway from
+  # ever reaching "listening" — which is exactly the "gateway won't start
+  # after update" failure. Best-effort: if the install fails OR times out we
+  # log a warning and let the gateway start anyway. Codex is one provider;
+  # a degraded Codex is far better than a dead box, and the next boot (or a
+  # manual `openclaw plugins install`) can still repair it.
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1; then
+    echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
+  else
+    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
+  fi
 fi
 
-# Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
-# ~/.codex/auth.json (not the openclaw profile) — without it the app-server
-# falls back to api.openai.com with no bearer -> 401. Synthesize it from the
-# codex OAuth profile (account_id decoded from the access JWT). Write-if-
-# missing: the app-server owns refresh once it exists, so we don't clobber it.
+# Codex reads its ChatGPT session from a Codex CLI-style auth.json. Without
+# one the app-server falls back to api.openai.com with no bearer -> 401
+# "Missing bearer or basic authentication in header", which is what users hit
+# as "codex is unusable" on a ChatGPT-subscription box. Two things have to
+# line up, and on current cores neither did:
+#
+#   1. WHERE the app-server reads it. Codex 2026.6.x used the shared
+#      ~/.codex. OpenClaw 2026.7.x spawns the app-server with
+#      CODEX_HOME=<agentDir>/codex-home (confirmed from the live process
+#      environment), so a credential that exists only in ~/.codex is never
+#      seen. Mirror it into every agent's codex-home.
+#   2. WHERE we read the profile from. The tokens used to live in
+#      agents/<id>/agent/auth-profiles.json; on 2026.7.x they moved into the
+#      auth_profile_store table of openclaw-agent.sqlite, so the old
+#      JSON-only lookup silently found nothing and wrote no credential at all.
+#
+# An existing ~/.codex/auth.json is preferred as the source: it comes from a
+# real Codex login and carries a true id_token, whereas a synthesized one can
+# only fall back to the access token. Write-if-missing at every destination —
+# the app-server owns refresh once a file exists, so we never clobber a newer
+# token.
 if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
-  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
-  if [ ! -f "$CODEX_AUTH_FILE" ]; then
-    node - "$OPENCLAW_HOME_DIR/agents/main/agent/auth-profiles.json" "$CODEX_AUTH_FILE" <<'NODE'
+  node - "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" <<'NODE'
 const fs = require("fs"), path = require("path");
-const [apPath, outPath] = process.argv.slice(2);
-try {
-  const data = JSON.parse(fs.readFileSync(apPath, "utf8"));
-  const profiles = data.profiles || {};
-  const p = profiles["codex:default"] || profiles["openai-codex:default"];
-  if (!p || !p.access) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+const [openclawHome, homeAuthPath] = process.argv.slice(2);
+
+function readJson(p) {
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+}
+
+// Prefer a real Codex login if one is already on disk.
+function fromExistingFile() {
+  const d = readJson(homeAuthPath);
+  return d && d.tokens && d.tokens.access_token ? d : null;
+}
+
+// Otherwise synthesize from the OpenClaw codex OAuth profile. Tokens live in
+// auth-profiles.json on older cores and in openclaw-agent.sqlite on 2026.7.x.
+function readProfiles(agentDir) {
+  const j = readJson(path.join(agentDir, "auth-profiles.json"));
+  if (j && j.profiles) return j.profiles;
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"), { readOnly: true });
+    const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary");
+    db.close();
+    const parsed = row && row.store_json ? JSON.parse(row.store_json) : null;
+    return (parsed && parsed.profiles) || null;
+  } catch { return null; } // no node:sqlite, no table, or locked — non-fatal
+}
+
+function synthesize(agentDir) {
+  const profiles = readProfiles(agentDir);
+  const p = profiles && (profiles["codex:default"] || profiles["openai-codex:default"]);
+  if (!p || !p.access) return null;
   let accountId = null;
   try {
     const claims = JSON.parse(Buffer.from(p.access.split(".")[1], "base64url").toString());
     const auth = claims["https://api.openai.com/auth"] || {};
     accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
   } catch { /* opaque token — leave accountId null */ }
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.chmodSync(path.dirname(outPath), 0o700); // ~/.codex holds OAuth tokens — keep it owner-only (not just the 0600 file)
-  fs.writeFileSync(outPath, JSON.stringify({
+  return {
     OPENAI_API_KEY: null,
     tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
     last_refresh: new Date().toISOString(),
-  }, null, 2), { mode: 0o600 });
-  console.log("  Wrote ~/.codex/auth.json for the Codex app-server (account_id " + (accountId ? "resolved" : "missing") + ")");
+  };
+}
+
+function write(dest, cred) {
+  if (fs.existsSync(dest)) return false;
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.chmodSync(path.dirname(dest), 0o700); // holds OAuth tokens — owner-only dir, not just the 0600 file
+  fs.writeFileSync(dest, JSON.stringify(cred, null, 2), { mode: 0o600 });
+  return true;
+}
+
+try {
+  const agentsRoot = path.join(openclawHome, "agents");
+  const agents = fs.existsSync(agentsRoot)
+    ? fs.readdirSync(agentsRoot).map((id) => path.join(agentsRoot, id, "agent")).filter((d) => fs.existsSync(d))
+    : [];
+
+  let cred = fromExistingFile();
+  if (!cred) {
+    // Prefer the main agent's profile store as the synthesis source.
+    const byMainFirst = (a, b) => Number(b.includes("/main/")) - Number(a.includes("/main/"));
+    for (const dir of [...agents].sort(byMainFirst)) {
+      cred = synthesize(dir);
+      if (cred) break;
+    }
+  }
+  if (!cred) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
+
+  if (write(homeAuthPath, cred)) console.log("  Wrote ~/.codex/auth.json for the Codex app-server");
+  for (const dir of agents) {
+    // CODEX_HOME the gateway actually passes to the app-server on 2026.7.x.
+    if (write(path.join(dir, "codex-home", "auth.json"), cred)) {
+      console.log("  Wrote " + path.basename(path.dirname(dir)) + " agent codex-home/auth.json");
+    }
+  }
 } catch (e) { console.log("  Codex auth.json: " + e.message); }
 NODE
+fi
+
+# Semantic memory embeddings default. OpenClaw's memory search defaults to
+# OpenAI embeddings, which need an OPENAI_API_KEY many boxes don't have
+# (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
+# "Semantic memory search is still offline ... missing OpenAI provider
+# auth/API-key access". If the user hasn't deliberately chosen an embeddings
+# provider AND the local model is present in Ollama, point memory search at
+# local Ollama so semantic recall works with zero API key. Self-heals existing
+# boxes on upgrade, not just fresh installs. Gated on the model actually being
+# present so we never leave memorySearch fail-closed on a missing model; only
+# touches an unset/"auto" provider so a deliberate OpenAI/remote setup stays.
+MEM_PROVIDER="$(python3 -c "import json;print(((json.load(open('$OPENCLAW_CONFIG')).get('agents',{}).get('defaults',{}) or {}).get('memorySearch',{}) or {}).get('provider') or '')" 2>/dev/null || echo "")"
+if [ -z "$MEM_PROVIDER" ] || [ "$MEM_PROVIDER" = "auto" ]; then
+  if curl -fsS --max-time 5 http://localhost:11434/api/tags 2>/dev/null | grep -q "qwen3-embedding"; then
+    if "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1 \
+       && "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model qwen3-embedding:0.6b >/dev/null 2>&1; then
+      echo "  Memory search -> local Ollama embeddings (qwen3-embedding:0.6b, no API key needed)"
+    else
+      echo "  WARN: could not set memorySearch to local Ollama embeddings (non-fatal; memory falls back to lexical FTS)"
+    fi
   fi
 fi
 
