@@ -1352,6 +1352,16 @@ step_post_update() {
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
   step_vnc_refresh || echo "  Warning: vnc_refresh step failed (non-fatal)"
+  # Reinstall the unit files from config/ + daemon-reload. Without this, unit
+  # changes only ever reached FRESH installs: the in-app update runs
+  # bootstrap_updater -> ... -> post_update and never re-copies
+  # /etc/systemd/system, so an updated box kept running whatever unit file it
+  # was born with. That silently swallowed the llamacpp_install
+  # TimeoutStartSec raise (30 min -> 2 h) that stops "Provisioning offline
+  # Gemma 4" from being killed mid-build, and would swallow any future unit or
+  # sudoers change the same way. The step is idempotent — cp, daemon-reload,
+  # enable — and is exactly what fresh installs already run.
+  step_systemd_services || echo "  Warning: systemd_services step failed (non-fatal)"
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
