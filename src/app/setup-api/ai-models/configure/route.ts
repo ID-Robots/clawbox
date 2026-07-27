@@ -89,7 +89,9 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
-      defaultModel: "codex/gpt-5.4",
+      // Newest model every ChatGPT tier can run, Free included. Entitled
+      // accounts are moved up to gpt-5.6 by the sign-in probe below.
+      defaultModel: "codex/gpt-5.5",
       profileKey: "codex:default",
     },
   },
@@ -561,14 +563,14 @@ export async function POST(request: Request) {
       && !(typeof bodyModel === "string" && bodyModel.trim())
     ) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
-      // gpt-5.4, so a Pro account used to land two generations behind and had
+      // gpt-5.5, so a Pro account used to land a generation behind and had
       // to know to change it. We can't read entitlement from a catalog — the
       // plugin's list is static and identical for every account — so ask the
       // account directly, newest first.
       //
       // Safety: resolveEntitledCodexModel only returns a model on a positive
       // answer. Gated, ambiguous, rate-limited, offline — all leave us on
-      // gpt-5.4, which every tier can use. Defaulting a non-entitled account
+      // gpt-5.5, which every tier can use. Defaulting a non-entitled account
       // onto a gpt-5.6 model would be far worse than being conservative: the
       // upstream 400 is a surface error with no failover, so every turn fails.
       try {

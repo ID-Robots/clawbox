@@ -8,22 +8,29 @@
 // exact mistake pinned a session to gpt-5.6-sol on 2026-07-13 and broke it
 // completely.
 //
+// Only the gpt-5.6 generation is gated. gpt-5.5 runs on every ChatGPT tier
+// including Free, so it is the floor we fall back to rather than a candidate.
+//
 // So we ask the account itself. One cheap request per candidate, newest first,
 // stopping at the first that answers. Deliberately biased toward the safe
 // answer: we only upgrade off the fallback on a POSITIVE signal, and any
 // ambiguity (auth trouble, rate limit, network, 5xx) leaves the caller on the
 // universally-available default.
 
-/** Newest first. gpt-5.4 is not here — it is the fallback everyone can use. */
+/** Newest first. gpt-5.5 is not here — it is the fallback everyone can use. */
 export const CODEX_MODEL_PREFERENCE = [
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
-  "gpt-5.5",
 ] as const;
 
-/** Available on every ChatGPT tier; what we keep when the probe can't improve on it. */
-export const CODEX_FALLBACK_MODEL = "gpt-5.4";
+/**
+ * Available on every ChatGPT tier including Free; what we keep when the probe
+ * can't improve on it. Only the gpt-5.6 generation is plan-gated, so there is
+ * nothing to gain from probing gpt-5.5 — it would spend a round-trip during
+ * setup to confirm a floor we already hold.
+ */
+export const CODEX_FALLBACK_MODEL = "gpt-5.5";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_PER_PROBE_TIMEOUT_MS = 6000;

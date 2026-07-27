@@ -65,7 +65,8 @@ const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   clawai: "deepseek-v4-flash",
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5.4",
-  codex: "gpt-5.4",
+  // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
+  codex: "gpt-5.5",
   google: "gemini-2.5-flash",
   openrouter: "anthropic/claude-haiku-4.5",
 };
