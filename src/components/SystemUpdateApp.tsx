@@ -6,8 +6,8 @@ import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 
 interface VersionInfo {
-  clawbox: { current: string; target: string | null };
-  openclaw: { current: string | null; target: string | null };
+  clawbox: { current: string; target: string | null; updateAvailable?: boolean };
+  openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
 }
 
 interface BranchInfo {
@@ -37,6 +37,10 @@ function compareSemver(a: string | null | undefined, b: string | null | undefine
 function isUpdateAvailable(current: string | null | undefined, target: string | null | undefined): boolean {
   if (!current || !target) return false;
   return compareSemver(target, current) > 0;
+}
+
+function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
+  return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 
 type Status = "loading" | "up-to-date" | "available" | "updating" | "completed" | "failed" | "fetch-error";
@@ -263,7 +267,7 @@ export default function SystemUpdateApp() {
     // of the ClawBox update, so an OpenClaw-pin delta without a ClawBox
     // delta means a ClawBox release hasn't been cut yet and there's
     // nothing for the user to install.
-    return isUpdateAvailable(versions.clawbox.current, versions.clawbox.target)
+    return componentNeedsUpdate(versions.clawbox)
       ? "available"
       : "up-to-date";
   }, [updateStarted, updateError, updateState, versions, versionsError]);
@@ -291,8 +295,8 @@ export default function SystemUpdateApp() {
         };
       case "available": {
         const updates: string[] = [];
-        if (versions && isUpdateAvailable(versions.clawbox.current, versions.clawbox.target)) updates.push("ClawBox");
-        if (versions && isUpdateAvailable(versions.openclaw.current, versions.openclaw.target)) updates.push("OpenClaw");
+        if (versions && componentNeedsUpdate(versions.clawbox)) updates.push("ClawBox");
+        if (versions && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
         return {
           icon: "system_update", iconClass: "text-emerald-300",
           headline: `${updates.length} update${updates.length === 1 ? "" : "s"} available`,
@@ -332,7 +336,7 @@ export default function SystemUpdateApp() {
     error: "from-red-500/10 via-red-500/5",
   }[hero.tone];
 
-  const clawboxAvail = !!versions && isUpdateAvailable(versions.clawbox.current, versions.clawbox.target);
+  const clawboxAvail = !!versions && componentNeedsUpdate(versions.clawbox);
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">

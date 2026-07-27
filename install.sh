@@ -82,7 +82,7 @@ is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.5.3-1"
+OPENCLAW_VERSION="2026.7.1"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -155,6 +155,45 @@ export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   fi
+}
+
+node_satisfies_openclaw_engine() {
+  local version major
+  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+  [ -n "$version" ] || return 1
+  major="${version%%.*}"
+
+  case "$major" in
+    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
+    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
+    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
+    2[6-9]|[3-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_openclaw_node_engine() {
+  if node_satisfies_openclaw_engine; then
+    echo "  Node.js $(node --version) satisfies OpenClaw engine requirements"
+    return 0
+  fi
+
+  local got
+  got=$(node --version 2>/dev/null || echo "missing")
+  echo "  Node.js $got does not satisfy OpenClaw 2026.7.1 engine requirements; upgrading Node.js 22..."
+  wait_for_apt
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  wait_for_apt
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+
+  if ! node_satisfies_openclaw_engine; then
+    got=$(node --version 2>/dev/null || echo "missing")
+    echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
+    echo "       OpenClaw 2026.7.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    exit 1
+  fi
+
+  echo "  Node.js $(node --version) installed"
 }
 
 ensure_env_setting() {
@@ -399,11 +438,13 @@ step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
-  # Node.js 22 (required for production server — bun doesn't fire upgrade events)
-  if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
-    echo "  Node.js $(node --version) already installed"
+  # Node.js for production server and OpenClaw. OpenClaw 2026.7.1 tightened
+  # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
+  # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
+  if node_satisfies_openclaw_engine; then
+    echo "  Node.js $(node --version) already satisfies OpenClaw engine requirements"
   else
-    echo "  Installing Node.js 22..."
+    echo "  Installing/upgrading Node.js 22..."
     # NodeSource's setup script will silently exit 0 even when its inner
     # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
     # first boot), and apt-get install nodejs then falls back to Ubuntu's
@@ -414,13 +455,13 @@ step_apt_update() {
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
-    if ! node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
+    if ! node_satisfies_openclaw_engine; then
       local got
       got=$(node --version 2>/dev/null || echo "missing")
-      echo "Error: Node.js 22 install failed — \`node --version\` reports $got." >&2
+      echo "Error: Node.js install failed — \`node --version\` reports $got." >&2
       echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
       echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
-      echo "       and apt fell back to Ubuntu's Node 12. flash.sh's Phase 0 should" >&2
+      echo "       or apt kept an older Node.js build. flash.sh's Phase 0 should" >&2
       echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
       echo "       rootfs to prevent this." >&2
       exit 1
@@ -752,6 +793,12 @@ step_openclaw_install() {
   fi
   local TARGET="${PINNED:-$OPENCLAW_VERSION}"
   local CORE_NEEDS_INSTALL=1
+
+  # Keep this guard inside the OpenClaw step too, not only in apt_update:
+  # update retries can start from this step, and old images with Node v22.22.2
+  # otherwise install the npm package but fail as soon as the OpenClaw CLI runs.
+  ensure_openclaw_node_engine
+
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
@@ -1310,7 +1357,77 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  # Re-assert the gateway service after an in-app update. The full update
+  # syncs repo files and rebuilds before this continuation runs; older devices
+  # can therefore reach the new UI while the gateway is still using stale
+  # service/drop-in state or is simply down from the reboot handoff. Run the
+  # same idempotent setup used by fresh installs so a completed update leaves
+  # clawbox-gateway as the active single source of truth.
+  step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
+  step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+}
+
+gateway_port_listening() {
+  local gw_port="${GATEWAY_PORT:-18789}"
+  ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
+}
+
+step_gateway_legacy_state_recovery() {
+  local gw_port="${GATEWAY_PORT:-18789}"
+  if gateway_port_listening; then
+    echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
+    return 0
+  fi
+
+  echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
+  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl restart clawbox-gateway.service || true
+  sleep 8
+  if gateway_port_listening; then
+    echo "  Gateway recovered after doctor --fix"
+    return 0
+  fi
+
+  local journal_tail
+  journal_tail=$(journalctl -u clawbox-gateway.service -n 160 --no-pager 2>/dev/null || true)
+  if ! printf '%s\n' "$journal_tail" | grep -Eq 'installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper'; then
+    echo "  Gateway still offline, but logs do not match known legacy-state blockers"
+    return 0
+  fi
+
+  local ts qdir moved=0
+  ts=$(date +%Y%m%d-%H%M%S)
+  qdir="$CLAWBOX_HOME/openclaw-legacy-quarantine-$ts"
+  mkdir -p "$qdir"
+
+  echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
+  systemctl stop clawbox-gateway.service || true
+  for f in \
+    "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* \
+    "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* \
+    "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"*
+  do
+    if [ -e "$f" ]; then
+      mv -v "$f" "$qdir/" && moved=1
+    fi
+  done
+
+  if [ "$moved" -eq 0 ]; then
+    echo "  No known legacy migration blocker files found to quarantine"
+  fi
+
+  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl start clawbox-gateway.service || true
+  sleep 12
+
+  if gateway_port_listening; then
+    echo "  Gateway recovered after legacy state quarantine"
+    return 0
+  fi
+
+  echo "  Warning: gateway still not listening on ${gw_port} after legacy state recovery"
+  return 1
 }
 
 step_update_smoke() {
@@ -1511,6 +1628,20 @@ step_ollama_install() {
   # Apply Jetson memory optimizations
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
   echo "  Ollama installed and running"
+
+  # Local embedding model for semantic memory. OpenClaw's memory search
+  # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
+  # doesn't have (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
+  # "Semantic memory search is still offline ... missing OpenAI provider
+  # auth/API-key access". Pull a small local embedding model so semantic
+  # recall works with zero API key; gateway-pre-start.sh points memorySearch
+  # at it once present. Best-effort: a failed pull must not abort the install
+  # (memory falls back to lexical FTS).
+  if ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
+    echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
+  else
+    echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
+  fi
 }
 
 step_llamacpp_install() {
@@ -1722,28 +1853,55 @@ step_ai_tools_install() {
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
     return 0
   fi
-  # Claude Code
+  # The AI coding CLIs below are ALL optional — the box boots and runs fine
+  # without any of them. This whole step must therefore be best-effort: no
+  # single tool's install may abort the run. install.sh runs under
+  # `set -euo pipefail`, so every risky command is guarded inside an `if`
+  # (where errexit is suspended) and failures only log a WARN.
+
+  # Claude Code — Anthropic GEO-BLOCKS some regions and serves an HTML
+  # "App unavailable in region" page with HTTP 200 (so `curl -f` does NOT
+  # catch it). Piping that HTML into `bash` yields
+  # `syntax error near unexpected token '<'`, and under `set -euo pipefail`
+  # that aborted the ENTIRE reinstall right here — so the later steps that
+  # (re)start the gateway never ran and the box came up as an nginx 404
+  # (Discord "broke my clawbox", step [18/23]). Guard it: download to a file,
+  # verify it looks like a shell script and not an HTML/region-block page,
+  # only then run it, and never let failure escape this step.
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
     echo "  Claude Code already installed"
   else
-    sudo -u "$CLAWBOX_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-    echo "  Claude Code installed"
+    _claude_installer="$(mktemp)"
+    if curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" 2>/dev/null \
+       && [ -s "$_claude_installer" ] \
+       && ! head -c 512 "$_claude_installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
+      if sudo -u "$CLAWBOX_USER" bash "$_claude_installer" </dev/null; then
+        echo "  Claude Code installed"
+      else
+        echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
+      fi
+    else
+      echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
+    fi
+    rm -f "$_claude_installer"
   fi
 
-  # OpenAI Codex CLI
+  # OpenAI Codex CLI (optional)
   if as_clawbox_login "command -v codex" &>/dev/null; then
     echo "  OpenAI Codex already installed"
-  else
-    as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"
+  elif as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"; then
     echo "  OpenAI Codex installed"
+  else
+    echo "  WARN: OpenAI Codex CLI install failed; skipping (optional, continuing)"
   fi
 
-  # Google Gemini CLI
+  # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
     echo "  Gemini CLI already installed"
-  else
-    as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"
+  elif as_clawbox_login "npm i -g @google/gemini-cli --prefix $NPM_PREFIX"; then
     echo "  Gemini CLI installed"
+  else
+    echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
   # Make claude / codex / gemini resolvable in the in-UI terminal's interactive

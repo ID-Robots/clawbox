@@ -4,6 +4,7 @@ import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
 import { findOpenclawBin, restartGateway } from "./openclaw-config";
+import { isPortOpen } from "./port-probe";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -18,7 +19,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // would actually deploy. Without this both sides diverged: the UI returned
 // null and reported "no update", while install.sh would still install
 // 2026.5.3-1 — confusing.
-const OPENCLAW_VERSION_FALLBACK = "2026.5.3-1";
+const OPENCLAW_VERSION_FALLBACK = "2026.7.1";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -283,6 +284,101 @@ async function updateClawBoxAndReboot(): Promise<void> {
 // 2-3 min; shared across both UPDATE_STEPS and OPENCLAW_UPDATE_STEPS so the
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
+const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
+const GATEWAY_WAIT_INTERVAL_MS = 1_500;
+const LEGACY_GATEWAY_BLOCKER_RE =
+  /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForGateway(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortOpen(GATEWAY_PORT, "127.0.0.1", 1_000)) return true;
+    await delay(GATEWAY_WAIT_INTERVAL_MS);
+  }
+  return false;
+}
+
+async function runOpenclawDoctorFix(): Promise<void> {
+  try {
+    await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
+      timeout: 90_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } catch {
+    // Doctor can still repair some state before exiting non-zero. Continue
+    // into a restart + positive gateway probe rather than trusting exit code.
+  }
+}
+
+async function readGatewayJournalTail(): Promise<string> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-u", "clawbox-gateway.service", "-n", "160", "--no-pager"],
+      { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+async function quarantineLegacyOpenclawState(): Promise<void> {
+  const script = `
+set -u
+CLAWBOX_HOME="/home/clawbox"
+TS="$(date +%Y%m%d-%H%M%S)"
+QDIR="$CLAWBOX_HOME/openclaw-legacy-quarantine-$TS"
+mkdir -p "$QDIR"
+/usr/bin/sudo /usr/bin/systemctl stop clawbox-gateway.service || true
+mv -v "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* "$QDIR/" 2>/dev/null || true
+mv -v "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* "$QDIR/" 2>/dev/null || true
+mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$QDIR/" 2>/dev/null || true
+`;
+  await execFile("/bin/bash", ["-lc", script], {
+    timeout: 30_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+  if (options.restartFirst) {
+    await restartGateway();
+  }
+
+  if (await waitForGateway(30_000)) return;
+
+  await runOpenclawDoctorFix();
+  await restartGateway().catch(() => {});
+  if (await waitForGateway(30_000)) return;
+
+  const beforeRecoveryLog = await readGatewayJournalTail();
+  if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
+    const lastLog = getLastLogLine(beforeRecoveryLog);
+    throw new Error(
+      lastLog
+        ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
+        : `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
+    );
+  }
+
+  await quarantineLegacyOpenclawState();
+  await runOpenclawDoctorFix();
+  await restartGateway();
+  if (await waitForGateway(45_000)) return;
+
+  const afterRecoveryLog = await readGatewayJournalTail();
+  const lastLog = getLastLogLine(afterRecoveryLog);
+  throw new Error(
+    lastLog
+      ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
+      : "OpenClaw gateway still offline after legacy state recovery",
+  );
+}
 
 const UPDATE_STEPS: UpdateStepDef[] = [
   {
@@ -369,6 +465,13 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     requiresRoot: true,
     advisoryOnOverrun: true,
   },
+  {
+    id: "gateway_verify",
+    label: "Verifying gateway health",
+    timeoutMs: 90_000,
+    customRun: () => ensureGatewayHealthy(),
+    failFast: true,
+  },
 ];
 
 /**
@@ -412,9 +515,15 @@ const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 
+interface ComponentVersionInfo {
+  current: string | null;
+  target: string | null;
+  updateAvailable?: boolean;
+}
+
 interface VersionInfo {
-  clawbox: { current: string; target: string | null };
-  openclaw: { current: string | null; target: string | null };
+  clawbox: ComponentVersionInfo & { current: string };
+  openclaw: ComponentVersionInfo;
 }
 
 let cachedVersionInfo: VersionInfo | null = null;
@@ -475,11 +584,40 @@ async function readClawboxVersion(): Promise<string> {
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
 }
 
+async function getPinnedBranchTarget(gitCmd: string): Promise<{
+  branch: string;
+  currentSha: string;
+  targetSha: string;
+} | null> {
+  let branch: string;
+  try {
+    branch = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+  } catch {
+    return null;
+  }
+  if (!branch || !SAFE_BRANCH.test(branch)) return null;
+
+  try {
+    await execShell(`${gitCmd} fetch --quiet origin ${branch}`, { timeout: 20_000 }).catch(() => {});
+    const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
+      execShell(`${gitCmd} rev-parse HEAD`, { timeout: 10_000 }),
+      execShell(`${gitCmd} rev-parse origin/${branch}`, { timeout: 10_000 }),
+    ]);
+    const currentSha = currentOut.trim();
+    const targetSha = targetOut.trim();
+    if (!currentSha || !targetSha || currentSha === targetSha) return null;
+    return { branch, currentSha, targetSha };
+  } catch {
+    return null;
+  }
+}
+
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
     return cachedVersionInfo;
   }
 
+  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
     execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
@@ -501,6 +639,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     })(),
     readClawboxVersion(),
   ]);
+  const pinnedBranchTarget = await getPinnedBranchTarget(gitCmd);
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -508,18 +647,23 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   // Only report a target if it's strictly newer than the device's base tag.
   // (A dev box can sit on a local tag ahead of origin's latest release.)
-  const clawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+  const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
+  const clawboxTarget = pinnedBranchTarget
+    ? `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
+    : taggedClawboxTarget;
 
   cachedVersionInfo = {
     clawbox: {
       current: rawVersion,
       target: clawboxTarget,
+      updateAvailable: !!clawboxTarget,
     },
     openclaw: {
       current: openclawCurrent,
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
+      updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
   };
   versionInfoCacheTime = Date.now();
@@ -549,25 +693,15 @@ export async function getTargetVersion(): Promise<string | null> {
       return null;
     }
     semverTags.sort(compareSemverTags);
-    // A tag is only a valid update target if the device's current HEAD is an
-    // ancestor of the tag's commit — otherwise the tag sits on a sibling
-    // branch and "updating" would roll local work back. Walk from newest to
-    // oldest and return the first one that passes.
-    for (let i = semverTags.length - 1; i >= 0; i--) {
-      const tag = semverTags[i];
-      const isForward = await execShell(
-        `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} merge-base --is-ancestor HEAD refs/tags/${tag}`,
-        { timeout: 10_000 },
-      ).then(() => true).catch(() => false);
-      if (isForward) {
-        cachedTargetVersion = tag;
-        targetVersionCacheTime = Date.now();
-        return tag;
-      }
-    }
-    cachedTargetVersion = null;
+    // ClawBox is an appliance: the updater hard-syncs to the configured
+    // upstream release branch before rebuilding. Do not require the current
+    // device HEAD to be an ancestor of the latest tag; factory-reset or
+    // branch-pinned boxes can legitimately sit on a sibling/ref-history path,
+    // and the old ancestry guard made those devices show "Latest: -" and
+    // "You're up to date" while a newer release was published.
+    cachedTargetVersion = semverTags[semverTags.length - 1];
     targetVersionCacheTime = Date.now();
-    return null;
+    return cachedTargetVersion;
   } catch {
     cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
@@ -711,7 +845,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_restart",
     label: "Restarting OpenClaw gateway",
     timeoutMs: 30_000,
-    customRun: () => restartGateway(),
+    customRun: () => ensureGatewayHealthy({ restartFirst: true }),
   },
 ];
 

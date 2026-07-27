@@ -317,11 +317,12 @@ function ChromeDesktopInner() {
         }
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
-        // Chat panel dock state
+        // Chat panel dock state — a docked side panel is a deliberate layout so
+        // we still restore it. The FLOATING chat popup, however, must never
+        // auto-open on load: it should appear only when the user taps the crab.
+        // (We intentionally ignore a persisted `ui_chat_open` here.)
         if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
           setChatPanelWidth(Number(data.ui_chat_panel_width));
-          setChatOpen(true);
-        } else if (data.ui_chat_open) {
           setChatOpen(true);
         }
         // Auto-open chat once after fresh install (no saved preferences yet)
@@ -1149,8 +1150,8 @@ function ChromeDesktopInner() {
   // Dismissals persist per exact target-version pair via SQLite so the user
   // isn't pestered across browsers or after a cache wipe.
   const [updateAvailable, setUpdateAvailable] = useState<{
-    clawbox: { current: string | null; target: string | null };
-    openclaw: { current: string | null; target: string | null };
+    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
   const lastVersionFingerprintRef = useRef<string | null>(null);
 
@@ -1161,8 +1162,8 @@ function ChromeDesktopInner() {
         const versionsRes = await fetch("/setup-api/update/versions");
         if (!active || !versionsRes.ok) return;
         const data = await versionsRes.json();
-        const clawboxNeedsUpdate = !!data.clawbox?.target && data.clawbox.target !== data.clawbox.current;
-        const openclawNeedsUpdate = !!data.openclaw?.target && data.openclaw.target !== data.openclaw.current;
+        const clawboxNeedsUpdate = data.clawbox?.updateAvailable ?? (!!data.clawbox?.target && data.clawbox.target !== data.clawbox.current);
+        const openclawNeedsUpdate = data.openclaw?.updateAvailable ?? (!!data.openclaw?.target && data.openclaw.target !== data.openclaw.current);
         // Fingerprint covers both targets *and* currents — bumping the device
         // version after an update should retire a stale "available" card even
         // if the next-target hasn't shifted yet.
@@ -1204,11 +1205,7 @@ function ChromeDesktopInner() {
   }, []);
 
   const openUpdateSettings = useCallback(() => {
-    // Stash the section before opening so SettingsApp drains it on mount,
-    // and also dispatch the event for already-mounted instances.
-    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = "about";
-    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "about" } }));
-    openAppRef.current("settings");
+    openAppRef.current("system_update");
     dismissUpdateNotification();
   }, [dismissUpdateNotification]);
 
@@ -1656,8 +1653,8 @@ function ChromeDesktopInner() {
           {updateAvailable && (() => {
             const cb = updateAvailable.clawbox;
             const oc = updateAvailable.openclaw;
-            const cbNeeds = !!cb?.target && cb.target !== cb.current;
-            const ocNeeds = !!oc?.target && oc.target !== oc.current;
+            const cbNeeds = cb?.updateAvailable ?? (!!cb?.target && cb.target !== cb.current);
+            const ocNeeds = oc?.updateAvailable ?? (!!oc?.target && oc.target !== oc.current);
             return (
               <div
                 className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
@@ -2012,9 +2009,15 @@ function ChromeDesktopInner() {
         )}
       </div>
 
-      {/* Mascot - tapping toggles chat popup, hidden when chat is docked as panel */}
-      {chatPanelWidth === 0 && !isMobile && (
-        <Mascot frozen={chatOpen} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} onPositionChange={chatOpen ? setMascotX : undefined} />
+      {/* Mascot - tapping toggles chat popup. It stays on the desktop even when
+          the chat is docked as a vertical panel; the Mascot slides itself clear
+          of the panel (rightInset) so it isn't hidden behind it.
+          mascotX is captured once from onTap; we intentionally do NOT stream the
+          frozen mascot's position while the chat is open — that used to nudge
+          mascotX for a frame right after opening, flashing the popup to the wrong
+          corner before it settled. */}
+      {!isMobile && (
+        <Mascot frozen={chatOpen} rightInset={chatPanelWidth} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 
