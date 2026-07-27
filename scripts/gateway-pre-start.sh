@@ -168,7 +168,10 @@ if isinstance(primary_model, str) and primary_model.lower() in (
 # hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
 # "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
 # where openai/* is a valid keyed route, are left untouched.
-_CODEX_SUPPORTED = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
+_CODEX_SUPPORTED = (
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+)
 
 def _auth_profiles():
     _auth = cfg.get("auth")

@@ -84,5 +84,38 @@ describe("ai-provider-progress", () => {
         progressPercent: null,
       });
     });
+
+    // A cold box builds llama.cpp from source before Gemma can start. The
+    // install route streams those journal lines tagged with a phase-stable
+    // prefix; the raw lines (cmake, hf, apt) match no phase keyword, so
+    // without the prefix the wizard would snap back to step 1 on every line
+    // and the user would see a spinner with no explanation for ~an hour.
+    it("keeps the provisioning phase pinned and surfaces the streamed line as detail", () => {
+      expect(
+        getLlamaCppOverlayProgress(
+          "Installing Gemma 4 for offline use — Installing llama.cpp server (CUDA=ON)...",
+          5,
+        ),
+      ).toEqual({
+        phase: 1,
+        detail: "Installing llama.cpp server (CUDA=ON)...",
+        progressPercent: null,
+      });
+
+      expect(
+        getLlamaCppOverlayProgress(
+          "Installing Gemma 4 for offline use — Downloading Gemma 4 GGUF for offline use...",
+          5,
+        ),
+      ).toEqual({
+        phase: 1,
+        detail: "Downloading Gemma 4 GGUF for offline use...",
+        progressPercent: null,
+      });
+    });
+
+    it("leaves detail null when there is no streamed line", () => {
+      expect(getLlamaCppOverlayProgress("Installing Gemma 4 for offline use...", 5).detail).toBeNull();
+    });
   });
 });
