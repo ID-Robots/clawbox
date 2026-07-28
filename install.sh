@@ -103,6 +103,7 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-performance.service
   clawbox-heartbeat.timer
   clawbox-ap-watchdog.timer
+  clawbox-codex-auth-sync.timer
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-heartbeat.service
@@ -110,6 +111,7 @@ EXPECTED_INSTALLED_SERVICES=(
   clawbox-tunnel.service
   "clawbox-root-update@.service"
   clawbox-ap-watchdog.service
+  clawbox-codex-auth-sync.service
 )
 
 # Load persisted WiFi interface if available
@@ -1272,6 +1274,7 @@ step_systemd_services() {
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
     [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
+    [[ "$svc" == "clawbox-codex-auth-sync.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
@@ -1280,6 +1283,15 @@ step_systemd_services() {
   # Start the AP watchdog immediately so a dropped setup hotspot self-heals
   # without waiting for a reboot.
   systemctl enable --now clawbox-ap-watchdog.timer
+  # The sync unit runs under ProtectSystem=strict and can only write paths named
+  # in ReadWritePaths. ~/.codex doesn't exist until the first ChatGPT login, so
+  # create it up front — otherwise the very first mirror write (the one that
+  # makes Codex work at all) hits a read-only namespace.
+  install -d -o clawbox -g clawbox -m 700 "$CLAWBOX_HOME/.codex"
+  # Start the Codex credential mirror sync immediately so a box updating into
+  # this release strips any refresh_token 3.1.11 planted in its mirrors without
+  # waiting for a reboot — that token is what burns the OAuth family.
+  systemctl enable --now clawbox-codex-auth-sync.timer
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Migration: prior installs enabled clawbox-tunnel by default, which loops

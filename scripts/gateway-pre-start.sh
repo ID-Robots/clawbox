@@ -615,92 +615,32 @@ fi
 #      auth_profile_store table of openclaw-agent.sqlite, so the old
 #      JSON-only lookup silently found nothing and wrote no credential at all.
 #
-# An existing ~/.codex/auth.json is preferred as the source: it comes from a
-# real Codex login and carries a true id_token, whereas a synthesized one can
-# only fall back to the access token. Write-if-missing at every destination —
-# the app-server owns refresh once a file exists, so we never clobber a newer
-# token.
+# THE MIRRORS MUST NOT CARRY refresh_token. ChatGPT OAuth refresh tokens are
+# single-use and rotating: the whole family dies the moment two holders each
+# present one ("refresh_token has already been used", HTTP 401
+# refresh_token_reused). 3.1.11 shipped the mirrors WITH the refresh token,
+# which gave the box two independent rotators — core (owner of the OAuth flow,
+# persists to openclaw-agent.sqlite) and the Codex app-server binary, which
+# rotates whatever sits in its CODEX_HOME. Boxes worked for a few hours and
+# then died. See #278.
+#
+# So: core stays the single rotator, and the mirrors are access-token-only,
+# read-only copies. They are REWRITTEN on every boot (not write-if-missing)
+# so they track core's current token instead of decaying, and so boxes already
+# poisoned by 3.1.11 self-heal on the next restart. Between boots
+# clawbox-codex-auth-sync.timer keeps them fresh -- an access token expires in
+# about an hour, far short of a reboot interval.
+#
+# A user-supplied OPENAI_API_KEY in ~/.codex/auth.json is preserved: that is
+# the API-key path, which core reads from this file and which has no rotation
+# problem.
 if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
-  node - "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" <<'NODE'
-const fs = require("fs"), path = require("path");
-const [openclawHome, homeAuthPath] = process.argv.slice(2);
-
-function readJson(p) {
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
-}
-
-// Prefer a real Codex login if one is already on disk.
-function fromExistingFile() {
-  const d = readJson(homeAuthPath);
-  return d && d.tokens && d.tokens.access_token ? d : null;
-}
-
-// Otherwise synthesize from the OpenClaw codex OAuth profile. Tokens live in
-// auth-profiles.json on older cores and in openclaw-agent.sqlite on 2026.7.x.
-function readProfiles(agentDir) {
-  const j = readJson(path.join(agentDir, "auth-profiles.json"));
-  if (j && j.profiles) return j.profiles;
-  try {
-    const { DatabaseSync } = require("node:sqlite");
-    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"), { readOnly: true });
-    const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary");
-    db.close();
-    const parsed = row && row.store_json ? JSON.parse(row.store_json) : null;
-    return (parsed && parsed.profiles) || null;
-  } catch { return null; } // no node:sqlite, no table, or locked — non-fatal
-}
-
-function synthesize(agentDir) {
-  const profiles = readProfiles(agentDir);
-  const p = profiles && (profiles["codex:default"] || profiles["openai-codex:default"]);
-  if (!p || !p.access) return null;
-  let accountId = null;
-  try {
-    const claims = JSON.parse(Buffer.from(p.access.split(".")[1], "base64url").toString());
-    const auth = claims["https://api.openai.com/auth"] || {};
-    accountId = auth.chatgpt_account_id || auth.account_id || auth.user_id || claims.sub || null;
-  } catch { /* opaque token — leave accountId null */ }
-  return {
-    OPENAI_API_KEY: null,
-    tokens: { id_token: p.id || p.access, access_token: p.access, refresh_token: p.refresh, account_id: accountId },
-    last_refresh: new Date().toISOString(),
-  };
-}
-
-function write(dest, cred) {
-  if (fs.existsSync(dest)) return false;
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.chmodSync(path.dirname(dest), 0o700); // holds OAuth tokens — owner-only dir, not just the 0600 file
-  fs.writeFileSync(dest, JSON.stringify(cred, null, 2), { mode: 0o600 });
-  return true;
-}
-
-try {
-  const agentsRoot = path.join(openclawHome, "agents");
-  const agents = fs.existsSync(agentsRoot)
-    ? fs.readdirSync(agentsRoot).map((id) => path.join(agentsRoot, id, "agent")).filter((d) => fs.existsSync(d))
-    : [];
-
-  let cred = fromExistingFile();
-  if (!cred) {
-    // Prefer the main agent's profile store as the synthesis source.
-    const byMainFirst = (a, b) => Number(b.includes("/main/")) - Number(a.includes("/main/"));
-    for (const dir of [...agents].sort(byMainFirst)) {
-      cred = synthesize(dir);
-      if (cred) break;
-    }
-  }
-  if (!cred) { console.log("  Codex auth.json: no codex OAuth profile yet, skipping"); process.exit(0); }
-
-  if (write(homeAuthPath, cred)) console.log("  Wrote ~/.codex/auth.json for the Codex app-server");
-  for (const dir of agents) {
-    // CODEX_HOME the gateway actually passes to the app-server on 2026.7.x.
-    if (write(path.join(dir, "codex-home", "auth.json"), cred)) {
-      console.log("  Wrote " + path.basename(path.dirname(dir)) + " agent codex-home/auth.json");
-    }
-  }
-} catch (e) { console.log("  Codex auth.json: " + e.message); }
-NODE
+  CODEX_AUTH_MIRROR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/codex-auth-mirror.js"
+  if [ -f "$CODEX_AUTH_MIRROR" ]; then
+    node "$CODEX_AUTH_MIRROR" "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" || true
+  else
+    echo "  WARN: $CODEX_AUTH_MIRROR missing; Codex credential mirrors not synced"
+  fi
 fi
 
 # Semantic memory embeddings default. OpenClaw's memory search defaults to
