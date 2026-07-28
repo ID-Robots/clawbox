@@ -48,7 +48,7 @@ This page covers what you actually need — from bare minimum to running local A
 
 ### Power User — local AI models
 - **Specs:** 4+ cores, 16 GB+ RAM, 100 GB+ SSD, 25 Mbps+, NVIDIA GPU, Linux (Ubuntu/Debian)
-- **Can do:** everything above, plus local LLMs (7B–13B), local image generation, on-device speech recognition, fully offline operation, multiple browser instances
+- **Can do:** everything above, plus local LLMs (1B–8B; 1–4B is the sweet spot on ClawBox Connect), local image generation, on-device speech recognition, fully offline operation, multiple browser instances
 - **Can't do:** 70B+ models need more VRAM → see [ClawBox Workstation](/hardware/clawbox-workstation)
 - **Examples:** **ClawBox Connect** (67 TOPS) · gaming PC with GPU · **ClawBox Workstation** (DGX Spark)
 
@@ -68,12 +68,17 @@ Running OpenClaw on dedicated hardware vs a shared VPS or your daily-use laptop:
 
 | Model | Speed | Quality |
 |---|---|---|
-| Llama 3.1 8B (Q4) | ~3.5 tok/s | Excellent |
-| Mistral 7B (Q4) | ~4.2 tok/s | Excellent |
-| Qwen2.5 7B (Q4) | ~4.0 tok/s | Excellent |
-| Phi-3 Mini (Q4) | ~6.8 tok/s | Good |
-| Gemma 2B (Q4) | ~9.1 tok/s | Fast |
-| TinyLlama 1B (Q4) | ~15.3 tok/s | Basic |
+| Llama 3.2 1B (Q4) | ~45 tok/s | Fast |
+| Gemma 2 2B (Q4) | ~26 tok/s | Good |
+| Qwen2.5 3B (Q4) | ~23 tok/s | Excellent |
+| Phi-3 Mini 3.8B (Q4) | ~22 tok/s | Excellent |
+| 7–8B class (Q4) | ~10 tok/s | Tight fit |
+
+Measured on a production ClawBox with Ollama (warm runs, `num_predict=200`, Ollama's own
+`eval_rate`; power and thermals from `tegrastats` over 176 samples): ~11.4 W average,
+19.2 W peak, 61.8 °C peak, no throttling. Most people read at 5–8 tok/s, so the 1–4B
+class generates faster than you can read. Full methodology:
+[We Benchmarked a Production ClawBox](https://clawbox.com/blog/2026-07-22-jetson-orin-nano-llm-benchmark-real-clawbox-numbers).
 
 <Note>
 For larger models, use your own cloud API key (Claude, GPT, Gemini) — see
@@ -84,6 +89,6 @@ see [ClawBox Workstation](/hardware/clawbox-workstation) (128 GB unified memory,
 ## Skip the DIY
 
 <Card title="Get ClawBox — pre-configured, ready in 5 minutes" href="https://clawbox.com" icon="cart-shopping" horizontal>
-  ClawBox ships with Recommended+ specs, OpenClaw pre-installed, dual-band Wi-Fi and Bluetooth.
+  ClawBox ships with Recommended+ specs, OpenClaw pre-installed, dual-band Wi-Fi 5 (802.11ac) and Bluetooth 5.0.
   Manual DIY setup is typically 2–4+ hours (plus waiting for hardware).
 </Card>
