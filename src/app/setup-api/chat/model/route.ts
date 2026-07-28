@@ -61,12 +61,22 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: "anthropic/claude-sonnet-4-6",
   openai: "openai/gpt-5.4",
-  codex: "codex/gpt-5.4",
+  // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
+  codex: "codex/gpt-5.5",
   google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
-const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+// Models selectable while the device is on ChatGPT/Codex subscription auth.
+// GPT-5.6 Sol/Terra/Luna are subscription-eligible — OpenClaw's ChatGPT route
+// catalog carries all three, and `openai/gpt-5.6-sol` is the documented
+// default for a fresh Codex OAuth setup. Keeping them out of this allowlist
+// rejected them locally with "not supported with ChatGPT subscription auth"
+// before the request ever reached OpenAI. GPT-5.6 is a limited preview, so
+// per-account access still varies: let the pick through and surface the
+// upstream access error instead of pre-rejecting it here. `-pro` tiers stay
+// out — those remain API-key only.
+const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
 const OPENAI_PRO_MODEL_RE = /^gpt-5\.[45]-pro$/;
 
 function isLocalModel(model: string | null | undefined): boolean {
@@ -356,7 +366,7 @@ export async function POST(request: Request) {
         let effectiveModelId = parsed.modelId;
         if (parsed.provider === "codex" && !CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
           return NextResponse.json({
-            error: `${parsed.modelId} is not supported with ChatGPT subscription auth. Use GPT-5.5, GPT-5.4, or GPT-5.4 Mini, or switch OpenAI to API-key mode for Pro/API-only models.`,
+            error: `${parsed.modelId} is not supported with ChatGPT subscription auth. Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, or switch OpenAI to API-key mode for Pro/API-only models.`,
           }, { status: 400 });
         }
         if (parsed.provider === "openai") {
@@ -374,7 +384,7 @@ export async function POST(request: Request) {
             effectiveModel = `codex/${parsed.modelId}`;
           } else if (!hasOpenAiKey) {
             return NextResponse.json({
-              error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
+              error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
             }, { status: 400 });
           }
         }
@@ -485,7 +495,7 @@ export async function POST(request: Request) {
         targetModel = `codex/${targetParsed.modelId}`;
       } else if (!hasOpenAiKey) {
         return NextResponse.json({
-          error: `${targetParsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
+          error: `${targetParsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
         }, { status: 400 });
       }
     }
@@ -510,6 +520,22 @@ export async function POST(request: Request) {
     //    so users switching chat models don't see a bogus failure when the
     //    gateway reloads concurrently with the write.
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
+
+    // 1b. Codex turns only work through the Codex app-server harness, which is
+    //     selected by agentRuntime. Without it core uses its generic HTTP
+    //     responses transport, which posts to
+    //     https://chatgpt.com/backend-api/responses — a browser endpoint
+    //     Cloudflare managed-challenges — and every turn fails with "the
+    //     provider returned an HTML error page". gateway-pre-start.sh sets this
+    //     too, but a model change applies WITHOUT a restart, so picking Codex
+    //     here has to arm the runtime immediately or the very next message
+    //     fails until the box is rebooted.
+    if (targetModel.toLowerCase().startsWith("codex/")) {
+      await runOpenclawConfigSet([
+        `agents.defaults.models.${targetModel}.agentRuntime.id`,
+        "codex",
+      ]);
+    }
 
     // 2. Full sweep including sessions previously tagged
     //    `modelOverrideSource: "user"` — the dropdown click *is* the

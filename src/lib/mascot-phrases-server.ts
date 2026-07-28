@@ -23,27 +23,37 @@ import {
 
 const KV_PHRASE_KEY = "clawbox-mascot-phrase-set";
 const KV_CONVO_LINES_KEY = "clawbox-mascot-convo-lines";
+const KV_LAST_FAILURE_KEY = "clawbox-mascot-phrase-last-failure";
 
 const FULL_REGEN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 const DAILY_TOPUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1 day
+// After a failed generation (timeout, OOM-slow inference, bad output) do NOT
+// retry in the background for this long. Without this, a stale cache + a
+// failing model retried on every mascot fetch — reloading a multi-GB model
+// into RAM every ~90s and swap-spiraling 8GB Jetsons.
+const FAILURE_BACKOFF_MS = 12 * 60 * 60 * 1000; // 12 hours
 const GENERATION_TIMEOUT_MS = 60_000;
 const MAX_PHRASES_PER_CATEGORY = 24; // cap so the bag doesn't grow forever
 const TARGET_NEW_PER_CATEGORY = 8; // model is asked to produce ~8 fresh entries per category
+// Don't start a generation unless the box has this much RAM to spare —
+// loading even a 1-2GB model on a memory-pressured Jetson pushes the whole
+// device into swap.
+const MIN_AVAILABLE_MEM_KB = 3 * 1024 * 1024; // 3 GB
 
 const OPENCLAW_WORKSPACE_DIR = "/home/clawbox/.openclaw/workspace";
 
 /**
- * Select a small Ollama model for fast generation. Prefers commonly-available
- * tiny instruct models; falls back to whatever's pulled.
+ * Select a small Ollama model for fast generation. Tiny instruct models
+ * (≤2B) ONLY — 3B+ models take minutes on a loaded Orin Nano and blow the
+ * 60s timeout, and an arbitrary user-pulled model (7B+) can OOM the box.
+ * If none of these is installed we skip generation entirely and the mascot
+ * keeps using the built-in inspiration phrases.
  */
 const PREFERRED_MODELS = [
-  "llama3.2:3b",
   "llama3.2:1b",
-  "qwen2.5:3b",
   "qwen2.5:1.5b",
   "gemma3:1b",
   "gemma2:2b",
-  "phi3.5:3.8b",
 ];
 
 interface PhraseCacheEnvelope {
@@ -91,11 +101,44 @@ async function pickOllamaModel(): Promise<string | null> {
     for (const preferred of PREFERRED_MODELS) {
       if (installed.includes(preferred)) return preferred;
     }
-    // No preferred match — return the first installed model.
-    return installed[0];
+    // No tiny model installed — do NOT fall back to an arbitrary installed
+    // model: it may be far too large for phrase generation on this hardware.
+    return null;
   } catch {
     return null;
   }
+}
+
+/**
+ * True when the box has enough free RAM to load a small model without
+ * swapping. Fails open on non-Linux (dev machines) or unreadable meminfo.
+ */
+async function hasMemoryHeadroom(): Promise<boolean> {
+  try {
+    const meminfo = await fs.readFile("/proc/meminfo", "utf-8");
+    const m = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m);
+    if (!m) return true;
+    const availableKb = parseInt(m[1], 10);
+    if (availableKb >= MIN_AVAILABLE_MEM_KB) return true;
+    console.warn(`[mascot-phrases] skipping generation: only ${Math.round(availableKb / 1024)}MB RAM available`);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function readLastFailure(): number {
+  const raw = kvGet(KV_LAST_FAILURE_KEY);
+  const ts = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function recordFailure(): void {
+  kvSet(KV_LAST_FAILURE_KEY, String(Date.now()));
+}
+
+function clearFailure(): void {
+  kvSet(KV_LAST_FAILURE_KEY, "0");
 }
 
 interface GenerationContext {
@@ -194,6 +237,10 @@ async function callOllama(model: string, prompt: string): Promise<MascotPhraseSe
         prompt,
         stream: false,
         format: "json",
+        // Unload the model right after the call — the default keep_alive
+        // (5m) holds gigabytes of RAM hostage on an 8GB box for a feature
+        // that runs once a day.
+        keep_alive: 0,
         options: {
           temperature: 0.9,
           top_p: 0.95,
@@ -277,12 +324,25 @@ export function maybeRegenerateInBackground(): Promise<void> {
       const { stale, mode } = isStale(cached, ctx.language);
       if (!stale) return;
 
+      // Failure backoff: a stale cache + a failing/slow model must not turn
+      // every mascot fetch into a fresh multi-GB model load.
+      if (Date.now() - readLastFailure() < FAILURE_BACKOFF_MS) return;
+
+      if (!(await hasMemoryHeadroom())) {
+        recordFailure(); // treat memory pressure like a failure: back off
+        return;
+      }
+
       const model = await pickOllamaModel();
-      if (!model) return; // no local model available — keep falling back to inspiration
+      if (!model) return; // no suitable tiny model — keep falling back to inspiration
 
       const prompt = buildPrompt(ctx, mode);
       const fresh = await callOllama(model, prompt);
-      if (!fresh) return;
+      if (!fresh) {
+        recordFailure();
+        return;
+      }
+      clearFailure();
 
       const now = Date.now();
       const existingPhrases = cached?.phrases ?? INSPIRATION_PHRASES;
@@ -320,12 +380,19 @@ export function forceRegenerate(): Promise<MascotPhraseSet | null> {
   if (inFlightForceRegen) return inFlightForceRegen;
   inFlightForceRegen = (async () => {
     try {
+      // Explicit user action bypasses the failure backoff, but still
+      // refuses to load a model into a memory-pressured box.
+      if (!(await hasMemoryHeadroom())) return null;
       const ctx = await gatherContext();
       const model = await pickOllamaModel();
       if (!model) return null;
       const prompt = buildPrompt(ctx, "full");
       const fresh = await callOllama(model, prompt);
-      if (!fresh) return null;
+      if (!fresh) {
+        recordFailure();
+        return null;
+      }
+      clearFailure();
       const now = Date.now();
       writeCache({
         phrases: fresh,

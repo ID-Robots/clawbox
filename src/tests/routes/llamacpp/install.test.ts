@@ -229,6 +229,97 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(payload.provider).toBe("llamacpp");
   });
 
+  // Provisioning on a cold box builds llama.cpp from source with CUDA and
+  // downloads a multi-GB GGUF — tens of minutes. It used to run as one
+  // blocking `systemctl start` that emitted nothing, so the wizard showed a
+  // bare spinner on "Provisioning offline Gemma 4" and a real hang was
+  // indistinguishable from normal progress.
+  it("streams install progress while the provisioning unit runs", async () => {
+    let installComplete = false;
+    let showCalls = 0;
+
+    mockFs.stat.mockImplementation((async (target: unknown) => {
+      const normalized = String(target);
+      const isRuntimeArtifact = normalized === "/usr/local/bin/llama-server"
+        || normalized.endsWith("gemma-4-e2b-it-edited-q4_0.gguf");
+      if (isRuntimeArtifact && installComplete) return { size: 1 } as never;
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show")) {
+        showCalls += 1;
+        // First poll: still building. Second: finished cleanly.
+        stdout = showCalls <= 1
+          ? "ActiveState=activating\nResult=success\n"
+          : "ActiveState=inactive\nResult=success\n";
+        if (showCalls >= 2) installComplete = true;
+      } else if (key.includes("journalctl")) {
+        stdout = "Installing llama.cpp server (CUDA=ON)...\n";
+      }
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) });
+    vi.stubGlobal("fetch", mockFetch);
+    mockSpawn.mockReturnValue(createSpawnedProcess(12345));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    // Phase-stable prefix keeps the wizard on the provisioning step; the tail
+    // is the live build line the user reads while waiting.
+    expect(text).toContain("Installing Gemma 4 for offline use — Installing llama.cpp server (CUDA=ON)...");
+    expect(text).toContain("\"success\":true");
+  });
+
+  it("fails fast with the journal line when the provisioning unit fails", async () => {
+    mockFs.stat.mockImplementation((async () => {
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show")) {
+        stdout = "ActiveState=failed\nResult=timeout\n";
+      } else if (key.includes("journalctl")) {
+        stdout = "Error: failed to download Gemma 4 for offline startup\n";
+      }
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    }));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    expect(text).toContain("failed to download Gemma 4 for offline startup");
+    // No point starting llama-server against a runtime that never installed.
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it("repairs the llama.cpp runtime and retries when hf is missing", async () => {
     const runtimeError = "[llamacpp] Missing Hugging Face CLI at /home/clawbox/.local/bin/hf. Run the llama.cpp install step to repair the local runtime.\n";
     const mockFetch = vi.fn()
@@ -293,7 +384,9 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("\"success\":true");
     expect(mockExecFile).toHaveBeenCalledWith(
       "/usr/bin/sudo",
-      ["/usr/bin/systemctl", "start", "clawbox-root-update@llamacpp_install.service"],
+      // --no-block: we poll systemd ourselves so the wizard can stream progress
+      // instead of sitting silent for the whole install.
+      ["/usr/bin/systemctl", "start", "--no-block", "clawbox-root-update@llamacpp_install.service"],
       expect.any(Object),
       expect.any(Function),
     );

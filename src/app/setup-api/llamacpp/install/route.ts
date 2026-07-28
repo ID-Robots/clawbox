@@ -23,7 +23,26 @@ const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
 const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
-const LLAMACPP_INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
+// Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
+// systemd, not us, owns the kill. A cold box builds llama.cpp from source with
+// CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
+// died mid-build.
+const LLAMACPP_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+// How often we ask systemd how the install unit is doing while it runs.
+const LLAMACPP_INSTALL_POLL_MS = 3000;
+// `systemctl start --no-block` returns before the unit leaves "inactive".
+// Re-check a couple of times at this interval before concluding it finished,
+// so we don't mistake "hasn't started yet" for "already done".
+const LLAMACPP_INSTALL_START_GRACE_MS = 1000;
+const LLAMACPP_INSTALL_START_GRACE_POLLS = 2;
+const SYSTEMCTL_QUERY_TIMEOUT_MS = 15_000;
+// Phase-stable prefix: getLlamaCppOverlayProgress keys the "Provisioning
+// offline Gemma 4" step off "installing gemma 4", and the raw journal lines
+// (cmake, hf download, apt) match nothing — without this the wizard would jump
+// back to step 1 on every log line. Everything after the separator is shown to
+// the user as live detail.
+const INSTALL_STATUS_PREFIX = "Installing Gemma 4 for offline use";
+const INSTALL_STATUS_SEPARATOR = " — ";
 
 function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
   controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
@@ -47,29 +66,70 @@ function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
     || normalized.includes("[llamacpp] missing local model");
 }
 
-async function readLlamaCppInstallFailure(): Promise<string | null> {
+async function readLlamaCppInstallLog(lines: number): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", LLAMACPP_INSTALL_SERVICE, "-n", "40", "--no-pager", "-o", "cat"],
+      ["-u", LLAMACPP_INSTALL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
       { timeout: 10_000 },
     );
-    return getLastLogLine(stdout);
+    return stdout;
   } catch {
-    return null;
+    return "";
   }
 }
 
-async function repairLlamaCppRuntime(): Promise<{ ok: boolean; error?: string }> {
+async function readLlamaCppInstallFailure(): Promise<string | null> {
+  return getLastLogLine(await readLlamaCppInstallLog(40));
+}
+
+/**
+ * ActiveState/Result for the install unit. Empty strings mean "couldn't ask" —
+ * callers treat that the same as "not running" and fall back to the on-disk
+ * provisioning check, which is the real gate.
+ */
+async function readInstallUnitState(): Promise<{ active: string; result: string }> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", LLAMACPP_INSTALL_SERVICE, "-p", "ActiveState", "-p", "Result"],
+      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
+    );
+    return {
+      active: /^ActiveState=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
+      result: /^Result=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
+    };
+  } catch {
+    return { active: "", result: "" };
+  }
+}
+
+function isUnitRunning(active: string): boolean {
+  return active === "activating" || active === "active" || active === "reloading";
+}
+
+/**
+ * Run the root install step, streaming its journal output.
+ *
+ * Previously this was a single blocking `systemctl start`, which emitted
+ * nothing for up to 30 minutes — a cold Jetson build looked identical to a
+ * hang, and there was no way to tell whether it was progressing. Now we start
+ * the unit detached and poll systemd, so the wizard shows live build/download
+ * lines and a genuine failure surfaces the moment the unit fails.
+ */
+async function repairLlamaCppRuntime(
+  onStatus: (line: string) => void,
+): Promise<{ ok: boolean; error?: string }> {
   await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", LLAMACPP_INSTALL_SERVICE], {
     timeout: 10_000,
   }).catch(() => {});
 
   try {
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", LLAMACPP_INSTALL_SERVICE], {
-      timeout: LLAMACPP_INSTALL_TIMEOUT_MS,
-    });
-    return { ok: true };
+    await execFile(
+      "/usr/bin/sudo",
+      ["/usr/bin/systemctl", "start", "--no-block", LLAMACPP_INSTALL_SERVICE],
+      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
+    );
   } catch (err) {
     const failureLine = await readLlamaCppInstallFailure();
     return {
@@ -77,6 +137,44 @@ async function repairLlamaCppRuntime(): Promise<{ ok: boolean; error?: string }>
       error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
     };
   }
+
+  const deadline = Date.now() + LLAMACPP_INSTALL_TIMEOUT_MS;
+  let lastLine: string | null = null;
+  let sawRunning = false;
+  let gracePolls = 0;
+
+  while (Date.now() < deadline) {
+    const { active, result } = await readInstallUnitState();
+    if (isUnitRunning(active)) sawRunning = true;
+
+    const line = getLastLogLine(await readLlamaCppInstallLog(5));
+    if (line && line !== lastLine) {
+      lastLine = line;
+      onStatus(line);
+    }
+
+    if (active === "failed") {
+      return { ok: false, error: lastLine || `llama.cpp install failed (${result || "unknown"})` };
+    }
+
+    if (!isUnitRunning(active)) {
+      // Either it finished, or `--no-block` returned before it started. Give it
+      // a couple of short re-checks before believing the former.
+      if (sawRunning || gracePolls >= LLAMACPP_INSTALL_START_GRACE_POLLS) {
+        if (result && result !== "success") {
+          return { ok: false, error: lastLine || `llama.cpp install failed (${result})` };
+        }
+        return { ok: true };
+      }
+      gracePolls += 1;
+      await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_START_GRACE_MS));
+      continue;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_POLL_MS));
+  }
+
+  return { ok: false, error: lastLine || "Timed out installing the local Gemma 4 runtime." };
 }
 
 function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
@@ -166,7 +264,9 @@ export async function POST(request: Request) {
               ? "Installing Gemma 4 for offline use..."
               : "Installing llama.cpp and Gemma 4 for offline use...",
           });
-          const repaired = await repairLlamaCppRuntime();
+          const repaired = await repairLlamaCppRuntime((line) => {
+            emit(controller, { status: `${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${line}` });
+          });
           if (!repaired.ok) {
             emit(controller, { error: repaired.error || "Failed to provision the local Gemma 4 runtime" });
             controller.close();
@@ -254,7 +354,9 @@ export async function POST(request: Request) {
             if (!attemptedRuntimeRepair && shouldRepairLlamaCppRuntime(logLine)) {
               emit(controller, { status: "Repairing the llama.cpp runtime so Gemma can start..." });
               attemptedRuntimeRepair = true;
-              const repaired = await repairLlamaCppRuntime();
+              const repaired = await repairLlamaCppRuntime((repairLine) => {
+                emit(controller, { status: `${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${repairLine}` });
+              });
               if (!repaired.ok) {
                 emit(controller, { error: repaired.error || "Failed to repair llama.cpp runtime" });
                 controller.close();
