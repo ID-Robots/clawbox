@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-sync the ClawBox Codex credential mirrors every 10 minutes
+Requires=clawbox-codex-auth-sync.service
+
+[Timer]
+# Boot sync already happens in gateway-pre-start.sh; give the gateway a moment
+# to come up before the first timer-driven pass so we mirror a settled store.
+OnBootSec=2min
+# ChatGPT access tokens last about an hour. 10 minutes leaves five chances to
+# pick up a rotation before the mirrors would serve an expired token and the
+# box regressed to "401 Missing bearer".
+OnUnitActiveSec=10min
+# The mirror is idempotent and cheap; let systemd batch the wake-up.
+AccuracySec=30s
+Unit=clawbox-codex-auth-sync.service
+
+[Install]
+WantedBy=timers.target

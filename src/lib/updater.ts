@@ -285,7 +285,9 @@ async function updateClawBoxAndReboot(): Promise<void> {
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
-const GATEWAY_WAIT_INTERVAL_MS = 1_500;
+const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
+const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
+const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
 
@@ -350,11 +352,11 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     await restartGateway();
   }
 
-  if (await waitForGateway(30_000)) return;
+  if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
 
   await runOpenclawDoctorFix();
   await restartGateway().catch(() => {});
-  if (await waitForGateway(30_000)) return;
+  if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
@@ -369,7 +371,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   await quarantineLegacyOpenclawState();
   await runOpenclawDoctorFix();
   await restartGateway();
-  if (await waitForGateway(45_000)) return;
+  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
   const lastLog = getLastLogLine(afterRecoveryLog);

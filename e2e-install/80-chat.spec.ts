@@ -127,18 +127,21 @@ test.describe("chat round trip", () => {
       { name: "clawbox_session", value: match![1], domain: "localhost", path: "/" },
     ]);
 
-    // The desktop opens the chat panel based on the ui_chat_open pref.
-    // Fresh-setup state leaves it closed; force it open so we don't have
-    // to hunt for the mascot-click sequence that toggles it.
+    // A persisted `ui_chat_open` no longer opens the chat — the floating
+    // popup is deliberately ignored on load now (see src/app/page.tsx), so
+    // seeding it leaves the desktop with no chat and no textbox to find.
+    // The docked side panel IS still restored, and `ui_chat_panel_width > 0`
+    // opens it at mount with the same input this test drives. That keeps the
+    // chat on screen without depending on a launcher button or the
+    // pointer-flaky crab tap.
     await fetch(`${BASE_URL}/setup-api/preferences`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ui_chat_open: 1, ui_mascot_hidden: 1 }),
+      body: JSON.stringify({ ui_chat_panel_width: 420, ui_mascot_hidden: 1 }),
     });
 
     await page.goto("/");
 
-    // ChatPopup auto-opens on the desktop shell — no launcher click needed.
     // Before the gateway WS connects, the textbox shows
     // "Waiting for the Claw to wake up…" and is disabled. Once the gateway
     // acknowledges the session, the placeholder flips to "Type a message..."
