@@ -36,7 +36,7 @@ let agentDir: string;
 let homeAuthPath: string;
 let codexHomeAuthPath: string;
 
-function seedProfile(access: string, refresh = "refresh-secret") {
+function seedProfile(access: string, refresh: string = "refresh-secret") {
   writeFileSync(
     path.join(agentDir, "auth-profiles.json"),
     JSON.stringify({
@@ -67,38 +67,34 @@ afterEach(() => {
 });
 
 describe("codex-auth-mirror.js", () => {
-  it("never writes a refresh_token into any mirror", () => {
+  it("keeps the refresh_token — core's credential reader hard-rejects without it", () => {
+    // core: readCodexCliCredentials()
+    //   if (typeof refreshToken !== "string" || !refreshToken) return null;
+    // A null credential means the codex plugin attaches no auth (`profile=-`
+    // in the gateway log) and every turn dies on 401. Stripping this field is
+    // exactly how the first attempt at the rotation fix broke Codex.
     seedProfile(accessToken("acct-1"));
     run();
 
-    for (const file of [homeAuthPath, codexHomeAuthPath]) {
-      const parsed = JSON.parse(readFileSync(file, "utf-8"));
-      expect(parsed.tokens.refresh_token).toBeUndefined();
-      // The whole serialized file, so a refresh token can't sneak in elsewhere.
-      expect(readFileSync(file, "utf-8")).not.toContain("refresh-secret");
-    }
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.refresh_token).toBe("refresh-secret");
+    expect(parsed.tokens.access_token).toBe(accessToken("acct-1"));
   });
 
-  it("mirrors the access token and account id the runtime needs", () => {
-    seedProfile(accessToken("acct-42"));
-    run();
-
-    const parsed = JSON.parse(readFileSync(codexHomeAuthPath, "utf-8"));
-    expect(parsed.tokens.access_token).toBe(accessToken("acct-42"));
-    expect(parsed.tokens.account_id).toBe("acct-42");
-    expect(parsed.tokens.id_token).toBe("id-token");
-  });
-
-  it("writes to CODEX_HOME as well as ~/.codex — the app-server only reads the former", () => {
+  it("never writes the copy the Codex app-server rotates", () => {
+    // <agentDir>/codex-home/auth.json is CODEX_HOME for the app-server, which
+    // rotates whatever credential it finds there. A refresh token in that file
+    // is a second rotator against core's single-use token and burns the whole
+    // family (401 refresh_token_reused). Core pushes the app-server its tokens
+    // over account/login/start, so the file is not needed at all.
     seedProfile(accessToken("acct-1"));
     run();
 
     expect(existsSync(homeAuthPath)).toBe(true);
-    expect(existsSync(codexHomeAuthPath)).toBe(true);
+    expect(existsSync(codexHomeAuthPath)).toBe(false);
   });
 
-  it("self-heals a mirror poisoned by 3.1.11", () => {
-    // Exactly what 3.1.11 left on disk: a mirror carrying the refresh token.
+  it("removes a rotating copy left behind by 3.1.11", () => {
     mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
     writeFileSync(
       codexHomeAuthPath,
@@ -115,31 +111,51 @@ describe("codex-auth-mirror.js", () => {
 
     const out = run();
 
-    const parsed = JSON.parse(readFileSync(codexHomeAuthPath, "utf-8"));
-    expect(parsed.tokens.refresh_token).toBeUndefined();
-    expect(out).toContain("stripped refresh_token");
+    expect(existsSync(codexHomeAuthPath)).toBe(false);
+    expect(out).toContain("removed rotating copy");
   });
 
-  it("refreshes a stale mirror when core has rotated the access token", () => {
+  it("mirrors the access token and account id the runtime needs", () => {
+    seedProfile(accessToken("acct-42"));
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.access_token).toBe(accessToken("acct-42"));
+    expect(parsed.tokens.account_id).toBe("acct-42");
+    expect(parsed.tokens.id_token).toBe("id-token");
+  });
+
+  it("refreshes a stale credential when core has rotated the access token", () => {
     seedProfile(accessToken("acct-1", "old"));
     run();
-    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.access_token)
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.access_token)
       .toBe(accessToken("acct-1", "old"));
 
     // Core rotated; the timer runs again.
     seedProfile(accessToken("acct-1", "new"));
     const out = run();
 
-    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.access_token)
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.access_token)
       .toBe(accessToken("acct-1", "new"));
     expect(out).toContain("refreshed");
+  });
+
+  it("realigns when only the refresh token drifted", () => {
+    seedProfile(accessToken("acct-1"), "refresh-old");
+    run();
+    seedProfile(accessToken("acct-1"), "refresh-new");
+    const out = run();
+
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-new");
+    expect(out).toContain("realigned");
   });
 
   it("is idempotent — a second run with no rotation rewrites nothing", () => {
     seedProfile(accessToken("acct-1"));
     run();
     const out = run();
-    expect(out).toContain("mirrors already current");
+    expect(out).toContain("credential already current");
   });
 
   it("preserves a user's OPENAI_API_KEY — that path has no rotation problem", () => {
@@ -158,10 +174,8 @@ describe("codex-auth-mirror.js", () => {
     seedProfile(accessToken("acct-1"));
     run();
 
-    for (const file of [homeAuthPath, codexHomeAuthPath]) {
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
-    }
+    expect(statSync(homeAuthPath).mode & 0o777).toBe(0o600);
+    expect(statSync(path.dirname(homeAuthPath)).mode & 0o777).toBe(0o700);
   });
 
   it("exits cleanly before login instead of blocking gateway start", () => {
@@ -193,22 +207,21 @@ describe("codex-auth-mirror.js", () => {
 
     run();
 
-    const parsed = JSON.parse(readFileSync(codexHomeAuthPath, "utf-8"));
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
     expect(parsed.tokens.access_token).toBe(accessToken("acct-sqlite"));
     expect(parsed.tokens.account_id).toBe("acct-sqlite");
-    expect(parsed.tokens.refresh_token).toBeUndefined();
-    expect(readFileSync(codexHomeAuthPath, "utf-8")).not.toContain("refresh-secret");
+    expect(parsed.tokens.refresh_token).toBe("refresh-secret");
   });
 
-  it("mirrors into every agent, not just main", () => {
+  it("clears rotating copies for every agent, not just main", () => {
     const second = path.join(openclawHome, "agents", "support", "agent");
-    mkdirSync(second, { recursive: true });
+    const secondRotating = path.join(second, "codex-home", "auth.json");
+    mkdirSync(path.dirname(secondRotating), { recursive: true });
+    writeFileSync(secondRotating, JSON.stringify({ tokens: { refresh_token: "x" } }));
     seedProfile(accessToken("acct-1"));
     run();
 
-    const secondMirror = path.join(second, "codex-home", "auth.json");
-    expect(existsSync(secondMirror)).toBe(true);
-    expect(JSON.parse(readFileSync(secondMirror, "utf-8")).tokens.refresh_token).toBeUndefined();
+    expect(existsSync(secondRotating)).toBe(false);
   });
 });
 
@@ -218,7 +231,7 @@ describe("gateway-pre-start.sh wiring", () => {
   it("delegates to the mirror script instead of inlining a credential writer", () => {
     const src = readFileSync(PRE_START, "utf-8");
     expect(src).toContain("scripts/codex-auth-mirror.js");
-    // The inline heredoc that planted refresh tokens must be gone for good.
-    expect(src).not.toMatch(/refresh_token:\s*p\.refresh/);
+    // The inline heredoc that mirrored into every codex-home must stay gone.
+    expect(src).not.toMatch(/codex-home", "auth\.json"/);
   });
 });

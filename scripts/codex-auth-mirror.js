@@ -101,15 +101,29 @@ function credentialFromProfiles(agentDir) {
   if (!profile || !profile.access) return null;
   return {
     accessToken: profile.access,
+    refreshToken: profile.refresh,
     idToken: profile.id || profile.access,
     accountId: accountIdFromAccessToken(profile.access),
   };
 }
 
 /**
- * Build the file contents. Deliberately no refresh_token — see the rule above.
- * An existing OPENAI_API_KEY is carried over: that is the API-key path, which
- * core reads from this same file and which has no rotation problem.
+ * Build the file contents.
+ *
+ * refresh_token IS included, and it has to be: core's readCodexCliCredentials()
+ * hard-rejects a credential without one --
+ *
+ *   if (typeof refreshToken !== "string" || !refreshToken) return null;
+ *
+ * -- and a null credential means the codex plugin attaches no auth at all
+ * (`profile=-` in the gateway log) and every turn dies on 401. An earlier
+ * attempt at this fix stripped the field and broke Codex exactly that way.
+ *
+ * Safety comes from WHERE it is written, not from omitting it: only
+ * ~/.codex/auth.json gets a credential, and nothing rotates that file. The
+ * codex plugin reads it and never writes it, and no process runs with
+ * CODEX_HOME=~/.codex. The file the Codex app-server *does* rotate is
+ * <agentDir>/codex-home/auth.json -- see the destination list in main().
  */
 function buildAuthFile(credential, existing) {
   return {
@@ -117,6 +131,7 @@ function buildAuthFile(credential, existing) {
     tokens: {
       id_token: credential.idToken,
       access_token: credential.accessToken,
+      refresh_token: credential.refreshToken,
       account_id: credential.accountId,
     },
     last_refresh: new Date().toISOString(),
@@ -124,15 +139,14 @@ function buildAuthFile(credential, existing) {
 }
 
 /**
- * Rewrite when the access token changed or a refresh_token is present (a
- * poisoned 3.1.11 mirror, or a stale copy). Returns a short reason for the log,
- * or null when the file was already correct.
+ * Rewrite whenever the file drifts from core's profile. Core is the only
+ * rotator, so "different from core" always means "stale copy", never "newer".
  */
 function syncReason(existing, credential) {
   if (!existing) return "created";
   const tokens = existing.tokens || {};
-  if (tokens.refresh_token) return "stripped refresh_token";
   if (tokens.access_token !== credential.accessToken) return "refreshed";
+  if (tokens.refresh_token !== credential.refreshToken) return "realigned";
   return null;
 }
 
@@ -175,19 +189,27 @@ function main() {
     return;
   }
 
-  const destinations = [
-    homeAuthPath,
-    ...agentDirs.map((dir) => path.join(dir, "codex-home", "auth.json")),
-  ];
-  let synced = 0;
-  for (const dest of destinations) {
-    const reason = writeMirror(dest, credential);
-    if (reason) {
-      synced += 1;
-      log(`Codex auth.json ${reason}: ${dest}`);
+  // ONLY ~/.codex/auth.json. The codex plugin reads it and never writes it,
+  // and nothing runs with CODEX_HOME=~/.codex, so this copy is never rotated.
+  const reason = writeMirror(homeAuthPath, credential);
+  if (reason) log(`Codex auth.json ${reason}: ${homeAuthPath}`);
+  else log("Codex auth.json: credential already current");
+
+  // <agentDir>/codex-home/auth.json is the file the Codex app-server rotates.
+  // A credential there is a second rotator against core's single-use refresh
+  // token and burns the whole family (401 refresh_token_reused). Core pushes
+  // the app-server its tokens over account/login/start, so the file is not
+  // needed -- remove any that 3.1.11 left behind.
+  for (const dir of agentDirs) {
+    const rotated = path.join(dir, "codex-home", "auth.json");
+    if (!fs.existsSync(rotated)) continue;
+    try {
+      fs.rmSync(rotated);
+      log(`Codex auth.json removed rotating copy: ${rotated}`);
+    } catch (error) {
+      log(`Codex auth.json: could not remove ${rotated}: ${error.message}`);
     }
   }
-  if (synced === 0) log("Codex auth.json: mirrors already current");
 }
 
 try {

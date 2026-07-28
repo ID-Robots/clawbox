@@ -635,6 +635,17 @@ fi
 # the API-key path, which core reads from this file and which has no rotation
 # problem.
 if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
+  # Credentials written by the setup wizard can land only in the legacy
+  # <agentDir>/auth-profiles.json, while core 2026.7.x resolves auth from the
+  # auth_profile_store table of openclaw-agent.sqlite. When that happens core
+  # attaches no profile (`profile=-` in the log), sends no bearer, and every
+  # turn 401s while the UI still shows the provider as connected. Migrate
+  # first, so the mirror below reads a populated store.
+  AUTH_PROFILE_MIGRATION="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/migrate-auth-profiles.js"
+  if [ -f "$AUTH_PROFILE_MIGRATION" ]; then
+    node "$AUTH_PROFILE_MIGRATION" "$OPENCLAW_HOME_DIR" || true
+  fi
+
   CODEX_AUTH_MIRROR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/codex-auth-mirror.js"
   if [ -f "$CODEX_AUTH_MIRROR" ]; then
     node "$CODEX_AUTH_MIRROR" "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" || true
