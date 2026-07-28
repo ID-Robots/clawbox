@@ -29,7 +29,12 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateNetwork=yes
 ProtectSystem=strict
-ReadWritePaths=/home/clawbox/.openclaw /home/clawbox/.codex
+# Leading "-" = tolerate a missing path. ~/.codex does not exist until the
+# first ChatGPT login, and systemd refuses to start a unit whose ReadWritePaths
+# names a path that isn't there — which would turn "not logged in yet" into a
+# failed unit on every fresh box. install.sh pre-creates it; this is insurance
+# for boxes that got here another way.
+ReadWritePaths=-/home/clawbox/.openclaw -/home/clawbox/.codex
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

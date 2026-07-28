@@ -1283,6 +1283,11 @@ step_systemd_services() {
   # Start the AP watchdog immediately so a dropped setup hotspot self-heals
   # without waiting for a reboot.
   systemctl enable --now clawbox-ap-watchdog.timer
+  # The sync unit runs under ProtectSystem=strict and can only write paths named
+  # in ReadWritePaths. ~/.codex doesn't exist until the first ChatGPT login, so
+  # create it up front — otherwise the very first mirror write (the one that
+  # makes Codex work at all) hits a read-only namespace.
+  install -d -o clawbox -g clawbox -m 700 "$CLAWBOX_HOME/.codex"
   # Start the Codex credential mirror sync immediately so a box updating into
   # this release strips any refresh_token 3.1.11 planted in its mirrors without
   # waiting for a reboot — that token is what burns the OAuth family.
