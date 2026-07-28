@@ -1,0 +1,41 @@
+[Unit]
+Description=ClawBox Codex credential mirror sync
+After=clawbox-gateway.service
+# The mirrors are only meaningful once the gateway (and therefore core's auth
+# profile store) exists. No Requires= — a stopped gateway just means there is
+# nothing new to mirror, which the script reports and exits 0 on.
+
+[Service]
+Type=oneshot
+User=clawbox
+Group=clawbox
+# Re-sync ~/.codex/auth.json and every agent's codex-home/auth.json from core's
+# auth profile store. ChatGPT access tokens expire in about an hour, and core
+# rotates the refresh token that mints them; the mirrors carry no refresh token
+# of their own (that is what killed boxes on 3.1.11 — two rotators, one
+# single-use token family, HTTP 401 refresh_token_reused). So they must be
+# re-read from core rather than left to decay. See scripts/codex-auth-mirror.js.
+Environment=CODEX_AUTH_MIRROR_QUIET=1
+ExecStart=/usr/bin/env node /home/clawbox/clawbox/scripts/codex-auth-mirror.js
+# A missing credential is the normal pre-login state and the script already
+# exits 0 on it. Anything else is transient (DB locked mid-write) and the next
+# tick retries, so never let this unit flap into failed state.
+SuccessExitStatus=0 1
+
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+# Reads core's sqlite store, writes two owner-only credential files under the
+# clawbox home. No network at all — this unit never talks to OpenAI.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/home/clawbox/.openclaw /home/clawbox/.codex
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
