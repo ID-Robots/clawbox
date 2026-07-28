@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -81,38 +81,59 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.access_token).toBe(accessToken("acct-1"));
   });
 
-  it("never writes the copy the Codex app-server rotates", () => {
-    // <agentDir>/codex-home/auth.json is CODEX_HOME for the app-server, which
-    // rotates whatever credential it finds there. A refresh token in that file
-    // is a second rotator against core's single-use token and burns the whole
-    // family (401 refresh_token_reused). Core pushes the app-server its tokens
-    // over account/login/start, so the file is not needed at all.
+  it("writes CODEX_HOME too — the app-server is the only correct API path", () => {
+    // Without a credential in <agentDir>/codex-home the app-server can't run,
+    // codex falls back to core's HTTP transport, and that posts to a
+    // Cloudflare-challenged browser endpoint.
     seedProfile(accessToken("acct-1"));
     run();
 
     expect(existsSync(homeAuthPath)).toBe(true);
-    expect(existsSync(codexHomeAuthPath)).toBe(false);
+    expect(existsSync(codexHomeAuthPath)).toBe(true);
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-secret");
   });
 
-  it("removes a rotating copy left behind by 3.1.11", () => {
+  it("adopts an app-server rotation instead of overwriting it with a spent token", () => {
+    // The app-server rotated its CODEX_HOME credential. Refresh tokens are
+    // single-use, so core's stored copy is now the DEAD one — writing it back
+    // over the file would burn the family on next use.
     mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
     writeFileSync(
       codexHomeAuthPath,
       JSON.stringify({
         OPENAI_API_KEY: null,
         tokens: {
-          access_token: accessToken("acct-1"),
-          refresh_token: "poisoned-rotating-token",
+          access_token: accessToken("acct-1", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
           account_id: "acct-1",
         },
       }),
     );
-    seedProfile(accessToken("acct-1"));
+    seedProfile(accessToken("acct-1", "old"), "refresh-spent");
 
     const out = run();
 
-    expect(existsSync(codexHomeAuthPath)).toBe(false);
-    expect(out).toContain("removed rotating copy");
+    expect(out).toContain("adopted app-server rotation");
+    // The rotated token survives everywhere, including core's own store.
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+  });
+
+  it("does not write the same file twice when codex-home is a symlink to ~/.codex", () => {
+    // A previous version resolved both destinations to one file and then
+    // deleted the real credential through the link.
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    symlinkSync(path.dirname(homeAuthPath), path.join(agentDir, "codex-home"));
+    seedProfile(accessToken("acct-1"));
+
+    run();
+
+    expect(existsSync(homeAuthPath)).toBe(true);
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.access_token)
+      .toBe(accessToken("acct-1"));
   });
 
   it("mirrors the access token and account id the runtime needs", () => {
@@ -140,15 +161,22 @@ describe("codex-auth-mirror.js", () => {
     expect(out).toContain("refreshed");
   });
 
-  it("realigns when only the refresh token drifted", () => {
-    seedProfile(accessToken("acct-1"), "refresh-old");
+  it("never clobbers a drifted file with core's copy — the file is the newer one", () => {
+    // Only the app-server rotates, so a refresh token that differs from core's
+    // means the app-server moved on and core's copy is spent. Writing core's
+    // value back over the file would hand a dead token to the next request.
+    seedProfile(accessToken("acct-1"), "refresh-from-appserver");
     run();
-    seedProfile(accessToken("acct-1"), "refresh-new");
-    const out = run();
+    seedProfile(accessToken("acct-1"), "refresh-spent");
+    run();
 
     expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
-      .toBe("refresh-new");
-    expect(out).toContain("realigned");
+      .toBe("refresh-from-appserver");
+    // ...and core has been realigned to it rather than the other way round.
+    const store = JSON.parse(
+      readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"),
+    );
+    expect(store.profiles["codex:default"].refresh).toBe("refresh-from-appserver");
   });
 
   it("is idempotent — a second run with no rotation rewrites nothing", () => {
@@ -213,15 +241,13 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.refresh_token).toBe("refresh-secret");
   });
 
-  it("clears rotating copies for every agent, not just main", () => {
+  it("mirrors into every agent, not just main", () => {
     const second = path.join(openclawHome, "agents", "support", "agent");
-    const secondRotating = path.join(second, "codex-home", "auth.json");
-    mkdirSync(path.dirname(secondRotating), { recursive: true });
-    writeFileSync(secondRotating, JSON.stringify({ tokens: { refresh_token: "x" } }));
+    mkdirSync(second, { recursive: true });
     seedProfile(accessToken("acct-1"));
     run();
 
-    expect(existsSync(secondRotating)).toBe(false);
+    expect(existsSync(path.join(second, "codex-home", "auth.json"))).toBe(true);
   });
 });
 

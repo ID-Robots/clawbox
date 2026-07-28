@@ -165,6 +165,85 @@ function writeMirror(dest, credential) {
   return reason;
 }
 
+
+/**
+ * Collapse destinations that resolve to the same file. <agentDir>/codex-home
+ * is sometimes a symlink to ~/.codex; without this the same file gets written
+ * twice, and a previous version deleted the real credential through the link.
+ */
+function dedupePaths(files) {
+  const seen = new Map();
+  for (const file of files) {
+    let key = file;
+    try {
+      key = path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file));
+    } catch {
+      // Directory doesn't exist yet — the raw path is unique enough.
+    }
+    if (!seen.has(key)) seen.set(key, file);
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Write an app-server rotation back into core's auth profile store, so core
+ * stops handing out a refresh token that has already been spent.
+ */
+function writeBackToCore(agentDirs, tokens) {
+  if (!tokens || !tokens.refresh_token) return false;
+  let wrote = false;
+
+  // Legacy JSON store, still the source on some boxes.
+  for (const agentDir of agentDirs) {
+    const jsonPath = path.join(agentDir, "auth-profiles.json");
+    const data = readJson(jsonPath);
+    const profiles = data && data.profiles;
+    if (!profiles) continue;
+    const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
+    if (!profiles[id]) continue;
+    profiles[id].access = tokens.access_token || profiles[id].access;
+    profiles[id].refresh = tokens.refresh_token;
+    if (tokens.id_token) profiles[id].id = tokens.id_token;
+    try {
+      fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      wrote = true;
+    } catch {
+      // Non-fatal; the sqlite store below is the one core reads.
+    }
+  }
+
+  for (const agentDir of agentDirs) {
+    const dbPath = path.join(agentDir, "openclaw-agent.sqlite");
+    if (!fs.existsSync(dbPath)) continue;
+    try {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(dbPath);
+      try {
+        const row = db
+          .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
+          .get("primary");
+        if (!row || !row.store_json) continue;
+        const store = JSON.parse(row.store_json);
+        const profiles = store.profiles || {};
+        const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
+        if (!profiles[id]) continue;
+        profiles[id].access = tokens.access_token || profiles[id].access;
+        profiles[id].refresh = tokens.refresh_token;
+        if (tokens.id_token) profiles[id].id = tokens.id_token;
+        store.profiles = profiles;
+        db.prepare("UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?")
+          .run(JSON.stringify(store), Date.now(), "primary");
+        wrote = true;
+      } finally {
+        db.close();
+      }
+    } catch {
+      // Locked or unavailable — the next timer tick retries.
+    }
+  }
+  return wrote;
+}
+
 function main() {
   const agentsRoot = path.join(openclawHome, "agents");
   const agentDirs = fs.existsSync(agentsRoot)
@@ -189,27 +268,56 @@ function main() {
     return;
   }
 
-  // ONLY ~/.codex/auth.json. The codex plugin reads it and never writes it,
-  // and nothing runs with CODEX_HOME=~/.codex, so this copy is never rotated.
-  const reason = writeMirror(homeAuthPath, credential);
-  if (reason) log(`Codex auth.json ${reason}: ${homeAuthPath}`);
-  else log("Codex auth.json: credential already current");
+  // Both locations are required:
+  //   ~/.codex/auth.json              - read by the codex plugin
+  //   <agentDir>/codex-home/auth.json - CODEX_HOME for the Codex app-server,
+  //                                     the only path that addresses the real
+  //                                     Codex API correctly
+  // An earlier attempt deleted the second one; the app-server then had no
+  // credential, codex fell back to core's HTTP transport, and every turn hit a
+  // Cloudflare-challenged browser endpoint. See #280.
+  const destinations = dedupePaths([
+    homeAuthPath,
+    ...agentDirs.map((dir) => path.join(dir, "codex-home", "auth.json")),
+  ]);
 
-  // <agentDir>/codex-home/auth.json is the file the Codex app-server rotates.
-  // A credential there is a second rotator against core's single-use refresh
-  // token and burns the whole family (401 refresh_token_reused). Core pushes
-  // the app-server its tokens over account/login/start, so the file is not
-  // needed -- remove any that 3.1.11 left behind.
-  for (const dir of agentDirs) {
-    const rotated = path.join(dir, "codex-home", "auth.json");
-    if (!fs.existsSync(rotated)) continue;
-    try {
-      fs.rmSync(rotated);
-      log(`Codex auth.json removed rotating copy: ${rotated}`);
-    } catch (error) {
-      log(`Codex auth.json: could not remove ${rotated}: ${error.message}`);
+  // The app-server rotates its own CODEX_HOME credential. Refresh tokens are
+  // single-use, so if it has already rotated, core's stored copy is the DEAD
+  // one -- overwriting the file with it would burn the family on next use.
+  // Core follows the app-server, never the other way round.
+  const rotated = destinations
+    .map((dest) => ({ dest, data: readJson(dest) }))
+    .find(({ data }) => {
+      const tokens = (data && data.tokens) || {};
+      return (
+        typeof tokens.refresh_token === "string" &&
+        tokens.refresh_token &&
+        tokens.refresh_token !== credential.refreshToken
+      );
+    });
+
+  if (rotated) {
+    const tokens = rotated.data.tokens;
+    if (writeBackToCore(agentDirs, tokens)) {
+      log(`Codex auth.json: adopted app-server rotation from ${rotated.dest}`);
+      credential = {
+        accessToken: tokens.access_token || credential.accessToken,
+        refreshToken: tokens.refresh_token,
+        idToken: tokens.id_token || credential.idToken,
+        accountId: tokens.account_id || credential.accountId,
+      };
     }
   }
+
+  let synced = 0;
+  for (const dest of destinations) {
+    const reason = writeMirror(dest, credential);
+    if (reason) {
+      synced += 1;
+      log(`Codex auth.json ${reason}: ${dest}`);
+    }
+  }
+  if (synced === 0) log("Codex auth.json: credential already current");
 }
 
 try {

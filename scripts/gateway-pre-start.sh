@@ -221,18 +221,62 @@ if _has_codex_oauth_profile() and not _has_openai_api_key_profile():
                 _fallbacks[_i] = _migrated_fb
                 changed = True
 
-# Strip orphaned per-model keys that a newer-than-pinned plugin wrote and a
-# version downgrade left behind, which fail strict config validation and
-# brick the AI provider page until `openclaw doctor --fix`. `agentRuntime`
-# is written by @openclaw/codex >= 2026.5.27 into agents.defaults.models[*];
-# when the plugin is realigned to the pinned core (< that version) the key is
-# orphaned. Drop it on every gateway start so affected devices self-heal.
+# agentRuntime routing for codex models.
+#
+# `agents.defaults.models["codex/*"].agentRuntime = {"id": "codex"}` is what
+# sends a codex turn through the Codex app-server harness. WITHOUT it core
+# falls back to its generic HTTP responses transport, which posts to
+# https://chatgpt.com/backend-api/responses -- a browser endpoint Cloudflare
+# managed-challenges -- and every turn dies with "the provider returned an HTML
+# error page". The real Codex API is /backend-api/codex/responses, and only the
+# app-server addresses it correctly. Proven on a live box 2026-07-28: with the
+# key, `CODEX OK`; remove the key, restart, same box, HTML challenge. See #280.
+#
+# ClawBox used to delete this key unconditionally, because
+# @openclaw/codex >= 2026.5.27 writes it and an older *pinned* core rejected it
+# in strict config validation, bricking the AI provider page. That is still
+# worth guarding, so the strip is kept for everything that is NOT a codex
+# model -- an orphaned agentRuntime on some other provider has no purpose.
+#
+# Also seed the entry for any codex model the box is actually configured to
+# use, so picking one in the UI works after the next gateway start rather than
+# needing the key added by hand.
 agents_models = agents_defaults.get("models")
-if isinstance(agents_models, dict):
-    for _model_key, _model_val in agents_models.items():
-        if isinstance(_model_val, dict) and "agentRuntime" in _model_val:
-            del _model_val["agentRuntime"]
-            changed = True
+if not isinstance(agents_models, dict):
+    agents_models = {}
+
+def _is_codex_ref(model_id):
+    return isinstance(model_id, str) and model_id.strip().lower().startswith("codex/")
+
+_codex_refs = set()
+if _is_codex_ref(model_defaults.get("primary")):
+    _codex_refs.add(model_defaults["primary"].strip())
+for _fb in model_defaults.get("fallbacks") or []:
+    if _is_codex_ref(_fb):
+        _codex_refs.add(_fb.strip())
+for _model_key in list(agents_models.keys()):
+    if _is_codex_ref(_model_key):
+        _codex_refs.add(_model_key)
+
+for _model_key, _model_val in list(agents_models.items()):
+    if not isinstance(_model_val, dict):
+        continue
+    if not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
+        del _model_val["agentRuntime"]
+        changed = True
+
+for _ref in sorted(_codex_refs):
+    _entry = agents_models.get(_ref)
+    if not isinstance(_entry, dict):
+        _entry = {}
+        agents_models[_ref] = _entry
+        changed = True
+    if _entry.get("agentRuntime") != {"id": "codex"}:
+        _entry["agentRuntime"] = {"id": "codex"}
+        changed = True
+
+if _codex_refs or agents_models:
+    agents_defaults["models"] = agents_models
 
 # Security migration: older ClawBox versions silently wrote
 # channels.telegram.dmPolicy="open" + allowFrom=["*"] at bot-token setup,
