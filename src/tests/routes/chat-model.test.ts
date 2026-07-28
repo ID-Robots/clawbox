@@ -254,6 +254,19 @@ describe("/setup-api/chat/model", () => {
     expect(body.activeLabel).toBe("Gemma 4 Local");
   });
 
+  it("does not arm the Codex runtime for a non-Codex model", async () => {
+    await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+    }));
+
+    const armed = vi.mocked(runOpenclawConfigSet).mock.calls.some(
+      ([args]) => Array.isArray(args) && String(args[0]).includes("agentRuntime"),
+    );
+    expect(armed).toBe(false);
+  });
+
   it("switches back to the stored primary provider model", async () => {
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",

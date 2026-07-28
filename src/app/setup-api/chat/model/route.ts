@@ -521,6 +521,22 @@ export async function POST(request: Request) {
     //    gateway reloads concurrently with the write.
     await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
 
+    // 1b. Codex turns only work through the Codex app-server harness, which is
+    //     selected by agentRuntime. Without it core uses its generic HTTP
+    //     responses transport, which posts to
+    //     https://chatgpt.com/backend-api/responses — a browser endpoint
+    //     Cloudflare managed-challenges — and every turn fails with "the
+    //     provider returned an HTML error page". gateway-pre-start.sh sets this
+    //     too, but a model change applies WITHOUT a restart, so picking Codex
+    //     here has to arm the runtime immediately or the very next message
+    //     fails until the box is rebooted.
+    if (targetModel.toLowerCase().startsWith("codex/")) {
+      await runOpenclawConfigSet([
+        `agents.defaults.models.${targetModel}.agentRuntime.id`,
+        "codex",
+      ]);
+    }
+
     // 2. Full sweep including sessions previously tagged
     //    `modelOverrideSource: "user"` — the dropdown click *is* the
     //    user's current pick, so prior tags shouldn't make repeat
