@@ -203,7 +203,7 @@ jobs:
       # job never does.
       pull-requests: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         env:
           E2E_INSTALL_RESULT: ${{ needs.e2e-install.result }}
         with:

@@ -62,7 +62,7 @@ jobs:
     steps:
       - name: Comment PR
         if: ${{ always() }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           TEST_RESULT: ${{ needs.test.result }}
           COVERAGE_FOUND: ${{ needs.test.outputs.found }}
