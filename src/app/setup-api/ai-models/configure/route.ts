@@ -784,9 +784,13 @@ export async function POST(request: Request) {
     await runCommand(OPENCLAW_BIN, [
       "config", "set", "gateway.auth.mode", "token",
     ]);
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.auth.token", gatewayToken,
-    ]);
+    // A null result means the token is externally managed. Preserve the
+    // SecretRef/interpolation instead of replacing it with plaintext.
+    if (gatewayToken !== null) {
+      await runCommand(OPENCLAW_BIN, [
+        "config", "set", "gateway.auth.token", gatewayToken,
+      ]);
+    }
     await runCommand(OPENCLAW_BIN, [
       "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
     ]);

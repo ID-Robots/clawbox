@@ -97,10 +97,17 @@ LEGACY_GATEWAY_TOKEN = "clawbox"
 MIN_GATEWAY_TOKEN_LENGTH = 32
 
 def is_strong_gateway_token(v):
-    # SecretRef object — managed externally. Require a known ref key so an
-    # empty/malformed {} isn't mistaken for a resolvable secret.
+    # SecretRef object — managed externally. OpenClaw stores canonical refs as
+    # {source, provider, id}. Reject legacy key-style, providerless, partial,
+    # and extra-key objects: current OpenClaw rejects all of those shapes.
     if isinstance(v, dict):
-        return any(k in v for k in ("env", "file", "exec"))
+        source = v.get("source")
+        ref_id = v.get("id")
+        if source in ("env", "file", "exec") and isinstance(ref_id, str) and ref_id.strip():
+            provider = v.get("provider")
+            if set(v) == {"source", "provider", "id"} and isinstance(provider, str) and provider.strip():
+                return True
+        return False
     if isinstance(v, str):
         # `${VAR}` interpolation (non-empty body) resolves from env at runtime.
         if v.startswith("${") and v.endswith("}") and len(v) > 3:
