@@ -2,6 +2,12 @@
 Description=ClawBox OpenClaw Gateway
 After=network-online.target
 Wants=network-online.target
+# A cold Jetson can legitimately spend up to TimeoutStartSec in
+# gateway-pre-start.sh. Keep the limiter window long enough to contain several
+# complete slow failures; inherited 5-in-10s defaults never tripped when one
+# failed cycle already took longer than ten seconds (issue #284).
+StartLimitIntervalSec=3600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -13,7 +19,8 @@ ExecStartPre=/home/clawbox/clawbox/scripts/gateway-pre-start.sh
 # gateway-proxy.ts injects into the SPA). Passing a literal here would override
 # that and reintroduce the shared-token / UI-drift bug (issues #149, #150).
 ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind lan
-Restart=always
+# Retry crashes and rejected startups, but leave deliberate clean stops alone.
+Restart=on-failure
 RestartSec=5
 # gateway-pre-start.sh runs as a blocking ExecStartPre. The default
 # ~90s start timeout could kill a legitimately slow first-boot pre-start
