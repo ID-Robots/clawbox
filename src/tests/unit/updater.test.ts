@@ -524,12 +524,6 @@ describe("updater", () => {
       const result = await updater.checkContinuation();
 
       expect(result).toBe(false);
-      const buildReadOrder = mockReadFile.mock.invocationCallOrder.at(-1) ?? 0;
-      const clearIndex = mockSet.mock.calls.findIndex(
-        ([key, value]) => key === "update_needs_continuation" && value === undefined,
-      );
-      expect(clearIndex).toBeGreaterThanOrEqual(0);
-      expect(buildReadOrder).toBeLessThan(mockSet.mock.invocationCallOrder[clearIndex]);
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");

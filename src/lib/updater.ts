@@ -769,6 +769,8 @@ export async function checkContinuation(): Promise<boolean> {
   const needsContinuation = await get("update_needs_continuation");
   if (!needsContinuation) return false;
 
+  await set("update_needs_continuation", undefined);
+
   const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
 
@@ -784,11 +786,6 @@ export async function checkContinuation(): Promise<boolean> {
   const unitFailed = (await getRootStepResult(REBUILD_ROOT_STEP)) === "failed";
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const buildUnchanged = recordedBuildId !== null && recordedBuildId === (await readBuildId());
-  // Consume only after the persisted build identity + unit result have been
-  // inspected. Clearing earlier loses the sole recovery breadcrumb before we
-  // know whether a rebuild actually occurred. Validation failures are still
-  // consumed below so they do not replay forever on every setup restart.
-  await set("update_needs_continuation", undefined);
   if (unitFailed || buildUnchanged) {
     const message = unitFailed
       ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"

@@ -14,14 +14,6 @@ WorkingDirectory=/home/clawbox/clawbox
 # timeout (ws://127.0.0.1:18800)". Node.js 22 runs the same standalone
 # bundle fine. Bun is still used for build (`bun run build`).
 ExecStart=/usr/bin/node /home/clawbox/clawbox/production-server.js
-# A full update reboots after rebuilding. Trigger its persisted post_update +
-# gateway-verification continuation locally, even when no browser is polling.
-# The helper is a no-op when no continuation flag exists and authenticates
-# with the existing per-install MCP bearer; no public update endpoint is used.
-# A continuation failure is logged but must not turn the setup UI itself into
-# a restart loop. When the route was never accepted, its persisted flag remains
-# available for the next start or an authenticated browser poll.
-ExecStartPost=-/bin/bash /home/clawbox/clawbox/scripts/update-continuation.sh
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
