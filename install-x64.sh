@@ -409,11 +409,19 @@ c.gateway.auth.mode='token';
 // plain literal "clawbox" here would reintroduce the shared-token vuln (#149).
 {
   // Keep this predicate in lockstep with is_strong_gateway_token() in
-  // scripts/gateway-pre-start.sh: SecretRef object with a known ref key,
-  // a non-empty ${ENV} interpolation, or a >=32-char non-legacy string.
+  // scripts/gateway-pre-start.sh: a canonical SecretRef object, a
+  // non-empty ${ENV} interpolation, or a >=32-char non-legacy string.
   const t=c.gateway.auth.token;
+  const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+  const keys=o=>Object.keys(o);
+  const nonEmptyString=v=>typeof v==='string'&&v.trim().length>0;
+  const source=t&&typeof t==='object'&&!Array.isArray(t)&&t.source;
+  const canonicalRef =
+    (source==='env'||source==='file'||source==='exec') &&
+    nonEmptyString(t.provider) && nonEmptyString(t.id) &&
+    keys(t).length===3 && own(t,'source') && own(t,'provider') && own(t,'id');
   const strong =
-    (t&&typeof t==='object'&&!Array.isArray(t)&&('env' in t||'file' in t||'exec' in t)) ||
+    canonicalRef ||
     (typeof t==='string' && (/^\$\{.+\}$/.test(t) || (t!=='clawbox' && t.length>=32)));
   if(!strong) c.gateway.auth.token=require('crypto').randomBytes(32).toString('hex');
 }
