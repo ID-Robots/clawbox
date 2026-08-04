@@ -263,7 +263,7 @@ describe("middleware", () => {
       expect(response.status).toBe(200);
     });
 
-    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once setup is complete and auth is active", async (p) => {
+    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup", "/setup-api/update/run"])("shields %s once setup is complete and auth is active", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
@@ -274,6 +274,21 @@ describe("middleware", () => {
       // No session cookie -> page-style requests redirect to /login (307).
       expect(response.status).toBe(307);
       expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("allows the existing update route through middleware with the per-install bearer", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_MCP_TOKEN = "recovery-test-token-that-is-long-enough";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/setup-api/update/run"), {
+        headers: { authorization: "Bearer recovery-test-token-that-is-long-enough" },
+      });
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+      delete process.env.CLAWBOX_MCP_TOKEN;
     });
 
     it.each(["/setup-api/wifi/scan", "/setup-api/update/status", "/setup-api/update/run", "/setup-api/system/credentials", "/setup-api/ai-models/configure", "/setup-api/telegram/configure"])("allows %s during setup wizard bootstrap", async (p) => {
