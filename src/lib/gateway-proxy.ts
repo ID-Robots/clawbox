@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import os from "os";
 import net from "net";
 import crypto from "crypto";
+import { loadConfiguredOriginsFromEnv, normalizeOrigin } from "./control-ui-origins";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_HOME
@@ -45,6 +46,29 @@ function isReflectableHost(rawHost: string): boolean {
   return false;
 }
 
+// Trusted control UI origins — a narrow escape hatch for genuinely
+// cross-origin/custom-origin deployments (see control-ui-origins.ts and
+// README). Unlike isReflectableHost() above (host-only, scheme/port-
+// agnostic), a configured origin must match EXACTLY: scheme, host, and
+// port (including a non-default port) all have to agree with an entry in
+// the configured list. A configured hostname does not get reflected on a
+// different scheme or port than what was configured.
+let cachedConfiguredOrigins: Set<string> | undefined; // undefined = not loaded yet
+function getConfiguredOrigins(): Set<string> {
+  if (cachedConfiguredOrigins !== undefined) return cachedConfiguredOrigins;
+  const { origins, warnings } = loadConfiguredOriginsFromEnv();
+  for (const warning of warnings) {
+    console.warn(`[gateway-proxy] ${warning}`);
+  }
+  cachedConfiguredOrigins = new Set(origins);
+  return cachedConfiguredOrigins;
+}
+
+function isConfiguredOrigin(proto: string, hostHeader: string): boolean {
+  const { origin } = normalizeOrigin(`${proto}://${hostHeader}`);
+  return origin !== null && getConfiguredOrigins().has(origin);
+}
+
 export function redirectToSetup(request: NextRequest): NextResponse {
   const rawProto = request.headers.get("x-forwarded-proto");
   const proto =
@@ -52,13 +76,14 @@ export function redirectToSetup(request: NextRequest): NextResponse {
       ?.split(",")
       .map((t) => t.trim().toLowerCase())
       .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
-  const rawHost = request.headers
-    .get("host")
-    ?.toLowerCase()
-    .replace(/:\d+$/, "");
-  if (rawHost && isReflectableHost(rawHost)) {
+  const hostHeader = request.headers.get("host");
+  const rawHost = hostHeader?.toLowerCase().replace(/:\d+$/, "");
+  const reflectable =
+    !!rawHost &&
+    (isReflectableHost(rawHost) || (!!hostHeader && isConfiguredOrigin(proto, hostHeader)));
+  if (reflectable) {
     return NextResponse.redirect(
-      new URL(`${proto}://${request.headers.get("host")}/setup`),
+      new URL(`${proto}://${hostHeader}/setup`),
       302
     );
   }
