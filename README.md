@@ -249,8 +249,35 @@ bun run test             # Unit tests (Vitest)
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
+| `CLAWBOX_CONTROL_UI_ORIGINS_FILE` | `data/control-ui-origins.json` | Extra trusted control UI origins (see below) |
 
 Additional options (OAuth client IDs, ClawBox AI, llama.cpp tuning) live in `.env.example`.
+
+#### Trusted control UI origins
+
+This is only for genuine cross-origin/custom-origin deployments — for example,
+a reverse proxy that serves the Control UI from a different hostname or port.
+Same-origin access via `<hostname>.local`, a
+Tailscale `.ts.net` name, or a private LAN IP already works out of the box
+(see `ALLOWED_HOSTS` above and the mDNS/IP handling in
+`src/lib/gateway-proxy.ts`) and normally needs no entry here.
+
+To trust an additional origin, put a JSON array of exact `http`/`https`
+origins in `data/control-ui-origins.json` (or the path set by
+`CLAWBOX_CONTROL_UI_ORIGINS_FILE`):
+
+```json
+["https://control.example.com", "http://192.0.2.10:8080"]
+```
+
+Entries are validated strictly — no wildcards, credentials, paths, query
+strings, or fragments — and normalized (lowercased scheme/host, default
+ports dropped). Invalid entries are dropped with a warning; a missing file
+is normal and adds nothing. Matching is exact: a configured origin does not
+grant trust to the same hostname on a different scheme or port. See
+`scripts/gateway_origins.py` (loaded by `gateway-pre-start.sh` into the
+gateway's own `allowedOrigins`) and `src/lib/control-ui-origins.ts` (used by
+the Next.js proxy's redirect-origin reflection).
 
 ## 🤝 Contributing
 
