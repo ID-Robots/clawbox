@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import VNCApp from "@/components/VNCApp";
 import { getTrackedVncKey } from "@/lib/vnc-keys";
+import { SETUP_AUTH_EXPIRED_MESSAGE } from "@/lib/fetch-setup-json";
 
 type RfbListener = (event?: Event | CustomEvent) => void;
 
@@ -73,6 +74,58 @@ describe("VNCApp", () => {
       ok: true,
       json: async () => ({ available: true, wsPort: 6080 }),
     })));
+  });
+
+  it("shows a sign-in prompt instead of parsing a 401 response", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return {
+        ok: false,
+        status: 401,
+        redirected: false,
+        url: "https://example.test/setup-api/vnc",
+        json: vi.fn(),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getByRole, queryByText } = render(<VNCApp />);
+
+    await waitFor(() => {
+      expect(getByRole("button", { name: "Refresh to sign in again" })).toBeInTheDocument();
+    });
+    expect(queryByText(SETUP_AUTH_EXPIRED_MESSAGE)).toBeInTheDocument();
+    expect(queryByText("Install / Repair & Reboot")).not.toBeInTheDocument();
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("Accept")).toBe("application/json");
+  });
+
+  it("stops the repair flow when authentication expires", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        redirected: false,
+        url: "https://example.test/setup-api/vnc",
+        json: async () => ({ available: false, error: "No VNC server detected" }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        redirected: false,
+        url: "https://example.test/setup-api/install/run-step",
+        json: vi.fn(),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByRole, getByRole } = render(<VNCApp />);
+    fireEvent.click(await findByRole("button", { name: /Install \/ Repair & Reboot/ }));
+
+    await waitFor(() => {
+      expect(getByRole("button", { name: "Refresh to sign in again" })).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe("/setup-api/install/run-step");
   });
 
   it("forwards keyboard events to the RFB connection when focus drifts off the noVNC canvas", async () => {
