@@ -78,6 +78,8 @@ describe("gateway restart breaker", () => {
 
   it("uses failure-only restarts and an explicit window covering the worst-case burst", () => {
     expect(GATEWAY_UNIT).toMatch(/^Restart=on-failure$/m);
+    expect(intervalSec).toBe(3_600);
+    expect(burst).toBe(5);
     expect(intervalSec).toBeGreaterThan(burst * (timeoutSec + restartSec));
   });
 

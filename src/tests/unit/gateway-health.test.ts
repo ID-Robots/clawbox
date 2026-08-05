@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { lastUsefulJournalLine, parseGatewaySystemctlProperties } from "@/lib/gateway-health";
+import {
+  gatewayJournalArgs,
+  lastUsefulJournalLine,
+  parseGatewaySystemctlProperties,
+} from "@/lib/gateway-health";
 
 describe("gateway service health", () => {
   it("keeps the final startup error instead of a repeated restart notice", () => {
@@ -16,6 +20,18 @@ describe("gateway service health", () => {
 
   it("returns null for an empty journal", () => {
     expect(lastUsefulJournalLine("\n")).toBeNull();
+  });
+
+  it("scopes journal diagnostics to the failed activation", () => {
+    const invocationId = "0123456789abcdef0123456789abcdef";
+    const args = gatewayJournalArgs(`ActiveState=failed\nInvocationID=${invocationId}\n`);
+
+    expect(args).toContain(`_SYSTEMD_INVOCATION_ID=${invocationId}`);
+    expect(args).toContain("clawbox-gateway.service");
+  });
+
+  it("does not fall back to stale journal history without an activation ID", () => {
+    expect(gatewayJournalArgs("ActiveState=failed\nInvocationID=\n")).toBeNull();
   });
 
   it("recognizes systemd 249's documented start-limit-hit result", () => {
