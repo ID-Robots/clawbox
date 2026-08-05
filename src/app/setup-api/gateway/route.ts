@@ -108,7 +108,7 @@ function gatewayOfflineResponse(health: GatewayServiceHealth) {
     status: 503,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store, no-cache",
     },
   });
 }

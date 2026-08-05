@@ -61,6 +61,22 @@ export function lastUsefulJournalLine(output: string): string | null {
   return finalLine ? sanitizeJournalLine(finalLine) || null : null;
 }
 
+export function gatewayJournalArgs(systemctlOutput: string): string[] | null {
+  const invocationId = /^InvocationID=([0-9a-f]{32})$/im.exec(systemctlOutput)?.[1];
+  if (!invocationId) return null;
+
+  return [
+    "-u",
+    GATEWAY_UNIT,
+    `_SYSTEMD_INVOCATION_ID=${invocationId}`,
+    "-n",
+    "40",
+    "--no-pager",
+    "-o",
+    "cat",
+  ];
+}
+
 export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
   try {
     const { stdout } = await exec(
@@ -68,7 +84,7 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
       [
         "show",
         GATEWAY_UNIT,
-        "--property=ActiveState,SubState,Result,NRestarts",
+        "--property=ActiveState,SubState,Result,NRestarts,InvocationID",
         "--no-pager",
       ],
       { timeout: 3_000 },
@@ -78,15 +94,18 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
     let finalStartupError: string | null = null;
 
     if (parsed.activeState === "failed" || breakerActive) {
-      try {
-        const journal = await exec(
-          "/usr/bin/journalctl",
-          ["-u", GATEWAY_UNIT, "-n", "40", "--no-pager", "-o", "cat"],
-          { timeout: 5_000, maxBuffer: 512 * 1024 },
-        );
-        finalStartupError = lastUsefulJournalLine(journal.stdout);
-      } catch {
-        // The state itself is still useful on restricted/container installs.
+      const journalArgs = gatewayJournalArgs(stdout);
+      if (journalArgs) {
+        try {
+          const journal = await exec(
+            "/usr/bin/journalctl",
+            journalArgs,
+            { timeout: 5_000, maxBuffer: 512 * 1024 },
+          );
+          finalStartupError = lastUsefulJournalLine(journal.stdout);
+        } catch {
+          // The state itself is still useful on restricted/container installs.
+        }
       }
     }
 

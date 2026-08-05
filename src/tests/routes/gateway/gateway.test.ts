@@ -61,6 +61,7 @@ describe("/setup-api/gateway", () => {
     const req = new NextRequest(new URL("http://clawbox.local/setup-api/gateway"));
     const res = await GET(req);
     expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toContain("no-store");
     const html = await res.text();
     expect(html).toContain("Gateway Offline");
     expect(html).toContain("Config validation failed");
