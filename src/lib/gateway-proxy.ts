@@ -3,7 +3,12 @@ import fs from "fs/promises";
 import os from "os";
 import net from "net";
 import crypto from "crypto";
-import { loadConfiguredOriginsFromEnv, normalizeOrigin } from "./control-ui-origins";
+import { statSync } from "node:fs";
+import {
+  loadConfiguredOrigins,
+  normalizeOrigin,
+  resolveOriginsPath,
+} from "./control-ui-origins";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_HOME
@@ -53,20 +58,48 @@ function isReflectableHost(rawHost: string): boolean {
 // port (including a non-default port) all have to agree with an entry in
 // the configured list. A configured hostname does not get reflected on a
 // different scheme or port than what was configured.
-let cachedConfiguredOrigins: Set<string> | undefined; // undefined = not loaded yet
-function getConfiguredOrigins(): Set<string> {
-  if (cachedConfiguredOrigins !== undefined) return cachedConfiguredOrigins;
-  const { origins, warnings } = loadConfiguredOriginsFromEnv();
+interface ConfiguredOriginState {
+  origins: Set<string>;
+  hosts: Set<string>;
+}
+
+let cachedConfiguredOrigins: ConfiguredOriginState | undefined;
+let cachedConfiguredOriginsSignature: string | undefined;
+
+function configuredOriginsSignature(path: string): string {
+  try {
+    const stat = statSync(path, { bigint: true });
+    return `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return `${path}:missing`;
+  }
+}
+
+function getConfiguredOrigins(): ConfiguredOriginState {
+  const path = resolveOriginsPath();
+  const signature = configuredOriginsSignature(path);
+  if (
+    cachedConfiguredOrigins !== undefined &&
+    cachedConfiguredOriginsSignature === signature
+  ) {
+    return cachedConfiguredOrigins;
+  }
+
+  const { origins, warnings } = loadConfiguredOrigins(path);
   for (const warning of warnings) {
     console.warn(`[gateway-proxy] ${warning}`);
   }
-  cachedConfiguredOrigins = new Set(origins);
+  cachedConfiguredOrigins = {
+    origins: new Set(origins),
+    hosts: new Set(origins.map((origin) => new URL(origin).hostname.toLowerCase())),
+  };
+  cachedConfiguredOriginsSignature = signature;
   return cachedConfiguredOrigins;
 }
 
 function isConfiguredOrigin(proto: string, hostHeader: string): boolean {
   const { origin } = normalizeOrigin(`${proto}://${hostHeader}`);
-  return origin !== null && getConfiguredOrigins().has(origin);
+  return origin !== null && getConfiguredOrigins().origins.has(origin);
 }
 
 export function redirectToSetup(request: NextRequest): NextResponse {
@@ -78,9 +111,17 @@ export function redirectToSetup(request: NextRequest): NextResponse {
       .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
   const hostHeader = request.headers.get("host");
   const rawHost = hostHeader?.toLowerCase().replace(/:\d+$/, "");
-  const reflectable =
-    !!rawHost &&
-    (isReflectableHost(rawHost) || (!!hostHeader && isConfiguredOrigin(proto, hostHeader)));
+  const configuredOrigins = getConfiguredOrigins();
+  const exactConfiguredMatch =
+    !!hostHeader && isConfiguredOrigin(proto, hostHeader);
+  // A configured host opts into exact origin matching even when it would
+  // otherwise match the broad IPv4/ALLOWED_HOSTS reflection path. Hosts with
+  // no configured entry retain the existing same-host behavior.
+  const reflectable = !!rawHost && (
+    configuredOrigins.hosts.has(rawHost)
+      ? exactConfiguredMatch
+      : isReflectableHost(rawHost) || exactConfiguredMatch
+  );
   if (reflectable) {
     return NextResponse.redirect(
       new URL(`${proto}://${hostHeader}/setup`),

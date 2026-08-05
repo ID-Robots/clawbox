@@ -34,6 +34,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(dir, { recursive: true, force: true });
     if (originalEnv === undefined) delete process.env[ENV_VAR];
     else process.env[ENV_VAR] = originalEnv;
@@ -122,8 +123,56 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     expect(response.headers.get("location")).toContain("clawbox.local");
   });
 
+  it("enforces exact scheme and port for a configured IPv4 origin", async () => {
+    writeOrigins(["http://192.0.2.10:8080"]);
+    await importFresh();
+
+    const exact = gatewayProxy.redirectToSetup(
+      createRequest("http://192.0.2.10:8080/", { host: "192.0.2.10:8080" }),
+    );
+    expect(exact.headers.get("location")).toBe("http://192.0.2.10:8080/setup");
+
+    const wrongPort = gatewayProxy.redirectToSetup(
+      createRequest("http://192.0.2.10:9999/", { host: "192.0.2.10:9999" }),
+    );
+    expect(wrongPort.headers.get("location")).toContain("clawbox.local");
+
+    const wrongScheme = gatewayProxy.redirectToSetup(
+      createRequest("http://192.0.2.10:8080/", {
+        host: "192.0.2.10:8080",
+        "x-forwarded-proto": "https",
+      }),
+    );
+    expect(wrongScheme.headers.get("location")).toContain("clawbox.local");
+  });
+
+  it("refreshes configured origins after the source file changes", async () => {
+    writeOrigins(["http://first.example.com"]);
+    await importFresh();
+
+    const first = gatewayProxy.redirectToSetup(
+      createRequest("http://first.example.com/", { host: "first.example.com" }),
+    );
+    expect(first.headers.get("location")).toContain("first.example.com");
+
+    writeOrigins(["http://replacement.example.com:8080"]);
+    const replacement = gatewayProxy.redirectToSetup(
+      createRequest("http://replacement.example.com:8080/", {
+        host: "replacement.example.com:8080",
+      }),
+    );
+    expect(replacement.headers.get("location")).toBe(
+      "http://replacement.example.com:8080/setup",
+    );
+
+    const stale = gatewayProxy.redirectToSetup(
+      createRequest("http://first.example.com/", { host: "first.example.com" }),
+    );
+    expect(stale.headers.get("location")).toContain("clawbox.local");
+  });
+
   it("retains existing ALLOWED_HOSTS/IP reflection when no origins are configured", async () => {
-    delete process.env[ENV_VAR];
+    process.env[ENV_VAR] = path.join(dir, "absent.json");
     await importFresh();
 
     const request = createRequest("http://clawbox.local/", { host: "clawbox.local" });
@@ -141,6 +190,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     writeFileSync(file, "{not json");
     process.env[ENV_VAR] = file;
     await importFresh();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const request = createRequest("http://clawbox.local/", { host: "clawbox.local" });
     const response = gatewayProxy.redirectToSetup(request);
@@ -151,5 +201,6 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     });
     const untrustedResponse = gatewayProxy.redirectToSetup(untrustedRequest);
     expect(untrustedResponse.headers.get("location")).not.toContain("untrusted.example.com");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("not valid JSON"));
   });
 });

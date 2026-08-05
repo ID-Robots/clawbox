@@ -51,6 +51,16 @@ def normalize_origin(raw):
     if not isinstance(raw, str):
         return None, f"origin must be a string, got {type(raw).__name__}: {raw!r}"
 
+    # urllib.parse and the WHATWG URL parser disagree on several raw inputs
+    # (for example, WHATWG silently removes tabs/newlines while urlsplit can
+    # reinterpret backslashes around userinfo). Keep the accepted language to
+    # printable ASCII and reject parser-sensitive escape characters before
+    # either implementation gets a chance to normalize them.
+    if any(ord(char) < 0x20 or ord(char) > 0x7E for char in raw) or any(
+        char in raw for char in ("\\", "%")
+    ):
+        return None, f"origin contains a forbidden raw character: {raw!r}"
+
     value = raw.strip()
     if not value:
         return None, "origin is empty"
@@ -91,10 +101,10 @@ def normalize_origin(raw):
     if ":" in hostname:
         # Bracketed IPv6 literal — urlsplit strips the brackets for .hostname.
         try:
-            ipaddress.IPv6Address(hostname)
+            ipv6 = ipaddress.IPv6Address(hostname)
         except ValueError:
             return None, f"origin has an invalid IPv6 host: {raw!r}"
-        host_part = f"[{hostname}]"
+        host_part = f"[{ipv6.compressed}]"
     else:
         if not _HOSTNAME_RE.match(hostname):
             return None, f"origin has an invalid host: {raw!r}"
@@ -123,10 +133,12 @@ def load_configured_origins(path):
         return [], []
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw_text = f.read()
     except OSError as exc:
         return [], [f"could not read control UI origins file {path}: {exc}"]
+    except UnicodeDecodeError as exc:
+        return [], [f"control UI origins file {path} is not valid UTF-8: {exc}"]
 
     try:
         data = json.loads(raw_text)
@@ -135,8 +147,10 @@ def load_configured_origins(path):
 
     if not isinstance(data, list):
         return [], [
-            f"control UI origins file {path} must contain a JSON array, "
-            f"got {type(data).__name__}"
+            (
+                f"control UI origins file {path} must contain a JSON array, "
+                f"got {type(data).__name__}"
+            )
         ]
 
     warnings = []

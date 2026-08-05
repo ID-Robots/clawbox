@@ -249,7 +249,7 @@ bun run test             # Unit tests (Vitest)
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
-| `CLAWBOX_CONTROL_UI_ORIGINS_FILE` | `data/control-ui-origins.json` | Extra trusted control UI origins (see below) |
+| `CLAWBOX_CONTROL_UI_ORIGINS_FILE` | `/home/clawbox/clawbox/data/control-ui-origins.json` | Extra trusted control UI origins (see below) |
 
 Additional options (OAuth client IDs, ClawBox AI, llama.cpp tuning) live in `.env.example`.
 

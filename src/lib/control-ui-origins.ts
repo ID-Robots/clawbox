@@ -24,6 +24,7 @@ const ORIGINS_PATH_ENV_VAR = "CLAWBOX_CONTROL_UI_ORIGINS_FILE";
 // pre-start loader.
 const HOSTNAME_RE =
   /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const FORBIDDEN_RAW_ORIGIN_RE = /[\\%]|[^\x20-\x7e]/;
 
 export interface NormalizedOrigin {
   origin: string | null;
@@ -52,6 +53,16 @@ export function normalizeOrigin(raw: unknown): NormalizedOrigin {
     return {
       origin: null,
       warning: `origin must be a string, got ${typeof raw}: ${JSON.stringify(raw)}`,
+    };
+  }
+
+  // Keep this in lockstep with scripts/gateway_origins.py. The WHATWG URL
+  // parser silently discards some controls and treats backslashes specially,
+  // while Python's urlsplit behaves differently.
+  if (FORBIDDEN_RAW_ORIGIN_RE.test(raw)) {
+    return {
+      origin: null,
+      warning: `origin contains a forbidden raw character: ${JSON.stringify(raw)}`,
     };
   }
 
@@ -137,7 +148,7 @@ export function loadConfiguredOrigins(path: string): ConfiguredOrigins {
   } catch (err) {
     return {
       origins: [],
-      warnings: [`could not read control UI origins file ${path}: ${(err as Error).message}`],
+      warnings: [`could not read control UI origins file ${path}: ${errorMessage(err)}`],
     };
   }
 
@@ -147,7 +158,7 @@ export function loadConfiguredOrigins(path: string): ConfiguredOrigins {
   } catch (err) {
     return {
       origins: [],
-      warnings: [`control UI origins file ${path} is not valid JSON: ${(err as Error).message}`],
+      warnings: [`control UI origins file ${path} is not valid JSON: ${errorMessage(err)}`],
     };
   }
 
@@ -176,6 +187,10 @@ export function loadConfiguredOrigins(path: string): ConfiguredOrigins {
   });
 
   return { origins, warnings };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Merge `extras` into `defaults`: defaults first, de-duplicated, order preserved. */

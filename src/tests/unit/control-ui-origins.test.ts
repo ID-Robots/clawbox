@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -47,6 +47,10 @@ describe("control-ui-origins", () => {
     it("keeps bracketed IPv6 hosts, dropping the default port", () => {
       expect(normalizeOrigin("https://[::1]:443")).toEqual({ origin: "https://[::1]", warning: null });
       expect(normalizeOrigin("http://[::1]:9000")).toEqual({ origin: "http://[::1]:9000", warning: null });
+      expect(normalizeOrigin("http://[0:0:0:0:0:0:0:1]")).toEqual({
+        origin: "http://[::1]",
+        warning: null,
+      });
     });
 
     it("rejects a wildcard origin", () => {
@@ -88,11 +92,27 @@ describe("control-ui-origins", () => {
     it("rejects an out-of-range port", () => {
       const result = normalizeOrigin("http://example.com:99999");
       expect(result.origin).toBeNull();
+      expect(result.warning).toMatch(/not a valid URL/);
     });
 
     it("rejects an out-of-range dotted-decimal host", () => {
       const result = normalizeOrigin("http://999.999.999.999");
       expect(result.origin).toBeNull();
+      expect(result.warning).toMatch(/not a valid URL/);
+    });
+
+    it("rejects raw characters whose URL-parser behavior is not portable", () => {
+      const inputs = [
+        "http://evil.com\\`@good.com`",
+        "http://exa\nmple.com",
+        "http://example.com/%65",
+        "http://éxample.com",
+      ];
+      for (const input of inputs) {
+        const result = normalizeOrigin(input);
+        expect(result.origin).toBeNull();
+        expect(result.warning).toMatch(/forbidden raw character/);
+      }
     });
 
     it("rejects a non-string entry without throwing", () => {
@@ -186,9 +206,22 @@ describe("control-ui-origins", () => {
       expect(result.warnings).toHaveLength(1);
     });
 
-    it("never throws, even on an unreadable path", () => {
-      expect(() => loadConfiguredOrigins("/root/definitely-not-readable/origins.json")).not.toThrow();
-    });
+    it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+      "returns a warning for an existing but unreadable file",
+      () => {
+        dir = mkdtempSync(path.join(tmpdir(), "control-ui-origins-"));
+        const file = path.join(dir, "origins.json");
+        writeFileSync(file, JSON.stringify(["http://a.example.com"]));
+        chmodSync(file, 0o000);
+        try {
+          const result = loadConfiguredOrigins(file);
+          expect(result.origins).toEqual([]);
+          expect(result.warnings).toHaveLength(1);
+        } finally {
+          chmodSync(file, 0o600);
+        }
+      },
+    );
   });
 
   describe("resolveOriginsPath / loadConfiguredOriginsFromEnv", () => {

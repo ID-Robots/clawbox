@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -73,6 +73,10 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
     it("keeps bracketed IPv6 hosts, dropping the default port", () => {
       expect(normalize("https://[::1]:443")).toEqual({ origin: "https://[::1]", warning: null });
       expect(normalize("http://[::1]:9000")).toEqual({ origin: "http://[::1]:9000", warning: null });
+      expect(normalize("http://[0:0:0:0:0:0:0:1]")).toEqual({
+        origin: "http://[::1]",
+        warning: null,
+      });
     });
 
     it("rejects a wildcard origin", () => {
@@ -138,13 +142,32 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
       const result = normalize("http://999.999.999.999");
       expect(result.origin).toBeNull();
     });
+
+    it("rejects raw characters whose URL-parser behavior is not portable", () => {
+      const inputs = [
+        "http://evil.com\\`@good.com`",
+        "http://exa\nmple.com",
+        "http://example.com/%65",
+        "http://éxample.com",
+      ];
+      for (const input of inputs) {
+        const result = normalize(input);
+        expect(result.origin).toBeNull();
+        expect(result.warning).toMatch(/forbidden raw character/);
+      }
+    });
   });
 
   describe("load_configured_origins", () => {
     let dir: string;
 
+    afterEach(() => {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    });
+
     it("returns no origins and no warning when the file is missing", () => {
-      const missing = path.join(mkdtempSync(path.join(tmpdir(), "gw-origins-")), "nope.json");
+      dir = mkdtempSync(path.join(tmpdir(), "gw-origins-"));
+      const missing = path.join(dir, "nope.json");
       expect(loadConfigured(missing)).toEqual({ origins: [], warnings: [] });
     });
 
@@ -158,7 +181,6 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
       const result = loadConfigured(file);
       expect(result.origins).toEqual(["http://a.example.com", "https://b.example.com:8443"]);
       expect(result.warnings).toEqual([]);
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it("drops invalid entries with a warning, keeps valid ones", () => {
@@ -168,7 +190,6 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
       const result = loadConfigured(file);
       expect(result.origins).toEqual(["http://good.example.com"]);
       expect(result.warnings).toHaveLength(2);
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it("returns a warning and no origins for invalid JSON", () => {
@@ -178,7 +199,6 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
       const result = loadConfigured(file);
       expect(result.origins).toEqual([]);
       expect(result.warnings).toHaveLength(1);
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it("returns a warning and no origins for a non-array top level", () => {
@@ -188,7 +208,16 @@ describe.skipIf(!hasPython3)("scripts/gateway_origins.py", () => {
       const result = loadConfigured(file);
       expect(result.origins).toEqual([]);
       expect(result.warnings).toHaveLength(1);
-      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("returns a warning and no origins for invalid UTF-8", () => {
+      dir = mkdtempSync(path.join(tmpdir(), "gw-origins-"));
+      const file = path.join(dir, "origins.json");
+      writeFileSync(file, Buffer.from([0xff, 0xfe, 0xfd]));
+      const result = loadConfigured(file);
+      expect(result.origins).toEqual([]);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toMatch(/not valid UTF-8/);
     });
   });
 
@@ -295,6 +324,10 @@ function runMerge(hostname: string, lanIps: string[], extraOrigins: string[]): s
 describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () => {
   let dir: string;
 
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
   it("default: no config file yields no extras, defaults only", () => {
     dir = mkdtempSync(path.join(tmpdir(), "gw-wiring-"));
     const missing = path.join(dir, "nope.json");
@@ -311,7 +344,6 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () =
       "http://10.43.0.1",
       "http://192.0.2.5",
     ]);
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("merges validated extras after defaults, deterministically", () => {
@@ -335,7 +367,6 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () =
       "http://192.0.2.5",
       "https://custom.example.com",
     ]);
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("is idempotent — re-running the loader+merge on unchanged input yields the same list", () => {
@@ -350,7 +381,6 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () =
     };
 
     expect(run()).toEqual(run());
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("invalid JSON produces a warning on stderr and no extras — defaults still merge cleanly", () => {
@@ -369,10 +399,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () =
       "http://10.42.0.1",
       "http://10.43.0.1",
     ]);
-    rmSync(dir, { recursive: true, force: true });
   });
 
-  it("missing helper module falls through to no extras (boot unaffected)", () => {
+  it("missing helper module warns and falls through to no extras (boot unaffected)", () => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR: "/nonexistent/scripts/dir",
@@ -380,6 +409,30 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh trusted-origins wiring", () =
     delete env.CLAWBOX_CONTROL_UI_ORIGINS_FILE;
     const result = spawnSync("python3", ["-c", extractLoaderSnippet()], { encoding: "utf-8", env });
     expect(result.stdout.trim()).toBe("");
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toMatch(/WARN.*helper unavailable.*using defaults only/);
+    expect(result.status).toBe(0);
+  });
+
+  it("unexpected helper failure warns and falls through without blocking boot", () => {
+    dir = mkdtempSync(path.join(tmpdir(), "gw-wiring-"));
+    writeFileSync(
+      path.join(dir, "gateway_origins.py"),
+      [
+        "def resolve_origins_path():",
+        "    raise RuntimeError('unexpected sensitive detail')",
+        "",
+        "def load_configured_origins(path):",
+        "    raise AssertionError('unreachable')",
+      ].join("\n"),
+    );
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR: dir,
+    };
+    const result = spawnSync("python3", ["-c", extractLoaderSnippet()], { encoding: "utf-8", env });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("");
+    expect(result.stderr).toMatch(/WARN.*helper failed \(RuntimeError\).*using defaults only/);
+    expect(result.stderr).not.toContain("unexpected sensitive detail");
   });
 });
