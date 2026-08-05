@@ -92,8 +92,7 @@ export CLAWBOX_LAN_IPS
 # Loaded from CLAWBOX_CONTROL_UI_ORIGINS_FILE (or the module's default
 # path) via scripts/gateway_origins.py. Missing helper module or missing
 # config file both fall through to "no extras" — defaults still boot.
-export CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR="$SCRIPT_DIR"
-CLAWBOX_EXTRA_ORIGINS="$(python3 - <<'PY'
+CLAWBOX_EXTRA_ORIGINS="$(CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
 import os, sys
 
 script_dir = os.environ.get("CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR", "")
@@ -102,11 +101,24 @@ if script_dir:
 
 try:
     import gateway_origins
-except Exception:
+except Exception as exc:
+    print(
+        "  WARN: trusted control UI origins helper unavailable "
+        f"({type(exc).__name__}); using defaults only",
+        file=sys.stderr,
+    )
     sys.exit(0)
 
-path = gateway_origins.resolve_origins_path()
-origins, warnings = gateway_origins.load_configured_origins(path)
+try:
+    path = gateway_origins.resolve_origins_path()
+    origins, warnings = gateway_origins.load_configured_origins(path)
+except Exception as exc:
+    print(
+        "  WARN: trusted control UI origins helper failed "
+        f"({type(exc).__name__}); using defaults only",
+        file=sys.stderr,
+    )
+    sys.exit(0)
 for warning in warnings:
     print(f"  WARN: {warning}", file=sys.stderr)
 for origin in origins:
