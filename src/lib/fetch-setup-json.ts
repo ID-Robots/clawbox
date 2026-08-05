@@ -9,7 +9,7 @@ export type SetupFetchResult<T> =
 function redirectedToLogin(response: Response): boolean {
   if (!response.redirected || !response.url) return false;
   try {
-    return new URL(response.url, "https://example.invalid").pathname === "/login";
+    return new URL(response.url, "https://example.invalid").pathname.endsWith("/login");
   } catch {
     return false;
   }

@@ -45,4 +45,20 @@ describe("fetchSetupJson", () => {
     expect(result.kind).toBe("auth-expired");
     expect(json).not.toHaveBeenCalled();
   });
+
+  it("classifies a base-path login redirect as expired authentication", async () => {
+    const json = vi.fn(async () => {
+      throw new SyntaxError("Unexpected token '<'");
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => response({
+      redirected: true,
+      url: "https://example.test/base/login?redirect=%2Fbase%2Fsetup-api%2Fvnc",
+      json,
+    })));
+
+    const result = await fetchSetupJson("/base/setup-api/vnc");
+
+    expect(result.kind).toBe("auth-expired");
+    expect(json).not.toHaveBeenCalled();
+  });
 });
