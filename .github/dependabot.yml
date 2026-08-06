@@ -1,13 +1,19 @@
-# Dependabot version updates. Alerts also require "Dependabot alerts" enabled
-# in Settings → Code security (admin toggle).
+# Dependabot config. Posture: security-first, low-churn.
 #
-# NOTE: target-branch only affects VERSION updates. Security-update PRs always
-# target main, ignore these labels/groups, and only bump package-lock.json —
-# run `bun install` to refresh bun.lock before merging one.
+# Two jobs only:
+#   1. Real vulnerabilities — security-update PRs. These need "Dependabot
+#      alerts" enabled in Settings → Code security (admin toggle). They ALWAYS
+#      target the default branch, ignore the groups/ignore rules below, and only
+#      bump package-lock.json — run `bun install` to refresh bun.lock before
+#      merging one.
+#   2. Routine version updates — grouped minor+patch ONLY. Major bumps are
+#      ignored on purpose: on an edge-deployed device OS, framework major jumps
+#      (e.g. TypeScript 5→7, or @types/node overshooting the Node 22 runtime)
+#      are opt-in, not automatic. Bump majors by hand when you actually want one.
 version: 2
 updates:
   # Version updates for the bun-managed app. bun.lock is authoritative
-  # (CI runs `bun install --frozen-lockfile`). Weekly + grouped.
+  # (CI runs `bun install --frozen-lockfile`). Weekly, grouped, minor+patch only.
   - package-ecosystem: "bun"
     directory: "/"
     schedule:
@@ -16,6 +22,10 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # Majors are opt-in — do them by hand, not on Dependabot's schedule.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # npm entry exists ONLY for security-update PRs (the bun ecosystem doesn't
   # support them; package-lock.json is kept in sync for this + the dependency
@@ -27,10 +37,14 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 0
 
-  # GitHub Actions pins (checkout, setup-node, gh-pages, …)
+  # GitHub Actions pins (checkout, setup-node, gh-pages, …). Minor+patch only;
+  # action majors are opt-in for the same reason as above.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
     target-branch: "beta"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
