@@ -83,10 +83,11 @@ export function isGatewaySecretRef(value: unknown): value is GatewaySecretRef {
   const keys = Object.keys(ref);
   const source = ref.source;
   if (source === "env" || source === "file" || source === "exec") {
+    // source is a valid enum and id/provider are non-empty strings, so with
+    // exactly 3 keys they must be {source, id, provider} — no need to re-assert
+    // each key is present.
     if (!isNonEmptyString(ref.id)) return false;
-    return keys.length === 3 && keys.includes("source") &&
-      keys.includes("id") && keys.includes("provider") &&
-      isNonEmptyString(ref.provider);
+    return keys.length === 3 && isNonEmptyString(ref.provider);
   }
   return false;
 }
