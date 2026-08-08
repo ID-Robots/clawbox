@@ -164,11 +164,7 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   await expect(modal).not.toBeVisible();
 });
 
-// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
-// rest of the suite, still fails against the production build too (verified on
-// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
-// switch fixed. Needs per-spec debugging. Tracked in #114.
-test.fixme("unpair flow opens the confirm dialog and Esc dismisses it without unpairing", async ({ page }) => {
+test("unpair flow opens the confirm dialog and Esc dismisses it without unpairing", async ({ page }) => {
   await setupDesktop(page);
 
   let unpairCalled = 0;
@@ -189,7 +185,12 @@ test.fixme("unpair flow opens the confirm dialog and Esc dismisses it without un
   });
 
   const clawkeep = await openClawkeep(page);
-  await clawkeep.getByRole("button", { name: "Unpair" }).click();
+  // Unpair sits at the very bottom of the paired dashboard, where the taskbar
+  // overlaps it — a positional click lands on the shelf instead. Dispatch the
+  // click straight to the element (no hit-testing) so its onClick fires.
+  const unpairButton = clawkeep.getByRole("button", { name: "Unpair" });
+  await expect(unpairButton).toBeVisible();
+  await unpairButton.dispatchEvent("click");
 
   // ConfirmDialog mounts with the unpair copy — exercises the dialog
   // render branch, the global Esc keydown listener registration, and

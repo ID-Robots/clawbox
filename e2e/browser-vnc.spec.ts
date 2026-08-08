@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
-// rest of the suite, still fails against the production build too (verified on
-// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
-// switch fixed. Needs per-spec debugging. Tracked in #114.
-test.fixme("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
+test("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -21,7 +17,11 @@ test.fixme("browser app installs chromium, enables integration, and opens the VN
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await openLauncher(page);
-  const browserLauncherButton = page.getByTestId("app-launcher").getByRole("button", { name: "Browser" });
+  // The launcher paginates its apps; "Browser" sits past the first page. Search
+  // to filter it onto the current page instead of relying on page order.
+  const launcher = page.getByTestId("app-launcher");
+  await launcher.getByRole("textbox").fill("Browser");
+  const browserLauncherButton = launcher.getByRole("button", { name: "Browser" });
   await browserLauncherButton.click();
 
   const browserWindow = page.getByTestId("chrome-window-browser");

@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
-// rest of the suite, still fails against the production build too (verified on
-// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
-// switch fixed. Needs per-spec debugging. Tracked in #114.
-test.fixme("installed app settings can save configuration and toggle enablement", async ({ page }) => {
+test("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -41,7 +37,11 @@ test.fixme("installed app settings can save configuration and toggle enablement"
   await page.getByRole("button", { name: "Install Anyway" }).click();
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
 
-  await page.locator('[data-desktop-icon-id="home-assistant"] button').click();
+  // The freshly-installed icon animates in, so it never passes Playwright's
+  // stability gate — dispatch the click straight to its launch button.
+  const haIcon = page.locator('[data-desktop-icon-id="home-assistant"] button');
+  await expect(haIcon).toBeVisible();
+  await haIcon.dispatchEvent("click");
 
   const settingsWindow = page.getByTestId("chrome-window-installed-home-assistant");
   await expect(settingsWindow).toBeVisible();

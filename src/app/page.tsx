@@ -1837,7 +1837,7 @@ function ChromeDesktopInner() {
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
       <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && mobileIconOrder ? `${(Math.floor((Object.keys(mobileIconOrder).length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app, i) => {
           const pos = getIconPosition(app.id, i);
@@ -2236,6 +2236,7 @@ function ChromeDesktopInner() {
       {/* Context menu */}
       {ctxMenu && (
         <div
+          data-testid="desktop-context-menu"
           className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 220),
