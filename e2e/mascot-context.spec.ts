@@ -1,8 +1,10 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: same GH-Actions-only flake as browser-vnc — verified passing
-// in isolation on the Jetson. Tracked as a follow-up to PR #113.
+// FIXME: the global-setup warmup (#114) removed the cold-compile flake, but
+// this spec still times out on GitHub Actions at its first DOM interaction — a
+// deeper post-mount/hydration lag under `bun run dev` workers:1 that the warmup
+// doesn't touch. Passes on the Jetson; still tracked in #114.
 test.fixme("mascot tap opens the chat popup", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {

@@ -1,11 +1,10 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: passes locally / on the Jetson worktree (verified ~7-18s) but
-// times out on GitHub Actions even with 60s per-test + 15s expect/action
-// timeouts. Root cause is environmental (likely runner memory pressure
-// with `bun run dev` under sequential workers:1). Tracked as a follow-up
-// to PR #113 — needs the e2e GH-runner profile investigated separately.
+// FIXME: the global-setup warmup (#114) removed the cold-compile flake, but
+// this spec still times out on GitHub Actions at its first DOM interaction — a
+// deeper post-mount/hydration lag under `bun run dev` workers:1 that the warmup
+// doesn't touch. Passes on the Jetson; still tracked in #114.
 test.fixme("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {

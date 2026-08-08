@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import ReconnectStage from "./ReconnectStage";
 import { imgProbe } from "@/lib/handoff-probe";
+import { useReconnect } from "@/hooks/useReconnect";
 
 interface WifiHandoffOverlayProps {
   /** The network the box is joining — shown in the copy. */
@@ -13,8 +13,6 @@ interface WifiHandoffOverlayProps {
   /** Grace period before we start probing the new address. */
   graceMs?: number;
 }
-
-type Phase = "switching" | "waiting" | "found";
 
 /**
  * Full-screen overlay for the WiFi network-switch handoff (setup Step 1→2).
@@ -29,41 +27,19 @@ type Phase = "switching" | "waiting" | "found";
  */
 export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: WifiHandoffOverlayProps) {
   const { t } = useT();
-  const [phase, setPhase] = useState<Phase>("switching");
 
-  useEffect(() => {
-    let cancelled = false;
-    let loopTimer: ReturnType<typeof setTimeout> | null = null;
+  // Cross-origin <img> probe (the box reappears at a new address a fetch can't
+  // reach), then redirect to its setup page on the home network.
+  const phase = useReconnect({
+    probe: (attempt) => imgProbe(targetUrl, attempt),
+    onReady: () => {
+      window.location.href = `${targetUrl}/setup`;
+    },
+    graceMs,
+    readyDelayMs: 1500,
+  });
 
-    const graceTimer = setTimeout(() => {
-      if (cancelled) return;
-      setPhase("waiting");
-      let attempt = 0;
-      const loop = async () => {
-        if (cancelled) return;
-        attempt += 1;
-        const reachable = await imgProbe(targetUrl, attempt);
-        if (cancelled) return;
-        if (reachable) {
-          setPhase("found");
-          setTimeout(() => {
-            if (!cancelled) window.location.href = `${targetUrl}/setup`;
-          }, 1500);
-          return;
-        }
-        loopTimer = setTimeout(loop, 2500);
-      };
-      loop();
-    }, graceMs);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(graceTimer);
-      if (loopTimer) clearTimeout(loopTimer);
-    };
-  }, [targetUrl, graceMs]);
-
-  const completed = phase === "found";
+  const completed = phase === "ready";
   const phaseIndex = completed ? 1 : 0;
 
   return (

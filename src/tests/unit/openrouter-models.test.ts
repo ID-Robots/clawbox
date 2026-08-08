@@ -33,6 +33,14 @@ describe("openrouter-models", () => {
       "meta-llama/llama-3.3-70b-instruct",
       "x-ai/grok-4-fast",
       "deepseek/deepseek-chat-v3.1",
+      // `:variant` suffixes — every FREE model on OpenRouter is addressed
+      // this way, and routing variants share the syntax. These were all
+      // rejected before the slug pattern learned about the colon.
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "qwen/qwen-2.5-vl-72b-instruct:free",
+      "perplexity/sonar:online",
+      "openai/gpt-4o:extended",
+      "meta-llama/llama-3.3-70b-instruct:nitro",
     ])("accepts valid slug %s", (slug) => {
       expect(isValidOpenRouterModelId(slug)).toBe(true);
     });
@@ -46,6 +54,11 @@ describe("openrouter-models", () => {
       "anthropic//claude",
       "anthropic/claude/",
       "org/model//variant",
+      // a colon is allowed, but only as ONE non-empty trailing variant
+      "anthropic/claude-haiku-4.5:",
+      "anthropic/claude-haiku-4.5:free:extra",
+      "anthropic:free",
+      "anthropic/claude haiku:free",
     ])("rejects invalid slug %s", (slug) => {
       expect(isValidOpenRouterModelId(slug)).toBe(false);
     });

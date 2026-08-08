@@ -22,6 +22,7 @@ import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 
 /* ── Types ── */
@@ -733,31 +734,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setSysPasswordSaving(false);
     }
   };
-  useEffect(() => {
-    if (!hostnameRebootTo) return;
-    let cancelled = false;
-    const redirect = () => { if (!cancelled) window.location.replace(hostnameRebootTo); };
-    const probe = async () => {
-      if (cancelled) return;
+  // After a device rename the box reboots and reappears at a new .local origin;
+  // poll it, then redirect there — with a hard fallback so we never hang if the
+  // cross-origin probe is unreliable. Same grace/poll/settle engine as the
+  // setup handoff overlays (see useReconnect).
+  useReconnect({
+    enabled: !!hostnameRebootTo,
+    // no-cors: the response is opaque so we can't inspect status, but any
+    // fulfilled fetch means TCP+HTTP completed — enough signal the box is back.
+    probe: async () => {
       try {
-        // no-cors: response is opaque so we can't inspect status. Any
-        // fulfilled fetch means TCP+HTTP completed, which is enough signal
-        // that the device is back — redirect deliberately on any success.
         await fetch(`${hostnameRebootTo}setup-api/setup/status`, {
           method: "GET",
           mode: "no-cors",
           cache: "no-store",
           signal: AbortSignal.timeout(REBOOT_PROBE_TIMEOUT_MS),
         });
-        redirect();
-        return;
-      } catch { /* not back yet */ }
-      if (!cancelled) setTimeout(probe, REBOOT_PROBE_INTERVAL_MS);
-    };
-    const probeStart = setTimeout(probe, REBOOT_PROBE_GRACE_MS);
-    const hardRedirect = setTimeout(redirect, REBOOT_HARD_REDIRECT_MS);
-    return () => { cancelled = true; clearTimeout(probeStart); clearTimeout(hardRedirect); };
-  }, [hostnameRebootTo]);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    onReady: () => {
+      if (hostnameRebootTo) window.location.replace(hostnameRebootTo);
+    },
+    graceMs: REBOOT_PROBE_GRACE_MS,
+    intervalMs: REBOOT_PROBE_INTERVAL_MS,
+    hardTimeoutMs: REBOOT_HARD_REDIRECT_MS,
+  });
   const localUrl = hostname ? `${hostname}.local` : "";
   const proto = typeof window !== "undefined" ? window.location.protocol : "http:";
   const port = typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : "";
