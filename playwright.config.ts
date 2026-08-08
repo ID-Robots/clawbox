@@ -5,10 +5,6 @@ const baseURL = `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  // Pre-compile the heavy routes on the dev server before any test clock starts
-  // (Turbopack compiles on demand under `workers: 1`, and the cold compile of
-  // `/` can outlast the 15s expect timeout on CI). See #114 / global-setup.ts.
-  globalSetup: "./e2e/global-setup.ts",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   // Mirror CI's retry strategy locally too. Tests that compress
@@ -43,8 +39,21 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `PORT=${port} bun run dev`,
+    // Run e2e against a real production build, not `bun run dev`. The Turbopack
+    // dev server compiled routes on demand (the first hit to `/` could outlast
+    // the 15s expect timeout under CI load) and, on next 16.2, its HMR
+    // websocket crashed hydration under Bun — both CI-only failures that never
+    // reproduced on-device. The standalone server serves pre-built, minified
+    // output with no HMR and no on-demand compile, so those classes vanish.
+    //
+    // SESSION_SECRET is unset for the test server so middleware auth stays
+    // inactive and `/` renders the desktop directly (production deploys set it
+    // via production-server.js; e2e drives the UI, not the auth gate). The
+    // WebSocket-backed specs mock `window.WebSocket` in-browser, so the bare
+    // standalone server (no gateway/terminal proxy) is enough.
+    command: `bun run build && env -u SESSION_SECRET PORT=${port} HOSTNAME=127.0.0.1 NODE_ENV=production node .next/standalone/server.js`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
+    timeout: 600_000,
   },
 });
