@@ -27,7 +27,9 @@ describe("gateway service health", () => {
     const args = gatewayJournalArgs(`ActiveState=failed\nInvocationID=${invocationId}\n`);
 
     expect(args).toContain(`_SYSTEMD_INVOCATION_ID=${invocationId}`);
-    expect(args).toContain("clawbox-gateway.service");
+    // Scoped by invocation id alone — no `-u UNIT`, which would OR-expand and
+    // break the AND with the invocation filter (surfacing stale lines).
+    expect(args).not.toContain("-u");
   });
 
   it("does not fall back to stale journal history without an activation ID", () => {
@@ -60,12 +62,16 @@ describe("gateway service health", () => {
   });
 
   it("redacts credentials from the authenticated error summary", () => {
-    const line = 'Config failed token="super-secret-value" bot=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ012345';
+    const line = 'Config failed token="super-secret-value" bot=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ012345 password=Hunter2Long key sk-proj-BAREKEY1234567890abcdefXY';
     const result = lastUsefulJournalLine(line);
 
     expect(result).toContain('token="[redacted]');
     expect(result).toContain("[redacted-telegram-token]");
+    expect(result).toContain("password=[redacted]");
+    expect(result).toContain("[redacted-key]");
     expect(result).not.toContain("super-secret-value");
     expect(result).not.toContain("ABCdefGHI");
+    expect(result).not.toContain("Hunter2Long");
+    expect(result).not.toContain("BAREKEY");
   });
 });

@@ -44,7 +44,8 @@ function sanitizeJournalLine(line: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
     .replace(/\b\d{6,12}:[A-Za-z0-9_-]{20,}\b/g, "[redacted-telegram-token]")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[redacted]")
-    .replace(/(["']?(?:token|secret|credential)["']?\s*[:=]\s*["']?)[^\s,"'}]{8,}/gi, "$1[redacted]")
+    .replace(/(["']?(?:token|secret|credential|password|passwd|pwd|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]{6,}/gi, "$1[redacted]")
+    .replace(/\bsk-(?:ant-)?[A-Za-z0-9._-]{16,}\b/g, "[redacted-key]")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 1_000);
@@ -65,9 +66,10 @@ export function gatewayJournalArgs(systemctlOutput: string): string[] | null {
   const invocationId = /^InvocationID=([0-9a-f]{32})$/im.exec(systemctlOutput)?.[1];
   if (!invocationId) return null;
 
+  // Scope strictly to the current failed activation. Combining `-u UNIT` with a
+  // field match doesn't AND as intended (`-u` expands to OR match-groups), so
+  // match on the invocation id alone — it's globally unique to this activation.
   return [
-    "-u",
-    GATEWAY_UNIT,
     `_SYSTEMD_INVOCATION_ID=${invocationId}`,
     "-n",
     "40",
@@ -87,7 +89,7 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
         "--property=ActiveState,SubState,Result,NRestarts,InvocationID",
         "--no-pager",
       ],
-      { timeout: 3_000 },
+      { timeout: 2_000 },
     );
     const parsed = parseGatewaySystemctlProperties(stdout);
     const breakerActive = parsed.breakerActive;
@@ -100,7 +102,7 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
           const journal = await exec(
             "/usr/bin/journalctl",
             journalArgs,
-            { timeout: 5_000, maxBuffer: 512 * 1024 },
+            { timeout: 2_500, maxBuffer: 512 * 1024 },
           );
           finalStartupError = lastUsefulJournalLine(journal.stdout);
         } catch {
