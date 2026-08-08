@@ -1,11 +1,12 @@
 # Dependabot config. Posture: security-first, low-churn.
 #
 # Two jobs only:
-#   1. Real vulnerabilities — security-update PRs. These need "Dependabot
-#      alerts" enabled in Settings → Code security (admin toggle). They ALWAYS
-#      target the default branch, ignore the groups/ignore rules below, and only
-#      bump package-lock.json — run `bun install` to refresh bun.lock before
-#      merging one.
+#   1. Real vulnerabilities — security-update PRs. These need BOTH "Dependabot
+#      alerts" AND "Dependabot security updates" enabled in Settings → Code
+#      security (admin toggles) — alerts alone surface the CVE but don't open a
+#      PR. They ALWAYS target the default branch, ignore the groups/ignore rules
+#      below, and only bump package-lock.json — run `bun install` to refresh
+#      bun.lock before merging one.
 #   2. Routine version updates — grouped minor+patch ONLY. Major bumps are
 #      ignored on purpose: on an edge-deployed device OS, framework major jumps
 #      (e.g. TypeScript 5→7, or @types/node overshooting the Node 22 runtime)
