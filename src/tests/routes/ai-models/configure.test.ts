@@ -418,6 +418,30 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).not.toContain("config set gateway.auth.token clawbox");
   });
 
+  it("preserves an externally managed gateway token when settings are saved", async () => {
+    const secretRef = {
+      source: "exec",
+      provider: "vault",
+      id: "gateway-token",
+    };
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("openclaw.json")
+        ? JSON.stringify({ gateway: { auth: { token: secretRef } } })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+    expect(res.status).toBe(200);
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map(
+      (call) => ["config", "set", ...(call[0] ?? [])].join(" "),
+    );
+    expect(commands).toContain("config set gateway.auth.mode token");
+    expect(commands.some((command) =>
+      command.startsWith("config set gateway.auth.token "),
+    )).toBe(false);
+  });
+
   it("promotes local AI to the active default when no primary AI provider was configured", async () => {
     const res = await configurePost(jsonRequest({
       provider: "llamacpp",

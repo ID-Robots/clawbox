@@ -70,7 +70,33 @@ const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;
 <a href="/" style="color:#f97316;text-decoration:none;font-weight:600">ClawBox</a>
 </div>`;
 
-export async function getGatewayToken(): Promise<string> {
+type GatewaySecretRef =
+  { source: "env" | "file" | "exec"; provider: string; id: string };
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function isGatewaySecretRef(value: unknown): value is GatewaySecretRef {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const ref = value as Record<string, unknown>;
+  const keys = Object.keys(ref);
+  const source = ref.source;
+  if (source === "env" || source === "file" || source === "exec") {
+    // source is a valid enum and id/provider are non-empty strings, so with
+    // exactly 3 keys they must be {source, id, provider} — no need to re-assert
+    // each key is present.
+    if (!isNonEmptyString(ref.id)) return false;
+    return keys.length === 3 && isNonEmptyString(ref.provider);
+  }
+  return false;
+}
+
+function isGatewayTokenInterpolation(value: unknown): value is string {
+  return typeof value === "string" && /^\$\{.+\}$/.test(value);
+}
+
+async function readGatewayTokenInput(): Promise<unknown> {
   try {
     const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf-8");
     const config = JSON.parse(raw);
@@ -78,6 +104,15 @@ export async function getGatewayToken(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+export async function getGatewayToken(): Promise<string> {
+  const token = await readGatewayTokenInput();
+  // ClawBox cannot resolve managed refs safely. Do not serialize a SecretRef
+  // object or an unresolved ${ENV} marker into the browser as an auth token.
+  return typeof token === "string" && !isGatewayTokenInterpolation(token)
+    ? token
+    : "";
 }
 
 // Legacy literal that earlier ClawBox builds wrote into `gateway.auth.token`.
@@ -88,16 +123,20 @@ const LEGACY_GATEWAY_TOKEN = "clawbox";
 const MIN_GATEWAY_TOKEN_LENGTH = 32;
 
 /**
- * Returns the existing per-device gateway auth token, or freshly generates
- * one when the on-disk value is missing, the legacy literal `"clawbox"`, or
- * shorter than the minimum random length.
+ * Returns null for an externally managed token, the existing per-device
+ * literal token when strong, or a fresh token when the on-disk value is
+ * missing, the legacy literal `"clawbox"`, malformed, or too short.
  *
  * Caller is responsible for persisting the returned value (via
  * `runOpenclawConfigSet`, `runCommand`, or a direct seed write).
  */
-export async function getOrGenerateGatewayToken(): Promise<string> {
-  const existing = await getGatewayToken();
+export async function getOrGenerateGatewayToken(): Promise<string | null> {
+  const existing = await readGatewayTokenInput();
+  if (isGatewaySecretRef(existing) || isGatewayTokenInterpolation(existing)) {
+    return null;
+  }
   if (
+    typeof existing === "string" &&
     existing &&
     existing !== LEGACY_GATEWAY_TOKEN &&
     existing.length >= MIN_GATEWAY_TOKEN_LENGTH

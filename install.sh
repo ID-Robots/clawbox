@@ -1482,7 +1482,16 @@ except Exception:
     print("missing"); sys.exit()
 t = ((c.get("gateway", {}) or {}).get("auth", {}) or {}).get("token")
 if isinstance(t, dict):
-    print("secretref")
+    keys = set(t)
+    source = t.get("source")
+    ref_id = t.get("id")
+    canonical = (
+        source in ("env", "file", "exec") and
+        isinstance(ref_id, str) and ref_id.strip() and
+        keys == {"source", "provider", "id"} and
+        isinstance(t.get("provider"), str) and t["provider"].strip()
+    )
+    print("secretref" if canonical else "weak")
 elif isinstance(t, str) and t.startswith("${") and t.endswith("}") and len(t) > 3:
     print("interp")
 elif isinstance(t, str) and t and t != "clawbox" and len(t) >= 32:

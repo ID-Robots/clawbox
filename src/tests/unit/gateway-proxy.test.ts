@@ -148,9 +148,40 @@ describe("gateway-proxy", () => {
 
       expect(a).not.toBe(b);
     });
+
+    it("preserves a canonical SecretRef without resolving it", async () => {
+      const token = { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_TOKEN" };
+      mockFs.readFile.mockResolvedValue(JSON.stringify({ gateway: { auth: { token } } }));
+      await expect(gatewayProxy.getOrGenerateGatewayToken()).resolves.toBeNull();
+    });
+
+    it("rotates malformed SecretRef objects", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: { source: "exec", provider: "vault" } } },
+      }));
+      await expect(gatewayProxy.getOrGenerateGatewayToken()).resolves.toMatch(HEX_64);
+    });
   });
 
   describe("serveGatewayHTML", () => {
+    it("does not serialize a SecretRef into the browser", async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: { source: "exec", provider: "vault", id: "gateway-token" } } },
+      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve("<html><body>Gateway Content</body></html>"),
+      }));
+
+      const response = await gatewayProxy.serveGatewayHTML(
+        createRequest("http://clawbox.local/", { host: "clawbox.local" }),
+      );
+      const html = await response.text();
+
+      expect(html).not.toContain("gateway-token");
+      expect(html).not.toContain("[object Object]");
+      expect(html).not.toContain('h.set("token"');
+    });
     it("fetches and injects ClawBox bar", async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
