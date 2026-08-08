@@ -86,6 +86,16 @@ export function normalizeOrigin(raw: unknown): NormalizedOrigin {
     return { origin: null, warning: `origin scheme must be http or https: ${JSON.stringify(raw)}` };
   }
 
+  // Match the stricter Python loader (gateway_origins.py) on the RAW input —
+  // the WHATWG URL parser is more lenient than urllib.urlsplit, and any origin
+  // the proxy trusts but the gateway rejects only half-works. `@` in the
+  // authority is userinfo even when empty (`http://@host`), which url.username
+  // cannot see once WHATWG strips it.
+  const rawAuthority = value.slice(value.indexOf("://") + 3).split(/[/?#]/)[0];
+  if (rawAuthority.includes("@")) {
+    return { origin: null, warning: `origin must not contain credentials: ${JSON.stringify(raw)}` };
+  }
+
   if (url.username || url.password) {
     return { origin: null, warning: `origin must not contain credentials: ${JSON.stringify(raw)}` };
   }
@@ -118,6 +128,13 @@ export function normalizeOrigin(raw: unknown): NormalizedOrigin {
     }
     if (/^[0-9.]+$/.test(hostname) && !net.isIPv4(hostname)) {
       return { origin: null, warning: `origin has an invalid IPv4 host: ${JSON.stringify(raw)}` };
+    }
+    // WHATWG rewrites IPv4 shorthand/integer/octal ("2130706433", "127.1",
+    // "010.0.0.1") to a canonical dotted quad; urllib.urlsplit does not, so the
+    // gateway would reject what we normalized. Only trust an already-canonical
+    // dotted quad.
+    if (net.isIPv4(hostname) && rawAuthority.replace(/:\d+$/, "").toLowerCase() !== hostname) {
+      return { origin: null, warning: `origin has a non-canonical IPv4 host: ${JSON.stringify(raw)}` };
     }
     hostPart = hostname;
   }

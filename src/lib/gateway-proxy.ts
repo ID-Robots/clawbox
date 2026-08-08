@@ -111,17 +111,15 @@ export function redirectToSetup(request: NextRequest): NextResponse {
       .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
   const hostHeader = request.headers.get("host");
   const rawHost = hostHeader?.toLowerCase().replace(/:\d+$/, "");
-  const configuredOrigins = getConfiguredOrigins();
   const exactConfiguredMatch =
     !!hostHeader && isConfiguredOrigin(proto, hostHeader);
-  // A configured host opts into exact origin matching even when it would
-  // otherwise match the broad IPv4/ALLOWED_HOSTS reflection path. Hosts with
-  // no configured entry retain the existing same-host behavior.
-  const reflectable = !!rawHost && (
-    configuredOrigins.hosts.has(rawHost)
-      ? exactConfiguredMatch
-      : isReflectableHost(rawHost) || exactConfiguredMatch
-  );
+  // A default-reflectable host (LAN IP / localhost / mDNS name) keeps its broad
+  // reflection even when an operator also configures an exact origin for it:
+  // configuring `https://10.42.0.1` must not stop plain `http://10.42.0.1` from
+  // working on the SoftAP. Configured non-default origins reflect on an exact
+  // scheme+host+port match.
+  const reflectable =
+    !!rawHost && (isReflectableHost(rawHost) || exactConfiguredMatch);
   if (reflectable) {
     return NextResponse.redirect(
       new URL(`${proto}://${hostHeader}/setup`),
