@@ -85,6 +85,7 @@ export default function SystemUpdateApp() {
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
+  const [forceConfirm, setForceConfirm] = useState(false);
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -508,6 +509,26 @@ export default function SystemUpdateApp() {
                       <p className="mt-2 text-xs text-red-300">{branchError}</p>
                     )}
                   </div>
+
+                  {/* Force full update — recovery for a device left with a
+                      stale OpenClaw/system unit by force-update.sh (restores
+                      the UI but not the full update). Re-runs the full updater. */}
+                  <div className="border-t border-white/5 pt-4">
+                    <div className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
+                      Force full update
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--text-muted)]">
+                      Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setForceConfirm(true)}
+                      className="mt-2 px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold cursor-pointer hover:bg-amber-500/25"
+                    >
+                      Force full update
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -555,6 +576,52 @@ export default function SystemUpdateApp() {
                 className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
               >
                 Enable beta
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {forceConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="force-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setForceConfirm(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 px-5 pt-5">
+              <div className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-500/15 text-amber-300">
+                <span className="material-symbols-rounded" style={{ fontSize: 22 }}>restart_alt</span>
+              </div>
+              <h2 id="force-confirm-title" className="text-base font-semibold text-gray-100">Force a full update?</h2>
+            </div>
+            <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
+              <p>
+                This re-runs the full update — including OpenClaw and system-service setup — even
+                though the version is already current, then <strong>reboots the device</strong>. Use it
+                to finish a recovery or fix services that misbehave after an update.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+              <button
+                type="button"
+                onClick={() => setForceConfirm(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => { setForceConfirm(false); void triggerUpdate(); }}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
+              >
+                Force full update
               </button>
             </div>
           </div>
