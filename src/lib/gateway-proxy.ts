@@ -121,10 +121,13 @@ export function redirectToSetup(request: NextRequest): NextResponse {
   const reflectable =
     !!rawHost && (isReflectableHost(rawHost) || exactConfiguredMatch);
   if (reflectable) {
-    return NextResponse.redirect(
-      new URL(`${proto}://${hostHeader}/setup`),
-      302
-    );
+    try {
+      return NextResponse.redirect(new URL(`${proto}://${hostHeader}/setup`), 302);
+    } catch {
+      // Malformed Host header (e.g. an out-of-range port like `:99999`, which
+      // rawHost strips before the reflection check) — fall through to the
+      // canonical origin instead of throwing a 500.
+    }
   }
   return NextResponse.redirect(new URL(`${CANONICAL_ORIGIN}/setup`), 302);
 }

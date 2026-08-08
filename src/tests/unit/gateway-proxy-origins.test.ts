@@ -203,6 +203,20 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     expect(ipResponse.headers.get("location")).toContain("192.0.2.3");
   });
 
+  it("falls back to the canonical origin on a malformed Host port instead of throwing", async () => {
+    process.env[ENV_VAR] = path.join(dir, "absent.json");
+    await importFresh();
+
+    // rawHost strips the port before the reflection check, so an out-of-range
+    // port in the Host header reaches the reflect path; new URL(...:99999/setup)
+    // would throw a 500. (Request URL stays valid — only the Host header is bad.)
+    const request = createRequest("http://clawbox.local/", { host: "clawbox.local:99999" });
+    expect(() => gatewayProxy.redirectToSetup(request)).not.toThrow();
+    const location = gatewayProxy.redirectToSetup(request).headers.get("location");
+    expect(location).toContain("clawbox.local");
+    expect(location).not.toContain("99999");
+  });
+
   it("an invalid origins file yields no extras and does not affect existing host reflection", async () => {
     const file = path.join(dir, "origins.json");
     writeFileSync(file, "{not json");
