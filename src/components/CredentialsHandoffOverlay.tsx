@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import ReconnectStage from "./ReconnectStage";
 import { imgProbe } from "@/lib/handoff-probe";
+import { useReconnect } from "@/hooks/useReconnect";
 
 interface CredentialsHandoffOverlayProps {
   /** Full setup URL (…/setup) to probe and, when the address changed, redirect to. */
@@ -26,8 +26,6 @@ interface CredentialsHandoffOverlayProps {
   graceMs?: number;
 }
 
-type Phase = "applying" | "waiting" | "done";
-
 /**
  * Full-screen overlay for the Step 3 → 4 handoff. Saving new credentials can
  * restart the setup hotspot (and optionally rename the device), which drops
@@ -44,22 +42,13 @@ export default function CredentialsHandoffOverlay({
   graceMs = 4000,
 }: CredentialsHandoffOverlayProps) {
   const { t } = useT();
-  const [phase, setPhase] = useState<Phase>("applying");
 
-  // onContinue is typically an inline arrow from the parent, so its identity
-  // changes each render — keep it in a ref so the probe loop isn't restarted.
-  const onContinueRef = useRef(onContinue);
-  useEffect(() => {
-    onContinueRef.current = onContinue;
-  }, [onContinue]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let loopTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // Same origin → fetch HEAD works. A 405 (method not allowed) still proves
-    // the server is up, so treat any response as reachable.
-    async function fetchProbe(): Promise<boolean> {
+  const phase = useReconnect({
+    // Same origin → a HEAD fetch works; a 405 (method not allowed) still proves
+    // the server is up, so treat any 2xx–4xx as reachable. Renamed device →
+    // cross-origin, so <img>-probe the new origin (fetch is CORS-blocked).
+    probe: async (attempt) => {
+      if (!sameOrigin) return imgProbe(targetUrl.replace(/\/setup\/?$/, ""), attempt);
       try {
         const res = await fetch(targetUrl, {
           method: "HEAD",
@@ -70,42 +59,17 @@ export default function CredentialsHandoffOverlay({
       } catch {
         return false;
       }
-    }
+    },
+    onReady: () => {
+      if (sameOrigin) onContinue();
+      else window.location.replace(targetUrl);
+    },
+    graceMs,
+    readyDelayMs: 1600,
+  });
 
-    const graceTimer = setTimeout(() => {
-      if (cancelled) return;
-      setPhase("waiting");
-      let attempt = 0;
-      const loop = async () => {
-        if (cancelled) return;
-        attempt += 1;
-        const reachable = sameOrigin
-          ? await fetchProbe()
-          : await imgProbe(targetUrl.replace(/\/setup\/?$/, ""), attempt);
-        if (cancelled) return;
-        if (reachable) {
-          setPhase("done");
-          setTimeout(() => {
-            if (cancelled) return;
-            if (sameOrigin) onContinueRef.current();
-            else window.location.replace(targetUrl);
-          }, 1600);
-          return;
-        }
-        loopTimer = setTimeout(loop, 2500);
-      };
-      loop();
-    }, graceMs);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(graceTimer);
-      if (loopTimer) clearTimeout(loopTimer);
-    };
-  }, [targetUrl, sameOrigin, graceMs]);
-
-  const completed = phase === "done";
-  const phaseIndex = phase === "applying" ? 0 : phase === "waiting" ? 1 : 2;
+  const completed = phase === "ready";
+  const phaseIndex = phase === "grace" ? 0 : phase === "probing" ? 1 : 2;
 
   let prettyUrl = targetUrl;
   try {

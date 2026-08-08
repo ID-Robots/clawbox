@@ -1,9 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: same GH-Actions-only flake as browser-vnc — verified passing
-// in isolation on the Jetson. Tracked as a follow-up to PR #113.
-test.fixme("installed app settings can save configuration and toggle enablement", async ({ page }) => {
+test("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -39,7 +37,11 @@ test.fixme("installed app settings can save configuration and toggle enablement"
   await page.getByRole("button", { name: "Install Anyway" }).click();
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
 
-  await page.locator('[data-desktop-icon-id="home-assistant"] button').click();
+  // The freshly-installed icon animates in, so it never passes Playwright's
+  // stability gate — dispatch the click straight to its launch button.
+  const haIcon = page.locator('[data-desktop-icon-id="home-assistant"] button');
+  await expect(haIcon).toBeVisible();
+  await haIcon.dispatchEvent("click");
 
   const settingsWindow = page.getByTestId("chrome-window-installed-home-assistant");
   await expect(settingsWindow).toBeVisible();

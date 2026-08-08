@@ -253,6 +253,20 @@ describe("middleware", () => {
       expect(response.status).toBe(401);
     });
 
+    it("returns a parseable JSON 401 for /setup-api/* with no Accept header (#304)", async () => {
+      // The bug: a raw fetch("/setup-api/...") sends Accept: */*, hit the login
+      // *redirect*, and the caller's `.json()` threw on the login page's HTML.
+      // Guard that an expired session now yields a JSON 401 the caller can parse.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api/system/info"));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
     it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
@@ -269,11 +283,13 @@ describe("middleware", () => {
       vi.resetModules();
       const mod = await import("@/middleware");
 
+      // createRequest() sends no Accept header — exactly like a raw fetch()
+      // (Accept: */*). Every /setup-api/* consumer parses JSON, so an expired
+      // session must return a JSON 401, not an HTML login redirect that makes
+      // the caller's .json() throw (#304).
       const req = createRequest(p);
       const response = await mod.middleware(req);
-      // No session cookie -> page-style requests redirect to /login (307).
-      expect(response.status).toBe(307);
-      expect(response.headers.get("Location")).toContain("/login");
+      expect(response.status).toBe(401);
     });
 
     it.each(["/setup-api/wifi/scan", "/setup-api/update/status", "/setup-api/update/run", "/setup-api/system/credentials", "/setup-api/ai-models/configure", "/setup-api/telegram/configure"])("allows %s during setup wizard bootstrap", async (p) => {
@@ -300,8 +316,9 @@ describe("middleware", () => {
 
       markSetupComplete();
       const locked = await mod.middleware(createRequest("/setup-api/wifi/scan"));
-      expect(locked.status).toBe(307);
-      expect(locked.headers.get("Location")).toContain("/login");
+      // Re-locked API surface returns a JSON 401 (not a login redirect) so
+      // fetch() callers can detect the expired session — see #304.
+      expect(locked.status).toBe(401);
     });
 
     it("skips auth on /setup-api/* when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
@@ -329,8 +346,8 @@ describe("middleware", () => {
 
       const req = createRequest("/setup-api/wifi/scan");
       const response = await mod.middleware(req);
-      expect(response.status).toBe(307);
-      expect(response.headers.get("Location")).toContain("/login");
+      // Auth still enforced -> /setup-api/* yields a JSON 401 (not a bypass).
+      expect(response.status).toBe(401);
     });
 
     it("still redirects page requests to /login under CLAWBOX_TEST_MODE", async () => {

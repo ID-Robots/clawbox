@@ -1,12 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: passes locally / on the Jetson worktree (verified ~7-18s) but
-// times out on GitHub Actions even with 60s per-test + 15s expect/action
-// timeouts. Root cause is environmental (likely runner memory pressure
-// with `bun run dev` under sequential workers:1). Tracked as a follow-up
-// to PR #113 — needs the e2e GH-runner profile investigated separately.
-test.fixme("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
+test("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -22,7 +17,11 @@ test.fixme("browser app installs chromium, enables integration, and opens the VN
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await openLauncher(page);
-  const browserLauncherButton = page.getByTestId("app-launcher").getByRole("button", { name: "Browser" });
+  // The launcher paginates its apps; "Browser" sits past the first page. Search
+  // to filter it onto the current page instead of relying on page order.
+  const launcher = page.getByTestId("app-launcher");
+  await launcher.getByRole("textbox").fill("Browser");
+  const browserLauncherButton = launcher.getByRole("button", { name: "Browser" });
   await browserLauncherButton.click();
 
   const browserWindow = page.getByTestId("chrome-window-browser");
