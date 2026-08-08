@@ -247,9 +247,30 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 5. API requests get 401, page requests redirect to login
+  // 5. Auth failed — choose a JSON 401 or an HTML login redirect.
+  //
+  // Everything under /setup-api/* (and /api/*) is an API surface consumed by
+  // fetch()/XHR that parses the body as JSON. A raw fetch() sends
+  // `Accept: */*`, so the old `accept.includes("application/json")` gate missed
+  // it and fell through to the login *redirect* — whose HTML body then made the
+  // caller's `.json()` throw on an expired session. #231/#303 patched this one
+  // caller at a time; return a JSON 401 for the whole prefix instead so every
+  // caller (~30 across ~15 files) gets a structured 401 it can detect, with no
+  // client changes (#304).
+  //
+  // Deliberate trade-off: a few /setup-api/* routes are loaded by direct
+  // browser navigation/embedding (webapps?app= iframes, apps/icon/[appId]
+  // <img>, file downloads) rather than fetch(), and now get a 401 too instead
+  // of a login page. That's fine — a login page rendered inside an <img> or a
+  // download stream is useless anyway, and the desktop shell drives the real
+  // re-login. Genuine top-level page navigations (no /setup-api/ or /api/
+  // prefix) still redirect below.
   const accept = request.headers.get("accept") || "";
-  if (accept.includes("application/json") || pathname.startsWith("/api/")) {
+  if (
+    pathname.startsWith("/setup-api/") ||
+    pathname.startsWith("/api/") ||
+    accept.includes("application/json")
+  ) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
 
