@@ -1,9 +1,9 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: same GH-Actions-only flake as browser-vnc — verified passing
-// in isolation on the Jetson. Tracked as a follow-up to PR #113.
-test.fixme("installed app settings can save configuration and toggle enablement", async ({ page }) => {
+// Re-enabled via the global-setup warmup (see #114) — the GH-Actions cold-`/`
+// compile flake is paid up front now, and this passes on the Jetson in isolation.
+test("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,

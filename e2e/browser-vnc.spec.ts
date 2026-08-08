@@ -1,12 +1,10 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-// FIXME: passes locally / on the Jetson worktree (verified ~7-18s) but
-// times out on GitHub Actions even with 60s per-test + 15s expect/action
-// timeouts. Root cause is environmental (likely runner memory pressure
-// with `bun run dev` under sequential workers:1). Tracked as a follow-up
-// to PR #113 — needs the e2e GH-runner profile investigated separately.
-test.fixme("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
+// Re-enabled: the GH-Actions-only flake was the cold Turbopack compile of `/`
+// under `bun run dev` (workers:1) outrunning the timeouts. The global-setup
+// warmup now pays that compile before the suite starts. See #114.
+test("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
