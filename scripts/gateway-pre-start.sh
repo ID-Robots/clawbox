@@ -18,6 +18,8 @@
 # switch, and crash-triggered restart.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
 OPENCLAW_CONFIG="/home/clawbox/.openclaw/openclaw.json"
 HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
@@ -83,6 +85,53 @@ else
 fi
 export CLAWBOX_LAN_IPS
 
+# Trusted control UI origins — a narrow escape hatch for genuinely
+# cross-origin/custom-origin Control UI deployments (see README and
+# scripts/gateway_origins.py). Same-origin access via `<hostname>.local`,
+# `.ts.net`, or a private LAN IP already works without any entry here.
+# Loaded from CLAWBOX_CONTROL_UI_ORIGINS_FILE (or the module's default
+# path) via scripts/gateway_origins.py. Missing helper module or missing
+# config file both fall through to "no extras" — defaults still boot.
+CLAWBOX_EXTRA_ORIGINS="$(CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
+import os, sys
+
+script_dir = os.environ.get("CLAWBOX_GATEWAY_ORIGINS_SCRIPT_DIR", "")
+if script_dir:
+    sys.path.insert(0, script_dir)
+
+try:
+    import gateway_origins
+except Exception as exc:
+    print(
+        "  WARN: trusted control UI origins helper unavailable "
+        f"({type(exc).__name__}); using defaults only",
+        file=sys.stderr,
+    )
+    sys.exit(0)
+
+try:
+    path = gateway_origins.resolve_origins_path()
+    origins, warnings = gateway_origins.load_configured_origins(path)
+except Exception as exc:
+    print(
+        "  WARN: trusted control UI origins helper failed "
+        f"({type(exc).__name__}); using defaults only",
+        file=sys.stderr,
+    )
+    sys.exit(0)
+for warning in warnings:
+    print(f"  WARN: {warning}", file=sys.stderr)
+for origin in origins:
+    print(origin)
+PY
+)"
+if [ -n "$CLAWBOX_EXTRA_ORIGINS" ]; then
+  while IFS= read -r origin; do
+    [ -n "$origin" ] && echo "  Trusted control UI origin: $origin"
+  done <<<"$CLAWBOX_EXTRA_ORIGINS"
+fi
+export CLAWBOX_EXTRA_ORIGINS
+
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
 
@@ -97,10 +146,17 @@ LEGACY_GATEWAY_TOKEN = "clawbox"
 MIN_GATEWAY_TOKEN_LENGTH = 32
 
 def is_strong_gateway_token(v):
-    # SecretRef object — managed externally. Require a known ref key so an
-    # empty/malformed {} isn't mistaken for a resolvable secret.
+    # SecretRef object — managed externally. OpenClaw stores canonical refs as
+    # {source, provider, id}. Reject legacy key-style, providerless, partial,
+    # and extra-key objects: current OpenClaw rejects all of those shapes.
     if isinstance(v, dict):
-        return any(k in v for k in ("env", "file", "exec"))
+        source = v.get("source")
+        ref_id = v.get("id")
+        if source in ("env", "file", "exec") and isinstance(ref_id, str) and ref_id.strip():
+            provider = v.get("provider")
+            if set(v) == {"source", "provider", "id"} and isinstance(provider, str) and provider.strip():
+                return True
+        return False
     if isinstance(v, str):
         # `${VAR}` interpolation (non-empty body) resolves from env at runtime.
         if v.startswith("${") and v.endswith("}") and len(v) > 3:
@@ -111,6 +167,7 @@ def is_strong_gateway_token(v):
 cfg_path = sys.argv[1]
 hostname = os.environ.get("CLAWBOX_HOSTNAME", "clawbox")
 lan_ips = [line for line in os.environ.get("CLAWBOX_LAN_IPS", "").split("\n") if line]
+extra_origins = [line for line in os.environ.get("CLAWBOX_EXTRA_ORIGINS", "").split("\n") if line]
 
 allowed_origins = [
     f"http://{hostname}.local",
@@ -120,6 +177,12 @@ allowed_origins = [
     "http://10.43.0.1",
     *lan_ips,
 ]
+# Merge already-validated extra origins (scripts/gateway_origins.py) into the
+# generated defaults, deterministically and before the set comparison below —
+# defaults first, extras appended in file order, de-duplicated.
+for _extra in extra_origins:
+    if _extra not in allowed_origins:
+        allowed_origins.append(_extra)
 
 try:
     with open(cfg_path) as f:

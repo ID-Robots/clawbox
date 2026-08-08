@@ -24,6 +24,10 @@ const LLAMACPP_ROUTE = readFileSync(
   path.join(REPO, "src/app/setup-api/llamacpp/install/route.ts"),
   "utf-8",
 );
+const GATEWAY_UNIT = readFileSync(
+  path.join(REPO, "config/clawbox-gateway.service"),
+  "utf-8",
+);
 
 function extractShellFunction(name: string): string {
   const start = INSTALL_SH.indexOf(`${name}() {`);
@@ -53,6 +57,45 @@ describe("in-app update delivers unit-file changes", () => {
       INSTALL_SH.indexOf(")", INSTALL_SH.indexOf("DISPATCH_STEPS=(")),
     );
     expect(dispatch).toContain("systemd_services");
+  });
+});
+
+describe("gateway restart breaker", () => {
+  const intervalSec = Number(/^StartLimitIntervalSec=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);
+  const burst = Number(/^StartLimitBurst=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);
+  const timeoutSec = Number(/^TimeoutStartSec=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);
+  const restartSec = Number(/^RestartSec=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);
+
+  function acceptedStarts(failureDurationSec: number, attempts: number): number[] {
+    const accepted: number[] = [];
+    for (let attempt = 0, at = 0; attempt < attempts; attempt += 1, at += failureDurationSec + restartSec) {
+      const inWindow = accepted.filter((startedAt) => at - startedAt <= intervalSec);
+      if (inWindow.length >= burst) break;
+      accepted.push(at);
+    }
+    return accepted;
+  }
+
+  it("uses failure-only restarts and an explicit window covering the worst-case burst", () => {
+    expect(GATEWAY_UNIT).toMatch(/^Restart=on-failure$/m);
+    expect(intervalSec).toBe(3_600);
+    expect(burst).toBe(5);
+    expect(intervalSec).toBeGreaterThan(burst * (timeoutSec + restartSec));
+  });
+
+  it("breaks a permanent failure whose 12-second cycles defeated the old 10-second window", () => {
+    expect(acceptedStarts(12, burst + 2)).toHaveLength(burst);
+  });
+
+  it("allows a transient first failure to recover on the next start", () => {
+    expect(acceptedStarts(12, 2)).toHaveLength(2);
+  });
+
+  it("is regenerated on both fresh install and update from the canonical unit", () => {
+    expect(extractShellFunction("step_gateway_setup")).toContain(
+      'cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/',
+    );
+    expect(extractShellFunction("step_post_update")).toContain("step_systemd_services");
   });
 });
 

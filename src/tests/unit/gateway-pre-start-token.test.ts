@@ -79,12 +79,19 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh token policy", () => {
     it("empty ${} interpolation is weak", () => {
       expect(classify("${}")).toBe("weak");
     });
-    it("SecretRef object with a known key is strong (externally managed)", () => {
-      expect(classify({ env: "OPENCLAW_GATEWAY_TOKEN" })).toBe("strong");
-      // file/exec are equally valid SecretRef shapes — assert each so a
-      // regression that drops one from the accepted-key set is caught.
-      expect(classify({ file: "/run/secrets/gateway-token" })).toBe("strong");
-      expect(classify({ exec: "cat /run/secrets/token" })).toBe("strong");
+    it("canonical SecretRef objects are strong (externally managed)", () => {
+      expect(classify({ source: "env", provider: "default", id: "OPENCLAW_GATEWAY_TOKEN" })).toBe("strong");
+      expect(classify({ source: "file", provider: "mounted", id: "/gateway/token" })).toBe("strong");
+      expect(classify({ source: "exec", provider: "vault", id: "gateway-token" })).toBe("strong");
+    });
+    it("malformed SecretRef objects are weak", () => {
+      expect(classify({ source: "bogus", provider: "default", id: "TOKEN" })).toBe("weak");
+      expect(classify({ source: "exec" })).toBe("weak");
+      expect(classify({ source: "exec", provider: "", id: "gateway-token" })).toBe("weak");
+      expect(classify({ source: "exec", provider: "vault", id: "gateway-token", extra: true })).toBe("weak");
+      expect(classify({ exec: "" })).toBe("weak");
+      expect(classify({ source: "exec", id: "gateway-token" })).toBe("weak");
+      expect(classify({ env: "OPENCLAW_GATEWAY_TOKEN" })).toBe("weak");
     });
     it("empty/keyless object is weak (not a resolvable secret)", () => {
       expect(classify({})).toBe("weak");
@@ -111,6 +118,14 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh token policy", () => {
       expect(rotateOutcome("${OPENCLAW_GATEWAY_TOKEN}")).toBe(
         "${OPENCLAW_GATEWAY_TOKEN}",
       );
+    });
+    it("preserves a canonical SecretRef unchanged", () => {
+      const ref = { source: "exec", provider: "vault", id: "gateway-token" };
+      const output = runPython(
+        `import json, sys, secrets\nt = json.loads(sys.argv[1])\nprint(json.dumps(t if is_strong_gateway_token(t) else secrets.token_hex(32), sort_keys=True))`,
+        JSON.stringify(ref),
+      );
+      expect(JSON.parse(output)).toEqual(ref);
     });
   });
 });

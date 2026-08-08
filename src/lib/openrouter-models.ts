@@ -28,12 +28,21 @@ export const OPENROUTER_DEFAULT_MODEL_ID = "anthropic/claude-haiku-4.5";
 
 /**
  * OpenRouter slugs are structured `<org>/<model>` (sometimes with more
- * path segments). Validate the shape before we accept a user-supplied
- * custom model ID — stops empty strings, whitespace, and obvious typos
- * without getting in the way of legitimate rare slugs.
+ * path segments) and may carry ONE trailing `:variant` suffix. Validate
+ * the shape before we accept a user-supplied custom model ID — stops
+ * empty strings, whitespace, and obvious typos without getting in the
+ * way of legitimate rare slugs.
+ *
+ * The `:variant` part is not optional pedantry: every free model on
+ * OpenRouter is addressed as `<org>/<model>:free`, and routing variants
+ * (`:online`, `:extended`, `:nitro`, `:thinking`) use the same syntax.
+ * The original pattern's character class had no colon, so it rejected
+ * ALL of them — a user pasting the correct id for a free model got
+ * "invalid model id" from us, not from OpenRouter. Reported in Discord
+ * 2026-07-30 for `nvidia/nemotron-3-ultra-550b-a55b:free`.
  */
 const OPENROUTER_SLUG_RE =
-  /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+$/i;
+  /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+(?::[a-z0-9][a-z0-9._-]*)?$/i;
 
 export function isValidOpenRouterModelId(id: string): boolean {
   return OPENROUTER_SLUG_RE.test(id.trim());

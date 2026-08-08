@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
@@ -85,6 +85,7 @@ export default function SystemUpdateApp() {
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
+  const [forceConfirm, setForceConfirm] = useState(false);
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -508,6 +509,30 @@ export default function SystemUpdateApp() {
                       <p className="mt-2 text-xs text-red-300">{branchError}</p>
                     )}
                   </div>
+
+                  {/* Force full update — recovery for a device left with a stale
+                      OpenClaw/system unit by force-update.sh (restores the UI but
+                      not the full update). Only offered when otherwise up to date
+                      (the recovery scenario) so it can't fire during loading or a
+                      failed version fetch. */}
+                  {status === "up-to-date" && (
+                    <div className="border-t border-white/5 pt-4">
+                      <div className="text-sm text-gray-100 inline-flex items-center gap-2">
+                        <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
+                        Force full update
+                      </div>
+                      <p className="mt-1 text-xs text-[var(--text-muted)]">
+                        Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setForceConfirm(true)}
+                        className="mt-2 px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold cursor-pointer hover:bg-amber-500/25"
+                      >
+                        Force full update
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -516,50 +541,132 @@ export default function SystemUpdateApp() {
       </div>
 
       {betaConfirm && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="beta-confirm-title"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-          onClick={() => setBetaConfirm(false)}
+        <ConfirmModal
+          titleId="beta-confirm-title"
+          title="Enable beta updates?"
+          icon="warning"
+          confirmLabel="Enable beta"
+          onCancel={() => setBetaConfirm(false)}
+          onConfirm={() => { setBetaConfirm(false); void saveBranch("beta"); }}
         >
-          <div
-            className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 px-5 pt-5">
-              <div className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-500/15 text-amber-300">
-                <span className="material-symbols-rounded" style={{ fontSize: 22 }}>warning</span>
-              </div>
-              <h2 id="beta-confirm-title" className="text-base font-semibold text-gray-100">Enable beta updates?</h2>
-            </div>
-            <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
-              <p>
-                Beta builds may include unfinished features and regressions. They&apos;re great for early
-                feedback but can break local state. You can switch back any time, but downgrades aren&apos;t
-                always reversible.
-              </p>
-            </div>
-            <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
-              <button
-                type="button"
-                onClick={() => setBetaConfirm(false)}
-                className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                autoFocus
-                onClick={() => { setBetaConfirm(false); void saveBranch("beta"); }}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
-              >
-                Enable beta
-              </button>
-            </div>
-          </div>
-        </div>
+          <p>
+            Beta builds may include unfinished features and regressions. They&apos;re great for early
+            feedback but can break local state. You can switch back any time, but downgrades aren&apos;t
+            always reversible.
+          </p>
+        </ConfirmModal>
       )}
+
+      {forceConfirm && (
+        <ConfirmModal
+          titleId="force-confirm-title"
+          title="Force a full update?"
+          icon="restart_alt"
+          confirmLabel="Yes, run full update"
+          onCancel={() => setForceConfirm(false)}
+          onConfirm={() => { setForceConfirm(false); void triggerUpdate(); }}
+        >
+          <p>
+            This re-runs the full update — including OpenClaw and system-service setup — even
+            though the version is already current, then <strong>reboots the device</strong>. Use it
+            to finish a recovery or fix services that misbehave after an update.
+          </p>
+        </ConfirmModal>
+      )}
+    </div>
+  );
+}
+
+// Shared confirmation dialog. Focuses Cancel on open (so a stray Enter can't
+// confirm a destructive action), closes on Escape, and traps Tab focus within
+// the dialog — the keyboard-nav behavior CLAUDE.md requires of modals.
+function ConfirmModal({
+  titleId,
+  title,
+  icon,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  children,
+}: {
+  titleId: string;
+  title: string;
+  icon: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  children: ReactNode;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusables || focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 px-5 pt-5">
+          <div className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-500/15 text-amber-300">
+            <span className="material-symbols-rounded" style={{ fontSize: 22 }}>{icon}</span>
+          </div>
+          <h2 id={titleId} className="text-base font-semibold text-gray-100">{title}</h2>
+        </div>
+        <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
+          {children}
+        </div>
+        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-black cursor-pointer"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
