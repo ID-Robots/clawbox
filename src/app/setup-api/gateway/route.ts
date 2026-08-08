@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
+import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest) {
       getGatewayToken(),
     ]);
     if (!res.ok) {
-      return gatewayOfflineResponse();
+      return gatewayOfflineResponse(await getGatewayServiceHealth());
     }
     let html = await res.text();
     // Use the request hostname so WebSocket connects to the right address
@@ -61,11 +62,23 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch {
-    return gatewayOfflineResponse();
+    return gatewayOfflineResponse(await getGatewayServiceHealth());
   }
 }
 
-function gatewayOfflineResponse() {
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] ?? character);
+}
+
+function gatewayOfflineResponse(health: GatewayServiceHealth) {
+  const breaker = health.breakerActive
+    ? `<p class="breaker" role="alert"><strong>Automatic restart breaker activated.</strong> Repair the configuration, then run <code>sudo systemctl reset-failed clawbox-gateway &amp;&amp; sudo systemctl restart clawbox-gateway</code>.</p>`
+    : "";
+  const finalError = health.finalStartupError
+    ? `<pre>${escapeHtml(health.finalStartupError)}</pre>`
+    : "";
   const html = `<!DOCTYPE html>
 <html><head><style>
   body { margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
@@ -73,6 +86,12 @@ function gatewayOfflineResponse() {
   .box { text-align:center; }
   h2 { color:#e2e8f0; margin:0 0 8px; font-size:18px; }
   p { margin:0; font-size:14px; }
+  .box { max-width:720px; padding:24px; }
+  .breaker { margin-top:14px; color:#fbbf24; line-height:1.5; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  code { color:#fed7aa; }
+  pre { margin:14px 0 0; padding:12px; text-align:left; white-space:pre-wrap; overflow-wrap:anywhere;
+        border:1px solid #7f1d1d; border-radius:8px; background:#1f1115; color:#fecaca; font-size:12px; }
   button { margin-top:16px; padding:8px 20px; border:1px solid #334155; border-radius:8px;
            background:#1e293b; color:#e2e8f0; cursor:pointer; font-size:13px; }
   button:hover { background:#334155; }
@@ -80,6 +99,8 @@ function gatewayOfflineResponse() {
 <div class="box">
   <h2>OpenClaw Gateway Offline</h2>
   <p>The gateway service is not running on port ${GATEWAY_PORT}.</p>
+  ${breaker}
+  ${finalError}
   <button onclick="location.reload()">Retry</button>
 </div>
 </body></html>`;
@@ -87,7 +108,7 @@ function gatewayOfflineResponse() {
     status: 503,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store, no-cache",
     },
   });
 }

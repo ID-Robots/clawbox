@@ -4,6 +4,11 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
 import { copyToClipboard } from "@/lib/clipboard";
+import {
+  fetchSetupJson,
+  SETUP_AUTH_EXPIRED_MESSAGE,
+  type SetupFetchOutcome,
+} from "@/lib/fetch-setup-json";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
@@ -22,6 +27,11 @@ const REMOTE_MODIFIER_CODES = new Set(REMOTE_MODIFIER_RELEASES.map((key) => key.
 function isEditableTarget(target: EventTarget | null): target is HTMLElement {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+function apiError(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || !("error" in data)) return undefined;
+  return typeof data.error === "string" ? data.error : undefined;
 }
 
 export default function VNCApp() {
@@ -61,6 +71,8 @@ export default function VNCApp() {
   // change arrived while we were mid-fetch so we re-fetch exactly once.
   const remoteClipboardInflightRef = useRef(false);
   const remoteClipboardPendingRef = useRef(false);
+  const authExpiredRef = useRef(false);
+  const [authExpired, setAuthExpired] = useState(false);
   // Late-bound refs so the Ctrl+V handler (which lives inside a useEffect
   // closure declared before openPasteModal / writeAndPaste exist) can call
   // them. Filled in via a `useEffect` further down.
@@ -71,10 +83,49 @@ export default function VNCApp() {
   // change signal and read the real UTF-8 via xclip on the server.
   const fetchRemoteClipboardRef = useRef<(() => Promise<void>) | null>(null);
 
+  const handleAuthExpired = useCallback(() => {
+    if (authExpiredRef.current) return;
+    authExpiredRef.current = true;
+    remoteClipboardPendingRef.current = false;
+    setAuthExpired(true);
+    setVncInfo(null);
+    setStatus("error");
+    setError(SETUP_AUTH_EXPIRED_MESSAGE);
+    setRepairState("failed");
+    setRepairError(null);
+    setPasteError(SETUP_AUTH_EXPIRED_MESSAGE);
+  }, []);
+
+  // Fetch a setup endpoint and fold in expired-session handling: on an expired
+  // session, show the auth-expired screen and return null so callers can bail
+  // with their own return value; otherwise return the resolved outcome.
+  const setupFetch = useCallback(
+    async <T,>(
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<SetupFetchOutcome<T> | null> => {
+      const result = await fetchSetupJson<T>(input, init);
+      if (result.kind === "auth-expired") {
+        handleAuthExpired();
+        return null;
+      }
+      return result;
+    },
+    [handleAuthExpired],
+  );
+
   const checkVnc = useCallback(async () => {
     try {
-      const res = await fetch("/setup-api/vnc");
-      const data = await res.json();
+      const result = await setupFetch<{ available?: boolean; wsPort?: number; error?: string }>(
+        "/setup-api/vnc",
+      );
+      if (!result) return;
+      if (result.kind === "error") {
+        setStatus("error");
+        setError(apiError(result.data) || `VNC check failed (HTTP ${result.response.status})`);
+        return;
+      }
+      const data = result.data;
       if (data.available) {
         // Keep host/wsPort in the state shape for backwards compatibility but
         // the WebSocket URL is actually built below against same-origin.
@@ -87,7 +138,7 @@ export default function VNCApp() {
       setStatus("error");
       setError(err instanceof Error ? err.message : "VNC check failed");
     }
-  }, []);
+  }, [setupFetch]);
 
   useEffect(() => {
     checkVnc();
@@ -393,6 +444,8 @@ export default function VNCApp() {
   }, [getInputCanvas, status]);
 
   const handleReconnect = useCallback(() => {
+    authExpiredRef.current = false;
+    setAuthExpired(false);
     setStatus("connecting");
     setError(null);
     setVncInfo(null);
@@ -403,14 +456,16 @@ export default function VNCApp() {
     setRepairError(null);
     setRepairState("repairing");
     try {
-      const res = await fetch("/setup-api/install/run-step", {
+      const result = await setupFetch<{ ok?: boolean; error?: string }>("/setup-api/install/run-step", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ step: "vnc_install" }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        setRepairError(data?.error || `vnc_install failed (HTTP ${res.status})`);
+      if (!result) return;
+      if (result.kind === "error" || !result.data.ok) {
+        setRepairError(
+          apiError(result.data) || `vnc_install failed (HTTP ${result.response.status})`,
+        );
         setRepairState("failed");
         return;
       }
@@ -420,14 +475,17 @@ export default function VNCApp() {
       // "rebooting" state once the request is accepted; a 4xx/5xx here
       // would otherwise leave the UI stuck on the rebooting spinner.
       try {
-        const rebootRes = await fetch("/setup-api/system/power", {
+        const rebootResult = await setupFetch<{ error?: string }>("/setup-api/system/power", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "restart" }),
         });
-        if (!rebootRes.ok) {
-          const body = await rebootRes.json().catch(() => ({}));
-          setRepairError(body?.error || `Reboot request failed (HTTP ${rebootRes.status})`);
+        if (!rebootResult) return;
+        if (rebootResult.kind === "error") {
+          setRepairError(
+            apiError(rebootResult.data)
+              || `Reboot request failed (HTTP ${rebootResult.response.status})`,
+          );
           setRepairState("failed");
           return;
         }
@@ -447,9 +505,13 @@ export default function VNCApp() {
       while (Date.now() - start < TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
         try {
-          const probe = await fetch("/setup-api/vnc", { cache: "no-store" });
-          if (!probe.ok) continue;
-          const data = await probe.json().catch(() => ({}));
+          const probe = await setupFetch<{ available?: boolean; wsPort?: number }>(
+            "/setup-api/vnc",
+            { cache: "no-store" },
+          );
+          if (!probe) return;
+          if (probe.kind === "error") continue;
+          const data = probe.data;
           if (data?.available) {
             setRepairState("idle");
             setRepairError(null);
@@ -465,7 +527,7 @@ export default function VNCApp() {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");
     }
-  }, []);
+  }, [setupFetch]);
 
   const openPasteModal = useCallback(() => {
     setPasteText("");
@@ -494,14 +556,16 @@ export default function VNCApp() {
   const writeAndPaste = useCallback(async (text: string): Promise<boolean> => {
     if (!text) return false;
     try {
-      const res = await fetch("/setup-api/vnc/clipboard", {
+      const result = await setupFetch<{ error?: string }>("/setup-api/vnc/clipboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setPasteError(body.error || `Clipboard write failed (HTTP ${res.status})`);
+      if (!result) return false;
+      if (result.kind === "error") {
+        setPasteError(
+          apiError(result.data) || `Clipboard write failed (HTTP ${result.response.status})`,
+        );
         return false;
       }
     } catch (err) {
@@ -517,7 +581,7 @@ export default function VNCApp() {
     rfb.sendKey(0x76, "KeyV", false);
     rfb.sendKey(0xffe3, "ControlLeft", false);
     return true;
-  }, []);
+  }, [setupFetch]);
 
   const sendPaste = useCallback(async () => {
     // Rapid Ctrl+Enter / double-click can re-enter this callback before the
@@ -546,6 +610,7 @@ export default function VNCApp() {
   // delivers. Tries the modern Clipboard API first (HTTPS / localhost), and
   // falls back to the manual-copy toast on insecure origins.
   const fetchRemoteClipboard = useCallback(async () => {
+    if (authExpiredRef.current) return;
     if (remoteClipboardInflightRef.current) {
       // Another fetch is already in flight — record that we need a second
       // pass once it resolves so we don't miss the latest selection.
@@ -556,9 +621,13 @@ export default function VNCApp() {
     try {
       let text = "";
       try {
-        const res = await fetch("/setup-api/vnc/clipboard", { cache: "no-store" });
-        if (!res.ok) return;
-        const body = (await res.json().catch(() => ({}))) as { text?: string };
+        const result = await setupFetch<{ text?: string }>(
+          "/setup-api/vnc/clipboard",
+          { cache: "no-store" },
+        );
+        if (!result) return;
+        if (result.kind === "error") return;
+        const body = result.data;
         text = typeof body.text === "string" ? body.text : "";
       } catch {
         return;
@@ -576,7 +645,7 @@ export default function VNCApp() {
         setTimeout(() => { void fetchRemoteClipboard(); }, 0);
       }
     }
-  }, []);
+  }, [setupFetch]);
 
   // Keep the late-bound refs pointing at the current callbacks so the
   // Ctrl+V handler (in a useEffect closure declared earlier) can invoke
@@ -632,7 +701,15 @@ export default function VNCApp() {
             {repairError}
           </p>
         )}
-        {rebooting ? (
+        {authExpired ? (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 btn-gradient rounded-lg text-sm text-white cursor-pointer"
+          >
+            Refresh to sign in again
+          </button>
+        ) : rebooting ? (
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
             <p className="text-sm text-white/80">Rebooting device — Remote Desktop will be ready in ~30s.</p>

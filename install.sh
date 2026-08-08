@@ -1404,6 +1404,7 @@ step_gateway_legacy_state_recovery() {
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
   as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true
   sleep 8
   if gateway_port_listening; then
@@ -1440,6 +1441,7 @@ step_gateway_legacy_state_recovery() {
   fi
 
   as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl start clawbox-gateway.service || true
   sleep 12
 
@@ -1482,7 +1484,16 @@ except Exception:
     print("missing"); sys.exit()
 t = ((c.get("gateway", {}) or {}).get("auth", {}) or {}).get("token")
 if isinstance(t, dict):
-    print("secretref")
+    keys = set(t)
+    source = t.get("source")
+    ref_id = t.get("id")
+    canonical = (
+        source in ("env", "file", "exec") and
+        isinstance(ref_id, str) and ref_id.strip() and
+        keys == {"source", "provider", "id"} and
+        isinstance(t.get("provider"), str) and t["provider"].strip()
+    )
+    print("secretref" if canonical else "weak")
 elif isinstance(t, str) and t.startswith("${") and t.endswith("}") and len(t) > 3:
     print("interp")
 elif isinstance(t, str) and t and t != "clawbox" and len(t) >= 32:
@@ -1833,6 +1844,9 @@ CONF
 
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
+  # Clear any tripped start-limit (breaker) state so the restart isn't refused
+  # on a box whose gateway had been crash-looping (issue #284 breaker).
+  systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service
 }
 

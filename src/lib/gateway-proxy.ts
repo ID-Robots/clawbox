@@ -3,6 +3,12 @@ import fs from "fs/promises";
 import os from "os";
 import net from "net";
 import crypto from "crypto";
+import { statSync } from "node:fs";
+import {
+  loadConfiguredOrigins,
+  normalizeOrigin,
+  resolveOriginsPath,
+} from "./control-ui-origins";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_HOME
@@ -45,6 +51,57 @@ function isReflectableHost(rawHost: string): boolean {
   return false;
 }
 
+// Trusted control UI origins — a narrow escape hatch for genuinely
+// cross-origin/custom-origin deployments (see control-ui-origins.ts and
+// README). Unlike isReflectableHost() above (host-only, scheme/port-
+// agnostic), a configured origin must match EXACTLY: scheme, host, and
+// port (including a non-default port) all have to agree with an entry in
+// the configured list. A configured hostname does not get reflected on a
+// different scheme or port than what was configured.
+interface ConfiguredOriginState {
+  origins: Set<string>;
+  hosts: Set<string>;
+}
+
+let cachedConfiguredOrigins: ConfiguredOriginState | undefined;
+let cachedConfiguredOriginsSignature: string | undefined;
+
+function configuredOriginsSignature(path: string): string {
+  try {
+    const stat = statSync(path, { bigint: true });
+    return `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return `${path}:missing`;
+  }
+}
+
+function getConfiguredOrigins(): ConfiguredOriginState {
+  const path = resolveOriginsPath();
+  const signature = configuredOriginsSignature(path);
+  if (
+    cachedConfiguredOrigins !== undefined &&
+    cachedConfiguredOriginsSignature === signature
+  ) {
+    return cachedConfiguredOrigins;
+  }
+
+  const { origins, warnings } = loadConfiguredOrigins(path);
+  for (const warning of warnings) {
+    console.warn(`[gateway-proxy] ${warning}`);
+  }
+  cachedConfiguredOrigins = {
+    origins: new Set(origins),
+    hosts: new Set(origins.map((origin) => new URL(origin).hostname.toLowerCase())),
+  };
+  cachedConfiguredOriginsSignature = signature;
+  return cachedConfiguredOrigins;
+}
+
+function isConfiguredOrigin(proto: string, hostHeader: string): boolean {
+  const { origin } = normalizeOrigin(`${proto}://${hostHeader}`);
+  return origin !== null && getConfiguredOrigins().origins.has(origin);
+}
+
 export function redirectToSetup(request: NextRequest): NextResponse {
   const rawProto = request.headers.get("x-forwarded-proto");
   const proto =
@@ -52,15 +109,25 @@ export function redirectToSetup(request: NextRequest): NextResponse {
       ?.split(",")
       .map((t) => t.trim().toLowerCase())
       .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
-  const rawHost = request.headers
-    .get("host")
-    ?.toLowerCase()
-    .replace(/:\d+$/, "");
-  if (rawHost && isReflectableHost(rawHost)) {
-    return NextResponse.redirect(
-      new URL(`${proto}://${request.headers.get("host")}/setup`),
-      302
-    );
+  const hostHeader = request.headers.get("host");
+  const rawHost = hostHeader?.toLowerCase().replace(/:\d+$/, "");
+  const exactConfiguredMatch =
+    !!hostHeader && isConfiguredOrigin(proto, hostHeader);
+  // A default-reflectable host (LAN IP / localhost / mDNS name) keeps its broad
+  // reflection even when an operator also configures an exact origin for it:
+  // configuring `https://10.42.0.1` must not stop plain `http://10.42.0.1` from
+  // working on the SoftAP. Configured non-default origins reflect on an exact
+  // scheme+host+port match.
+  const reflectable =
+    !!rawHost && (isReflectableHost(rawHost) || exactConfiguredMatch);
+  if (reflectable) {
+    try {
+      return NextResponse.redirect(new URL(`${proto}://${hostHeader}/setup`), 302);
+    } catch {
+      // Malformed Host header (e.g. an out-of-range port like `:99999`, which
+      // rawHost strips before the reflection check) — fall through to the
+      // canonical origin instead of throwing a 500.
+    }
   }
   return NextResponse.redirect(new URL(`${CANONICAL_ORIGIN}/setup`), 302);
 }
@@ -70,7 +137,33 @@ const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;
 <a href="/" style="color:#f97316;text-decoration:none;font-weight:600">ClawBox</a>
 </div>`;
 
-export async function getGatewayToken(): Promise<string> {
+type GatewaySecretRef =
+  { source: "env" | "file" | "exec"; provider: string; id: string };
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function isGatewaySecretRef(value: unknown): value is GatewaySecretRef {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const ref = value as Record<string, unknown>;
+  const keys = Object.keys(ref);
+  const source = ref.source;
+  if (source === "env" || source === "file" || source === "exec") {
+    // source is a valid enum and id/provider are non-empty strings, so with
+    // exactly 3 keys they must be {source, id, provider} — no need to re-assert
+    // each key is present.
+    if (!isNonEmptyString(ref.id)) return false;
+    return keys.length === 3 && isNonEmptyString(ref.provider);
+  }
+  return false;
+}
+
+function isGatewayTokenInterpolation(value: unknown): value is string {
+  return typeof value === "string" && /^\$\{.+\}$/.test(value);
+}
+
+async function readGatewayTokenInput(): Promise<unknown> {
   try {
     const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf-8");
     const config = JSON.parse(raw);
@@ -78,6 +171,15 @@ export async function getGatewayToken(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+export async function getGatewayToken(): Promise<string> {
+  const token = await readGatewayTokenInput();
+  // ClawBox cannot resolve managed refs safely. Do not serialize a SecretRef
+  // object or an unresolved ${ENV} marker into the browser as an auth token.
+  return typeof token === "string" && !isGatewayTokenInterpolation(token)
+    ? token
+    : "";
 }
 
 // Legacy literal that earlier ClawBox builds wrote into `gateway.auth.token`.
@@ -88,16 +190,20 @@ const LEGACY_GATEWAY_TOKEN = "clawbox";
 const MIN_GATEWAY_TOKEN_LENGTH = 32;
 
 /**
- * Returns the existing per-device gateway auth token, or freshly generates
- * one when the on-disk value is missing, the legacy literal `"clawbox"`, or
- * shorter than the minimum random length.
+ * Returns null for an externally managed token, the existing per-device
+ * literal token when strong, or a fresh token when the on-disk value is
+ * missing, the legacy literal `"clawbox"`, malformed, or too short.
  *
  * Caller is responsible for persisting the returned value (via
  * `runOpenclawConfigSet`, `runCommand`, or a direct seed write).
  */
-export async function getOrGenerateGatewayToken(): Promise<string> {
-  const existing = await getGatewayToken();
+export async function getOrGenerateGatewayToken(): Promise<string | null> {
+  const existing = await readGatewayTokenInput();
+  if (isGatewaySecretRef(existing) || isGatewayTokenInterpolation(existing)) {
+    return null;
+  }
   if (
+    typeof existing === "string" &&
     existing &&
     existing !== LEGACY_GATEWAY_TOKEN &&
     existing.length >= MIN_GATEWAY_TOKEN_LENGTH
