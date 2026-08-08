@@ -1,10 +1,10 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: the global-setup warmup (#114) removed the cold-compile flake, but
-// this spec still times out on GitHub Actions at its first DOM interaction — a
-// deeper post-mount/hydration lag under `bun run dev` workers:1 that the warmup
-// doesn't touch. Passes on the Jetson; still tracked in #114.
+// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
+// rest of the suite, still fails against the production build too (verified on
+// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
+// switch fixed. Needs per-spec debugging. Tracked in #114.
 test.fixme("installed app settings can save configuration and toggle enablement", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
