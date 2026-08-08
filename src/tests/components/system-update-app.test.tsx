@@ -47,7 +47,7 @@ describe("SystemUpdateApp — force-full-update recovery affordance", () => {
   });
 
   it("offers 'Force full update' under Advanced options and forces only after confirming", async () => {
-    const { getByRole, getAllByRole, findByText } = render(<SystemUpdateApp />);
+    const { getByRole, findByText } = render(<SystemUpdateApp />);
 
     await findByText("You're up to date");
 
@@ -55,17 +55,32 @@ describe("SystemUpdateApp — force-full-update recovery affordance", () => {
     fireEvent.click(getByRole("button", { name: /Advanced options/ }));
     fireEvent.click(getByRole("button", { name: "Force full update" }));
 
-    // Confirmation gates the reboot — nothing is triggered until confirm.
+    // Confirmation gates the reboot — the confirm has a distinct name, and
+    // nothing fires until it's clicked.
     getByRole("dialog");
     expect(runBody).toBeNull();
 
-    // The modal's confirm button is the last "Force full update" in the DOM.
-    const buttons = getAllByRole("button", { name: "Force full update" });
-    fireEvent.click(buttons[buttons.length - 1]);
+    fireEvent.click(getByRole("button", { name: "Yes, run full update" }));
 
     await waitFor(() => {
       expect(runBody).not.toBeNull();
     });
     expect(JSON.parse(runBody as string)).toMatchObject({ force: true });
+  });
+
+  it("dismisses the confirm dialog on Escape without forcing an update", async () => {
+    const { getByRole, queryByRole, findByText } = render(<SystemUpdateApp />);
+
+    await findByText("You're up to date");
+    fireEvent.click(getByRole("button", { name: /Advanced options/ }));
+    fireEvent.click(getByRole("button", { name: "Force full update" }));
+    getByRole("dialog");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(queryByRole("dialog")).toBeNull();
+    });
+    expect(runBody).toBeNull();
   });
 });
