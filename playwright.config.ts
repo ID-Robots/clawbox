@@ -5,6 +5,10 @@ const baseURL = `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  // Pre-compile the heavy routes on the dev server before any test clock starts
+  // (Turbopack compiles on demand under `workers: 1`, and the cold compile of
+  // `/` can outlast the 15s expect timeout on CI). See #114 / global-setup.ts.
+  globalSetup: "./e2e/global-setup.ts",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   // Mirror CI's retry strategy locally too. Tests that compress
