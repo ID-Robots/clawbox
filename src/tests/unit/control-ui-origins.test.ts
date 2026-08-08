@@ -59,6 +59,24 @@ describe("control-ui-origins", () => {
       expect(result.warning).toMatch(/wildcard/);
     });
 
+    it("rejects empty userinfo the Python loader also rejects", () => {
+      // WHATWG strips the empty userinfo so url.username can't see it; match the
+      // gateway's stricter urlsplit parity.
+      const result = normalizeOrigin("http://@example.com");
+      expect(result.origin).toBeNull();
+      expect(result.warning).toMatch(/credentials/);
+    });
+
+    it("rejects IPv4 shorthand the Python loader also rejects", () => {
+      // WHATWG rewrites these to a dotted quad; the gateway (urlsplit) rejects
+      // them, so the proxy must too or it trusts an origin the gateway refuses.
+      for (const bad of ["http://2130706433", "http://127.1", "http://010.0.0.1"]) {
+        const result = normalizeOrigin(bad);
+        expect(result.origin, bad).toBeNull();
+        expect(result.warning, bad).toMatch(/IPv4/);
+      }
+    });
+
     it("rejects credentials in the origin", () => {
       const result = normalizeOrigin("http://user:pass@" + "example.com");
       expect(result.origin).toBeNull();

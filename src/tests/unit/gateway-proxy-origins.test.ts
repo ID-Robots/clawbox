@@ -123,27 +123,45 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     expect(response.headers.get("location")).toContain("clawbox.local");
   });
 
-  it("enforces exact scheme and port for a configured IPv4 origin", async () => {
-    writeOrigins(["http://192.0.2.10:8080"]);
+  it("enforces exact scheme and port for a configured non-default origin", async () => {
+    writeOrigins(["http://box.example.com:8080"]);
     await importFresh();
 
     const exact = gatewayProxy.redirectToSetup(
-      createRequest("http://192.0.2.10:8080/", { host: "192.0.2.10:8080" }),
+      createRequest("http://box.example.com:8080/", { host: "box.example.com:8080" }),
     );
-    expect(exact.headers.get("location")).toBe("http://192.0.2.10:8080/setup");
+    expect(exact.headers.get("location")).toBe("http://box.example.com:8080/setup");
 
     const wrongPort = gatewayProxy.redirectToSetup(
-      createRequest("http://192.0.2.10:9999/", { host: "192.0.2.10:9999" }),
+      createRequest("http://box.example.com:9999/", { host: "box.example.com:9999" }),
     );
     expect(wrongPort.headers.get("location")).toContain("clawbox.local");
 
     const wrongScheme = gatewayProxy.redirectToSetup(
-      createRequest("http://192.0.2.10:8080/", {
-        host: "192.0.2.10:8080",
+      createRequest("http://box.example.com:8080/", {
+        host: "box.example.com:8080",
         "x-forwarded-proto": "https",
       }),
     );
     expect(wrongScheme.headers.get("location")).toContain("clawbox.local");
+  });
+
+  it("keeps broad reflection for a default host even when a matching origin is configured", async () => {
+    // Regression: configuring https://10.42.0.1 must not stop plain
+    // http://10.42.0.1 (a default-reflectable LAN IP) from reflecting on the
+    // SoftAP — otherwise the user dead-ends at the unresolvable clawbox.local.
+    writeOrigins(["https://10.42.0.1"]);
+    await importFresh();
+
+    const plainHttp = gatewayProxy.redirectToSetup(
+      createRequest("http://10.42.0.1/", { host: "10.42.0.1" }),
+    );
+    expect(plainHttp.headers.get("location")).toBe("http://10.42.0.1/setup");
+
+    const otherPort = gatewayProxy.redirectToSetup(
+      createRequest("http://10.42.0.1:9999/", { host: "10.42.0.1:9999" }),
+    );
+    expect(otherPort.headers.get("location")).toBe("http://10.42.0.1:9999/setup");
   });
 
   it("refreshes configured origins after the source file changes", async () => {
