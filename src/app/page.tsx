@@ -2236,6 +2236,7 @@ function ChromeDesktopInner() {
       {/* Context menu */}
       {ctxMenu && (
         <div
+          data-testid="desktop-context-menu"
           className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 220),

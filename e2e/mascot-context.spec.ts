@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
-// rest of the suite, still fails against the production build too (verified on
-// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
-// switch fixed. Needs per-spec debugging. Tracked in #114.
-test.fixme("mascot tap opens the chat popup", async ({ page }) => {
+test("mascot tap opens the chat popup", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -27,26 +23,19 @@ test.fixme("mascot tap opens the chat popup", async ({ page }) => {
   await expect(boxImage).toBeVisible();
   const mascotImg = page.locator('img[src="/clawbox-crab.png"][alt=""]').first();
   await expect(mascotImg).toBeVisible();
-  await page.evaluate(() => {
-    const img = document.querySelector('img[src="/clawbox-crab.png"][alt=""]') as HTMLElement | null;
-    if (!img) throw new Error("mascot img not found");
-    const rect = img.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const init: PointerEventInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      pointerId: 1,
-      pointerType: "mouse",
-      isPrimary: true,
-      button: 0,
-      buttons: 1,
-      clientX: cx,
-      clientY: cy,
-    };
-    img.dispatchEvent(new PointerEvent("pointerdown", init));
-    img.dispatchEvent(new PointerEvent("pointerup", { ...init, buttons: 0 }));
-  });
-  await expect(page.getByTestId("chat-popup")).toBeVisible({ timeout: 15_000 });
+
+  const chatPopup = page.getByTestId("chat-popup");
+  // Tap the crab with a real pointer, not a synthetic PointerEvent: the handler
+  // calls `setPointerCapture(e.pointerId)`, which throws for a dispatched event
+  // (no active pointer with that id) and aborts the tap. A Playwright click uses
+  // a genuine, capturable pointer and waits for actionability. Because tapping
+  // *toggles* the chat (onTap -> setChatOpen(o => !o)), only click while it is
+  // still closed and stop the moment it opens, so exactly one tap lands. (This
+  // surfaced only on the production build — see #114.)
+  await expect(async () => {
+    if (!(await chatPopup.isVisible())) {
+      await mascotImg.click({ timeout: 2000, force: true });
+    }
+    await expect(chatPopup).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 20_000, intervals: [400, 400, 600] });
 });

@@ -1,11 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// FIXME: fails at its first DOM interaction on GitHub Actions and, unlike the
-// rest of the suite, still fails against the production build too (verified on
-// the Jetson) -- so it is not the dev-server compile/HMR class the prod-build
-// switch fixed. Needs per-spec debugging. Tracked in #114.
-test.fixme("desktop background context menu can launch the terminal", async ({ page }) => {
+test("desktop background context menu can launch the terminal", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -24,6 +20,11 @@ test.fixme("desktop background context menu can launch the terminal", async ({ p
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await page.getByTestId("desktop-root").click({ button: "right", position: { x: 40, y: 40 } });
-  await page.getByRole("button", { name: "Terminal" }).click();
+  // Scope to the context menu: "Terminal" also appears as a shelf/taskbar
+  // control, so an unscoped getByRole matched two elements (strict-mode
+  // violation) once both were mounted under the production build.
+  const contextMenu = page.getByTestId("desktop-context-menu");
+  await expect(contextMenu).toBeVisible();
+  await contextMenu.getByRole("button", { name: "Terminal" }).click();
   await expect(page.getByTestId("chrome-window-terminal")).toBeVisible();
 });
