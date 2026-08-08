@@ -6,10 +6,14 @@ export type SetupFetchResult<T> =
   | { kind: "auth-expired"; response: Response }
   | { kind: "error"; data: unknown; response: Response };
 
+/** A resolved outcome — the auth-expired case has already been handled. */
+export type SetupFetchOutcome<T> = Exclude<SetupFetchResult<T>, { kind: "auth-expired" }>;
+
 function redirectedToLogin(response: Response): boolean {
   if (!response.redirected || !response.url) return false;
   try {
-    return new URL(response.url, "https://example.invalid").pathname.endsWith("/login");
+    // Response.url is always an absolute serialized URL, so no base is needed.
+    return new URL(response.url).pathname.endsWith("/login");
   } catch {
     return false;
   }

@@ -86,7 +86,7 @@ describe("VNCApp", () => {
         redirected: false,
         url: "https://example.test/setup-api/vnc",
         json: vi.fn(),
-      } as Response;
+      } as unknown as Response;
     });
     vi.stubGlobal("fetch", fetchMock);
 

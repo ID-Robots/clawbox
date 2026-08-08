@@ -7,6 +7,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import {
   fetchSetupJson,
   SETUP_AUTH_EXPIRED_MESSAGE,
+  type SetupFetchOutcome,
 } from "@/lib/fetch-setup-json";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -95,15 +96,30 @@ export default function VNCApp() {
     setPasteError(SETUP_AUTH_EXPIRED_MESSAGE);
   }, []);
 
-  const checkVnc = useCallback(async () => {
-    try {
-      const result = await fetchSetupJson<{ available?: boolean; wsPort?: number; error?: string }>(
-        "/setup-api/vnc",
-      );
+  // Fetch a setup endpoint and fold in expired-session handling: on an expired
+  // session, show the auth-expired screen and return null so callers can bail
+  // with their own return value; otherwise return the resolved outcome.
+  const setupFetch = useCallback(
+    async <T,>(
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<SetupFetchOutcome<T> | null> => {
+      const result = await fetchSetupJson<T>(input, init);
       if (result.kind === "auth-expired") {
         handleAuthExpired();
-        return;
+        return null;
       }
+      return result;
+    },
+    [handleAuthExpired],
+  );
+
+  const checkVnc = useCallback(async () => {
+    try {
+      const result = await setupFetch<{ available?: boolean; wsPort?: number; error?: string }>(
+        "/setup-api/vnc",
+      );
+      if (!result) return;
       if (result.kind === "error") {
         setStatus("error");
         setError(apiError(result.data) || `VNC check failed (HTTP ${result.response.status})`);
@@ -122,7 +138,7 @@ export default function VNCApp() {
       setStatus("error");
       setError(err instanceof Error ? err.message : "VNC check failed");
     }
-  }, [handleAuthExpired]);
+  }, [setupFetch]);
 
   useEffect(() => {
     checkVnc();
@@ -440,15 +456,12 @@ export default function VNCApp() {
     setRepairError(null);
     setRepairState("repairing");
     try {
-      const result = await fetchSetupJson<{ ok?: boolean; error?: string }>("/setup-api/install/run-step", {
+      const result = await setupFetch<{ ok?: boolean; error?: string }>("/setup-api/install/run-step", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ step: "vnc_install" }),
       });
-      if (result.kind === "auth-expired") {
-        handleAuthExpired();
-        return;
-      }
+      if (!result) return;
       if (result.kind === "error" || !result.data.ok) {
         setRepairError(
           apiError(result.data) || `vnc_install failed (HTTP ${result.response.status})`,
@@ -462,15 +475,12 @@ export default function VNCApp() {
       // "rebooting" state once the request is accepted; a 4xx/5xx here
       // would otherwise leave the UI stuck on the rebooting spinner.
       try {
-        const rebootResult = await fetchSetupJson<{ error?: string }>("/setup-api/system/power", {
+        const rebootResult = await setupFetch<{ error?: string }>("/setup-api/system/power", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "restart" }),
         });
-        if (rebootResult.kind === "auth-expired") {
-          handleAuthExpired();
-          return;
-        }
+        if (!rebootResult) return;
         if (rebootResult.kind === "error") {
           setRepairError(
             apiError(rebootResult.data)
@@ -495,14 +505,11 @@ export default function VNCApp() {
       while (Date.now() - start < TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
         try {
-          const probe = await fetchSetupJson<{ available?: boolean; wsPort?: number }>(
+          const probe = await setupFetch<{ available?: boolean; wsPort?: number }>(
             "/setup-api/vnc",
             { cache: "no-store" },
           );
-          if (probe.kind === "auth-expired") {
-            handleAuthExpired();
-            return;
-          }
+          if (!probe) return;
           if (probe.kind === "error") continue;
           const data = probe.data;
           if (data?.available) {
@@ -520,7 +527,7 @@ export default function VNCApp() {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");
     }
-  }, [handleAuthExpired]);
+  }, [setupFetch]);
 
   const openPasteModal = useCallback(() => {
     setPasteText("");
@@ -549,15 +556,12 @@ export default function VNCApp() {
   const writeAndPaste = useCallback(async (text: string): Promise<boolean> => {
     if (!text) return false;
     try {
-      const result = await fetchSetupJson<{ error?: string }>("/setup-api/vnc/clipboard", {
+      const result = await setupFetch<{ error?: string }>("/setup-api/vnc/clipboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (result.kind === "auth-expired") {
-        handleAuthExpired();
-        return false;
-      }
+      if (!result) return false;
       if (result.kind === "error") {
         setPasteError(
           apiError(result.data) || `Clipboard write failed (HTTP ${result.response.status})`,
@@ -577,7 +581,7 @@ export default function VNCApp() {
     rfb.sendKey(0x76, "KeyV", false);
     rfb.sendKey(0xffe3, "ControlLeft", false);
     return true;
-  }, [handleAuthExpired]);
+  }, [setupFetch]);
 
   const sendPaste = useCallback(async () => {
     // Rapid Ctrl+Enter / double-click can re-enter this callback before the
@@ -617,14 +621,11 @@ export default function VNCApp() {
     try {
       let text = "";
       try {
-        const result = await fetchSetupJson<{ text?: string }>(
+        const result = await setupFetch<{ text?: string }>(
           "/setup-api/vnc/clipboard",
           { cache: "no-store" },
         );
-        if (result.kind === "auth-expired") {
-          handleAuthExpired();
-          return;
-        }
+        if (!result) return;
         if (result.kind === "error") return;
         const body = result.data;
         text = typeof body.text === "string" ? body.text : "";
@@ -644,7 +645,7 @@ export default function VNCApp() {
         setTimeout(() => { void fetchRemoteClipboard(); }, 0);
       }
     }
-  }, [handleAuthExpired]);
+  }, [setupFetch]);
 
   // Keep the late-bound refs pointing at the current callbacks so the
   // Ctrl+V handler (in a useEffect closure declared earlier) can invoke
