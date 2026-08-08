@@ -1,12 +1,22 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
+import { mockTerminalWebSocket } from "./helpers/mock-backends";
 
-// FIXME: the "Terminal" locator is now scoped correctly (via the
-// desktop-context-menu testid), but launching the terminal still fails against
-// the bare standalone e2e server — it lacks the /terminal-ws proxy that
-// production-server.js provides, so the terminal app can't come up. Closing
-// this needs the e2e server to expose the interactive backends. Tracked in #114.
+// FIXME (#114): two compounding prod-build issues remain beyond the locator fix
+// (which is done — the "Terminal" match is scoped to the desktop-context-menu
+// testid). 1) The right-click at (40,40) does not open the desktop context menu
+// on the production build — desktop-root's own onContextMenu only
+// preventDefault()s; the menu is opened by an inner grid layer, and the corner
+// position isn't reaching it (a layout/hit-testing difference from dev).
+// 2) The terminal also needs its /terminal-ws handshake mocked (mockTerminalWebSocket,
+// wired below). Needs a reliable empty-desktop right-click target before it can
+// be re-enabled.
 test.fixme("desktop background context menu can launch the terminal", async ({ page }) => {
+  // The terminal app connects to /terminal-ws, which only production-server.js
+  // proxies — not the standalone e2e server or a CI runner. Fake the handshake
+  // in-browser (same as terminal-reconnect) so the window mounts and stays up.
+  await mockTerminalWebSocket(page);
+
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
