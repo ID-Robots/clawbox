@@ -54,7 +54,7 @@ describe("a live tunnel", () => {
 
 describe("a dead tunnel", () => {
   beforeEach(() => {
-    cloudflared.readTunnelUrl.mockResolvedValue("https://heel-executed-worm-hay.trycloudflare.com");
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead-tunnel-example.trycloudflare.com");
     liveness.checkTunnelLiveness.mockResolvedValue("dead");
   });
 

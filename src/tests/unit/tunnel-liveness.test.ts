@@ -38,21 +38,21 @@ afterEach(() => {
 describe("checkTunnelLiveness", () => {
   it("calls a resolving hostname alive", async () => {
     resolve4.mockResolvedValue(["104.16.0.1"]);
-    expect(await mod.checkTunnelLiveness("https://spies-hardwood-mens-roughly.trycloudflare.com")).toBe("alive");
+    expect(await mod.checkTunnelLiveness("https://example-tunnel-host.trycloudflare.com")).toBe("alive");
   });
 
   it("calls it dead when it does not resolve but our DNS does", async () => {
     resolve4.mockImplementation((host: string) =>
       host === "cloudflare.com" ? Promise.resolve(["104.16.0.1"]) : Promise.reject(new Error("ENOTFOUND")),
     );
-    expect(await mod.checkTunnelLiveness("https://heel-executed-worm-hay.trycloudflare.com")).toBe("dead");
+    expect(await mod.checkTunnelLiveness("https://dead-tunnel-example.trycloudflare.com")).toBe("dead");
   });
 
   it("says unknown when nothing resolves, because then the fault is ours", async () => {
     // A box on a dropped uplink. Restarting the tunnel here would churn it
     // every five minutes and fix nothing.
     resolve4.mockRejectedValue(new Error("EAI_AGAIN"));
-    expect(await mod.checkTunnelLiveness("https://heel-executed-worm-hay.trycloudflare.com")).toBe("unknown");
+    expect(await mod.checkTunnelLiveness("https://dead-tunnel-example.trycloudflare.com")).toBe("unknown");
   });
 
   it("checks the control host only after the tunnel fails, not on every tick", async () => {
@@ -112,8 +112,8 @@ describe("the restart cooldown", () => {
 
 describe("hostnameOf", () => {
   it("pulls the host out of a tunnel url", () => {
-    expect(mod.hostnameOf("https://course-leg-correction-being.trycloudflare.com")).toBe(
-      "course-leg-correction-being.trycloudflare.com",
+    expect(mod.hostnameOf("https://sample-tunnel-host.trycloudflare.com")).toBe(
+      "sample-tunnel-host.trycloudflare.com",
     );
   });
 
