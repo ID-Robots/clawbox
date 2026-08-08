@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import ReconnectStage from "./ReconnectStage";
+import { useReconnect } from "@/hooks/useReconnect";
 
 interface ReconnectingOverlayProps {
   /**
@@ -23,8 +23,6 @@ interface ReconnectingOverlayProps {
   graceMs?: number;
 }
 
-type Phase = "restarting" | "reconnecting" | "done";
-
 /**
  * Full-screen overlay shown while the device restarts and the browser's
  * connection drops on the SAME network (manual restart, or the reboot inside a
@@ -41,44 +39,31 @@ export default function ReconnectingOverlay({
   graceMs = 4000,
 }: ReconnectingOverlayProps) {
   const { t } = useT();
-  const [phase, setPhase] = useState<Phase>("restarting");
 
-  useEffect(() => {
-    let cancelled = false;
-    let pollId: ReturnType<typeof setInterval> | null = null;
+  // Same-network restart → poll the health endpoint until it answers OK, then
+  // reload in place (or redirect). A thrown fetch / non-OK just keeps looping.
+  const phase = useReconnect({
+    probe: async () => {
+      try {
+        const res = await fetch(healthUrl, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    onReady: () => {
+      if (redirectTo) window.location.replace(redirectTo);
+      else window.location.reload();
+    },
+    graceMs,
+    readyDelayMs: 1600,
+  });
 
-    const graceTimer = setTimeout(() => {
-      if (cancelled) return;
-      setPhase("reconnecting");
-      pollId = setInterval(async () => {
-        try {
-          const res = await fetch(healthUrl, {
-            cache: "no-store",
-            signal: AbortSignal.timeout(3000),
-          });
-          if (cancelled || !res.ok) return;
-          if (pollId) clearInterval(pollId);
-          setPhase("done");
-          setTimeout(() => {
-            if (cancelled) return;
-            if (redirectTo) window.location.replace(redirectTo);
-            else window.location.reload();
-          }, 1600);
-        } catch {
-          /* device still offline — keep looping */
-        }
-      }, 2500);
-    }, graceMs);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(graceTimer);
-      if (pollId) clearInterval(pollId);
-    };
-  }, [healthUrl, redirectTo, graceMs]);
-
-  const completed = phase === "done";
-  const phaseIndex = phase === "restarting" ? 0 : phase === "reconnecting" ? 1 : 2;
+  const completed = phase === "ready";
+  const phaseIndex = phase === "grace" ? 0 : phase === "probing" ? 1 : 2;
 
   return (
     <ReconnectStage
@@ -88,7 +73,7 @@ export default function ReconnectingOverlay({
       title={
         completed
           ? t("settings.backOnline")
-          : phase === "reconnecting"
+          : phase === "probing"
             ? t("settings.reconnecting")
             : t("wizard.restarting")
       }
