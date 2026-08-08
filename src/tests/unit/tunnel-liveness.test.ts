@@ -48,6 +48,21 @@ describe("checkTunnelLiveness", () => {
     expect(await mod.checkTunnelLiveness("https://dead-tunnel-example.trycloudflare.com")).toBe("dead");
   });
 
+  it("retries a transient tunnel-host failure instead of condemning a healthy tunnel", async () => {
+    // First lookup blips (SERVFAIL), second succeeds. A single transient
+    // failure must not restart a working tunnel and rotate its public URL.
+    let tunnelAttempts = 0;
+    resolve4.mockImplementation((host: string) => {
+      if (host === "cloudflare.com") return Promise.resolve(["104.16.0.1"]);
+      tunnelAttempts += 1;
+      return tunnelAttempts === 1
+        ? Promise.reject(new Error("SERVFAIL"))
+        : Promise.resolve(["104.16.0.1"]);
+    });
+    expect(await mod.checkTunnelLiveness("https://example-tunnel-host.trycloudflare.com")).toBe("alive");
+    expect(tunnelAttempts).toBe(2);
+  });
+
   it("says unknown when nothing resolves, because then the fault is ours", async () => {
     // A box on a dropped uplink. Restarting the tunnel here would churn it
     // every five minutes and fix nothing.

@@ -29,8 +29,13 @@ import { promises as dns } from "dns";
  */
 const DNS_CONTROL_HOST = "cloudflare.com";
 
-/** Long enough for a slow uplink, short enough not to stall the tick. */
-const LOOKUP_TIMEOUT_MS = 5_000;
+/**
+ * Long enough for a slow uplink, short enough not to stall the tick. Kept tight
+ * because the tunnel host is now retried once and the control host checked on
+ * failure, so the worst case is 3 lookups — 3 × 2.5s = 7.5s, still under the
+ * heartbeat unit's budget.
+ */
+const LOOKUP_TIMEOUT_MS = 2_500;
 
 /**
  * A restart mints a new hostname, and the portal only learns it on the next
@@ -48,10 +53,13 @@ export type LivenessVerdict =
   | "unknown";
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
-  ]);
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms);
+  });
+  // clear the timer whichever side wins, so the fast path doesn't park a live
+  // reject timer for the full timeout on every lookup.
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 export function hostnameOf(tunnelUrl: string): string | null {
@@ -62,13 +70,16 @@ export function hostnameOf(tunnelUrl: string): string | null {
   }
 }
 
-async function resolves(hostname: string): Promise<boolean> {
-  try {
-    const records = await withTimeout(dns.resolve4(hostname), LOOKUP_TIMEOUT_MS);
-    return records.length > 0;
-  } catch {
-    return false;
+async function resolves(hostname: string, attempts = 1): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const records = await withTimeout(dns.resolve4(hostname), LOOKUP_TIMEOUT_MS);
+      if (records.length > 0) return true;
+    } catch {
+      // transient failure (SERVFAIL / EAI_AGAIN / timeout) — retry if any left
+    }
   }
+  return false;
 }
 
 /**
@@ -80,9 +91,12 @@ export async function checkTunnelLiveness(tunnelUrl: string | null): Promise<Liv
   const hostname = hostnameOf(tunnelUrl);
   if (!hostname) return "unknown";
 
-  if (await resolves(hostname)) return "alive";
+  // Retry the tunnel host before condemning it: a single transient failure
+  // must not restart a working tunnel and rotate its public URL (every
+  // bookmark/QR/shared link would break). Two agreeing failures is the bar.
+  if (await resolves(hostname, 2)) return "alive";
 
-  // It did not resolve. Before calling it dead, prove that anything resolves.
+  // It failed twice. Before calling it dead, prove that anything resolves.
   if (await resolves(DNS_CONTROL_HOST)) return "dead";
   return "unknown";
 }
