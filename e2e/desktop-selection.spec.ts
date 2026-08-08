@@ -1,9 +1,11 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
-// Re-enabled via the global-setup warmup (see #114) — the GH-Actions cold-`/`
-// compile flake is paid up front now, and this passes on the Jetson in isolation.
-test("desktop background context menu can launch the terminal", async ({ page }) => {
+// FIXME: the global-setup warmup (#114) removed the cold-compile flake, but
+// this spec still times out on GitHub Actions at its first DOM interaction — a
+// deeper post-mount/hydration lag under `bun run dev` workers:1 that the warmup
+// doesn't touch. Passes on the Jetson; still tracked in #114.
+test.fixme("desktop background context menu can launch the terminal", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
