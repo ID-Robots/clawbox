@@ -57,6 +57,20 @@ export function getOllamaOverlayProgress(
   };
 }
 
+// The install route tags long-running provisioning lines as
+// `<phase-stable prefix> — <raw journal line>`. The prefix keeps the step
+// indicator pinned (raw cmake/hf/apt output matches no phase keyword and would
+// bounce the wizard back to step 1); the tail is what the user actually wants
+// to read while a multi-minute build runs.
+const DETAIL_SEPARATOR = " — ";
+
+function splitStatusDetail(status: string): string | null {
+  const index = status.indexOf(DETAIL_SEPARATOR);
+  if (index < 0) return null;
+  const detail = status.slice(index + DETAIL_SEPARATOR.length).trim();
+  return detail || null;
+}
+
 export function getLlamaCppOverlayProgress(
   status: string | null,
   stepCount: number,
@@ -94,7 +108,7 @@ export function getLlamaCppOverlayProgress(
 
   return {
     phase: clampPhase(phase, stepCount),
-    detail: null,
+    detail: splitStatusDetail(normalizedStatus),
     progressPercent: null,
   };
 }

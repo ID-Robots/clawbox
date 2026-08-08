@@ -28,37 +28,40 @@ export const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
   adaptive: "Adaptive",
 };
 
-// Per-provider effort levels and defaults. Sourced from each upstream's
-// official API docs. Showing the universal 8-level dropdown for every provider
-// was misleading — `Max` doesn't exist on OpenAI, `Minimal` was dropped from
-// gpt-5.4+, Google has `Adaptive` (thinking_budget=-1) where others have
-// `Default`, etc. Per-provider config keeps the UI honest.
+// Per-provider effort levels and defaults.
+//
+// Product decision (2026-07-23): the reasoning-effort picker is UNIFORM across
+// every cloud provider — `Off / Low / Medium / High` — so the control looks and
+// behaves the same no matter which model you pick. The OpenClaw gateway accepts
+// this ladder for all of them (it normalizes/translates per provider; e.g.
+// DeepSeek folds low/medium up to its single reasoning tier). Provider-specific
+// extras (`xhigh`, `max`, `adaptive`, `minimal`) are intentionally dropped for
+// consistency.
+//
+// Defaults differ on purpose: ClawBox AI / DeepSeek default to `off` so simple
+// prompts stay fast and don't burn reasoning tokens (users opt in), while the
+// reasoning-first cloud providers default to `medium`.
 export interface ProviderReasoningConfig {
   levels: readonly ThinkingLevel[];
   default: ThinkingLevel;
 }
 
+const UNIFORM_LEVELS: readonly ThinkingLevel[] = ["off", "low", "medium", "high"];
+
 export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
-  openai: { levels: ["off", "low", "medium", "high", "xhigh"], default: "medium" },
+  openai: { levels: UNIFORM_LEVELS, default: "medium" },
   // ChatGPT-subscription provider, renamed from `openai-codex` in OpenClaw
   // 2026.6.x. Provider ids are normalized to `codex` before they reach here.
-  codex: { levels: ["off", "low", "medium", "high", "xhigh"], default: "medium" },
-  // Anthropic effort docs: `low | medium | high | max` on Opus 4.6+, Sonnet
-  // 4.6, Opus 4.7, Mythos. Default per platform.claude.com is `high`. xhigh is
-  // Opus-4.7-only; we omit until we add per-model gating.
-  anthropic: { levels: ["low", "medium", "high", "max"], default: "high" },
-  // Gemini 2.5 thinking_budget: 0=off (Flash/Lite only — Pro silently
-  // ignores), -1=adaptive (auto). Picker stays provider-wide; Pro will fall
-  // back to adaptive when user picks Off.
-  google: { levels: ["off", "low", "medium", "high", "adaptive"], default: "adaptive" },
-  // ClawBox AI/DeepSeek defaults to Off so simple prompts stay fast and do
-  // not burn reasoning tokens. Users opt in when the task actually needs it.
-  deepseek: { levels: ["off", "high", "xhigh"], default: "off" },
+  codex: { levels: UNIFORM_LEVELS, default: "medium" },
+  anthropic: { levels: UNIFORM_LEVELS, default: "medium" },
+  google: { levels: UNIFORM_LEVELS, default: "medium" },
+  // ClawBox AI/DeepSeek keeps `off` as its default so simple prompts stay fast;
+  // low/medium/high are offered for parity but the gateway folds low/medium up
+  // to DeepSeek's single reasoning tier.
+  deepseek: { levels: UNIFORM_LEVELS, default: "off" },
   // ClawBox AI routes via DeepSeek today.
-  clawai: { levels: ["off", "high", "xhigh"], default: "off" },
-  // OpenRouter normalizes per underlying model — surface the full set they
-  // document at openrouter.ai/docs/guides/best-practices/reasoning-tokens.
-  openrouter: { levels: ["off", "minimal", "low", "medium", "high", "xhigh"], default: "medium" },
+  clawai: { levels: UNIFORM_LEVELS, default: "off" },
+  openrouter: { levels: UNIFORM_LEVELS, default: "medium" },
   // Local Gemma (llama.cpp) exposes no reasoning-effort control — the gateway
   // rejects any thinkingLevel other than `off` ("thinkingLevel … is not
   // supported for llamacpp/gemma… (use off)"). Declaring it off-only hides the

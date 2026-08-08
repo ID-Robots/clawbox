@@ -199,12 +199,18 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
     mockGetLocalAiToken.mockReturnValue("a".repeat(64));
 
+    // The codex entitlement probe talks to chatgpt.com. Stub it by default so
+    // no test reaches the network; individual tests override with the verdict
+    // they need.
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
+
     const mod = await import("@/app/setup-api/ai-models/configure/route");
     configurePost = mod.POST;
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("returns 400 for invalid JSON", async () => {
@@ -474,7 +480,69 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4");
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
+  });
+
+  // A Pro account used to land on gpt-5.5 after sign-in and had to know to
+  // change it. Entitlement isn't readable from any catalog (the plugin list is
+  // static and identical for every account), so the route asks the account.
+  it("defaults a ChatGPT sign-in to the newest model the account can use", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    expect(res.status).toBe(200);
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.6-sol");
+  });
+
+  it("leaves a non-entitled account on gpt-5.5 rather than a model that 400s", async () => {
+    // Every gpt-5.6 id gated: the safe landing spot is gpt-5.5, which runs on
+    // every tier including Free, not the newest id in the static catalog.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 403 })));
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    expect(res.status).toBe(200);
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
+  });
+
+  it("does not probe when the user picked a model explicitly", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+      // Deliberately NOT the subscription default (gpt-5.5) — otherwise this
+      // assertion would pass even if the probe ran and found nothing.
+      model: "gpt-5.4-mini",
+    }));
+
+    expect(res.status).toBe(200);
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4-mini");
+    const probedCodex = fetchMock.mock.calls.some(([url]) => String(url).includes("backend-api/codex/responses"));
+    expect(probedCodex).toBe(false);
   });
 
   it("includes projectId for google oauth", async () => {

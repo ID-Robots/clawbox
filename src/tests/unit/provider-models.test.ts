@@ -16,7 +16,8 @@ describe("provider-models", () => {
   describe("getProviderCatalog", () => {
     it("returns configured provider catalogs", () => {
       expect(getProviderCatalog("openai")?.defaultModelId).toBe("gpt-5.4");
-      expect(getProviderCatalog("codex")?.defaultModelId).toBe("gpt-5.4");
+      // Codex (ChatGPT auth) starts on the newest model every tier can run.
+      expect(getProviderCatalog("codex")?.defaultModelId).toBe("gpt-5.5");
     });
 
     it("does not return inherited Object prototype members", () => {

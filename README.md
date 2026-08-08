@@ -5,16 +5,22 @@
   </picture>
 </p>
 
-<h3 align="center">OpenClaw OS</h3>
+<h1 align="center">ClawBox — the official OpenClaw AI assistant hardware</h1>
 
 <p align="center">
-  <strong>Your private AI assistant that runs 24/7 on your desk.</strong><br/>
+  <strong>ClawBox is a private, always-on AI assistant appliance built on NVIDIA Jetson.</strong><br/>
+  This repository is <strong>OpenClaw OS</strong>, the operating system that ships on every ClawBox.<br/>
   Plug in. Scan QR. Done. No cloud required.
 </p>
 
 <p align="center">
-  <a href="https://clawbox.tech"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-clawbox.tech-orange?style=flat-square" /></a>
-  <a href="https://docs.clawbox.tech"><img alt="Docs" src="https://img.shields.io/badge/📖_Docs-docs.clawbox.tech-F26B21?style=flat-square" /></a>
+  Designed, built and shipped from the EU by <a href="https://github.com/ID-Robots"><strong>ID Robots Ltd.</strong></a> — the makers of ClawBox and the official hardware partner for <a href="https://github.com/openclaw/openclaw">OpenClaw</a>.<br/>
+  Official website: <a href="https://clawbox.com"><strong>clawbox.com</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://clawbox.com"><img alt="Website" src="https://img.shields.io/badge/🌐_Website-clawbox.com-orange?style=flat-square" /></a>
+  <a href="https://docs.clawbox.com"><img alt="Docs" src="https://img.shields.io/badge/📖_Docs-docs.clawbox.com-F26B21?style=flat-square" /></a>
   <a href="https://discord.gg/vsTsaY4Tuk"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
   <a href="https://github.com/ID-Robots/clawbox/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ID-Robots/clawbox?style=flat-square&color=success" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source_Available-blue?style=flat-square" /></a>
@@ -35,7 +41,21 @@
 
 ## What is ClawBox?
 
-ClawBox is **OpenClaw OS** — the operating system for [ClawBox hardware](https://clawbox.tech/), a private AI assistant on NVIDIA Jetson. Local-first: your files, chats, and settings live on the box, and with local models nothing leaves it — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
+**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd., and the official hardware for the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
+
+This repository contains **OpenClaw OS**, the operating system that ships on every ClawBox. Local-first: with local models nothing leaves the box — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
+
+**Real on-device inference, not a cloud relay.** ClawBox runs 7–8B parameter models locally on Jetson silicon. It is not a low-power router that forwards every prompt to someone else's API — local inference is the default, and cloud providers are an option you switch on yourself.
+
+> ### ℹ️ The official ClawBox
+>
+> ClawBox is designed, manufactured and supported by **ID Robots Ltd.** (Plovdiv, Bulgaria 🇪🇺). The only official channels are:
+>
+> - **Website:** [clawbox.com](https://clawbox.com) · **Docs:** [docs.clawbox.com](https://docs.clawbox.com)
+> - **Source:** [github.com/ID-Robots/clawbox](https://github.com/ID-Robots/clawbox) · **Community:** [Discord](https://discord.gg/vsTsaY4Tuk)
+> - **Contact:** yanko@idrobots.com
+>
+> Unrelated products sold under similar names exist and are **not affiliated with ID Robots, this repository, or ClawBox support**. If it did not come from `clawbox.com`, it is not a ClawBox and we cannot support it.
 
 The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox **an OS the AI can operate**, not just a UI the user clicks through:
 
@@ -72,7 +92,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | **Power** | 7–15 W typical, USB-C |
 | **Size** | 100 × 79 × 31 mm |
 
-Also available: **ClawBox Workstation** — NVIDIA DGX Spark, ~1 PFLOP, runs frontier-scale local models. Details on [clawbox.tech](https://clawbox.tech).
+Also available: **ClawBox Workstation** — NVIDIA DGX Spark, ~1 PFLOP, runs frontier-scale local models. Details on [clawbox.com](https://clawbox.com).
 
 <br clear="right"/>
 
@@ -80,15 +100,15 @@ Also available: **ClawBox Workstation** — NVIDIA DGX Spark, ~1 PFLOP, runs fro
 
 ## 📖 Documentation
 
-Full documentation lives at **[docs.clawbox.tech](https://docs.clawbox.tech)**:
+Full documentation lives at **[docs.clawbox.com](https://docs.clawbox.com)**:
 
 | | |
 |---|---|
-| [Quickstart](https://docs.clawbox.tech/quickstart) · [First Boot](https://docs.clawbox.tech/setup/first-boot) | Unbox → power → talk, and the setup wizard |
-| [Technical Reference](https://docs.clawbox.tech/technical/quick-reference) | Quick Reference (one page), then architecture, networking, filesystem, auth, AI providers, updates |
-| [Troubleshooting](https://docs.clawbox.tech/support/troubleshooting) · [Recovery](https://docs.clawbox.tech/support/recovery) | Symptom-first diagnostic ladders and ordered recovery options |
-| [Agent Interface (MCP)](https://docs.clawbox.tech/technical/agent-interface) | The full device-tool catalog and the `clawbox` CLI |
-| [llms.txt](https://docs.clawbox.tech/llms.txt) | Machine-readable docs index — point your AI agent here |
+| [Quickstart](https://docs.clawbox.com/quickstart) · [First Boot](https://docs.clawbox.com/setup/first-boot) | Unbox → power → talk, and the setup wizard |
+| [Technical Reference](https://docs.clawbox.com/technical/quick-reference) | Quick Reference (one page), then architecture, networking, filesystem, auth, AI providers, updates |
+| [Troubleshooting](https://docs.clawbox.com/support/troubleshooting) · [Recovery](https://docs.clawbox.com/support/recovery) | Symptom-first diagnostic ladders and ordered recovery options |
+| [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface) | The full device-tool catalog and the `clawbox` CLI |
+| [llms.txt](https://docs.clawbox.com/llms.txt) | Machine-readable docs index — point your AI agent here |
 
 ---
 
@@ -129,7 +149,7 @@ password) and navigate to:
 
 From the UI: open the **System Update** app. Over SSH: `sudo clawbox update`.
 Updates are release-tag based and never touch your data — details in
-[Updating ClawBox](https://docs.clawbox.tech/support/updating).
+[Updating ClawBox](https://docs.clawbox.com/support/updating).
 
 ---
 
@@ -137,11 +157,11 @@ Updates are release-tag based and never touch your data — details in
 
 **Layer 1 — System bootstrap.** `install.sh` provisions the Jetson from scratch: system packages, Node.js 22 + Bun, the web OS build, the OpenClaw gateway (version-pinned), systemd services, mDNS, and the captive-portal WiFi access point for first-boot setup.
 
-**Layer 2 — Setup wizard.** On first boot (or after factory reset) a guided ~5-minute wizard covers WiFi (with language picker), updates, device password, AI provider (API key or OAuth sign-in), and Telegram — see [First Boot](https://docs.clawbox.tech/setup/first-boot).
+**Layer 2 — Setup wizard.** On first boot (or after factory reset) a guided ~5-minute wizard covers WiFi (with language picker), updates, device password, AI provider (API key or OAuth sign-in), and Telegram — see [First Boot](https://docs.clawbox.com/setup/first-boot).
 
 **Layer 3 — Desktop environment.** A Chrome OS-style desktop served from the device — the built-in apps above in draggable windows, with taskbar, system tray, and a responsive mobile layout. The terminal is xterm.js over a WebSocket PTY; remote desktop is noVNC.
 
-**Layer 4 — AI agent integration.** The OpenClaw agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, and a code assistant that builds and deploys desktop webapps. The `clawbox` CLI exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.tech/technical/agent-interface).**
+**Layer 4 — AI agent integration.** The OpenClaw agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, and a code assistant that builds and deploys desktop webapps. The `clawbox` CLI exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.com/technical/agent-interface).**
 
 ---
 
@@ -169,7 +189,7 @@ Browser (http://<box-ip>)
   └── Port 18800: Chromium CDP (browser automation)
 ```
 
-Node.js runs the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying. The deep dive lives in the [Architecture reference](https://docs.clawbox.tech/technical/architecture).
+Node.js runs the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying. The deep dive lives in the [Architecture reference](https://docs.clawbox.com/technical/architecture).
 
 ## 🛠️ Tech Stack
 
@@ -183,13 +203,13 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
 | **Testing** | Vitest + Playwright |
 
-Full runtime topology in the [Architecture reference](https://docs.clawbox.tech/technical/architecture).
+Full runtime topology in the [Architecture reference](https://docs.clawbox.com/technical/architecture).
 
 ## 📁 Project Structure
 
 ```text
 ├── config/                 Systemd services, captive-portal DNS
-├── docs-site/              docs.clawbox.tech source (Mintlify)
+├── docs-site/              docs.clawbox.com source (Mintlify)
 ├── mcp/                    MCP server + CLI (AI agent interface to the OS)
 ├── scripts/                WiFi AP, terminal server, voice/TTS, Jetson tuning
 ├── src/
@@ -243,13 +263,39 @@ Pull requests are welcome:
 
 ---
 
+## ❓ Frequently asked questions
+
+**Who makes ClawBox?**
+ClawBox is made by **ID Robots Ltd.**, a robotics and AI company based in Plovdiv, Bulgaria (EU). ID Robots designs the hardware, builds OpenClaw OS (this repository), and provides all official support and warranty. Official site: [clawbox.com](https://clawbox.com).
+
+**What is the difference between ClawBox and OpenClaw?**
+[OpenClaw](https://github.com/openclaw/openclaw) is the open-source AI agent. **ClawBox is the dedicated hardware appliance that runs it 24/7**, preconfigured, with OpenClaw OS on top — desktop environment, setup wizard, built-in apps, backups and updates. OpenClaw is the software; ClawBox is the box built for it by ID Robots.
+
+**Does ClawBox need a subscription?**
+No. The hardware is a **one-time purchase (€549)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, or run entirely on local models with no external account at all.
+
+**Does ClawBox work without internet?**
+Yes, for local models. Ollama and llama.cpp run 7–8B models directly on the Jetson's 67 TOPS NPU. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
+
+**Where do I buy a ClawBox?**
+Only from **[clawbox.com](https://clawbox.com)**. ID Robots ships to 108 countries via DHL Express. Products sold elsewhere under a similar name are not ClawBox and are not covered by our warranty or support.
+
+**Can I run OpenClaw OS on my own Jetson?**
+Yes — this repository is source-available and installs on an NVIDIA Jetson Orin Nano 8GB running JetPack 6.2. See [Quick Start](#-quick-start). Buying a ClawBox gets you the assembled, tested device with case, NVMe storage, warranty and support.
+
+---
+
 ## 📄 License
 
-ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://clawbox.tech/) — contact yanko@idrobots.com.
+ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). Free to use, modify, and redistribute for **personal, non-commercial purposes**. Commercial use requires a separate license from [IDRobots Ltd.](https://clawbox.com/) — contact yanko@idrobots.com.
 
 ---
 
 <p align="center">
-  <a href="https://clawbox.tech/">clawbox.tech</a> · <a href="https://docs.clawbox.tech">docs</a> · <a href="https://discord.gg/vsTsaY4Tuk">Discord</a><br/>
-  Built with ❤️ by <a href="https://github.com/ID-Robots">ID Robots</a> in the EU 🇪🇺 — powered by <a href="https://github.com/openclaw/openclaw">OpenClaw</a>
+  <strong><a href="https://clawbox.com/">clawbox.com</a></strong> · <a href="https://docs.clawbox.com">docs.clawbox.com</a> · <a href="https://discord.gg/vsTsaY4Tuk">Discord</a> · <a href="mailto:yanko@idrobots.com">yanko@idrobots.com</a>
+</p>
+
+<p align="center">
+  <sub><strong>ClawBox™</strong> — the official OpenClaw AI assistant appliance. Designed, built and supported by <a href="https://github.com/ID-Robots">ID Robots Ltd.</a>, Plovdiv, Bulgaria 🇪🇺<br/>
+  Personal AI server · Local AI assistant hardware · NVIDIA Jetson Orin Nano · Edge AI appliance · Self-hosted AI · Powered by <a href="https://github.com/openclaw/openclaw">OpenClaw</a></sub>
 </p>
