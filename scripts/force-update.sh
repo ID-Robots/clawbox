@@ -78,7 +78,14 @@ echo "[force-update] Restarting clawbox-setup..."
 sudo systemctl restart clawbox-setup
 sleep 5
 if systemctl is-active --quiet clawbox-setup; then
-  echo "[force-update] Done. Reload http://clawbox.local in your browser."
+  echo "[force-update] The ClawBox interface is restored."
+  echo "[force-update] IMPORTANT: this recovered the UI only. OpenClaw and system"
+  echo "[force-update]   services may still be on the OLD version — the interface"
+  echo "[force-update]   being current does NOT mean the update finished."
+  echo "[force-update] To finish: open http://clawbox.local, launch the System Update"
+  echo "[force-update]   app (Settings -> About -> System Update), open 'Advanced"
+  echo "[force-update]   options' and click 'Force full update'. The device reboots"
+  echo "[force-update]   when it completes."
 else
   echo "[force-update] WARNING: clawbox-setup failed to come up. Check 'sudo journalctl -u clawbox-setup -n 50'." >&2
   exit 1
