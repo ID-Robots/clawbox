@@ -5,6 +5,7 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
+import { isProtectedFilePath } from "@/lib/file-guard";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,6 +33,10 @@ function safePath(rel: string): string | null {
   // Require either an exact base match or a path inside base (with separator),
   // otherwise sibling dirs like "/home/clawboxmalicious" would slip through.
   if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
+  // The browse root is $HOME, so secret stores (.ssh, .openclaw, the data/
+  // tokens) sit inside the sandbox — deny them at the single resolve chokepoint
+  // that every read/write/rename/download path funnels through.
+  if (isProtectedFilePath(resolved)) return null;
   return resolved;
 }
 
@@ -71,6 +76,8 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
       if (!includeHidden && name.startsWith(".")) continue;
       const isDir = dirent.isDirectory();
       const full = path.join(dir, name);
+      // Never surface or descend into secret stores, even with ?hidden=1.
+      if (isProtectedFilePath(full)) continue;
       if (name.toLowerCase().includes(query)) {
         let size: number | null = null;
         let modified = "";
@@ -144,6 +151,8 @@ export async function GET(req: NextRequest) {
     .map((name) => {
       try {
         const fullPath = path.join(abs, name);
+        // Keep secret stores out of the listing entirely (not just un-openable).
+        if (isProtectedFilePath(fullPath)) return null;
         const s = fs.statSync(fullPath);
         return {
           name,

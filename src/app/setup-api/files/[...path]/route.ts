@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { isProtectedFilePath } from "@/lib/file-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,8 @@ function safePath(segments: string[]): string | null {
   const rel = segments.join("/");
   const resolved = path.resolve(BASE_DIR, rel);
   if (!resolved.startsWith(path.resolve(BASE_DIR) + path.sep) && resolved !== path.resolve(BASE_DIR)) return null;
+  // Browse root is $HOME → secret stores live inside the sandbox; deny them.
+  if (isProtectedFilePath(resolved)) return null;
   return resolved;
 }
 
@@ -62,6 +65,10 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const newAbs = path.resolve(parentDir, body.newName);
   const base = path.resolve(BASE_DIR);
   if (newAbs !== base && !newAbs.startsWith(base + path.sep)) {
+    return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+  }
+  // Don't let a rename create/clobber a secret store name either.
+  if (isProtectedFilePath(newAbs)) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
   }
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
