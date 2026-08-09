@@ -17,6 +17,34 @@ HOME_DIR="${HOME:-/home/clawbox}"
 CANON="$HOME_DIR/.clawbox/agent-identity"
 OC_WS="$HOME_DIR/.openclaw/workspace"
 
+# Optional target harness ("openclaw" | "hermes"). The harness/select route
+# passes the harness it is switching TO; the systemd path unit (canonical
+# changed) invokes us with no argument.
+#
+# The gateway restart below exists only to make a RUNNING OpenClaw gateway
+# re-read the refreshed workspace files (it caches them at start). Restarting it
+# is pointless — and harmful — when OpenClaw isn't the harness in play: on a
+# switch to Hermes it would bounce the gateway for ~30 s, during which OpenClaw
+# reports itself "not available" and switching back is rejected. So restart the
+# gateway only when OpenClaw is the target (or, for the no-arg path-unit case,
+# the currently active harness). The on-disk copies are refreshed either way, so
+# the next switch back to OpenClaw still starts it with current identity.
+TARGET_HARNESS="${1:-}"
+CONFIG_JSON="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/data/config.json"
+
+resolve_active_harness() {
+  node -e 'try{const c=require(process.argv[1]);process.stdout.write(String(c.active_harness||"openclaw"))}catch(e){process.stdout.write("openclaw")}' "$CONFIG_JSON" 2>/dev/null || echo openclaw
+}
+
+should_refresh_openclaw() {
+  if [ "$TARGET_HARNESS" = "openclaw" ]; then
+    return 0
+  elif [ -z "$TARGET_HARNESS" ] && [ "$(resolve_active_harness)" = "openclaw" ]; then
+    return 0
+  fi
+  return 1
+}
+
 # Self-heal: if the shared-identity bridge was never established (e.g. the very
 # first harness switch on a device), bootstrap it now so the sync has a source.
 if [ ! -d "$CANON" ]; then
@@ -27,14 +55,18 @@ if [ ! -d "$CANON" ]; then
   }
 fi
 
-# 1. OpenClaw ← canonical (real copies).
+# 1. OpenClaw ← canonical (real copies). Always refresh the on-disk copies so
+# the next OpenClaw start reads current identity; only bounce the running
+# gateway when OpenClaw is actually the harness in play (see above).
 if [ -d "$OC_WS" ]; then
   for f in SOUL USER MEMORY; do
     [ -f "$CANON/$f.md" ] && cp "$CANON/$f.md" "$OC_WS/$f.md"
   done
-  # Refresh the gateway's cached workspace-file scan (best-effort).
-  sudo -n /usr/bin/systemctl restart clawbox-gateway.service 2>/dev/null || \
-    systemctl --user restart clawbox-gateway 2>/dev/null || true
+  if should_refresh_openclaw; then
+    # Refresh the gateway's cached workspace-file scan (best-effort).
+    sudo -n /usr/bin/systemctl restart clawbox-gateway.service 2>/dev/null || \
+      systemctl --user restart clawbox-gateway 2>/dev/null || true
+  fi
 fi
 
 # 2. Hermes ← canonical: the symlinks placed by setup-shared-identity.sh ARE the
