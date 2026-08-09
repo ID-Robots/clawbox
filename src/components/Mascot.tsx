@@ -858,6 +858,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       let lastFrenzyFrame = 0
       const frenzyAnimate = (now: number) => {
+        if (frozenRef.current) return // stop rescheduling once frozen mid-frenzy
         if (!lastFrenzyFrame) lastFrenzyFrame = now
         const dt = now - lastFrenzyFrame
         if (dt >= 16) { // ~60fps cap
@@ -902,6 +903,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         if (Math.random() < 0.4) {
           const jStart = performance.now()
           const jLoop = (now: number) => {
+            if (frozenRef.current) { setJumpY(0); return } // freeze cancels an in-flight jump
             const t = Math.min((now - jStart) / 375, 1) // 15 frames * 25ms
             setJumpY(-Math.sin(t * Math.PI) * 35)
             if (t < 1) requestAnimationFrame(jLoop)
@@ -915,11 +917,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       // End frenzy after 60 seconds
       frenzyTimeout.current = setTimeout(() => {
-        setFrenzy(false)
-        setMoneyParticles([])
-        frenzyIntervalsRef.current.forEach(clearInterval)
-        frenzyIntervalsRef.current = []
-        if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+        stopFrenzy()
         doActionRef.current()
       }, 60000)
     }
@@ -990,6 +988,23 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     return () => mq.removeEventListener?.('change', update)
   }, [])
 
+  // Tear down an in-flight frenzy: the rAF walk loop, the quote/money/jump
+  // intervals, the 60s end-timer, and the visual state they drove. Safe to call
+  // when no frenzy is running. Used both by the natural 60s end and when the
+  // crab freezes mid-frenzy (chat opens, or reduced-motion turns on) — without
+  // it those intervals would keep firing say()/money/jumps for up to a minute
+  // after the crab was supposed to hold still. (An already-scheduled jump rAF
+  // can't be cancelled by handle here, so its jLoop also bails on frozenRef.)
+  const stopFrenzy = useCallback(() => {
+    if (frenzyTimeout.current) { clearTimeout(frenzyTimeout.current); frenzyTimeout.current = null }
+    frenzyIntervalsRef.current.forEach(clearInterval)
+    frenzyIntervalsRef.current = []
+    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current); walkInterval.current = null }
+    setFrenzy(false)
+    setMoneyParticles([])
+    setJumpY(0)
+  }, [])
+
   // Freeze/unfreeze mascot (chat popup open, or reduced-motion) — enter power stance
   useEffect(() => {
     const effFrozen = frozen || reducedMotion
@@ -997,7 +1012,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (effFrozen) {
       // Stop all movement — stay in place (don't teleport to box)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
-      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      stopFrenzy() // cancel an active frenzy, not just block new ones
       setBoxGlow(true)
       setState('idle')
       setSpeech('')
@@ -1008,7 +1023,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
     }
-  }, [frozen, reducedMotion])
+  }, [frozen, reducedMotion, stopFrenzy])
 
   // ─── Keep the crab clear of a docked chat panel ───
   // When the chat opens as a vertical side panel (rightInset = its width in px),
@@ -1102,7 +1117,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 : 'none',
       }}>
         {/* Body */}
-        <div style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
+        <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
           <img src="/clawbox-crab.png" alt="" style={{
             width: 150, height: 150, objectFit: 'contain',
           }} />
