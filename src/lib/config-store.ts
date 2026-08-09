@@ -20,7 +20,16 @@ function readConfig(): Record<string, unknown> {
 
 function writeConfig(data: Record<string, unknown>): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2));
+  // 0o600: config.json holds real secrets (clawai portal token, telegram bot
+  // token). writeFileSync only applies mode when *creating* the file, so an
+  // existing file left 0644 by an older build keeps its perms — re-harden
+  // explicitly, matching the auth-profiles/session-secret/mcp-token stores.
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
+  try {
+    fs.chmodSync(CONFIG_PATH, 0o600);
+  } catch {
+    // best-effort; a failed chmod must not break config writes
+  }
 }
 
 export async function get(key: string): Promise<unknown> {

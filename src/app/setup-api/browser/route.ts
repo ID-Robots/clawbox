@@ -3,10 +3,58 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import net from "net";
+import { lookup as dnsLookup } from "dns/promises";
 
 const exec = promisify(execFile);
 const CDP_PORT = 18800;
 const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+
+// SEC-4: the automation browser must not be steerable to `file://` (local-file
+// exfil — the JSON response hands back a screenshot of whatever it renders) or
+// to the device's own internal services (SSRF). Restrict to http(s) and reject
+// hosts that are, or resolve to, loopback/private/link-local addresses.
+function isPrivateIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const p = ip.split(".").map(Number);
+    if (p[0] === 127 || p[0] === 10 || p[0] === 0) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] >= 224) return true;
+    return false;
+  }
+  const lc = ip.toLowerCase();
+  if (lc === "::1" || lc === "::") return true;
+  if (lc.startsWith("fe80") || lc.startsWith("fc") || lc.startsWith("fd")) return true;
+  if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7));
+  return false;
+}
+
+/** Returns an error message if the URL is not safe to navigate to, else null. */
+async function validateNavUrl(url: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "Invalid URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)`;
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return "Blocked internal host";
+  if (net.isIP(host)) {
+    return isPrivateIp(host) ? "Blocked internal address" : null;
+  }
+  try {
+    const results = await dnsLookup(host, { all: true });
+    if (results.some((r) => isPrivateIp(r.address))) return "Blocked internal address";
+  } catch {
+    return "Host did not resolve";
+  }
+  return null;
+}
 
 // Playwright key name mapping (browser KeyboardEvent.key → Playwright key names)
 const KEY_MAP: Record<string, string> = {
@@ -155,6 +203,8 @@ export async function POST(req: Request) {
 
       const { url } = body;
       if (url) {
+        const navErr = await validateNavUrl(url);
+        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
@@ -197,6 +247,8 @@ export async function POST(req: Request) {
       case "navigate": {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
+        const navErr = await validateNavUrl(url);
+        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
         return NextResponse.json(await respond());
       }
