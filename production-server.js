@@ -45,9 +45,32 @@ function resolveUpgradeTarget(reqUrl) {
   return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
 }
 
+// Current session generation, read from data/config.json (mtime-cached), so WS
+// upgrades honor the same password-change revocation the Next.js middleware
+// enforces (src/middleware.ts). Without this, a cookie revoked by a password
+// change would still be accepted at the /terminal-ws (root shell) and /novnc-ws
+// gates until natural expiry. Defaults to 0 on any read error / missing field.
+const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "config.json");
+let sessionGenCache = null;
+function readSessionGeneration() {
+  try {
+    const stat = fs.statSync(CONFIG_JSON_PATH);
+    if (sessionGenCache && sessionGenCache.mtimeMs === stat.mtimeMs) return sessionGenCache.value;
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_JSON_PATH, "utf-8"));
+    const value = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
+      ? parsed.session_generation
+      : 0;
+    sessionGenCache = { mtimeMs: stat.mtimeMs, value };
+    return value;
+  } catch {
+    sessionGenCache = { mtimeMs: -1, value: 0 };
+    return 0;
+  }
+}
+
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
 // src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
-// base64url payload carries { exp }). Mirrored here in CJS because upgrades
+// base64url payload carries { exp, gen }). Mirrored here in CJS because upgrades
 // bypass Next.js. Fails closed when the secret is absent.
 function hasValidSession(req) {
   // Fails closed on ANY error. This runs inside the 'upgrade' listener, so an
@@ -71,7 +94,10 @@ function hasValidSession(req) {
     if (!require("crypto").timingSafeEqual(sigBuf, expBuf)) return false;
     const decoded = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
     const data = JSON.parse(decoded);
-    return typeof data.exp === "number" && data.exp > Math.floor(Date.now() / 1000);
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    // Reject cookies from before the last password change (session revocation).
+    if ((typeof data.gen === "number" ? data.gen : 0) !== readSessionGeneration()) return false;
+    return true;
   } catch {
     return false;
   }
