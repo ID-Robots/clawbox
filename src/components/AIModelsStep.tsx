@@ -1172,7 +1172,7 @@ export default function AIModelsStep({
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string }
+    tokenData: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string; oauthHandoff?: boolean }
   ) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1187,20 +1187,33 @@ export default function AIModelsStep({
       // this, picking a model in the wizard would silently be ignored
       // for OAuth providers.
       const subscriptionModel = getRequestedCatalogModelId(true);
+      // Device-auth (server-side handoff): the provider tokens were persisted
+      // to a server-only file by device-poll, so we send no token fields —
+      // just the handoff flag telling configure to read them there. The
+      // redirect/exchange path (Anthropic) still posts the real tokens.
+      const configureBody = tokenData.oauthHandoff
+        ? {
+            scope: configureScope,
+            provider: selectedProvider,
+            authMode: "subscription",
+            oauthHandoff: true,
+            ...(subscriptionModel ? { model: subscriptionModel } : {}),
+          }
+        : {
+            scope: configureScope,
+            provider: selectedProvider,
+            apiKey: tokenData.access_token,
+            authMode: "subscription",
+            idToken: tokenData.id_token,
+            refreshToken: tokenData.refresh_token,
+            expiresIn: tokenData.expires_in,
+            ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
+            ...(subscriptionModel ? { model: subscriptionModel } : {}),
+          };
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scope: configureScope,
-          provider: selectedProvider,
-          apiKey: tokenData.access_token,
-          authMode: "subscription",
-          idToken: tokenData.id_token,
-          refreshToken: tokenData.refresh_token,
-          expiresIn: tokenData.expires_in,
-          ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
-          ...(subscriptionModel ? { model: subscriptionModel } : {}),
-        }),
+        body: JSON.stringify(configureBody),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -1256,10 +1269,12 @@ export default function AIModelsStep({
       const data = await res.json();
       if (controller.signal.aborted) return;
 
-      if (data.status === "complete" && data.access_token) {
+      if (data.status === "complete") {
         stopPolling();
         setDeviceSaving(true);
-        await saveOAuthToken(data);
+        // Tokens never touch the browser: device-poll persisted them to a
+        // server-only file. Signal the configure route to read them there.
+        await saveOAuthToken({ oauthHandoff: true });
         return;
       }
 
