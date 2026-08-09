@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, beta]
   pull_request:
-    branches: [main]
+    branches: [main, beta]
   schedule:
     # Weekly full scan (Mondays 02:30 UTC) to catch advisories in code that
     # hasn't changed since the last push.
