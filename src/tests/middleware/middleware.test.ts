@@ -421,8 +421,13 @@ describe("middleware", () => {
       "/setup-api/webapps",
       "/setup-api/vnc/status",
       "/setup-api/terminal",
+      "/setup-api/clawkeep/restore",
+      "/setup-api/tunnel/enable",
+      "/setup-api/apps/install",
+      "/setup-api/apps/uninstall",
       "/setup-api/gateway/ws-config",
       "/setup-api/gateway",
+      "/setup-api/gateway/", // trailing slash must not dodge the exact match
     ])("gates sensitive %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();

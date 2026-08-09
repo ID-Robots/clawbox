@@ -122,6 +122,10 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/webapps",
   "/setup-api/vnc",
   "/setup-api/terminal",
+  "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
+  "/setup-api/tunnel",      // enabling remote tunnel access
+  "/setup-api/apps/install",
+  "/setup-api/apps/uninstall",
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token
 ];
 // Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
@@ -133,9 +137,12 @@ const PRE_AUTH_SENSITIVE_EXACT = new Set([
 ]);
 
 function isSensitiveSetupApi(pathname: string): boolean {
-  if (PRE_AUTH_SENSITIVE_EXACT.has(pathname)) return true;
+  // Normalize a trailing slash so `/setup-api/gateway/` can't dodge the exact
+  // match (Next.js may not always redirect it before middleware runs).
+  const p0 = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+  if (PRE_AUTH_SENSITIVE_EXACT.has(p0)) return true;
   for (const p of PRE_AUTH_SENSITIVE_PREFIXES) {
-    if (pathname === p || pathname.startsWith(p + "/")) return true;
+    if (p0 === p || p0.startsWith(p + "/")) return true;
   }
   return false;
 }
