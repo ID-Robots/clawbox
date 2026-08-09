@@ -17,7 +17,15 @@ HOME_DIR="${HOME:-/home/clawbox}"
 CANON="$HOME_DIR/.clawbox/agent-identity"
 OC_WS="$HOME_DIR/.openclaw/workspace"
 
-[ -d "$CANON" ] || { echo "[identity-sync] no canonical dir; run setup-shared-identity.sh first" >&2; exit 1; }
+# Self-heal: if the shared-identity bridge was never established (e.g. the very
+# first harness switch on a device), bootstrap it now so the sync has a source.
+if [ ! -d "$CANON" ]; then
+  echo "[identity-sync] canonical dir missing — bootstrapping via setup-shared-identity.sh"
+  bash "$(dirname "$0")/setup-shared-identity.sh" || {
+    echo "[identity-sync] bootstrap failed; nothing to sync" >&2
+    exit 1
+  }
+fi
 
 # 1. OpenClaw ← canonical (real copies).
 if [ -d "$OC_WS" ]; then

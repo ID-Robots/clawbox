@@ -81,7 +81,8 @@ export default function HarnessPicker() {
             <button
               key={h.id}
               onClick={() => select(h.id)}
-              disabled={!!switching || active}
+              disabled={!!switching || active || !h.healthy}
+              title={!h.healthy ? `${h.label} is not available on this device` : undefined}
               className={`flex items-center justify-between rounded-xl border p-3 text-left transition-colors ${
                 active
                   ? "border-[var(--coral-bright)] bg-orange-500/10"
