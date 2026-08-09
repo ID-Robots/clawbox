@@ -29,7 +29,10 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    const config = OAUTH_PROVIDERS[provider];
+    // Own-property check: a bare index would let inherited keys like
+    // "__proto__"/"constructor" resolve to Object.prototype (truthy) and slip
+    // past the `!config` guard, yielding a junk 200 instead of this 400.
+    const config = Object.hasOwn(OAUTH_PROVIDERS, provider) ? OAUTH_PROVIDERS[provider] : undefined;
     if (!config) {
       return NextResponse.json(
         { error: `OAuth not supported for provider: ${provider}` },

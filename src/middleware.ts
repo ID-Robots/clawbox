@@ -136,6 +136,7 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/terminal",
   "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
   "/setup-api/tunnel",      // enabling remote tunnel access
+  "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
   "/setup-api/apps/install",
   "/setup-api/apps/uninstall",
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token

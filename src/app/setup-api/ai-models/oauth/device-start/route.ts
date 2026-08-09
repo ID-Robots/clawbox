@@ -25,7 +25,10 @@ export async function POST(request: Request) {
     }
 
     const providerName = body.provider || "openai";
-    const config = DEVICE_AUTH_PROVIDERS[providerName];
+    // Own-property check so inherited keys ("__proto__"/"constructor") can't
+    // resolve to a truthy Object.prototype value and bypass this 400 (they'd
+    // otherwise proceed with undefined config fields → a fetch(undefined) 500).
+    const config = Object.hasOwn(DEVICE_AUTH_PROVIDERS, providerName) ? DEVICE_AUTH_PROVIDERS[providerName] : undefined;
     if (!config) {
       return NextResponse.json(
         { error: `Device auth not supported for provider: ${providerName}` },

@@ -472,6 +472,8 @@ describe("middleware", () => {
       "/setup-api/terminal",
       "/setup-api/clawkeep/restore",
       "/setup-api/tunnel/enable",
+      "/setup-api/portal/start", // same privileged tunnel control as /tunnel
+      "/setup-api/portal/stop",
       "/setup-api/apps/install",
       "/setup-api/apps/uninstall",
       "/setup-api/gateway/ws-config",
@@ -496,6 +498,18 @@ describe("middleware", () => {
       const mod = await import("@/middleware");
 
       const response = await mod.middleware(createRequest("/setup-api/gateway/health"));
+      expect(response.status).toBe(200);
+    });
+
+    it("still allows /setup-api/portal/heartbeat-tick during the setup window", async () => {
+      // The heartbeat timer hits this on a freshly-booted device before login;
+      // gating the /setup-api/portal prefix must not catch this whitelisted
+      // sibling (it does no privileged work).
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api/portal/heartbeat-tick"));
       expect(response.status).toBe(200);
     });
 
