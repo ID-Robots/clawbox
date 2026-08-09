@@ -5,7 +5,7 @@ import fs from "fs/promises";
 import path from "path";
 import { get, set } from "@/lib/config-store";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
-import { getSystemUsername, verifyPassword, isSafePasswordChars } from "@/lib/auth";
+import { getSystemUsername, verifyPassword, isSafePasswordChars, bumpSessionGeneration } from "@/lib/auth";
 import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -81,6 +81,13 @@ export async function POST(request: Request) {
 
     await set("password_configured", true);
     await set("password_configured_at", new Date().toISOString());
+
+    // Revoke every session minted under the old password. Only matters for an
+    // actual change (there are no live sessions during first-boot setup), but
+    // bumping unconditionally is harmless and keeps the logic simple.
+    if (passwordAlreadyConfigured) {
+      await bumpSessionGeneration();
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

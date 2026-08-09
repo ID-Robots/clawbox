@@ -26,6 +26,7 @@ vi.mock("@/lib/auth", () => ({
   PASSWORD_CONTROL_CHAR_RE: /[\r\n\x00-\x1f\x7f]/,
   isSafePasswordChars: (s: string) => !/[\r\n\x00-\x1f\x7f]/.test(s),
   verifyPassword: vi.fn(async () => true),
+  bumpSessionGeneration: vi.fn(async () => 1),
 }));
 
 

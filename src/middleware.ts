@@ -16,25 +16,37 @@ const CONFIG_ROOT = process.env.CLAWBOX_ROOT
   || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
 
-let setupCompleteCache: { mtimeMs: number; value: boolean } | null = null;
+let configCache: { mtimeMs: number; setupComplete: boolean; sessionGen: number } | null = null;
 
-function isSetupComplete(): boolean {
+function readConfigCached(): { setupComplete: boolean; sessionGen: number } {
   try {
     const stat = fs.statSync(CONFIG_PATH);
-    if (setupCompleteCache && setupCompleteCache.mtimeMs === stat.mtimeMs) {
-      return setupCompleteCache.value;
-    }
+    if (configCache && configCache.mtimeMs === stat.mtimeMs) return configCache;
     const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { setup_complete?: unknown };
-    const value = parsed.setup_complete === true;
-    setupCompleteCache = { mtimeMs: stat.mtimeMs, value };
-    return value;
+    const parsed = JSON.parse(raw) as { setup_complete?: unknown; session_generation?: unknown };
+    const setupComplete = parsed.setup_complete === true;
+    const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
+      ? parsed.session_generation
+      : 0;
+    configCache = { mtimeMs: stat.mtimeMs, setupComplete, sessionGen };
+    return configCache;
   } catch {
     // Missing/unreadable config = pre-setup. Cache the negative answer so we
     // don't statSync on every request before config.json is first written.
-    setupCompleteCache = { mtimeMs: -1, value: false };
-    return false;
+    configCache = { mtimeMs: -1, setupComplete: false, sessionGen: 0 };
+    return configCache;
   }
+}
+
+function isSetupComplete(): boolean {
+  return readConfigCached().setupComplete;
+}
+
+// Current session generation — bumped on password change to revoke every cookie
+// minted earlier (see src/lib/auth.ts). Defaults to 0, so cookies are only ever
+// rejected here once a password change has actually happened.
+function currentSessionGeneration(): number {
+  return readConfigCached().sessionGen;
 }
 
 // ─── Captive Portal ──────────────────────────────────────────────────────────
@@ -142,7 +154,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 /** Verify HMAC-SHA256 session cookie using Web Crypto API (available in Node 22+). */
-async function verifySessionCookie(cookie: string): Promise<boolean> {
+async function verifySessionCookie(cookie: string, expectedGen: number): Promise<boolean> {
   const secret = process.env.SESSION_SECRET;
   if (!secret) return false;
 
@@ -174,7 +186,10 @@ async function verifySessionCookie(cookie: string): Promise<boolean> {
     // Check expiration
     const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
     const data = JSON.parse(decoded);
-    return typeof data.exp === "number" && data.exp > Math.floor(Date.now() / 1000);
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    // Reject cookies from before the last password change (session revocation).
+    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return false;
+    return true;
   } catch {
     return false;
   }
@@ -243,7 +258,7 @@ export async function middleware(request: NextRequest) {
 
   // 4. Check session cookie
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
-  if (sessionCookie && await verifySessionCookie(sessionCookie)) {
+  if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
     return NextResponse.next();
   }
 

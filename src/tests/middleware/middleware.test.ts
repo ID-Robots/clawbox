@@ -45,8 +45,16 @@ describe("middleware", () => {
     return new NextRequest(new URL(`http://localhost${pathname}`));
   }
 
-  async function createSignedSessionCookie(exp: number): Promise<string> {
-    const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+  function writeConfig(fields: Record<string, unknown>) {
+    const dataDir = path.join(tmpRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify(fields));
+  }
+
+  async function createSignedSessionCookie(exp: number, gen?: number): Promise<string> {
+    const body: Record<string, number> = { exp };
+    if (gen !== undefined) body.gen = gen;
+    const payload = Buffer.from(JSON.stringify(body)).toString("base64url");
     const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode("test-secret"),
@@ -404,6 +412,47 @@ describe("middleware", () => {
       const response = await mod.middleware(req);
 
       expect(response.status).toBe(307);
+    });
+  });
+
+  describe("session generation revocation", () => {
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    it("accepts a matching-generation cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, session_generation: 3 });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(200);
+    });
+
+    it("rejects a cookie from before the last password change", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      // Generation bumped to 4; a cookie stamped gen 3 is now revoked.
+      writeConfig({ setup_complete: true, session_generation: 4 });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(307);
+    });
+
+    it("treats a legacy cookie with no generation as generation 0", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true }); // session_generation defaults to 0
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(200);
     });
   });
 
