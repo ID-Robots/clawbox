@@ -117,9 +117,12 @@ export async function GET() {
       display,
     );
     if (code !== 0) {
-      // xclip returns non-zero when the selection is empty; treat that as
-      // an empty string rather than an error so the UI can render "(empty)".
-      const isEmpty = stderr.includes("There is no owner");
+      // xclip returns non-zero when the selection is empty; treat that as an
+      // empty string rather than an error so the UI can render "(empty)".
+      // Different xclip builds word this differently: "There is no owner for
+      // the selection" (no selection at all) vs "target STRING not available"
+      // (a selection exists but holds no text) — both mean "empty" to us.
+      const isEmpty = /there is no owner|target string not available/i.test(stderr);
       if (isEmpty) {
         return NextResponse.json({ text: "" }, { headers: { "Cache-Control": "no-store" } });
       }
