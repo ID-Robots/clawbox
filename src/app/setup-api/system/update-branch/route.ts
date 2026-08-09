@@ -6,7 +6,10 @@ export const dynamic = "force-dynamic";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
-const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+// Reject a leading '-' (or '/') so an attacker-chosen branch can't smuggle a
+// git option flag (e.g. "-D"/"--all") into the updater's checkout/fetch and
+// brick it. Mirrors SAFE_BRANCH in src/lib/updater.ts.
+const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
 
 function isEnoent(err: unknown): boolean {
   return !!(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
