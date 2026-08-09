@@ -46,10 +46,14 @@ export default function HarnessPicker() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Switch failed");
-        await load();
+        // The desktop chat resolves its harness on mount and stays mounted, so
+        // a live switch wouldn't reach an already-open chat. Reload so the whole
+        // desktop re-mounts against the newly-selected harness — a clean, sure
+        // apply for a deliberate engine switch.
+        window.location.reload();
+        return;
       } catch (e) {
         setError(e instanceof Error ? e.message : "Switch failed");
-      } finally {
         setSwitching(null);
       }
     },
