@@ -1,0 +1,53 @@
+import path from "path";
+import fs from "fs";
+import { DATA_DIR } from "./config-store";
+
+// ── Files API secret guard ──────────────────────────────────────────────────
+//
+// The Files API browses the home directory, so its every secret store lives
+// *inside* the sandbox root — `..` containment alone doesn't protect them. This
+// denylist keeps credential/key material off the read, write, list, rename and
+// download paths (mirrors the MCP file-tool denylist). Matched against the
+// realpath'd path so an in-base symlink can't dodge the check (CWE-59).
+
+const PROTECTED_DIR_RES: RegExp[] = [
+  /(^|\/)\.ssh(\/|$)/,
+  /(^|\/)\.openclaw(\/|$)/,
+  /(^|\/)\.codex(\/|$)/,
+  /(^|\/)\.gnupg(\/|$)/,
+  /(^|\/)\.aws(\/|$)/,
+  /(^|\/)\.config\/(gcloud|gh)(\/|$)/,
+];
+
+// Exact secret files in the ClawBox data dir: the session-secret (forge cookies),
+// the service bearer tokens, and the config/kv stores that carry provider keys.
+const PROTECTED_FILES = new Set(
+  [".session-secret", ".mcp-token", ".local-ai-token", "config.json", "kv.json"]
+    .map((n) => path.join(DATA_DIR, n)),
+);
+
+function isProtected(abs: string): boolean {
+  if (PROTECTED_FILES.has(abs)) return true;
+  return PROTECTED_DIR_RES.some((re) => re.test(abs));
+}
+
+/**
+ * True if `abs` — or, after resolving symlinks, its real target — is a protected
+ * secret store. Callers should treat a `true` result as "not found / forbidden".
+ */
+export function isProtectedFilePath(abs: string): boolean {
+  if (isProtected(abs)) return true;
+  try {
+    const real = fs.realpathSync(abs);
+    return real !== abs && isProtected(real);
+  } catch {
+    // Path (or leaf) doesn't exist yet, e.g. an upload target — resolve the
+    // parent so a symlinked ancestor can't smuggle a write into a secret dir.
+    try {
+      const real = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
+      return real !== abs && isProtected(real);
+    } catch {
+      return false;
+    }
+  }
+}
