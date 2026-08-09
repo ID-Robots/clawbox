@@ -837,6 +837,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const moneyEmojis = ['💰', '💵', '💸', '🤑', '💎', '🪙', '💲', '€']
 
     const handleNewOrder = () => {
+      // Skip the frenzy (60s of autonomous running + spawns) when motion is
+      // reduced or the crab is frozen (chat open) — frozenRef reflects
+      // `frozen || reducedMotion`, so this honours the OS reduce-motion setting.
+      if (frozenRef.current) return
       // Cancel current action
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
