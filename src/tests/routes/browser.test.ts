@@ -8,6 +8,8 @@ const execFileMock = vi.hoisted(() => vi.fn((file: string, args?: unknown, optio
 
 const mockPage = vi.hoisted(() => ({
   goto: vi.fn().mockResolvedValue(undefined),
+  // Redirect/rebind SSRF guard installs a request interceptor via page.route.
+  route: vi.fn().mockResolvedValue(undefined),
   url: vi.fn().mockReturnValue("https://www.google.com"),
   title: vi.fn().mockResolvedValue("Google"),
   screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
