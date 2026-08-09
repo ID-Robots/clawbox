@@ -27,8 +27,11 @@ function requestIsHttps(req: Request): boolean {
 }
 
 // Remaining lifetime (seconds) of the caller's current session cookie, so a
-// re-issued cookie preserves the chosen duration instead of extending it. Best
-// effort — the cookie was already validated by middleware to reach this route.
+// re-issued cookie preserves roughly the chosen duration. Best effort — the
+// cookie was already validated by middleware to reach this route. Returns null
+// (→ caller falls back to a fresh 24h) when the cookie is absent, unparseable,
+// or nearly expired; the caller just re-proved the current password, so a fresh
+// window is acceptable there.
 function remainingSessionSeconds(req: Request): number | null {
   const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.get("cookie") || "");
   if (!m) return null;
@@ -118,17 +121,25 @@ export async function POST(request: Request) {
     // neither bumps nor re-issues.
     if (passwordAlreadyConfigured) {
       const gen = await bumpSessionGeneration();
-      const secret = await getSessionSigningSecret();
-      const duration = remainingSessionSeconds(request) ?? 86400;
-      const res = NextResponse.json({ success: true, reauthenticated: true });
-      res.cookies.set("clawbox_session", createSessionCookie(duration, secret, gen), {
-        httpOnly: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: duration,
-        secure: requestIsHttps(request),
-      });
-      return res;
+      // Re-issue is best-effort: the password change already succeeded, so a
+      // failure to mint the replacement cookie must NOT turn into a 500 (that
+      // would log the admin out — the exact outcome we're trying to avoid).
+      // Worst case they just see the login screen, like setup/complete.
+      try {
+        const secret = await getSessionSigningSecret();
+        const duration = remainingSessionSeconds(request) ?? 86400;
+        const res = NextResponse.json({ success: true, reauthenticated: true });
+        res.cookies.set("clawbox_session", createSessionCookie(duration, secret, gen), {
+          httpOnly: true,
+          sameSite: "lax",
+          path: "/",
+          maxAge: duration,
+          secure: requestIsHttps(request),
+        });
+        return res;
+      } catch {
+        return NextResponse.json({ success: true });
+      }
     }
 
     return NextResponse.json({ success: true });

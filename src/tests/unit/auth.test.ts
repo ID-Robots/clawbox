@@ -324,5 +324,16 @@ describe("auth", () => {
       const cookie = auth.createSessionCookie(3600, secret, 5);
       expect(auth.verifySessionCookie(cookie, secret)).toBe(true);
     });
+
+    it("treats a truly legacy cookie (payload has no gen field) as generation 0", () => {
+      // createSessionCookie always stamps gen; hand-build a payload with ONLY
+      // exp — the shape minted before this feature existed — and sign it.
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+      const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+      const legacy = `${payload}.${sig}`;
+      expect(auth.verifySessionCookie(legacy, secret, 0)).toBe(true);
+      expect(auth.verifySessionCookie(legacy, secret, 1)).toBe(false);
+    });
   });
 });
