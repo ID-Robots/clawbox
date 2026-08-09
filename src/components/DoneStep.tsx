@@ -668,6 +668,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     },
     onSaveError: (message: string) => setAiStatus({ type: "error", message }),
     onPullError: (message: string) => setAiStatus({ type: "error", message }),
+    onDeleteError: (message: string) => setAiStatus({ type: "error", message }),
     onClearStatus: () => setAiStatus(null),
   }), []);
 

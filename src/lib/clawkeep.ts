@@ -685,9 +685,46 @@ export interface CloudSnapshot {
 interface SnapshotsResponse {
   ok: boolean;
   error?: string;
+  /** Coarse failure classification from the daemon so we can map to a
+   * sensible HTTP status instead of collapsing everything into 502. */
+  kind?: string;
   snapshots?: CloudSnapshot[];
   quotaBytes?: number;
   cloudBytes?: number;
+}
+
+/**
+ * Map a failed `snapshots` daemon response to an HTTP status + a friendly
+ * message. We deliberately never surface `resp.error` verbatim — it can be a
+ * raw Python traceback or leak internal paths — so the caller gets a clean,
+ * classified error the UI can act on.
+ */
+function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
+  switch (resp.kind) {
+    case "unpaired":
+    case "no_token":
+    case "not_paired":
+      return new ClawKeepError("ClawKeep is not paired with an account", 409);
+    case "auth":
+    case "unauthorized":
+    case "revoked":
+    case "forbidden":
+      return new ClawKeepError(
+        "ClawKeep authorisation was rejected — re-pair the device",
+        401,
+      );
+    case "network":
+    case "offline":
+    case "timeout":
+      return new ClawKeepError("Could not reach the ClawKeep portal", 504);
+    case "portal":
+    case "server":
+      return new ClawKeepError("The ClawKeep portal returned an error", 502);
+    default:
+      // Covers missing-dependency (e.g. boto3) and any unclassified daemon
+      // failure without leaking the raw internal string.
+      return new ClawKeepError("Could not list cloud backups", 502);
+  }
 }
 
 interface RestoreOk {
@@ -717,6 +754,9 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
 }
 
 const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+// Generous cap for a full backup (openclaw backup create + multipart upload).
+// A hung clawkeepd must not hold a Next.js worker open forever.
+const BACKUP_TIMEOUT_MS = 60 * 60 * 1000;
 
 function spawnCliJson<T>(
   bin: string,
@@ -754,6 +794,13 @@ function spawnCliJson<T>(
     });
     child.on("error", (err) => {
       clearTimeout(killTimer);
+      // An unresolved binary (clawkeep/clawkeepd not on PATH or the derived
+      // sibling missing) surfaces as ENOENT. Turn it into a friendly 503
+      // instead of a raw "spawn ... ENOENT" 500.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new ClawKeepError("ClawKeep daemon not installed", 503));
+        return;
+      }
       reject(new Error(`spawn ${clawkeepBin} failed: ${err.message}`));
     });
     child.on("close", (code) => {
@@ -777,10 +824,16 @@ function spawnCliJson<T>(
 }
 
 async function fetchCloudSnapshots(): Promise<SnapshotsResponse> {
+  // Fail fast + friendly on the unpaired case rather than shelling out and
+  // surfacing the daemon's raw "no token" error as a 502.
+  const token = await readToken();
+  if (!token) {
+    throw new ClawKeepError("ClawKeep is not paired with an account", 409);
+  }
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
   if (!resp.ok) {
-    throw new ClawKeepError(resp.error ?? "snapshots failed", 502);
+    throw mapSnapshotsError(resp);
   }
   return resp;
 }
@@ -988,6 +1041,20 @@ export async function runBackup(
     const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const settle = (result: BackupResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      resolve(result);
+    };
+    // Mirror spawnCliJson's kill-timer: SIGKILL a hung daemon and resolve
+    // with a non-zero exit so the caller surfaces "backup timed out" rather
+    // than leaking a worker forever.
+    const killTimer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      settle({ exitCode: 124, stdout, stderr: appendCapped(stderr, "\nbackup timed out") });
+    }, BACKUP_TIMEOUT_MS);
     child.stdout.on("data", (b: Buffer) => {
       stdout = appendCapped(stdout, b.toString("utf8"));
     });
@@ -996,10 +1063,10 @@ export async function runBackup(
     });
     child.on("error", (e) => {
       // ENOENT etc. — synthesize a non-zero exit so callers can surface it.
-      resolve({ exitCode: 127, stdout, stderr: appendCapped(stderr, e.message) });
+      settle({ exitCode: 127, stdout, stderr: appendCapped(stderr, e.message) });
     });
     child.on("close", (code) => {
-      resolve({ exitCode: code ?? -1, stdout, stderr });
+      settle({ exitCode: code ?? -1, stdout, stderr });
     });
   });
 }

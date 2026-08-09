@@ -777,6 +777,7 @@ export default function AIModelsStep({
     onSaveSuccess: () => showSuccessAndContinue(),
     onSaveError: (message: string) => showError(message),
     onPullError: (message: string) => showError(message),
+    onDeleteError: (message: string) => showError(message),
     onClearStatus: () => setStatus(null),
   }), [showError, showSuccessAndContinue]);
 

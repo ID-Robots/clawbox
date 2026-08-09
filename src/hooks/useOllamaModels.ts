@@ -18,6 +18,7 @@ export interface OllamaCallbacks {
   onSaveSuccess: (model: string) => void;
   onSaveError: (message: string) => void;
   onPullError: (message: string) => void;
+  onDeleteError: (message: string) => void;
   /** Called before save/pull actions to clear previous status messages */
   onClearStatus?: () => void;
 }
@@ -193,14 +194,23 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model }),
         });
-        if (res.ok) {
-          await checkOllamaStatus();
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          callbacks.onDeleteError(
+            typeof data.error === "string" ? data.error : "Failed to delete model"
+          );
         }
-      } catch {
-        /* silently fail — model list will refresh next status check */
+      } catch (err) {
+        callbacks.onDeleteError(
+          `Failed to delete model: ${err instanceof Error ? err.message : err}`
+        );
+      } finally {
+        // Always reconcile against the daemon: a partial/failed delete still
+        // needs the list refreshed so the UI reflects reality.
+        await checkOllamaStatus();
       }
     },
-    [checkOllamaStatus]
+    [callbacks, checkOllamaStatus]
   );
 
   const selectExistingOllamaModel = useCallback(

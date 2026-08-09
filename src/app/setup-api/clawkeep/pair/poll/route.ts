@@ -136,7 +136,13 @@ export async function POST() {
     return NextResponse.json({ status: "pending" }, { headers: { "Cache-Control": "no-store" } });
   }
 
-  const data = (await upstreamRes.json()) as UpstreamPollResponse;
+  // A 200 with a non-JSON body (captive portal / proxy HTML) must not throw
+  // an unhandled error — that would 500 the route while the client keeps
+  // polling. Treat an unparseable body as "keep waiting".
+  const data = (await upstreamRes.json().catch(() => null)) as UpstreamPollResponse | null;
+  if (!data) {
+    return NextResponse.json({ status: "pending" }, { headers: { "Cache-Control": "no-store" } });
+  }
   const upstreamStatus = (data.status || "").toLowerCase();
 
   if (upstreamStatus === "pending" || upstreamStatus === "authorization_pending") {
