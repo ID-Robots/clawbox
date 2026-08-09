@@ -46,7 +46,12 @@ export async function POST(request: Request) {
     }
     return NextResponse.json({ success: true, action: "update", connected, reactivateError });
   } catch (err) {
-    console.warn(`[wifi/update] ${action} ${normalizedSsid} failed:`, err);
+    // The `connection modify` argv includes `wifi-sec.psk <password>`, which
+    // execFile embeds into its error message — scrub the PSK before logging so
+    // it doesn't land in the journal in cleartext.
+    const raw = err instanceof Error ? err.message : String(err);
+    const safe = body.password ? raw.split(String(body.password)).join("***") : raw;
+    console.warn(`[wifi/update] ${action} ${normalizedSsid} failed: ${safe}`);
     return NextResponse.json({ error: "Failed to update WiFi network" }, { status: 500 });
   }
 }
