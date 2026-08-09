@@ -44,10 +44,13 @@ export default function ProgressBar({ currentStep }: ProgressBarProps) {
             key={num}
             aria-current={isCurrent ? "step" : undefined}
             aria-disabled={num > currentStep ? true : undefined}
-            className={`flex items-center gap-1.5 px-1.5 py-1.5 sm:px-3 rounded-full text-xs font-medium transition-all ${stepColors(isDone, isCurrent)} ${isCurrent ? "scale-105" : ""}`}
+            className={`flex items-center gap-1.5 px-1.5 py-1.5 sm:px-3 rounded-full text-xs font-medium transition-[transform,color,background-color,box-shadow] duration-200 ${stepColors(isDone, isCurrent)} ${isCurrent ? "scale-105" : ""}`}
           >
+            {/* Fixed 24px badge; the current step is emphasised via transform
+                scale (GPU-composited) instead of animating w/h — the latter
+                reflowed the sticky header (micro-CLS) on every step change. */}
             <span
-              className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold text-white shrink-0 transition-all ${badgeColor(isDone, isCurrent)} ${isCurrent ? "w-6 h-6" : "w-5 h-5"}`}
+              className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold text-white shrink-0 transition-transform duration-200 ${badgeColor(isDone, isCurrent)} ${isCurrent ? "" : "scale-[0.83]"}`}
             >
               {isDone ? (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
