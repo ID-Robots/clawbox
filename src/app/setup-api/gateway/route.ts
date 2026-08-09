@@ -29,10 +29,21 @@ export async function GET(request: NextRequest) {
       ? rawHost
       : "clawbox.local";
     const wsUrl = `ws://${host}:${GATEWAY_PORT}`;
-    // Rewrite relative asset paths (./assets/... → /assets/...) so they
-    // resolve through Next.js rewrites which proxy to the gateway.
-    html = html.replace(/\.\//g, '/');
-    const safeToken = gatewayToken ? JSON.stringify(gatewayToken) : '""';
+    // Rewrite relative asset paths (href="./assets/…" / src="./assets/…" →
+    // "/assets/…") so they resolve through Next.js rewrites which proxy to the
+    // gateway. Anchored to href=/src= attributes so a bare "./" inside an inline
+    // script or text node isn't corrupted (the old global replace mangled any
+    // "./" in the document).
+    html = html.replace(/\b(href|src)=(["'])\.\//gi, '$1=$2/');
+    // Escape <, >, & (in addition to JSON.stringify) before embedding the token
+    // in the inline <script>, so a token value containing "</script>" can't
+    // break out of the script context (mirrors serveGatewayHTML()).
+    const safeToken = gatewayToken
+      ? JSON.stringify(gatewayToken)
+          .replace(/&/g, "\\u0026")
+          .replace(/</g, "\\u003c")
+          .replace(/>/g, "\\u003e")
+      : '""';
     const autoConnect = `<script>
       (function(){
         var KEY="openclaw.control.settings.v1";

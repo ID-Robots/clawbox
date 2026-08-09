@@ -179,7 +179,11 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
 }
 
 /** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
-const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+// The negative lookahead rejects a leading '-' (or '/'): a branch token that
+// starts with '-' is parsed by git as an option flag (e.g. "-D", "--all")
+// rather than a ref, which smuggles switches into the checkout/fetch commands
+// and bricks the updater. Real branch names never start with '-' or '/'.
+const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
 
 /**
  * Determine which branch to update to, in priority order:
