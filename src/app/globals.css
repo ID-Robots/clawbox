@@ -370,7 +370,9 @@ html {
   border: 2px solid var(--border-subtle);
   border-top-color: var(--coral-bright);
   border-radius: 50%;
-  animation: spin 0.6s linear infinite;
+  /* Match Tailwind's animate-spin (1s) so the two spinner systems that appear
+     together in the wizard rotate at the same speed. */
+  animation: spin 1s linear infinite;
   display: inline-block;
 }
 

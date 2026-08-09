@@ -972,10 +972,25 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
   })()
 
-  // Freeze/unfreeze mascot (e.g. when chat popup is open) — enter power stance
+  // Honor the OS "reduce motion" setting. The global CSS guard neutralizes the
+  // crab's keyframe animations, but its autonomous walking/dancing is driven by
+  // a JS rAF loop — continuous motion a vestibular-sensitive user can't stop.
+  // Reuse the freeze mechanism to hold the crab still under reduced-motion.
+  const [reducedMotion, setReducedMotion] = useState(false)
   useEffect(() => {
-    frozenRef.current = !!frozen
-    if (frozen) {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReducedMotion(mq.matches)
+    update()
+    mq.addEventListener?.('change', update)
+    return () => mq.removeEventListener?.('change', update)
+  }, [])
+
+  // Freeze/unfreeze mascot (chat popup open, or reduced-motion) — enter power stance
+  useEffect(() => {
+    const effFrozen = frozen || reducedMotion
+    frozenRef.current = effFrozen
+    if (effFrozen) {
       // Stop all movement — stay in place (don't teleport to box)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
@@ -989,7 +1004,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
     }
-  }, [frozen])
+  }, [frozen, reducedMotion])
 
   // ─── Keep the crab clear of a docked chat panel ───
   // When the chat opens as a vertical side panel (rightInset = its width in px),
