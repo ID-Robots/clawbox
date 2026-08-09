@@ -64,18 +64,35 @@ export async function setActiveHarness(harness: Harness): Promise<void> {
  * response (even 401/404) proves the process is up; only a connection failure
  * or timeout counts as down. Loopback-only, short timeout so a down harness
  * doesn't stall the status route.
+ *
+ * The probe is retried a couple of times before giving up: on a loaded Jetson
+ * a single 2.5 s timeout produces false negatives — most visibly right after a
+ * harness switch, where the just-finished identity sync momentarily starves the
+ * event loop and the still-running gateway fails to answer in time, which would
+ * otherwise report a healthy harness as "not available" and block switching
+ * back to it. A genuinely down harness still fails every attempt.
  */
+const HEALTH_PROBE_ATTEMPTS = 3;
+const HEALTH_PROBE_TIMEOUT_MS = 2500;
+const HEALTH_PROBE_RETRY_GAP_MS = 250;
+
 export async function harnessHealthy(harness: Harness): Promise<boolean> {
   // Prefer a live server probe: any HTTP response means the process is up.
-  try {
-    const res = await fetch(`${HARNESSES[harness].baseUrl}/`, {
-      signal: AbortSignal.timeout(2500),
-    });
-    // Drain the body we don't read so undici frees the pooled socket now.
-    res.body?.cancel();
-    return true;
-  } catch {
-    // fall through
+  for (let attempt = 0; attempt < HEALTH_PROBE_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`${HARNESSES[harness].baseUrl}/`, {
+        signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+      });
+      // Drain the body we don't read so undici frees the pooled socket now.
+      res.body?.cancel();
+      return true;
+    } catch {
+      // Transient timeout/refusal under load — retry a couple of times before
+      // falling through to the per-harness fallback / "down" verdict.
+      if (attempt < HEALTH_PROBE_ATTEMPTS - 1) {
+        await new Promise((r) => setTimeout(r, HEALTH_PROBE_RETRY_GAP_MS));
+      }
+    }
   }
   // Hermes chat uses the `hermes -z` CLI, not the serve endpoint, so it's
   // usable whenever the binary is installed — the serve probe above is just a
