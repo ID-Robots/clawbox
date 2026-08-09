@@ -36,11 +36,17 @@ interface XclipResult {
 // `xclip` may not be installed (or the guest X display may be absent). spawn
 // then fails with ENOENT — surface a clean 503 the UI can show ("clipboard
 // bridge unavailable") instead of leaking a raw "spawn xclip ENOENT" 500.
+// EACCES/EPERM mean the binary is present but not executable (bad perms /
+// restricted): same "unavailable" story from the user's side, so map them to
+// the same 503 rather than leaking a raw permission 500.
 function unavailableResponse(err: unknown): NextResponse | null {
   const code = (err as NodeJS.ErrnoException)?.code;
-  if (code === "ENOENT") {
+  if (code === "ENOENT" || code === "EACCES" || code === "EPERM") {
+    const detail = code === "ENOENT"
+      ? "xclip is not installed on this device."
+      : "xclip is installed but not executable on this device.";
     return NextResponse.json(
-      { error: "Clipboard bridge unavailable: xclip is not installed on this device.", unavailable: true },
+      { error: `Clipboard bridge unavailable: ${detail}`, unavailable: true },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -133,8 +139,11 @@ export async function GET() {
     }
     return NextResponse.json({ text: stdout }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
+    // Only genuinely unexpected errors reach here (ENOENT/EACCES/EPERM are
+    // handled above). Return a static message rather than echoing err.message,
+    // which can leak spawn/path internals.
     return unavailableResponse(err) ?? NextResponse.json(
-      { error: err instanceof Error ? err.message : "xclip read failed" },
+      { error: "xclip read failed" },
       { status: 500 },
     );
   }
@@ -180,8 +189,10 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
+    // See the GET handler: static message for unexpected errors, no err.message
+    // echo. ENOENT/EACCES/EPERM are already mapped to a clean 503 above.
     return unavailableResponse(err) ?? NextResponse.json(
-      { error: err instanceof Error ? err.message : "xclip write failed" },
+      { error: "xclip write failed" },
       { status: 500 },
     );
   }

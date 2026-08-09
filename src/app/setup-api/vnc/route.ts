@@ -43,6 +43,13 @@ export async function GET() {
           detached: true,
           stdio: "ignore",
         });
+        // A detached child with no 'error' listener turns a spawn failure into
+        // an uncaughtException that would take down the whole :80 server. Log
+        // and swallow it — the isPortOpen() probe below is what actually
+        // decides success, so a failed spawn just reports "unavailable".
+        proc.on("error", (e) => {
+          console.warn("[vnc] Failed to auto-start websockify:", e);
+        });
         proc.unref();
 
         // Wait a moment for it to start

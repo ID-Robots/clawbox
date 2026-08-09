@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import os from "os";
-import { execSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import fs from "fs";
 import fsP from "fs/promises";
+
+const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +33,7 @@ interface ProcessEntry {
   command: string;
 }
 
-function getCpuUsage(): number {
+async function getCpuUsage(): Promise<number> {
   try {
     const stat1 = fs.readFileSync("/proc/stat", "utf-8");
     const line1 = stat1.split("\n")[0];
@@ -38,9 +41,9 @@ function getCpuUsage(): number {
     const idle1 = parts1[3];
     const total1 = parts1.reduce((a, b) => a + b, 0);
 
-    // Sleep 200ms via busy wait isn't ideal — use two reads with a small gap
-    const start = Date.now();
-    while (Date.now() - start < 200) { /* busy wait */ }
+    // Sample /proc/stat twice with a non-blocking 200ms gap. A synchronous
+    // busy-wait here would freeze the single Node event loop on every poll.
+    await new Promise((r) => setTimeout(r, 200));
 
     const stat2 = fs.readFileSync("/proc/stat", "utf-8");
     const line2 = stat2.split("\n")[0];
@@ -60,12 +63,13 @@ function getCpuUsage(): number {
   }
 }
 
-function getDiskUsage(): DiskMount[] {
+async function getDiskUsage(): Promise<DiskMount[]> {
   try {
-    const output = execSync("df -h -x tmpfs -x devtmpfs -x squashfs 2>/dev/null", {
-      encoding: "utf-8",
-      timeout: 5000,
-    });
+    const { stdout: output } = await execFileAsync(
+      "df",
+      ["-h", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
+      { encoding: "utf-8", timeout: 5000 },
+    );
     const lines = output.trim().split("\n").slice(1); // skip header
     const result: DiskMount[] = [];
     for (const line of lines) {
@@ -125,13 +129,14 @@ function getNetworkInterfaces(): NetworkInterface[] {
   return result;
 }
 
-function getTopProcesses(): ProcessEntry[] {
+async function getTopProcesses(): Promise<ProcessEntry[]> {
   try {
-    const output = execSync("ps aux --sort=-%cpu 2>/dev/null | head -11", {
+    const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
       encoding: "utf-8",
       timeout: 5000,
     });
-    const lines = output.trim().split("\n").slice(1); // skip header
+    // Skip the header, keep the top 10 by CPU (the old `| head -11` limit).
+    const lines = output.trim().split("\n").slice(1, 11);
     return lines.map((line) => {
       const parts = line.trim().split(/\s+/);
       const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
@@ -173,9 +178,10 @@ function getUptime(): string {
   }
 }
 
-function getKernelRelease(): string {
+async function getKernelRelease(): Promise<string> {
   try {
-    return execSync("uname -r", { encoding: "utf-8", timeout: 3000 }).trim();
+    const { stdout } = await execFileAsync("uname", ["-r"], { encoding: "utf-8", timeout: 3000 });
+    return stdout.trim();
   } catch {
     return os.release();
   }
@@ -222,19 +228,29 @@ export async function GET() {
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
 
-    const [temp, gpuUsage] = await Promise.all([getTemperature(), getGpuUsage()]);
+    // Gather everything that touches the event loop (the 200ms CPU sample,
+    // temp/gpu reads, and the promisified execFile shells) in parallel so we
+    // never block the single Node process.
+    const [cpuUsage, temp, gpuUsage, kernel, storage, processes] = await Promise.all([
+      getCpuUsage(),
+      getTemperature(),
+      getGpuUsage(),
+      getKernelRelease(),
+      getDiskUsage(),
+      getTopProcesses(),
+    ]);
 
     const stats = {
       overview: {
         hostname: os.hostname(),
         os: `${os.type()} ${os.release()}`,
-        kernel: getKernelRelease(),
+        kernel,
         uptime: getUptime(),
         arch: os.arch(),
         platform: os.platform(),
       },
       cpu: {
-        usage: getCpuUsage(),
+        usage: cpuUsage,
         model: cpus[0]?.model || "Unknown",
         cores: cpus.length,
         loadAvg: os.loadavg().map((v) => v.toFixed(2)),
@@ -249,9 +265,9 @@ export async function GET() {
       },
       temperature: temp,
       gpu: { usage: gpuUsage },
-      storage: getDiskUsage(),
+      storage,
       network: getNetworkInterfaces(),
-      processes: getTopProcesses(),
+      processes,
       timestamp: Date.now(),
     };
 
