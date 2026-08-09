@@ -7,8 +7,10 @@ import { DATA_DIR } from "./config-store";
 // The Files API browses the home directory, so its every secret store lives
 // *inside* the sandbox root — `..` containment alone doesn't protect them. This
 // denylist keeps credential/key material off the read, write, list, rename and
-// download paths (mirrors the MCP file-tool denylist). Matched against the
-// realpath'd path so an in-base symlink can't dodge the check (CWE-59).
+// download paths. Matched against the realpath'd path so an in-base symlink
+// can't dodge the check (CWE-59). (realpath resolves symlinks, not hard links —
+// a hard link to a secret already needs read access to create, a separate
+// fuller-privilege surface.)
 
 const PROTECTED_DIR_RES: RegExp[] = [
   /(^|\/)\.ssh(\/|$)/,
@@ -16,7 +18,21 @@ const PROTECTED_DIR_RES: RegExp[] = [
   /(^|\/)\.codex(\/|$)/,
   /(^|\/)\.gnupg(\/|$)/,
   /(^|\/)\.aws(\/|$)/,
-  /(^|\/)\.config\/(gcloud|gh)(\/|$)/,
+  /(^|\/)\.kube(\/|$)/,
+  /(^|\/)\.docker(\/|$)/,
+  /(^|\/)\.config\/(gcloud|gh|rclone)(\/|$)/,
+];
+
+// Credential files matched by basename anywhere under the browse root — common
+// on a dev box (git/npm/pip/postgres tokens). Blocking the whole file is fine:
+// a file manager has no legitimate reason to surface a credential store.
+const PROTECTED_FILE_RES: RegExp[] = [
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)\.pypirc$/,
+  /(^|\/)\.pgpass$/,
+  /(^|\/)\.git-credentials$/,
+  /(^|\/)\.config\/git\/credentials$/,
 ];
 
 // Exact secret files in the ClawBox data dir: the session-secret (forge cookies),
@@ -28,6 +44,7 @@ const PROTECTED_FILES = new Set(
 
 function isProtected(abs: string): boolean {
   if (PROTECTED_FILES.has(abs)) return true;
+  if (PROTECTED_FILE_RES.some((re) => re.test(abs))) return true;
   return PROTECTED_DIR_RES.some((re) => re.test(abs));
 }
 

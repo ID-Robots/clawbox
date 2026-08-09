@@ -47,6 +47,30 @@ describe("isProtectedFilePath", () => {
   });
 
   it.each([
+    `${home}/.kube/config`,
+    `${home}/.docker/config.json`,
+    `${home}/.config/rclone/rclone.conf`,
+    `${home}/.netrc`,
+    `${home}/.npmrc`,
+    `${home}/.pypirc`,
+    `${home}/.pgpass`,
+    `${home}/.git-credentials`,
+    `${home}/.config/git/credentials`,
+  ])("flags dev-box credential store %s", (p) => {
+    expect(guard.isProtectedFilePath(p)).toBe(true);
+  });
+
+  it.each([
+    `${home}/notopenclaw/file.txt`,   // .openclaw pattern must not match without the dot
+    `${home}/my.openclaw-backup/x`,   // trailing char is '-', not '/'
+    `${home}/.ssh-notes.txt`,         // .ssh must be a full segment
+    `${home}/.config/git/config`,     // gitconfig is NOT the credential file
+    `${home}/project/.npmrc.example`, // basename must match exactly
+  ])("does NOT over-block %s", (p) => {
+    expect(guard.isProtectedFilePath(p)).toBe(false);
+  });
+
+  it.each([
     `${home}/Documents/notes.txt`,
     `${home}/Downloads/photo.png`,
     `${home}/Desktop/config.json`, // a config.json OUTSIDE the data dir is fine
