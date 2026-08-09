@@ -1452,19 +1452,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             ? 'opacity 0.2s ease, transform 0.42s cubic-bezier(0.22, 1.28, 0.36, 1)'
             : 'opacity 0.18s ease',
         pointerEvents: visible ? 'auto' : 'none',
-        willChange: 'transform, opacity, filter',
+        willChange: 'transform, opacity',
       }}
     >
-      {/* Insane entrance: spring burst out of the mascot with an overshoot,
-          a tilt-wobble, a soft blur-in and an orange energy-glow pulse.
-          transform-origin (set on the container) pins it to where the crab is,
-          so the whole thing erupts from the tapped mascot and settles clean. */}
+      {/* Spring burst out of the mascot: overshoot + tilt-wobble, transform +
+          opacity only. transform-origin (set on the container) pins it to where
+          the crab is. The previous version also tweened filter:blur/brightness/
+          drop-shadow every frame — a full-layer repaint per frame that dropped
+          frames on the Jetson iGPU (esp. while chat is connecting). The
+          transform spring already carries the "erupt and settle" feel. */}
       <style>{`@keyframes clawChatBurstIn {
-        0%   { opacity: 0; transform: scale(0.12) translateY(38px) rotate(-8deg); filter: blur(16px) brightness(1.55) drop-shadow(0 0 0 rgba(249,115,22,0)); }
-        45%  { opacity: 1; transform: scale(1.08) translateY(-6px) rotate(2.4deg); filter: blur(0px) brightness(1.18) drop-shadow(0 0 26px rgba(249,115,22,0.6)); }
-        65%  { transform: scale(0.965) translateY(3px) rotate(-1.4deg); filter: brightness(1.05) drop-shadow(0 0 12px rgba(249,115,22,0.32)); }
-        82%  { transform: scale(1.015) translateY(-1px) rotate(0.5deg); filter: drop-shadow(0 0 5px rgba(249,115,22,0.16)); }
-        100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); filter: blur(0px) brightness(1) drop-shadow(0 0 0 rgba(249,115,22,0)); }
+        0%   { opacity: 0; transform: scale(0.12) translateY(38px) rotate(-8deg); }
+        45%  { opacity: 1; transform: scale(1.08) translateY(-6px) rotate(2.4deg); }
+        65%  { transform: scale(0.965) translateY(3px) rotate(-1.4deg); }
+        82%  { transform: scale(1.015) translateY(-1px) rotate(0.5deg); }
+        100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); }
       }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
       <div

@@ -640,13 +640,18 @@ html {
 }
 
 @keyframes welcome-powerup {
-  0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); filter: drop-shadow(0 0 8px rgba(249,115,22,0.4)); }
-  33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); filter: drop-shadow(0 0 14px rgba(249,115,22,0.6)); }
-  66% { transform: translateY(-4px) scale(1.08) rotate(2deg); filter: drop-shadow(0 0 10px rgba(249,115,22,0.5)); }
+  0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); }
+  33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); }
+  66% { transform: translateY(-4px) scale(1.08) rotate(2deg); }
 }
 
 .animate-welcome-powerup {
   animation: welcome-powerup 1.5s ease-in-out infinite;
+  /* Static glow: animating filter:drop-shadow repaints the filtered region on
+     every frame (expensive on the Jetson iGPU). Keep the glow, animate only the
+     compositor-friendly transform above. */
+  filter: drop-shadow(0 0 10px rgba(249, 115, 22, 0.5));
+  will-change: transform;
 }
 
 @keyframes clawbox-notification-shield-blink {
@@ -775,4 +780,22 @@ input[type="range"].appearance-none::-moz-range-track {
 }
 .clawkeep-shelf-glow-orange {
   --glow-color: rgba(245, 158, 11, 0.95);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Reduced motion (WCAG 2.3.3). The setup wizard and desktop run many perpetual
+   decorative animations at once (mascot idle, pulse rings, orbits, spinners,
+   shelf glow). Honor the OS "reduce motion" setting: near-zero durations and a
+   single iteration collapse infinite loops to a static end state while keeping
+   layout intact. The mascot's rAF movement loop is gated separately in JS.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

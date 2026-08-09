@@ -53,9 +53,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   // Speech
   const [speech, setSpeech] = useState('')
+  const speechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const say = useCallback((text: string, ms = 3000) => {
+    // Clear any in-flight clear timer first: without this, an older bubble's
+    // timeout fires and blanks a newer bubble early (visible flicker during
+    // frenzy / rapid taps), and a late fire can setState after unmount.
+    if (speechTimerRef.current) clearTimeout(speechTimerRef.current)
     setSpeech(text)
-    setTimeout(() => setSpeech(''), ms)
+    speechTimerRef.current = setTimeout(() => setSpeech(''), ms)
   }, [])
   const sayRef = useRef<((text: string, ms?: number) => void) | null>(null)
   sayRef.current = say
@@ -946,6 +951,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       frenzyIntervalsRef.current.forEach(clearInterval)
       if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
       if (boxPhysicsRAF.current) cancelAnimationFrame(boxPhysicsRAF.current)
+      if (speechTimerRef.current) clearTimeout(speechTimerRef.current)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
