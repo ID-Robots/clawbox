@@ -21,6 +21,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
 
@@ -782,15 +783,21 @@ function spawnCliJson<T>(
 
     let stdout = "";
     let stderr = "";
+    // Decode through a StringDecoder so a multibyte UTF-8 sequence split across
+    // two 'data' events (e.g. a Cyrillic snapshot label straddling a chunk
+    // boundary) isn't corrupted into U+FFFD — the decoder buffers the partial
+    // trailing bytes until the next chunk (flushed via .end() on close).
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
     const killTimer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
     }, timeoutMs);
 
     child.stdout.on("data", (b: Buffer) => {
-      stdout = appendCapped(stdout, b.toString("utf8"));
+      stdout = appendCapped(stdout, outDecoder.write(b));
     });
     child.stderr.on("data", (b: Buffer) => {
-      stderr = appendCapped(stderr, b.toString("utf8"));
+      stderr = appendCapped(stderr, errDecoder.write(b));
     });
     child.on("error", (err) => {
       clearTimeout(killTimer);
@@ -805,6 +812,10 @@ function spawnCliJson<T>(
     });
     child.on("close", (code) => {
       clearTimeout(killTimer);
+      // Flush any bytes the decoder is still holding (a trailing partial
+      // multibyte sequence) before parsing.
+      stdout = appendCapped(stdout, outDecoder.end());
+      stderr = appendCapped(stderr, errDecoder.end());
       // Both `clawkeep snapshots` and `clawkeep restore` print a single JSON
       // object on stdout — even on errors. Parse first; fall back to stderr
       // text if parsing fails so the caller still gets a usable message.
