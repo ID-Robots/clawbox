@@ -1952,6 +1952,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
       }}>
+        {/* Hermes chat is text-only (the `hermes -z` CLI takes no attachments),
+            so hide the attach control there — otherwise a user could attach a
+            file that startRun silently drops on the Hermes path. */}
+        {harnessMode !== 'hermes' && (
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={status !== 'connected'}
@@ -1968,6 +1972,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
         </button>
+        )}
         <textarea
           ref={inputRef}
           value={input}

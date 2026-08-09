@@ -55,6 +55,18 @@ export async function POST(request: Request) {
     );
   }
 
-  await setActiveHarness(harness);
+  // Persist the selection. Identity is already synced, so on a persistence
+  // failure the device is in an uncertain state (synced but maybe not flipped);
+  // return the JSON error contract and tell the client to re-read status rather
+  // than letting a framework-generated 500 leak through.
+  try {
+    await setActiveHarness(harness);
+  } catch (err) {
+    console.error("[harness/select] failed to persist active harness:", err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: "Failed to persist the active harness; reload harness status.", reloadStatus: true },
+      { status: 500 },
+    );
+  }
   return NextResponse.json({ success: true, active: harness });
 }

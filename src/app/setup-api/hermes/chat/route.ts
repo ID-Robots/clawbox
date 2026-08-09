@@ -73,10 +73,17 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
       out += chunk.toString();
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      // Same cap as stdout — stderr only feeds the error message, so once we
-      // have enough for that, stop growing the buffer.
-      if (errBytes >= MAX_OUTPUT_BYTES) return;
+      if (settled) return;
       errBytes += chunk.length;
+      // A failing hermes can spew unbounded stderr. Once it clears the cap the
+      // run is already a loss — kill the child (don't let it keep burning CPU
+      // until the timeout) and reject with what we captured. Mirrors stdout.
+      if (errBytes > MAX_OUTPUT_BYTES) {
+        cleanup();
+        child.kill("SIGKILL");
+        reject(new Error(err.trim() || "Hermes error output exceeded the size limit"));
+        return;
+      }
       err += chunk.toString();
     });
 
