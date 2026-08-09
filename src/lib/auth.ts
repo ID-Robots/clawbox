@@ -53,13 +53,14 @@ export function isSafePasswordChars(s: string): boolean {
 
 /**
  * Verify the configured Linux user's password using unix_chkpwd (PAM helper).
- * NOTE: no `nullok` — a blank/unset OS password must never authenticate, so a
- * stale `password_configured=true` flag can't be logged into against an empty
- * credential.
+ * Uses `nonull` (not `nullok`) so a blank/unset OS password can never
+ * authenticate — a stale `password_configured=true` flag then can't be logged
+ * into against an empty credential. (The second arg is required and must be
+ * `nullok` or `nonull`; omitting it is not valid.)
  */
 export async function verifyPassword(password: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn("/usr/sbin/unix_chkpwd", [getSystemUsername()], {
+    const child = spawn("/usr/sbin/unix_chkpwd", [getSystemUsername(), "nonull"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
     });
