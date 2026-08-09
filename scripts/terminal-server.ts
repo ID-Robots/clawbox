@@ -51,30 +51,51 @@ wss.on("connection", (ws: WebSocket, req) => {
     POWERLEVEL9K_INSTANT_PROMPT: "quiet",
   };
 
-  const term = pty.spawn(shell, ["-l"], {
-    name: "xterm-256color",
-    cols: 80,
-    rows: 24,
-    cwd: targetHome,
-    env: cleanEnv,
-  });
+  // Spawning the PTY can fail (EAGAIN/ENOMEM under load, a missing shell,
+  // node-pty ABI mismatch). Without a guard here one bad spawn throws out of
+  // the 'connection' handler and crashes the whole :3006 server, dropping
+  // every other live terminal session. Contain the failure to this one socket:
+  // tell the client and close, leaving the server up.
+  let term: ReturnType<typeof pty.spawn>;
+  try {
+    term = pty.spawn(shell, ["-l"], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: targetHome,
+      env: cleanEnv,
+    });
 
-  console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
+    console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
 
-  // PTY → WebSocket
-  term.onData((data: string) => {
+    // PTY → WebSocket
+    term.onData((data: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "output", data }));
+      }
+    });
+
+    term.onExit(({ exitCode }: { exitCode: number }) => {
+      console.log(`[terminal-server] PTY exited pid=${term.pid} code=${exitCode}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "exit", code: exitCode }));
+        ws.close();
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[terminal-server] Failed to spawn PTY:", err);
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "output", data }));
+      ws.send(JSON.stringify({ type: "output", data: `\r\n[terminal-server] Failed to start shell: ${message}\r\n` }));
+      ws.send(JSON.stringify({ type: "exit", code: 1 }));
     }
-  });
-
-  term.onExit(({ exitCode }: { exitCode: number }) => {
-    console.log(`[terminal-server] PTY exited pid=${term.pid} code=${exitCode}`);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "exit", code: exitCode }));
+    try {
       ws.close();
+    } catch {
+      /* socket already gone */
     }
-  });
+    return;
+  }
 
   // WebSocket → PTY
   ws.on("message", (raw: Buffer | string) => {
@@ -121,6 +142,14 @@ wss.on("connection", (ws: WebSocket, req) => {
 // ClawBox session cookie on the /terminal-ws upgrade.
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`[terminal-server] Listening on ws://127.0.0.1:${PORT}`);
+});
+
+// Last-resort backstop: an unforeseen throw anywhere in an async callback (a
+// node-pty native fault, a socket write race) must NOT take the whole terminal
+// server down and drop every session. Log it and keep running; per-connection
+// handlers already contain their own failures.
+process.on("uncaughtException", (err) => {
+  console.error("[terminal-server] Uncaught exception (kept alive):", err);
 });
 
 process.on("SIGTERM", () => {
