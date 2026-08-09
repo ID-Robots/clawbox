@@ -44,6 +44,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
     let out = "";
     let err = "";
     let outBytes = 0;
+    let errBytes = 0;
 
     const cleanup = () => {
       settled = true;
@@ -72,6 +73,10 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
       out += chunk.toString();
     });
     child.stderr.on("data", (chunk: Buffer) => {
+      // Same cap as stdout — stderr only feeds the error message, so once we
+      // have enough for that, stop growing the buffer.
+      if (errBytes >= MAX_OUTPUT_BYTES) return;
+      errBytes += chunk.length;
       err += chunk.toString();
     });
 

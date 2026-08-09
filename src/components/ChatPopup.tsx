@@ -194,6 +194,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // never open the OpenClaw WS in Hermes mode.
   const harnessRef = useRef<'openclaw' | 'hermes'>('openclaw')
   const [harnessLoaded, setHarnessLoaded] = useState(false)
+  // Reactive copy of the harness for rendering (the ref drives connect/send at
+  // call-time; this drives which header controls show).
+  const [harnessMode, setHarnessMode] = useState<'openclaw' | 'hermes'>('openclaw')
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -1259,7 +1262,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       try {
         const res = await fetch('/setup-api/harness/active', { cache: 'no-store' })
         const data = await res.json()
-        if (!cancelled && data?.active === 'hermes') harnessRef.current = 'hermes'
+        if (!cancelled && data?.active === 'hermes') {
+          harnessRef.current = 'hermes'
+          setHarnessMode('hermes')
+        }
       } catch {
         // default to openclaw
       }
@@ -1551,6 +1557,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           touchAction: 'none',
         }}>
         <div className="chat-header-pills">
+          {harnessMode === 'hermes' ? (
+            // Hermes manages its own provider/model config — the OpenClaw
+            // provider/model/reasoning pills don't apply, so show a plain label.
+            <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+          ) : (<>
           {chatModelState && (() => {
             const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
             const activeOption = chatModelState.options.find(o => o.id === activeId)
@@ -1675,6 +1686,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               popoverWidth={180}
             />
           )}
+          </>)}
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (

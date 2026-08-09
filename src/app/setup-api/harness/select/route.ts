@@ -39,21 +39,22 @@ export async function POST(request: Request) {
     );
   }
 
-  await setActiveHarness(harness);
-
-  // Propagate the canonical identity to the selected harness (OpenClaw real
-  // copies + gateway refresh; Hermes FTS5 reindex). Best-effort — the switch
-  // itself already took effect — but report whether it succeeded so the caller
-  // isn't told "all good" when the identity didn't actually sync.
-  let identitySynced = true;
+  // Propagate the canonical identity to both harnesses (OpenClaw real copies +
+  // gateway refresh; Hermes FTS5 reindex) BEFORE flipping the active one, so we
+  // never complete a switch that leaves the selected harness without its shared
+  // identity. If the sync fails, the harness is NOT switched.
   try {
     await exec("bash", [path.join(CONFIG_ROOT, "scripts", "clawbox-identity-sync.sh")], {
       timeout: 60_000,
     });
   } catch (err) {
-    identitySynced = false;
-    console.warn("[harness/select] identity sync failed:", err instanceof Error ? err.message : err);
+    console.error("[harness/select] identity sync failed; not switching:", err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: "Identity synchronization failed; harness not switched." },
+      { status: 502 },
+    );
   }
 
-  return NextResponse.json({ success: true, active: harness, identitySynced });
+  await setActiveHarness(harness);
+  return NextResponse.json({ success: true, active: harness });
 }

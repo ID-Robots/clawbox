@@ -44,7 +44,11 @@ fi
 HERMES="${HERMES_BIN:-$HOME_DIR/.local/bin/hermes}"
 [ -x "$HERMES" ] || HERMES="$(command -v hermes || true)"
 if [ -n "$HERMES" ] && [ -x "$HERMES" ]; then
-  "$HERMES" memory reindex >/dev/null 2>&1 || "$HERMES" sync >/dev/null 2>&1 || true
+  # Surface a reindex failure to the caller (the select route reports it) rather
+  # than swallowing it: a stale FTS5 index means Hermes won't see refreshed
+  # memory. `set -e` propagates a non-zero exit if BOTH reindex and the sync
+  # fallback fail.
+  "$HERMES" memory reindex >/dev/null 2>&1 || "$HERMES" sync >/dev/null 2>&1
 fi
 
 echo "[identity-sync] done"
