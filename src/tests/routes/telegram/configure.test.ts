@@ -153,14 +153,21 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(body.error).toBe("Gateway unreachable");
   });
 
-  it("returns 500 when restartGateway fails", async () => {
+  it("saves with a soft warning when restartGateway fails", async () => {
+    // The token is already persisted before the restart, so a restart failure
+    // must not fail the whole save — it's reported as a soft warning that
+    // applies on the next gateway restart.
     mockRestartGateway.mockRejectedValue(new Error("Restart failed"));
 
     const res = await telegramConfigurePost(jsonRequest({ botToken: "123:abc" }));
     const body = await res.json();
 
-    expect(res.status).toBe(500);
-    expect(body.error).toBe("Restart failed");
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.restarted).toBe(false);
+    expect(typeof body.warning).toBe("string");
+    // The raw exec error must never be surfaced.
+    expect(JSON.stringify(body)).not.toContain("Restart failed");
   });
 
   it("returns generic error for non-Error throws", async () => {
