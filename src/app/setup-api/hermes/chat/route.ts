@@ -75,8 +75,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_MODEL;
-  const args = ["-z", message, "-m", model];
+  // argv flag-smuggling guard (no shell is involved — spawn uses an arg array —
+  // but a value starting with "-" could still be parsed by hermes as a flag,
+  // e.g. `--version`). Model must match a strict charset and not start with "-";
+  // a message starting with "-" gets a leading space so hermes reads it as the
+  // prompt value (the UI shows ClawBox's own copy of the message, not this one).
+  const rawModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_MODEL;
+  const model = /^[A-Za-z0-9_./:-]+$/.test(rawModel) && !rawModel.startsWith("-") ? rawModel : DEFAULT_MODEL;
+  const safeMessage = message.startsWith("-") ? ` ${message}` : message;
+  const args = ["-z", safeMessage, "-m", model];
 
   try {
     const text = await runHermes(args);
