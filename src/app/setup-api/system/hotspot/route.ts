@@ -90,9 +90,20 @@ export async function POST(request: Request) {
       );
     }
 
+    // Preserve the stored WPA key when a request omits `password`. The Settings
+    // toggle and SSID-rename actions POST only {ssid, enabled} (the GET handler
+    // returns hasPassword, not the value, so the client can't resend it) — with
+    // the old `password || undefined`, setMany would DELETE the key and the AP
+    // would come back up OPEN. Only clear it if the caller explicitly asks.
+    const storedPassword = await get("hotspot_password");
+    const existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
+      ? storedPassword
+      : undefined;
+    const effectivePassword = password ? password : existingPassword;
+
     const updates: Record<string, unknown> = {
       hotspot_ssid: ssid.trim(),
-      hotspot_password: password || undefined,
+      hotspot_password: effectivePassword || undefined,
     };
     if (typeof enabled === "boolean") {
       updates.hotspot_enabled = enabled;
@@ -103,8 +114,8 @@ export async function POST(request: Request) {
 
     // Write shell-sourceable env file for start-ap.sh
     const envLines = [`HOTSPOT_SSID=${shellQuote(ssid.trim())}`];
-    if (password) {
-      envLines.push(`HOTSPOT_PASSWORD=${shellQuote(password)}`);
+    if (effectivePassword) {
+      envLines.push(`HOTSPOT_PASSWORD=${shellQuote(effectivePassword)}`);
     }
     if (!isEnabled) {
       envLines.push(`HOTSPOT_DISABLED=1`);

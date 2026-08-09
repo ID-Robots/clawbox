@@ -188,8 +188,17 @@ async function readAuthProfiles(): Promise<AuthProfilesFile> {
   try {
     const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
     return JSON.parse(raw) as AuthProfilesFile;
-  } catch {
-    return { version: 1, profiles: {} };
+  } catch (err) {
+    // Only a genuinely absent file means "no profiles yet" (first run). Any
+    // other failure — EACCES on a root-owned file, a partial/corrupt JSON, an
+    // I/O error — must NOT be treated as empty: the caller does a
+    // read-modify-write, so defaulting to {} here would overwrite the file with
+    // a single profile and silently destroy every other provider's stored
+    // credentials (there is no backup for this file). Fail closed instead.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 1, profiles: {} };
+    }
+    throw err;
   }
 }
 

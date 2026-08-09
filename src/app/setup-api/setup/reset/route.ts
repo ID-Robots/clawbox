@@ -353,6 +353,23 @@ export async function POST() {
       console.error("[Reset] Ollama cleanup failed:", err instanceof Error ? err.message : err);
     });
 
+    // Always unmask before either reboot or returning a failure — leaving the
+    // unit masked would block the gateway from coming back on the next boot.
+    await unmaskGateway();
+
+    // Surface partial-wipe failures BEFORE any connectivity-destructive step.
+    // Deleting the WiFi profile / resetting the login password without the
+    // reboot that follows (the AP only returns on reboot, and the abort path
+    // does NOT reboot) would strand a WiFi-only device offline with no way to
+    // retry. Gate first so an incomplete wipe leaves the box reachable.
+    if (allFailures.length > 0) {
+      console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
+      return NextResponse.json(
+        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
+        { status: 500 },
+      );
+    }
+
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
@@ -372,22 +389,6 @@ export async function POST() {
       ], { timeout: 10_000 });
     } catch (err) {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
-    }
-
-    // Always unmask before either reboot or returning a failure — leaving the
-    // unit masked would block the gateway from coming back on the next boot.
-    await unmaskGateway();
-
-    // Surface partial-wipe failures explicitly: returning an error here
-    // (instead of rebooting silently) keeps the user on the reset screen so
-    // they can retry or escalate. The masked-then-unmasked gateway is fine
-    // either way; mask only persists until the next reboot.
-    if (allFailures.length > 0) {
-      console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
-      return NextResponse.json(
-        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
-        { status: 500 },
-      );
     }
 
     scheduleReboot();
