@@ -49,10 +49,24 @@ export async function POST(request: Request) {
       await set("telegram_approved_names", undefined);
     }
 
-    // Restart gateway so it picks up the new channel (and the reset allowlist)
-    await restartGateway();
+    // Restart gateway so it picks up the new channel (and the reset allowlist).
+    // The token is already persisted at this point, so a restart failure must
+    // not fail the whole save — report it as a soft warning that'll apply on
+    // the next gateway restart (mirrors /telegram/streaming). Never surface the
+    // raw exec error.
+    try {
+      await restartGateway();
+    } catch (restartErr) {
+      console.error("[telegram/configure] Gateway restart failed:", restartErr);
+      return NextResponse.json({
+        success: true,
+        reset: tokenChanged,
+        restarted: false,
+        warning: "Saved — will apply on next gateway restart",
+      });
+    }
 
-    return NextResponse.json({ success: true, reset: tokenChanged });
+    return NextResponse.json({ success: true, reset: tokenChanged, restarted: true });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to save" },

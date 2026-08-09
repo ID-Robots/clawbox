@@ -16,6 +16,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [configuring, setConfiguring] = useState(false);
+  const [configurePromise, setConfigurePromise] = useState<Promise<void> | undefined>(undefined);
   const [status, setStatus] = useState<{
     type: "success" | "error";
     message: string;
@@ -39,6 +40,23 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
 
     setSaving(true);
     setConfiguring(true);
+    setStatus(null);
+
+    // Expose the configure outcome so the overlay only advances the wizard
+    // (onDone → onNext) once the save has actually succeeded — gateway
+    // health alone must not be read as success. Mirrors SettingsApp's
+    // Telegram flow via TelegramConfiguringOverlay's `waitFor` prop.
+    const {
+      promise: cfgPromise,
+      resolve: configureResolve,
+      reject: configureReject,
+    } = Promise.withResolvers<void>();
+    // Swallow the rejection at the promise level so unhandled-rejection
+    // doesn't fire; the failed state is surfaced via setStatus below and
+    // the overlay is torn down by setConfiguring(false).
+    cfgPromise.catch(() => {});
+    setConfigurePromise(cfgPromise);
+
     try {
       const res = await fetch("/setup-api/telegram/configure", {
         method: "POST",
@@ -46,9 +64,13 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         body: JSON.stringify({ botToken: token.trim() }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        configureReject(new Error("aborted"));
+        return;
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        configureReject(new Error(data.error || "configure failed"));
         setConfiguring(false);
         setStatus({
           type: "error",
@@ -57,8 +79,14 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         return;
       }
       const data = await res.json();
-      if (controller.signal.aborted) return;
-      if (!data.success) {
+      if (controller.signal.aborted) {
+        configureReject(new Error("aborted"));
+        return;
+      }
+      if (data.success) {
+        configureResolve();
+      } else {
+        configureReject(new Error(data.error || "configure returned success=false"));
         setConfiguring(false);
         setStatus({
           type: "error",
@@ -66,7 +94,11 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         });
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        configureReject(err);
+        return;
+      }
+      configureReject(err);
       setConfiguring(false);
       setStatus({
         type: "error",
@@ -81,7 +113,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
     <div className="w-full max-w-[520px]" data-testid="setup-step-telegram">
       <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
         {configuring && (
-          <TelegramConfiguringOverlay onDone={onNext} />
+          <TelegramConfiguringOverlay waitFor={configurePromise} onDone={onNext} />
         )}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         <h1 className="text-xl sm:text-2xl font-bold font-display mb-2 flex flex-wrap items-center gap-2.5">

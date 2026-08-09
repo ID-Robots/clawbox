@@ -97,6 +97,13 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
     child.on("error", (e) => {
       if (settled) return;
       cleanup();
+      // A missing binary surfaces as ENOENT with the full spawn path in the
+      // message (`spawn /home/clawbox/.local/bin/hermes ENOENT`). Don't leak
+      // that path to the client — report the actionable cause instead.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new Error("Hermes is not installed on this device"));
+        return;
+      }
       reject(e);
     });
     child.on("close", (code) => {

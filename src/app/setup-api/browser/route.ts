@@ -265,7 +265,6 @@ export async function POST(req: Request) {
         title: await page.title().catch(() => ""),
         screenshot: screenshot ? screenshot.toString("base64") : null,
         canGoBack: await page.evaluate(() => window.history.length > 1).catch(() => false),
-        canGoForward: false,
       };
     };
 
@@ -316,12 +315,21 @@ export async function POST(req: Request) {
 
       case "keydown": {
         const { key } = body;
+        if (typeof key !== "string" || key.length === 0) {
+          return NextResponse.json({ error: "key required" }, { status: 400 });
+        }
         const pwKey = KEY_MAP[key] || key;
-        // Single printable character → type it; special key → press it
-        if (pwKey.length === 1 && !KEY_MAP[key]) {
-          await page.keyboard.type(pwKey);
-        } else {
-          await page.keyboard.press(pwKey);
+        // Single printable character → type it; special key → press it. A
+        // key name Playwright doesn't recognise makes press() throw — treat
+        // that as a client error rather than letting it become a raw 500.
+        try {
+          if (pwKey.length === 1 && !KEY_MAP[key]) {
+            await page.keyboard.type(pwKey);
+          } else {
+            await page.keyboard.press(pwKey);
+          }
+        } catch {
+          return NextResponse.json({ error: `Unknown key: ${key}` }, { status: 400 });
         }
         await page.waitForTimeout(100);
         return NextResponse.json(await respond());

@@ -569,7 +569,11 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
           <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
         ) : (
           <>
-            {completionError && currentStep === 5 && (
+            {/* Completion failed and is no longer in flight (we're in the
+                !completionStarted branch). Show it regardless of step — the
+                resume path lands on step 6, which has no body, so gating on
+                step 5 would leave a blank card. */}
+            {completionError && (
               <div className="w-full max-w-[520px] mb-4">
                 <StatusMessage type="error" message={completionError} />
                 <button

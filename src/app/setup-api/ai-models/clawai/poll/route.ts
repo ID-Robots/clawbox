@@ -14,6 +14,11 @@ const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
   || "https://openclawhardware.dev/api/clawbox-ai/device-poll";
 
+// Max time a session may sit in `configuring` before the poll route gives up
+// on the background configure and surfaces a retryable error. A gateway
+// restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
+const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
+
 interface UpstreamPollResponse {
   status?: string;
   access_token?: string;
@@ -115,11 +120,24 @@ export async function POST() {
   if (session.status === "complete") {
     return NextResponse.json({ status: "complete" });
   }
-  if (session.status === "configuring") {
-    return NextResponse.json({ status: "configuring" });
-  }
   if (session.status === "error" && session.error) {
     return NextResponse.json({ status: "error", error: session.error });
+  }
+  if (session.status === "configuring") {
+    // The background configure normally flips the session to complete/error
+    // within a gateway-restart cycle. If it never reports back (process died
+    // mid-restart, etc.) the session would sit in `configuring` forever and
+    // the UI would poll indefinitely. Time it out into a retryable error so
+    // the user can request a fresh code.
+    const configuringStartedAt = session.configuringStartedAt ?? session.createdAt;
+    if (Date.now() - configuringStartedAt > CONFIGURING_TIMEOUT_MS) {
+      await clearClawAiSession();
+      return NextResponse.json(
+        { status: "error", error: "ClawBox AI setup timed out while finishing up. Please request a new code and try again." },
+        { status: 408 },
+      );
+    }
+    return NextResponse.json({ status: "configuring" });
   }
 
   if (isClawAiSessionExpired(session)) {
@@ -208,7 +226,12 @@ export async function POST() {
   // off the configure off the request lifecycle and acknowledge the
   // poll quickly. The next poll tick — typically within `interval`
   // seconds — sees `configuring` or `complete` and the UI advances.
-  const configuringSession: ClawAiConnectSession = { ...session, status: "configuring", error: null };
+  const configuringSession: ClawAiConnectSession = {
+    ...session,
+    status: "configuring",
+    error: null,
+    configuringStartedAt: Date.now(),
+  };
   await writeClawAiSession(configuringSession);
   void runConfigureInBackground(configuringSession, accessToken);
 
