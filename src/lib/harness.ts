@@ -7,9 +7,14 @@
 // "where each harness's local server lives" — chat/gateway routing and the
 // Settings picker both read it.
 
+import fs from "fs";
+import path from "path";
 import { get, set } from "@/lib/config-store";
 
 export type Harness = "openclaw" | "hermes";
+
+const HERMES_BIN =
+  process.env.HERMES_BIN || path.join(process.env.HOME || "/home/clawbox", ".local", "bin", "hermes");
 
 export const HARNESS_CONFIG_KEY = "active_harness";
 export const DEFAULT_HARNESS: Harness = "openclaw";
@@ -59,12 +64,24 @@ export async function setActiveHarness(harness: Harness): Promise<void> {
  * doesn't stall the status route.
  */
 export async function harnessHealthy(harness: Harness): Promise<boolean> {
+  // Prefer a live server probe (any HTTP response = the process is up).
   try {
     const res = await fetch(`${HARNESSES[harness].baseUrl}/`, {
       signal: AbortSignal.timeout(2500),
     });
-    return res.status > 0;
+    if (res.status > 0) return true;
   } catch {
-    return false;
+    // fall through
   }
+  // Hermes chat uses the `hermes -z` CLI, not the serve endpoint, so it's
+  // usable whenever the binary is installed — the serve probe above is just a
+  // bonus signal, not a requirement.
+  if (harness === "hermes") {
+    try {
+      return fs.existsSync(HERMES_BIN);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
