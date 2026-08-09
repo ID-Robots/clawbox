@@ -30,7 +30,12 @@ function clear() {
 function fireBackup(): void {
   // Best-effort: if a manual backup is already running the daemon will
   // serialise via its own heartbeat lock, so we don't gate here.
-  void runBackup({ idle: true })
+  //
+  // A scheduled run must create + upload a REAL backup — `idle: true` only
+  // sends a heartbeat ping (and short-circuits within the heartbeat interval),
+  // so it would silently never back anything up. The manual "Backup now" path
+  // uses idle:false; the scheduler must too.
+  void runBackup({ idle: false })
     .catch((err) => {
       console.warn("[clawkeep-scheduler] auto-backup failed:", err instanceof Error ? err.message : err);
     })
