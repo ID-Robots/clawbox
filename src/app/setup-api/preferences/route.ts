@@ -61,7 +61,13 @@ export async function POST(req: Request) {
         fr: "Français", it: "Italiano", ja: "日本語", nl: "Nederlands",
         sv: "Svenska", zh: "中文",
       };
-      const lang = body.ui_language;
+      // Constrain to a known language code before it's interpolated into the
+      // agent's SOUL.md/USER.md persona files. The raw request value must never
+      // reach those files — a value with newlines/Markdown headings would
+      // otherwise inject arbitrary instructions into the agent's system prompt
+      // (reachable pre-auth during the setup-AP window).
+      const requested = body.ui_language;
+      const lang = Object.hasOwn(LANG_NAMES, requested) ? requested : "en";
       const langName = LANG_NAMES[lang] ?? "English";
       const wsDir = "/home/clawbox/.openclaw/workspace";
       await fs.mkdir(wsDir, { recursive: true }).catch(() => {});

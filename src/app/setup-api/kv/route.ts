@@ -4,9 +4,21 @@ import { kvGet, kvSet, kvDelete, kvGetAll, kvSetMany } from "@/lib/kv-store";
 export const dynamic = "force-dynamic";
 
 const SAFE_KEY = /^[\w.:-]{1,256}$/;
+// Reserved/dunder names slip through SAFE_KEY (all `\w`) but corrupt the plain
+// object backing the store — e.g. `data["__proto__"] = "x"` is a silent no-op
+// that reports success yet stores nothing, and a read returns Object.prototype.
+const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+// Bound each value and the batch size so a caller can't grow data/kv.json
+// without limit (disk-exhaustion DoS — the whole file is rewritten per set).
+const MAX_VALUE_BYTES = 256 * 1024; // 256 KB per value
+const MAX_ENTRIES = 500;
 
 function isValidKey(key: string): boolean {
-  return SAFE_KEY.test(key);
+  return SAFE_KEY.test(key) && !RESERVED_KEYS.has(key);
+}
+
+function isValidValue(v: unknown): v is string {
+  return typeof v === "string" && Buffer.byteLength(v, "utf8") <= MAX_VALUE_BYTES;
 }
 
 // GET /setup-api/kv?key=foo        → single key
@@ -38,15 +50,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true });
     }
     if (body.entries && typeof body.entries === "object") {
+      const rawKeys = Object.keys(body.entries);
+      if (rawKeys.length > MAX_ENTRIES) {
+        return NextResponse.json({ error: `Too many entries (max ${MAX_ENTRIES})` }, { status: 413 });
+      }
       const entries: Record<string, string> = {};
       for (const [k, v] of Object.entries(body.entries)) {
-        if (isValidKey(k) && typeof v === "string") entries[k] = v;
+        if (isValidKey(k) && isValidValue(v)) entries[k] = v;
       }
       if (Object.keys(entries).length > 0) kvSetMany(entries);
       return NextResponse.json({ ok: true });
     }
     if (typeof body.key === "string" && typeof body.value === "string") {
       if (!isValidKey(body.key)) return NextResponse.json({ error: "Invalid key" }, { status: 400 });
+      if (!isValidValue(body.value)) {
+        return NextResponse.json({ error: `Value too large (max ${MAX_VALUE_BYTES} bytes)` }, { status: 413 });
+      }
       kvSet(body.key, body.value);
       return NextResponse.json({ ok: true });
     }
