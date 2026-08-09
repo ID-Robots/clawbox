@@ -107,6 +107,39 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/ollama",
 ];
 
+// Sensitive /setup-api/* surfaces that must NEVER be reachable without a session
+// (or the MCP bearer) — not even during the pre-setup wizard window. These are
+// desktop-app / agent backends (file access, browser automation, the code
+// workspace, the remote-desktop bridge, and the gateway-token endpoints) with
+// no role in first-boot onboarding. The blanket pre-setup pass below used to
+// expose them unauthenticated while the open `ClawBox-Setup` AP was up, turning
+// otherwise-local issues into network-adjacent, pre-auth ones.
+const PRE_AUTH_SENSITIVE_PREFIXES = [
+  "/setup-api/files",
+  "/setup-api/browser",
+  "/setup-api/code",        // code workspace file ops / build (also /code/*)
+  "/setup-api/code-server",
+  "/setup-api/webapps",
+  "/setup-api/vnc",
+  "/setup-api/terminal",
+  "/setup-api/gateway/ws-config", // hands back the live gateway auth token
+];
+// Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
+// `/setup-api/gateway/health`, which the wizard's readiness check legitimately
+// polls before setup completes. The SPA proxy at the bare path injects the
+// gateway token into HTML, so it stays gated.
+const PRE_AUTH_SENSITIVE_EXACT = new Set([
+  "/setup-api/gateway",
+]);
+
+function isSensitiveSetupApi(pathname: string): boolean {
+  if (PRE_AUTH_SENSITIVE_EXACT.has(pathname)) return true;
+  for (const p of PRE_AUTH_SENSITIVE_PREFIXES) {
+    if (pathname === p || pathname.startsWith(p + "/")) return true;
+  }
+  return false;
+}
+
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
   "/favicon.ico",
@@ -213,7 +246,12 @@ export async function middleware(request: NextRequest) {
   // run the updater, set the password, etc. Once setup completes the gate
   // closes and every /setup-api/* request requires a valid session.
   if (pathname.startsWith("/setup-api/") && !isSetupComplete()) {
-    return NextResponse.next();
+    // ...except the sensitive surfaces above, which stay gated even pre-setup
+    // (they play no part in onboarding). They fall through to the session /
+    // MCP-bearer checks below, so an authenticated caller still reaches them.
+    if (!isSensitiveSetupApi(pathname)) {
+      return NextResponse.next();
+    }
   }
 
   // 3b. Trusted-test-environment escape hatch for the e2e-install harness.
