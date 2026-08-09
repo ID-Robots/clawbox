@@ -81,8 +81,11 @@ export async function harnessHealthy(harness: Harness): Promise<boolean> {
   // usable whenever the binary is installed — the serve probe above is just a
   // bonus signal, not a requirement.
   if (harness === "hermes") {
+    // Chat uses the `hermes` CLI, so Hermes is usable when the binary is present
+    // AND executable (existsSync alone would accept a non-executable file).
     try {
-      return fs.existsSync(HERMES_BIN);
+      fs.accessSync(HERMES_BIN, fs.constants.X_OK);
+      return true;
     } catch {
       return false;
     }

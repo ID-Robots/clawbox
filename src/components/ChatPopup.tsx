@@ -1034,19 +1034,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Hermes send: POST the turn to the HTTP route (hermes -z keeps a persistent
   // session, so multi-turn memory works without threading context). No
   // streaming yet — the reply lands whole. Attachments are OpenClaw-only for now.
+  // Holds the in-flight Hermes request so Stop can abort it (which aborts the
+  // fetch → the route sees request.signal abort → kills the `hermes` process).
+  const hermesAbortRef = useRef<AbortController | null>(null)
   const dispatchHermes = useCallback(async (text: string) => {
+    const controller = new AbortController()
+    hermesAbortRef.current = controller
     try {
       const res = await fetch('/setup-api/hermes/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
+        signal: controller.signal,
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
       setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      // A user-initiated Stop shows nothing, not an error line.
+      if ((err as Error)?.name !== 'AbortError') {
+        setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      }
     } finally {
+      hermesAbortRef.current = null
       setSending(false)
       setStreaming('')
       runIdRef.current = null
@@ -1140,6 +1150,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Abort generation
   const abort = useCallback(async () => {
+    if (harnessRef.current === 'hermes') {
+      hermesAbortRef.current?.abort()
+      return
+    }
     try {
       await wsRequest('chat.abort', { sessionKey: sessionKeyRef.current })
     } catch {}

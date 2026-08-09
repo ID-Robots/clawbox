@@ -41,10 +41,23 @@ if [ -d "$OC_WS" ]; then
   done
 fi
 
+# Move a real (non-symlink) file out of the way before symlinking, without ever
+# clobbering an earlier backup — so repeated migrations never destroy previously
+# preserved Hermes identity data.
+backup_if_real() {
+  local f="$1"
+  [ -e "$f" ] && [ ! -L "$f" ] || return 0
+  local bak="$f.pre-bridge"
+  [ -e "$bak" ] && bak="$f.pre-bridge.$(date +%s.%N)"
+  mv "$f" "$bak"
+}
+
 # 3. Hermes side — symlinks (Hermes follows them; keeps the markdown live).
 if [ -d "$HM_DIR" ]; then
   mkdir -p "$HM_DIR/memories"
-  [ -e "$HM_DIR/SOUL.md" ] && [ ! -L "$HM_DIR/SOUL.md" ] && mv "$HM_DIR/SOUL.md" "$HM_DIR/SOUL.md.pre-bridge"
+  backup_if_real "$HM_DIR/SOUL.md"
+  backup_if_real "$HM_DIR/memories/MEMORY.md"
+  backup_if_real "$HM_DIR/memories/USER.md"
   ln -sfn "$CANON/SOUL.md" "$HM_DIR/SOUL.md"
   ln -sfn "$CANON/MEMORY.md" "$HM_DIR/memories/MEMORY.md"
   ln -sfn "$CANON/USER.md" "$HM_DIR/memories/USER.md"

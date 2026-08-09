@@ -23,6 +23,7 @@ export default function HarnessPicker() {
   const load = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/harness/status", { cache: "no-store" });
+      if (!res.ok) throw new Error(`status ${res.status}`);
       setStatus(await res.json());
     } catch {
       setError("Could not load harness status");
@@ -66,9 +67,9 @@ export default function HarnessPicker() {
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>
           hub
         </span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest m-0">
           Agent harness
-        </label>
+        </h3>
       </div>
       <p className="text-xs text-[var(--text-muted)] mb-3">
         The engine that runs your agent. One shared identity; each harness keeps its own providers.

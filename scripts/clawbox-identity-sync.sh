@@ -38,10 +38,13 @@ if [ -d "$OC_WS" ]; then
 fi
 
 # 2. Hermes ← canonical (symlinks already live) → reindex FTS5.
-if command -v hermes >/dev/null 2>&1; then
-  # `hermes memory reindex` rebuilds the recall index from the markdown; fall
-  # back to `sync` on older builds. Non-fatal if neither exists.
-  hermes memory reindex >/dev/null 2>&1 || hermes sync >/dev/null 2>&1 || true
+# Prefer the configured Hermes CLI (HERMES_BIN, matching src/lib/harness.ts's
+# default), falling back to PATH. `hermes memory reindex` rebuilds the recall
+# index from the markdown; fall back to `sync` on older builds. Non-fatal.
+HERMES="${HERMES_BIN:-$HOME_DIR/.local/bin/hermes}"
+[ -x "$HERMES" ] || HERMES="$(command -v hermes || true)"
+if [ -n "$HERMES" ] && [ -x "$HERMES" ]; then
+  "$HERMES" memory reindex >/dev/null 2>&1 || "$HERMES" sync >/dev/null 2>&1 || true
 fi
 
 echo "[identity-sync] done"
