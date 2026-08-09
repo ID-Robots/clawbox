@@ -61,6 +61,8 @@ export async function POST(req: Request) {
     if (writer) {
       const sanitized: Record<string, string | boolean> = {};
       for (const [k, v] of Object.entries(settings)) {
+        // Never let a caller-supplied key touch the prototype chain.
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
         if (typeof v === "string" || typeof v === "boolean") sanitized[k] = v;
         else if (typeof v === "number") sanitized[k] = String(v);
         else return NextResponse.json({ error: `Invalid value type for key "${k}"` }, { status: 400 });
