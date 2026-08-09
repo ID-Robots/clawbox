@@ -1198,6 +1198,10 @@ export default function AIModelsStep({
             provider: selectedProvider,
             authMode: "subscription",
             oauthHandoff: true,
+            // projectId is not a secret (a GCP identifier) — relay it in the
+            // body for the Google handoff since the server-only token file
+            // doesn't carry it.
+            ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
             ...(subscriptionModel ? { model: subscriptionModel } : {}),
           }
         : {
@@ -1390,9 +1394,14 @@ export default function AIModelsStep({
       if (!exchangeRes.ok) return showError(await extractError(exchangeRes, "Token exchange failed"));
       const tokenData = await exchangeRes.json();
       if (controller.signal.aborted) return;
-      if (!tokenData.access_token) return showError("No access token received");
-
-      await saveOAuthToken(tokenData);
+      // Exchange now persists the tokens server-side and returns only a status
+      // (keeping access/refresh/id tokens off the plain-HTTP setup-AP hop), so
+      // complete the config through the same server-side handoff the
+      // device-code flow uses. projectId (non-secret) is relayed for Google.
+      if (tokenData.status !== "complete") {
+        return showError(tokenData.error || "Sign-in did not complete");
+      }
+      await saveOAuthToken({ oauthHandoff: true, projectId: tokenData.projectId });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
