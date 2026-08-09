@@ -1,0 +1,7 @@
+# Scripts run on the Linux device (Jetson). Force LF even on Windows checkouts —
+# CRLF breaks bash (`set -euo pipefail\r` → "pipefail: invalid option name") and
+# other interpreters. Prevents a Windows-edited script from being deployed broken.
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.py   text eol=lf
+*.bash text eol=lf

@@ -37,18 +37,15 @@ if [ -d "$OC_WS" ]; then
     systemctl --user restart clawbox-gateway 2>/dev/null || true
 fi
 
-# 2. Hermes ← canonical (symlinks already live) → reindex FTS5.
-# Prefer the configured Hermes CLI (HERMES_BIN, matching src/lib/harness.ts's
-# default), falling back to PATH. `hermes memory reindex` rebuilds the recall
-# index from the markdown; fall back to `sync` on older builds. Non-fatal.
-HERMES="${HERMES_BIN:-$HOME_DIR/.local/bin/hermes}"
-[ -x "$HERMES" ] || HERMES="$(command -v hermes || true)"
-if [ -n "$HERMES" ] && [ -x "$HERMES" ]; then
-  # Surface a reindex failure to the caller (the select route reports it) rather
-  # than swallowing it: a stale FTS5 index means Hermes won't see refreshed
-  # memory. `set -e` propagates a non-zero exit if BOTH reindex and the sync
-  # fallback fail.
-  "$HERMES" memory reindex >/dev/null 2>&1 || "$HERMES" sync >/dev/null 2>&1
-fi
+# 2. Hermes ← canonical: the symlinks placed by setup-shared-identity.sh ARE the
+# sync. Hermes's built-in memory (MEMORY.md/USER.md) is always active and read
+# directly from those files — in this Hermes there is NO separate recall index
+# to rebuild. `hermes memory` only manages external provider plugins
+# (honcho/mem0/…) and exposes just setup/status/off/reset; there is no
+# `reindex`/`sync` memory subcommand. The previous `hermes memory reindex ||
+# hermes sync` therefore invoked a non-existent command (and the unrelated
+# skill-`sync`), which under the service environment failed `set -e` and blocked
+# every harness switch with "Identity synchronization failed". The symlinks are
+# authoritative and live, so there is nothing further to do for Hermes here.
 
 echo "[identity-sync] done"
