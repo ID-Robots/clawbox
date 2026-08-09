@@ -40,7 +40,7 @@ describe("verifyPassword", () => {
     await expect(resultPromise).resolves.toBe(true);
     expect(mockSpawn).toHaveBeenCalledWith(
       "/usr/sbin/unix_chkpwd",
-      ["desktopuser", "nullok"],
+      ["desktopuser", "nonull"],
       expect.objectContaining({
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 5000,

@@ -6,6 +6,7 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn(),
     writeFile: vi.fn(),
     rename: vi.fn(),
+    unlink: vi.fn(),
   },
 }));
 
@@ -66,6 +67,7 @@ describe("POST /setup-api/ai-models/oauth/device-start", () => {
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue(undefined);
 
     vi.stubGlobal("fetch", vi.fn());
 
@@ -180,6 +182,42 @@ describe("POST /setup-api/ai-models/oauth/device-start", () => {
     expect(mockFs.mkdir).toHaveBeenCalled();
     expect(mockFs.writeFile).toHaveBeenCalled();
     expect(mockFs.rename).toHaveBeenCalled();
+  });
+
+  it("clears a stale token-handoff file when a new flow begins (best-effort)", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        device_auth_id: "test-device-id",
+        user_code: "ABCD-1234",
+        interval: 5,
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await deviceStartPost(emptyRequest());
+
+    // A prior abandoned flow may have left tokens on disk — starting fresh must
+    // remove them so a later configure call can't consume them.
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
+  it("does not fail the new flow if clearing the stale file errors", async () => {
+    mockFs.unlink.mockRejectedValue(new Error("EPERM"));
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        device_auth_id: "test-device-id",
+        user_code: "ABCD-1234",
+        interval: 5,
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await deviceStartPost(emptyRequest());
+    expect(res.status).toBe(200);
   });
 
   it("handles invalid JSON body gracefully", async () => {

@@ -19,8 +19,15 @@ export async function GET(request: NextRequest) {
       return gatewayOfflineResponse(await getGatewayServiceHealth());
     }
     let html = await res.text();
-    // Use the request hostname so WebSocket connects to the right address
-    const host = request.headers.get("host")?.replace(/:\d+$/, "") || "clawbox.local";
+    // Use the request hostname so WebSocket connects to the right address.
+    // The Host header is attacker-controllable and gets embedded in the inline
+    // <script> below, so only accept hostname / IP-literal characters — anything
+    // else (quotes, angle brackets) falls back to the mDNS name so it can't
+    // break out of the JS string context (reflected XSS).
+    const rawHost = request.headers.get("host")?.replace(/:\d+$/, "") || "";
+    const host = /^[A-Za-z0-9.-]+$/.test(rawHost) || /^\[[0-9a-fA-F:]+\]$/.test(rawHost)
+      ? rawHost
+      : "clawbox.local";
     const wsUrl = `ws://${host}:${GATEWAY_PORT}`;
     // Rewrite relative asset paths (./assets/... → /assets/...) so they
     // resolve through Next.js rewrites which proxy to the gateway.
@@ -29,7 +36,7 @@ export async function GET(request: NextRequest) {
     const autoConnect = `<script>
       (function(){
         var KEY="openclaw.control.settings.v1";
-        var wsUrl="${wsUrl}";
+        var wsUrl=${JSON.stringify(wsUrl)};
         try{
           var s=JSON.parse(localStorage.getItem(KEY)||"{}");
           s.url=wsUrl;

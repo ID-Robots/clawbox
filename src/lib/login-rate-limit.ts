@@ -23,6 +23,11 @@ const LOCKOUT_TIERS: Array<{ failures: number; lockMs: number }> = [
   { failures: 20, lockMs: 24 * 60 * 60 * 1000 },
 ];
 
+// Max lock for a bucket with no trusted per-client identity (the shared LAN
+// "global" bucket). Bounds the owner-lockout DoS to a short, self-healing window
+// while still throttling brute force.
+export const SHARED_BUCKET_MAX_LOCK_MS = 5 * 60 * 1000;
+
 export interface AttemptRecord {
   failures: number;
   // First failure timestamp in the current window (ms since epoch). Used
@@ -126,17 +131,24 @@ export async function checkLockout(key: string): Promise<LockoutCheck> {
  * so the caller can return a single Retry-After response without an
  * extra round-trip.
  */
-export async function recordFailure(key: string): Promise<LockoutCheck> {
+export async function recordFailure(key: string, opts?: { maxLockMs?: number }): Promise<LockoutCheck> {
   const state = await loadState();
   const now = Date.now();
   pruneExpired(state, now);
+
+  // Clamp the lock for buckets with no trusted per-client identity (the shared
+  // LAN "global" bucket). Without this cap an unauthenticated attacker could
+  // drive the shared bucket to the 24h tier and lock the real owner out (DoS).
+  // A short self-healing lock still throttles brute-force (paired with the
+  // response-time pad and the 15-min window).
+  const capLock = (ms: number) => (opts?.maxLockMs !== undefined ? Math.min(ms, opts.maxLockMs) : ms);
 
   // If we'd have to evict an active lockout to admit this new key, refuse
   // admission instead. Treat the new key as locked for the highest-tier
   // duration so the IP-rotating attacker who's filling the table can't
   // also keep retrying past the cap.
   if (isOverCapForNewKey(state, now, key)) {
-    const lockMs = LOCKOUT_TIERS[LOCKOUT_TIERS.length - 1].lockMs;
+    const lockMs = capLock(LOCKOUT_TIERS[LOCKOUT_TIERS.length - 1].lockMs);
     return { locked: true, retryAfterSeconds: Math.ceil(lockMs / 1000) };
   }
 
@@ -151,7 +163,7 @@ export async function recordFailure(key: string): Promise<LockoutCheck> {
   // refreshes the lock window from "now".
   for (const tier of LOCKOUT_TIERS) {
     if (rec.failures >= tier.failures) {
-      rec.lockedUntilMs = now + tier.lockMs;
+      rec.lockedUntilMs = now + capLock(tier.lockMs);
     }
   }
 
