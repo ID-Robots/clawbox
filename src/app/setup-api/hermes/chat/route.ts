@@ -16,6 +16,11 @@ import path from "path";
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 const HERMES_BIN = process.env.HERMES_BIN || path.join(HOME_DIR, ".local", "bin", "hermes");
 const HERMES_TIMEOUT_MS = 90_000;
+// Hermes uses `vendor/model` IDs (routed via its base_url, default OpenRouter).
+// ClawBox's chat model picker is OpenClaw-specific, so when the desktop chat
+// doesn't send a Hermes model we fall back to a known-good default rather than
+// Hermes' config default (which may not resolve on the configured provider).
+const DEFAULT_MODEL = process.env.HERMES_DEFAULT_MODEL || "openai/gpt-4o-mini";
 
 function runHermes(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -70,10 +75,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  const args = ["-z", message];
-  if (typeof body.model === "string" && body.model.trim()) {
-    args.push("-m", body.model.trim());
-  }
+  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_MODEL;
+  const args = ["-z", message, "-m", model];
 
   try {
     const text = await runHermes(args);

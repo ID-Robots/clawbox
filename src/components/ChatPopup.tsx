@@ -188,6 +188,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Which agent harness backs this chat. OpenClaw uses the gateway WebSocket;
+  // Hermes uses the /setup-api/hermes/chat HTTP route (hermes -z, persistent
+  // session). Loaded once on mount; connect() is gated on `harnessLoaded` so we
+  // never open the OpenClaw WS in Hermes mode.
+  const harnessRef = useRef<'openclaw' | 'hermes'>('openclaw')
+  const [harnessLoaded, setHarnessLoaded] = useState(false)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -487,6 +493,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const connect = useCallback(async () => {
+    // Hermes mode: no gateway WebSocket. Mark connected so the composer is
+    // enabled; startRun routes sends to /setup-api/hermes/chat instead.
+    if (harnessRef.current === 'hermes') {
+      setStatus('connected')
+      return
+    }
     // Cancel any pending retry / auth-backoff timer so an explicit reconnect
     // (e.g. the "Try again" button) can't race with a previously scheduled one
     // and fire a duplicate connect later.
@@ -1019,6 +1031,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
+  // Hermes send: POST the turn to the HTTP route (hermes -z keeps a persistent
+  // session, so multi-turn memory works without threading context). No
+  // streaming yet — the reply lands whole. Attachments are OpenClaw-only for now.
+  const dispatchHermes = useCallback(async (text: string) => {
+    try {
+      const res = await fetch('/setup-api/hermes/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
+      setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+    } finally {
+      setSending(false)
+      setStreaming('')
+      runIdRef.current = null
+    }
+  }, [])
+
   const startRun = useCallback((text: string, sendAttachments: { name: string; path: string; type: string }[]) => {
     const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
@@ -1027,12 +1061,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setStreaming('')
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
+    if (harnessRef.current === 'hermes') {
+      void dispatchHermes(text)
+      return
+    }
     if (status !== 'connected') {
       pendingSendsRef.current.push({ text, attachments: sendAttachments, idempotencyKey })
       return
     }
     void dispatchSend(text, sendAttachments, idempotencyKey)
-  }, [status, dispatchSend])
+  }, [status, dispatchSend, dispatchHermes])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -1199,13 +1237,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     await switchChatModel({ model: target.model, label: target.label })
   }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
-  // Pre-warm the gateway WebSocket on mount so opening chat is instant —
-  // the WS handshake happens silently while the user is still on the desktop.
-  // onClose's retry budget covers a dropped pre-warm; no need for the isOpen
-  // effect to also call connect().
+  // Resolve the active harness once, before connecting, so we never open the
+  // OpenClaw WS in Hermes mode.
   useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/setup-api/harness/status', { cache: 'no-store' })
+        const data = await res.json()
+        if (!cancelled && data?.active === 'hermes') harnessRef.current = 'hermes'
+      } catch {
+        // default to openclaw
+      }
+      if (!cancelled) setHarnessLoaded(true)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Pre-warm the connection on mount so opening chat is instant. In OpenClaw
+  // mode this silently completes the gateway WS handshake; in Hermes mode
+  // connect() just marks connected (no WS). Gated on the harness resolving.
+  useEffect(() => {
+    if (!harnessLoaded) return
     connect()
-  }, [connect])
+  }, [connect, harnessLoaded])
 
   useEffect(() => {
     if (isOpen) {
