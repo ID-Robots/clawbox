@@ -44,7 +44,11 @@ export async function POST(request: Request) {
   // never complete a switch that leaves the selected harness without its shared
   // identity. If the sync fails, the harness is NOT switched.
   try {
-    await exec("bash", [path.join(CONFIG_ROOT, "scripts", "clawbox-identity-sync.sh")], {
+    // Pass the target harness so the sync only bounces the OpenClaw gateway
+    // when OpenClaw is the harness being switched to — bouncing it on a switch
+    // to Hermes would leave OpenClaw briefly unreachable and reject switching
+    // back.
+    await exec("bash", [path.join(CONFIG_ROOT, "scripts", "clawbox-identity-sync.sh"), harness], {
       timeout: 60_000,
     });
   } catch (err) {
