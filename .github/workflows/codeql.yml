@@ -42,7 +42,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           # Config file carries the security-extended query suite plus
-          # paths-ignore for non-runtime code (tests, CI scripts).
+          # paths-ignore for test code (runtime scripts stay scanned).
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
