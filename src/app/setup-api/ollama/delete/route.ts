@@ -9,7 +9,7 @@ const MODEL_RE = /^[a-zA-Z0-9._:/-]+$/;
 export async function POST(request: Request) {
   try {
     const { model } = await request.json();
-    if (!model || typeof model !== "string" || !MODEL_RE.test(model)) {
+    if (!model || typeof model !== "string" || !MODEL_RE.test(model) || model.includes("..")) {
       return NextResponse.json({ error: "Invalid model name" }, { status: 400 });
     }
 

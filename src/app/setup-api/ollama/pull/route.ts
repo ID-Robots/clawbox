@@ -17,8 +17,9 @@ export async function POST(request: Request) {
 
   // Validate model name format. Mirrors the delete route's MODEL_RE so
   // namespaced refs ("user/model:tag", "hf.co/...") that Ollama accepts
-  // aren't rejected here.
-  if (!/^[a-zA-Z0-9._:/-]+$/.test(model)) {
+  // aren't rejected here. Reject any ".." segment: the broadened charset
+  // permits it, but a traversal-looking ref is never a legitimate model.
+  if (!/^[a-zA-Z0-9._:/-]+$/.test(model) || model.includes("..")) {
     return NextResponse.json(
       { error: "Invalid model name format" },
       { status: 400 },
