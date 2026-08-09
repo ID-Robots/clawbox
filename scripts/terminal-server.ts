@@ -115,8 +115,12 @@ wss.on("connection", (ws: WebSocket, req) => {
   });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[terminal-server] Listening on ws://0.0.0.0:${PORT}`);
+// Bind loopback only. This PTY server spawns an unauthenticated shell per
+// connection, so it must never be reachable directly from the LAN (SEC-1).
+// The port-80 production-server proxy reaches it via 127.0.0.1 and enforces a
+// ClawBox session cookie on the /terminal-ws upgrade.
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`[terminal-server] Listening on ws://127.0.0.1:${PORT}`);
 });
 
 process.on("SIGTERM", () => {

@@ -14,9 +14,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
 import type { Dirent } from "fs";
-import { readFileSync } from "fs";
+import { readFileSync, realpathSync } from "fs";
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir, unlink } from "fs/promises";
 import { resolve, relative, dirname, extname, join, basename } from "path";
+import net from "net";
+import { lookup as dnsLookup } from "dns/promises";
 
 // ══════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -38,6 +40,85 @@ const MAX_COMMAND_TIMEOUT = 600_000;
 const AUTO_BG_TIMEOUT = 15_000;
 const UI_PICKUP_DELAY_MS = 2500;
 const DEFAULT_READ_LIMIT = 2000;
+
+// ══════════════════════════════════════════════════════════════════════
+// SSRF GUARD (SEC-5): keep web_fetch off the box's own internal services.
+// Without this the agent — steerable by any page it reads — could pivot to
+// the loopback gateway API, Ollama, CDP, VNC, or cloud metadata (169.254).
+// ══════════════════════════════════════════════════════════════════════
+
+function isPrivateIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const p = ip.split(".").map(Number);
+    if (p[0] === 127 || p[0] === 10 || p[0] === 0) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 169 && p[1] === 254) return true; // link-local / cloud metadata
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64/10 CGNAT
+    if (p[0] >= 224) return true; // multicast / reserved
+    return false;
+  }
+  const lc = ip.toLowerCase();
+  if (lc === "::1" || lc === "::") return true;
+  if (/^fe[89ab]/.test(lc)) return true; // fe80::/10 link-local (fe80–febf)
+  if (lc.startsWith("fc") || lc.startsWith("fd")) return true; // fc00::/7 unique-local
+  if (lc.startsWith("ff")) return true; // ff00::/8 multicast
+  if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7)); // IPv4-mapped
+  return false;
+}
+
+// Auth-bearing headers that must not follow a redirect to a different origin.
+const SENSITIVE_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+
+/** Reject a host that is an internal IP or resolves to one. */
+async function assertPublicHost(hostname: string): Promise<void> {
+  const host = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error(`blocked internal address: ${host}`);
+    return;
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    throw new Error(`blocked internal host: ${host}`);
+  }
+  const results = await dnsLookup(host, { all: true });
+  for (const r of results) {
+    if (isPrivateIp(r.address)) {
+      throw new Error(`blocked host ${host} → internal ${r.address}`);
+    }
+  }
+}
+
+/**
+ * fetch() with SSRF protection: validate the host on every hop and follow
+ * redirects manually so a 3xx to an internal target can't slip past the
+ * initial check. (Residual TOCTOU DNS-rebind between lookup and connect is
+ * accepted here — closing it fully needs IP-pinned connects.)
+ */
+async function safeFetch(url: string, init: RequestInit, maxRedirects = 5): Promise<Response> {
+  let currentUrl = new URL(url);
+  // Normalize headers up front so we can strip auth on cross-origin redirects.
+  const headers = new Headers(init.headers);
+  for (let i = 0; i <= maxRedirects; i++) {
+    if (currentUrl.protocol !== "http:" && currentUrl.protocol !== "https:") {
+      throw new Error(`blocked redirect scheme: ${currentUrl.protocol}`);
+    }
+    await assertPublicHost(currentUrl.hostname);
+    const res = await fetch(currentUrl, { ...init, headers, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      const next = new URL(location, currentUrl);
+      // Don't leak credentials across origins: drop auth headers when the
+      // scheme/host/port changes (matches browser + undici redirect behavior).
+      if (next.origin !== currentUrl.origin) {
+        for (const h of SENSITIVE_HEADERS) headers.delete(h);
+      }
+      currentUrl = next;
+      continue;
+    }
+    return res;
+  }
+  throw new Error("too many redirects");
+}
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const GLOB_RESULT_LIMIT = 200;
 const GREP_RESULT_LIMIT = 250;
@@ -406,6 +487,52 @@ const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".
 const BINARY_EXTS = new Set([".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".bin", ".exe", ".so", ".dylib", ".o", ".a", ".wasm", ".pyc", ".class", ".pdf"]);
 const BLOCKED_PATHS = new Set(["/dev/zero", "/dev/null", "/dev/random", "/dev/urandom", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/console", "/proc/self/mem"]);
 
+// SEC-10: keep the agent's file tools off the device's own credential stores.
+// The agent legitimately edits its workspace (~/.openclaw/workspace) and code,
+// so this denies the specific secret files, not ~/.openclaw wholesale.
+const MCP_DATA_DIR = join(DEFAULT_CWD, "data");
+const SECRET_PATH_RES: RegExp[] = [
+  /(^|\/)\.ssh(\/|$)/,
+  /(^|\/)\.codex\/auth\.json$/,
+  /(^|\/)\.openclaw\/openclaw\.json(\.bak.*)?$/,
+  /(^|\/)auth-profiles\.json$/,
+  /(^|\/)\.openclaw\/agents\/[^/]+\/agent\/[^/]*\.sqlite$/,
+  /(^|\/)\.openclaw\/credentials(\/|$)/,
+  /\/proc\/\d+\/environ$/,
+];
+function isSecretPath(absPath: string): boolean {
+  if (SECRET_PATH_RES.some((re) => re.test(absPath))) return true;
+  for (const name of [".session-secret", ".mcp-token", ".local-ai-token", "config.json", "kv.json"]) {
+    if (absPath === join(MCP_DATA_DIR, name)) return true;
+  }
+  return false;
+}
+
+// Single chokepoint the read/write/edit file tools share (was duplicated inline
+// at three sites). A path is blocked if it — or, after resolving symlinks, its
+// real target — is a device node, /proc/self, or a secret store. The realpath
+// pass defeats symlink escapes (CWE-59): a benignly-named link pointing at
+// ~/.ssh or auth-profiles.json would otherwise sail past the literal-path denylist.
+function isBlockedPath(absPath: string): boolean {
+  const hit = (p: string) =>
+    BLOCKED_PATHS.has(p) || p.startsWith("/dev/") || p.startsWith("/proc/self/") || isSecretPath(p);
+  if (hit(absPath)) return true;
+  try {
+    const real = realpathSync(absPath);
+    return real !== absPath && hit(real);
+  } catch {
+    // Leaf doesn't exist yet (e.g. a fresh write target). Resolve the parent
+    // dir instead so a symlinked ancestor can't smuggle a write into a secret
+    // location; the literal-path check above already covered the leaf name.
+    try {
+      const real = join(realpathSync(dirname(absPath)), basename(absPath));
+      return real !== absPath && hit(real);
+    } catch {
+      return false;
+    }
+  }
+}
+
 function isImageFile(p: string): boolean { return IMAGE_EXTS.has(extname(p).toLowerCase()); }
 function isBinaryFile(p: string): boolean { return BINARY_EXTS.has(extname(p).toLowerCase()); }
 function isPdfFile(p: string): boolean { return extname(p).toLowerCase() === ".pdf"; }
@@ -714,8 +841,8 @@ Usage:
   async ({ file_path, offset, limit }) => {
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/")) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot read device path: ${file_path}` }], isError: true };
     }
 
@@ -831,8 +958,8 @@ IMPORTANT:
   async ({ file_path, content }) => {
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/")) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot write to device path: ${file_path}` }], isError: true };
     }
 
@@ -903,8 +1030,8 @@ RULES:
 
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/")) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot edit device path: ${file_path}` }], isError: true };
     }
 
@@ -1200,9 +1327,10 @@ If the URL redirects to a different host, a warning is shown.`,
       const extraHeaders = headers ? JSON.parse(headers) : {};
       const originalHost = new URL(url).hostname;
 
-      const res = await fetch(url, {
+      // safeFetch (SEC-5) validates the host on every redirect hop, blocking
+      // loopback/RFC1918/link-local/metadata targets.
+      const res = await safeFetch(url, {
         headers: { "User-Agent": "ClawBox/3.0 (MCP Agent)", "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*", ...extraHeaders },
-        redirect: "follow",
         signal: AbortSignal.timeout(15_000),
       });
 
