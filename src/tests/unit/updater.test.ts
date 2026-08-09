@@ -396,10 +396,15 @@ describe("updater", () => {
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockReadFile.mockRejectedValue(new Error("ENOENT"));
-      mockIsPortOpen
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true);
+      // The gateway only "recovers" once the legacy-state quarantine has run.
+      // Tie the probe to that side-effect instead of a fixed false/false/true
+      // call sequence: waitForGateway polls in a loop (deadline/interval are 1ms
+      // in these tests), so the old sequence could be fully consumed by the very
+      // first poll — reporting recovery BEFORE quarantine ran and leaving no
+      // /bin/bash call to assert on. That made this test flaky (~1 in 3).
+      mockIsPortOpen.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd]) => cmd === "/bin/bash"),
+      );
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
