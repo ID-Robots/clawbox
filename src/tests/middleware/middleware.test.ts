@@ -45,8 +45,16 @@ describe("middleware", () => {
     return new NextRequest(new URL(`http://localhost${pathname}`));
   }
 
-  async function createSignedSessionCookie(exp: number): Promise<string> {
-    const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+  function writeConfig(fields: Record<string, unknown>) {
+    const dataDir = path.join(tmpRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify(fields));
+  }
+
+  async function createSignedSessionCookie(exp: number, gen?: number): Promise<string> {
+    const body: Record<string, number> = { exp };
+    if (gen !== undefined) body.gen = gen;
+    const payload = Buffer.from(JSON.stringify(body)).toString("base64url");
     const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode("test-secret"),
@@ -404,6 +412,105 @@ describe("middleware", () => {
       const response = await mod.middleware(req);
 
       expect(response.status).toBe(307);
+    });
+  });
+
+  describe("session generation revocation", () => {
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    it("accepts a matching-generation cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, session_generation: 3 });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(200);
+    });
+
+    it("rejects a cookie from before the last password change", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      // Generation bumped to 4; a cookie stamped gen 3 is now revoked.
+      writeConfig({ setup_complete: true, session_generation: 4 });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(307);
+    });
+
+    it("treats a legacy cookie with no generation as generation 0", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true }); // session_generation defaults to 0
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      });
+      expect((await mod.middleware(req)).status).toBe(200);
+    });
+  });
+
+  describe("pre-auth sensitive-surface gate (setup window)", () => {
+    // SESSION_SECRET is provisioned but setup_complete is NOT yet written — the
+    // pre-setup wizard window. Sensitive desktop/agent backends must stay gated
+    // here (they play no part in onboarding), even though the wizard's own
+    // routes pass. Regression guard for the pre-auth reachability multiplier.
+    it.each([
+      "/setup-api/files/clawbox/data/.session-secret",
+      "/setup-api/files",
+      "/setup-api/browser/navigate",
+      "/setup-api/code/project/init",
+      "/setup-api/code-server/start",
+      "/setup-api/webapps",
+      "/setup-api/vnc/status",
+      "/setup-api/terminal",
+      "/setup-api/clawkeep/restore",
+      "/setup-api/tunnel/enable",
+      "/setup-api/apps/install",
+      "/setup-api/apps/uninstall",
+      "/setup-api/gateway/ws-config",
+      "/setup-api/gateway",
+      "/setup-api/gateway/", // trailing slash must not dodge the exact match
+    ])("gates sensitive %s during the setup window", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest(p));
+      // Falls through to the session gate → JSON 401 (no valid cookie).
+      expect(response.status).toBe(401);
+    });
+
+    it("still allows /setup-api/gateway/health during the setup window", async () => {
+      // The wizard polls gateway readiness before setup_complete is written, so
+      // health must stay open even though the sibling ws-config / SPA proxy are
+      // gated.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api/gateway/health"));
+      expect(response.status).toBe(200);
+    });
+
+    it("allows a sensitive route once a valid session is presented", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/setup-api/files"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
     });
   });
 

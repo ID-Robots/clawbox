@@ -184,7 +184,15 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
-      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, { timeout: 30_000 });
+      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, {
+        timeout: 30_000,
+        // Chromium gates the CDP WebSocket upgrade on Origin against
+        // --remote-allow-origins (pinned to this exact value in
+        // scripts/launch-browser.sh). Send a matching Origin so our automation
+        // connects while a rebound web page's own origin is rejected — closing
+        // the CDP DNS-rebinding takeover. Keep this byte-identical to the flag.
+        headers: { Origin: CDP_ENDPOINT },
+      });
       browser.on("disconnected", () => {
         if (cachedBrowser === browser) cachedBrowser = null;
         // Also drop a stale in-flight promise so a disconnect that races

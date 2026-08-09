@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
@@ -12,6 +13,34 @@ import {
 export const dynamic = "force-dynamic";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
+const TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");
+
+interface DeviceTokens {
+  access_token?: string;
+  id_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+// Persist the freshly-issued provider tokens to a server-only file (0600) and
+// acknowledge the browser with just a status. The provider credentials never
+// leave the device: the configure route reads this file server-side on the
+// handoff path. This keeps access/refresh/id tokens off the plain-HTTP setup
+// AP hop the browser would otherwise relay them across.
+async function persistTokensAndAck(
+  provider: string,
+  tokens: DeviceTokens,
+): Promise<NextResponse> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = `${TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  await fs.writeFile(
+    tmpPath,
+    JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),
+    { mode: 0o600 },
+  );
+  await fs.rename(tmpPath, TOKENS_PATH);
+  return NextResponse.json({ status: "complete" });
+}
 
 interface StoredState {
   provider?: string;
@@ -65,8 +94,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
   // If polling returns tokens directly
   if (pollData.access_token) {
     await fs.unlink(STATE_PATH).catch(() => {});
-    return NextResponse.json({
-      status: "complete",
+    return persistTokensAndAck(stored.provider ?? "openai", {
       access_token: pollData.access_token,
       id_token: pollData.id_token,
       refresh_token: pollData.refresh_token,
@@ -130,8 +158,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
     // format" on every message — and poisoning even the API-key OpenAI path,
     // since ~/.codex/auth.json is shared and rebuilt on every gateway start.
     await fs.unlink(STATE_PATH).catch(() => {});
-    return NextResponse.json({
-      status: "complete",
+    return persistTokensAndAck(stored.provider ?? "openai", {
       access_token: tokenData.access_token,
       id_token: tokenData.id_token,
       refresh_token: tokenData.refresh_token,

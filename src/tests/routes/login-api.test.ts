@@ -10,6 +10,7 @@ vi.mock("@/lib/auth", () => ({
   verifyPassword: vi.fn(),
   createSessionCookie: vi.fn().mockReturnValue("session.cookie"),
   getSessionSigningSecret: vi.fn().mockResolvedValue("secret"),
+  getSessionGeneration: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/lib/login-rate-limit", () => ({
@@ -18,6 +19,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
   recordSuccess: vi.fn(),
   // No-op so tests don't sleep 300 ms each.
   padResponseTime: vi.fn().mockResolvedValue(undefined),
+  SHARED_BUCKET_MAX_LOCK_MS: 300000,
 }));
 
 import * as config from "@/lib/config-store";
@@ -77,7 +79,7 @@ describe("/login-api", () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(401);
-    expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5");
+    expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5", { maxLockMs: undefined });
     expect(mockPadResponseTime).toHaveBeenCalled();
   });
 
@@ -117,7 +119,7 @@ describe("/login-api", () => {
       body: JSON.stringify({ password: "wrong", duration: 43200 }),
     });
     await POST(req);
-    expect(mockRecordFailure).toHaveBeenCalledWith("global");
+    expect(mockRecordFailure).toHaveBeenCalledWith("global", { maxLockMs: 300000 });
   });
 
   it("rejects missing password", async () => {

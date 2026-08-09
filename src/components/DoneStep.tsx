@@ -493,17 +493,20 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
     setDeviceSaving(false);
   };
 
-  const saveDeviceToken = async (tokenData: { access_token: string; refresh_token?: string; expires_in?: number }) => {
+  const saveDeviceToken = async () => {
     aiSaveControllerRef.current?.abort();
     const controller = new AbortController();
     aiSaveControllerRef.current = controller;
 
     setDeviceSaving(true);
     try {
+      // Server-side OAuth handoff: device-poll persisted the provider tokens
+      // to a server-only file, so no token fields leave the browser — the
+      // configure route reads them there via `oauthHandoff`.
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: aiProvider, apiKey: tokenData.access_token, authMode: "subscription", refreshToken: tokenData.refresh_token, expiresIn: tokenData.expires_in }),
+        body: JSON.stringify({ provider: aiProvider, authMode: "subscription", oauthHandoff: true }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -552,9 +555,9 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
       }
       const data = await res.json();
       if (controller.signal.aborted) return;
-      if (data.status === "complete" && data.access_token) {
+      if (data.status === "complete") {
         stopDevicePolling();
-        await saveDeviceToken(data);
+        await saveDeviceToken();
         return;
       }
       if (data.status === "pending") {
