@@ -611,7 +611,11 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("handles missing auth profiles file", async () => {
-    mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+    // A genuinely absent file (ENOENT) → treated as no profiles yet. Real fs
+    // errors carry a `.code`; a message-only Error would now (correctly) be
+    // treated as an unexpected read failure and fail closed.
+    const enoent = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+    mockFs.readFile.mockRejectedValue(enoent);
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
