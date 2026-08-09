@@ -17,6 +17,7 @@ vi.mock("fs/promises", () => ({
     chown: vi.fn(),
     mkdir: vi.fn(),
     rm: vi.fn(),
+    unlink: vi.fn(),
   },
 }));
 
@@ -174,6 +175,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.chown.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.rm.mockResolvedValue(undefined);
+    mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockReadOpenClawConfig.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -943,5 +945,141 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
+  });
+
+  // SEC-12: server-side OAuth token handoff. On the handoff path the browser
+  // posts no provider tokens — configure reads them from the 0600 file that
+  // device-poll wrote, consumes it, and proceeds as if they were in the body.
+  it("reads OAuth tokens from the server-side handoff file and consumes it", async () => {
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // The handoff file is deleted after read so tokens don't linger on disk.
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+    // The access token from the file lands in the oauth auth profile.
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.profiles["codex:default"].access).toBe("access.token.jwt");
+    expect(written.profiles["codex:default"].id).toBe("id.token.jwt");
+  });
+
+  it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {
+    // The file says openai (→ codex profile); the body claims google. The
+    // tokens were minted for openai, so the file's provider must win — binding
+    // them under google:default would be wrong.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "google",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    expect(res.status).toBe(200);
+    // Profile is codex:default (openai subscription), NOT google:default.
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.profiles["codex:default"]).toBeDefined();
+    expect(written.profiles["google:default"]).toBeUndefined();
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((c) => c.startsWith("config set agents.defaults.model.primary codex/"))).toBe(true);
+  });
+
+  it("keeps the handoff file for a retry when the gateway restart fails", async () => {
+    mockRestartGateway.mockRejectedValue(new Error("gateway down"));
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    // A transient 5xx must NOT consume the tokens — the client can retry within
+    // the TTL rather than being forced through a full re-auth.
+    expect(res.status).toBe(502);
+    expect(mockFs.unlink).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the handoff file is missing on the subscription handoff path", async () => {
+    mockFs.readFile.mockImplementation(async (file) => {
+      if (String(file).endsWith("oauth-device-tokens.json")) {
+        throw new Error("ENOENT");
+      }
+      return JSON.stringify({ version: 1, profiles: {} });
+    });
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("No pending OAuth tokens");
+  });
+
+  it("returns 400 when the handoff tokens are expired", async () => {
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            createdAt: Date.now() - 20 * 60 * 1000, // 20 min ago > 15 min TTL
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
   });
 });

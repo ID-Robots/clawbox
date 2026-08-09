@@ -456,6 +456,64 @@ describe("middleware", () => {
     });
   });
 
+  describe("pre-auth sensitive-surface gate (setup window)", () => {
+    // SESSION_SECRET is provisioned but setup_complete is NOT yet written — the
+    // pre-setup wizard window. Sensitive desktop/agent backends must stay gated
+    // here (they play no part in onboarding), even though the wizard's own
+    // routes pass. Regression guard for the pre-auth reachability multiplier.
+    it.each([
+      "/setup-api/files/clawbox/data/.session-secret",
+      "/setup-api/files",
+      "/setup-api/browser/navigate",
+      "/setup-api/code/project/init",
+      "/setup-api/code-server/start",
+      "/setup-api/webapps",
+      "/setup-api/vnc/status",
+      "/setup-api/terminal",
+      "/setup-api/clawkeep/restore",
+      "/setup-api/tunnel/enable",
+      "/setup-api/apps/install",
+      "/setup-api/apps/uninstall",
+      "/setup-api/gateway/ws-config",
+      "/setup-api/gateway",
+      "/setup-api/gateway/", // trailing slash must not dodge the exact match
+    ])("gates sensitive %s during the setup window", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest(p));
+      // Falls through to the session gate → JSON 401 (no valid cookie).
+      expect(response.status).toBe(401);
+    });
+
+    it("still allows /setup-api/gateway/health during the setup window", async () => {
+      // The wizard polls gateway readiness before setup_complete is written, so
+      // health must stay open even though the sibling ws-config / SPA proxy are
+      // gated.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api/gateway/health"));
+      expect(response.status).toBe(200);
+    });
+
+    it("allows a sensitive route once a valid session is presented", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/setup-api/files"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      const response = await mod.middleware(req);
+      expect(response.status).toBe(200);
+    });
+  });
+
   describe("config export", () => {
     it("exports matcher config", async () => {
       const mod = await import("@/middleware");

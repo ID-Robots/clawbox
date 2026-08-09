@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { getAll, setMany } from "@/lib/config-store";
+import { DATA_DIR, getAll, setMany } from "@/lib/config-store";
 import {
   restartGateway,
   findOpenclawBin,
@@ -437,11 +437,60 @@ export async function POST(request: Request) {
       scope?: ConfigureScope;
       clawaiTier?: string;
       model?: string;
+      oauthHandoff?: boolean;
     };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    // Server-side OAuth token handoff: on the subscription handoff path the
+    // browser posts no provider tokens — device-poll persisted them to a
+    // server-only file. Read them here and splice them into the body so
+    // everything downstream (validation + persistence) is unchanged. The file
+    // is only consumed (unlinked) on the happy path, right before success, so a
+    // transient failure downstream leaves it readable for a retry within its
+    // 15-minute TTL rather than forcing a full re-auth.
+    let pendingHandoffTokensPath: string | null = null;
+    if (body.authMode === "subscription" && body.oauthHandoff) {
+      const tokensPath = path.join(DATA_DIR, "oauth-device-tokens.json");
+      let handoff: {
+        provider?: string;
+        access_token?: string;
+        id_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        createdAt?: number;
+      };
+      try {
+        handoff = JSON.parse(await fs.readFile(tokensPath, "utf-8"));
+      } catch {
+        return NextResponse.json(
+          { error: "No pending OAuth tokens. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      if (
+        !handoff.access_token ||
+        (handoff.createdAt && Date.now() - handoff.createdAt > 15 * 60 * 1000)
+      ) {
+        // Stale/invalid credential material — consume it so it can't linger.
+        await fs.unlink(tokensPath).catch(() => {});
+        return NextResponse.json(
+          { error: "OAuth tokens missing or expired. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      // Trust the provider recorded alongside the tokens over the request body:
+      // the tokens were minted for that provider, so binding them to a
+      // different profile (from a mismatched body) would be wrong.
+      if (handoff.provider) body.provider = handoff.provider;
+      body.apiKey = handoff.access_token;
+      body.idToken = handoff.id_token;
+      body.refreshToken = handoff.refresh_token;
+      body.expiresIn = handoff.expires_in;
+      pendingHandoffTokensPath = tokensPath;
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
@@ -1039,6 +1088,13 @@ export async function POST(request: Request) {
         { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
         { status: 502 },
       );
+    }
+
+    // Configuration fully applied — now consume the OAuth handoff file (if any).
+    // Deferring the unlink to here means a transient failure above returned
+    // early with the file intact, so the client can retry within the TTL.
+    if (pendingHandoffTokensPath) {
+      await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
     return NextResponse.json({ success: true });

@@ -5,6 +5,9 @@ vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),
     unlink: vi.fn(),
+    writeFile: vi.fn(),
+    rename: vi.fn(),
+    mkdir: vi.fn(),
   },
 }));
 
@@ -38,6 +41,9 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     mockFs.readFile.mockResolvedValue(JSON.stringify(validState));
     mockFs.unlink.mockResolvedValue();
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.rename.mockResolvedValue();
+    mockFs.mkdir.mockResolvedValue(undefined);
 
     vi.stubGlobal("fetch", vi.fn());
 
@@ -117,7 +123,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(body.error).toContain("Missing device_id");
   });
 
-  it("returns complete with tokens on success", async () => {
+  it("persists tokens server-side and returns complete without tokens in the body", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({
@@ -133,8 +139,16 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
-    expect(body.access_token).toBe("test-access-token");
-    expect(body.refresh_token).toBe("test-refresh-token");
+    // SEC-12: the browser gets only a status — provider tokens never travel
+    // back over the plain-HTTP setup AP.
+    expect(body.access_token).toBeUndefined();
+    expect(body.refresh_token).toBeUndefined();
+    // Tokens are written to the server-only handoff file instead.
+    expect(mockFs.writeFile).toHaveBeenCalled();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("test-access-token");
+    expect(written.refresh_token).toBe("test-refresh-token");
+    expect(written.provider).toBe("openai");
     expect(mockFs.unlink).toHaveBeenCalled();
   });
 
@@ -164,7 +178,9 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
-    expect(body.access_token).toBe("exchanged-token");
+    expect(body.access_token).toBeUndefined();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("exchanged-token");
   });
 
   it("returns 502 when no code_verifier in response", async () => {
@@ -233,9 +249,13 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
     // Codex needs the JWTs, not an exchanged sk- key: id_token is preserved and
-    // there is no third (id_token → api-key) fetch.
-    expect(body.access_token).toBe("first-token");
-    expect(body.id_token).toBe("test-id-token");
+    // there is no third (id_token → api-key) fetch. The tokens are persisted
+    // to the server-only handoff file, not returned to the browser.
+    expect(body.access_token).toBeUndefined();
+    expect(body.id_token).toBeUndefined();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("first-token");
+    expect(written.id_token).toBe("test-id-token");
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
