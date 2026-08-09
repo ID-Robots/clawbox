@@ -28,8 +28,16 @@ function readKV(): Record<string, string> {
 function writeKV(data: Record<string, string>): void {
   ensureDir();
   const tmp = KV_PATH + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data));
+  // 0o600: kv is an untyped string store (callers may stash anything), so it
+  // should not default to world-readable. Written on the tmp file before the
+  // atomic rename so the final file is never briefly 0644.
+  fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
   fs.renameSync(tmp, KV_PATH);
+  try {
+    fs.chmodSync(KV_PATH, 0o600);
+  } catch {
+    // best-effort
+  }
 }
 
 export function kvGet(key: string): string | null {

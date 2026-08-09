@@ -21,9 +21,14 @@ const IS_DEV = process.env.NODE_ENV === "development";
 //
 //   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.ts)
 //   /novnc-ws     → noVNC / websockify for the remote desktop app
+// `requireAuth` gates the raw single-service sockets (terminal PTY, noVNC) on a
+// valid ClawBox session cookie. WebSocket upgrades never pass through Next.js
+// middleware, so without this check any LAN client could reach the unauth PTY /
+// VNC services straight through the port-80 proxy (SEC-1). The gateway route
+// (default) is intentionally NOT gated here — it enforces its own auth token.
 const UPGRADE_ROUTES = [
-  { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true },
+  { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true },
 ];
 
 function resolveUpgradeTarget(reqUrl) {
@@ -34,10 +39,48 @@ function resolveUpgradeTarget(reqUrl) {
       const rewritten = r.stripPrefix
         ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped)
         : reqUrl;
-      return { targetPort: r.targetPort, url: rewritten };
+      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth };
     }
   }
-  return { targetPort: GATEWAY_PORT, url: reqUrl };
+  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
+}
+
+// Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
+// src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
+// base64url payload carries { exp }). Mirrored here in CJS because upgrades
+// bypass Next.js. Fails closed when the secret is absent.
+function hasValidSession(req) {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) return false;
+  const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.cookie || "");
+  if (!m) return false;
+  const cookie = decodeURIComponent(m[1]);
+  const dot = cookie.indexOf(".");
+  if (dot < 0) return false;
+  const payload = cookie.slice(0, dot);
+  const sig = cookie.slice(dot + 1);
+  if (!payload || !sig) return false;
+  try {
+    const expected = require("crypto").createHmac("sha256", secret).update(payload).digest("hex");
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length) return false;
+    if (!require("crypto").timingSafeEqual(sigBuf, expBuf)) return false;
+    const decoded = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    const data = JSON.parse(decoded);
+    return typeof data.exp === "number" && data.exp > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
+}
+
+function rejectUpgrade(socket) {
+  try {
+    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+  } catch {
+    // socket already gone
+  }
+  socket.destroy();
 }
 
 // ─── Session secret ───
@@ -122,7 +165,10 @@ try {
 // to 127.0.0.1:<port> since upstream does need the port for Host routing.
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
-    const { targetPort, url } = resolveUpgradeTarget(req.url);
+    const { targetPort, url, requireAuth } = resolveUpgradeTarget(req.url);
+    if (requireAuth && !hasValidSession(req)) {
+      return rejectUpgrade(socket);
+    }
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const hostHeader = `127.0.0.1:${targetPort}`;
       const originHeader = "http://127.0.0.1";
@@ -174,6 +220,10 @@ function startHttpsServer(httpServer) {
     const wss = new WebSocket.Server({ noServer: true });
 
     httpsServer.on("upgrade", (req, socket, head) => {
+      const gate = resolveUpgradeTarget(req.url || "/");
+      if (gate.requireAuth && !hasValidSession(req)) {
+        return rejectUpgrade(socket);
+      }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const { targetPort, url } = resolveUpgradeTarget(req.url || "/");
         const upstreamUrl = `ws://127.0.0.1:${targetPort}${url}`;

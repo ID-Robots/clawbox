@@ -105,10 +105,12 @@ describe("kv-store", () => {
 
       kvStore.kvSet("atomic", "test");
 
-      // Should write to .tmp file first
+      // Should write to .tmp file first, with a 0600 mode (secrets may be stashed
+      // in kv; the final file must not be world-readable).
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
         KV_PATH + ".tmp",
         expect.any(String),
+        { mode: 0o600 },
       );
       // Then rename to the actual path
       expect(renameSyncSpy).toHaveBeenCalledWith(KV_PATH + ".tmp", KV_PATH);
