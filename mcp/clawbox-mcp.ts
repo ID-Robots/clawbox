@@ -63,7 +63,21 @@ function isPrivateIp(ip: string): boolean {
   if (/^fe[89ab]/.test(lc)) return true; // fe80::/10 link-local (fe80–febf)
   if (lc.startsWith("fc") || lc.startsWith("fd")) return true; // fc00::/7 unique-local
   if (lc.startsWith("ff")) return true; // ff00::/8 multicast
-  if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7)); // IPv4-mapped
+  if (lc.startsWith("::ffff:")) {
+    // IPv4-mapped IPv6. WHATWG URL normalizes these to the HEX form
+    // (::ffff:7f00:1), not dotted (::ffff:127.0.0.1), so a plain recurse on the
+    // suffix misses loopback/private targets. Canonicalize both forms to a
+    // dotted IPv4 and evaluate that; fail closed on any unrecognized ::ffff:
+    // shape (a legitimate mapped address always fits one of the two).
+    const mapped = lc.slice(7);
+    if (net.isIPv4(mapped)) return isPrivateIp(mapped);
+    const hx = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
+    if (hx) {
+      const hi = parseInt(hx[1], 16), lo = parseInt(hx[2], 16);
+      return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    }
+    return true;
+  }
   return false;
 }
 
@@ -257,9 +271,29 @@ function runShell(
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-    child.on("close", (code: number | null) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
+    // Cap accumulated output so a high-volume command (e.g. `base64 /dev/urandom`)
+    // can't grow these strings until the MCP process OOM-crashes and takes every
+    // agent tool down with it. Once a stream hits the cap we stop appending and
+    // SIGKILL the child (mirrors the spawnSync callers' maxBuffer discipline).
+    const MAX_OUTPUT = 10 * 1024 * 1024; // 10 MB per stream
+    let truncated = false;
+    const capReached = () => stdout.length >= MAX_OUTPUT || stderr.length >= MAX_OUTPUT;
+    child.stdout.on("data", (d: Buffer) => {
+      if (stdout.length < MAX_OUTPUT) {
+        stdout += d.toString();
+        if (capReached()) { truncated = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }
+      }
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      if (stderr.length < MAX_OUTPUT) {
+        stderr += d.toString();
+        if (capReached()) { truncated = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }
+      }
+    });
+    child.on("close", (code: number | null) => {
+      if (truncated) stderr += "\n[output truncated: exceeded 10 MB limit]";
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
     child.on("error", (err: Error) => resolve({ stdout, stderr: err.message, exitCode: 1 }));
   });
 }
@@ -380,9 +414,24 @@ function spawnBackground(command: string, timeoutMs: number, desc = "", workDir 
     env: { ...process.env, HOME },
   });
   task.process = child;
-  child.stdout.on("data", (d: Buffer) => { task.stdout += d.toString(); });
-  child.stderr.on("data", (d: Buffer) => { task.stderr += d.toString(); });
+  // Cap accumulated output (these buffers also persist in bgTasks for up to an
+  // hour) so a high-volume background command can't OOM-crash the MCP process.
+  const MAX_BG_OUTPUT = 10 * 1024 * 1024; // 10 MB per stream
+  let bgTruncated = false;
+  child.stdout.on("data", (d: Buffer) => {
+    if (task.stdout.length < MAX_BG_OUTPUT) {
+      task.stdout += d.toString();
+      if (task.stdout.length >= MAX_BG_OUTPUT) { bgTruncated = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }
+    }
+  });
+  child.stderr.on("data", (d: Buffer) => {
+    if (task.stderr.length < MAX_BG_OUTPUT) {
+      task.stderr += d.toString();
+      if (task.stderr.length >= MAX_BG_OUTPUT) { bgTruncated = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }
+    }
+  });
   child.on("close", (code: number | null) => {
+    if (bgTruncated) task.stderr += "\n[output truncated: exceeded 10 MB limit]";
     task.exitCode = code ?? 1;
     task.status = code === 0 ? "completed" : "failed";
     task.completedAt = Date.now();
@@ -1096,6 +1145,11 @@ tool(
   { path: z.string().optional().describe("Directory path (default: /home/clawbox/clawbox)") },
   async ({ path: dirPath }) => {
     const absPath = resolvePath(dirPath || DEFAULT_CWD);
+    // Same secret-store denylist read_file/write_file/edit_file apply, so
+    // listing can't enumerate the device's credential dirs (.ssh, .openclaw…).
+    if (isBlockedPath(absPath)) {
+      return { content: [{ type: "text", text: `Cannot list device path: ${dirPath || DEFAULT_CWD}` }], isError: true };
+    }
     const st = await stat(absPath).catch(() => null);
     if (!st || !st.isDirectory()) {
       return { content: [{ type: "text", text: `Not a directory: ${dirPath || DEFAULT_CWD}` }], isError: true };
@@ -1129,6 +1183,11 @@ Use this for finding files by name. For searching file *contents*, use grep.`,
   },
   async ({ pattern, path: searchPath }) => {
     const dir = resolvePath(searchPath || DEFAULT_CWD);
+    // Don't let glob enumerate secret-store paths (it would leak credential
+    // file names the read/write/edit tools already refuse).
+    if (isBlockedPath(dir)) {
+      return { content: [{ type: "text", text: `Cannot search device path: ${searchPath || DEFAULT_CWD}` }], isError: true };
+    }
 
     const hasSlash = pattern.includes("/");
     const findArg = hasSlash ? `-path ${shellEscape(`*/${pattern}`)}` : `-name ${shellEscape(pattern)}`;
@@ -1205,6 +1264,12 @@ Supports regex, context lines, case-insensitive, multiline, file type filtering.
   },
   async ({ pattern, path: searchPath, include, type: fileType, output_mode, before_context, after_context, context, case_sensitive, max_results, offset, multiline }) => {
     const dir = resolvePath(searchPath || DEFAULT_CWD);
+    // grep is a first-class file-reading tool; without this it would dump the
+    // contents of the very credential files read_file refuses (SSH keys, the
+    // MCP token, auth-profiles.json). Same denylist as the other file tools.
+    if (isBlockedPath(dir)) {
+      return { content: [{ type: "text", text: `Cannot search device path: ${searchPath || DEFAULT_CWD}` }], isError: true };
+    }
     const limit = max_results ?? GREP_RESULT_LIMIT;
     const skip = offset ?? 0;
     const mode = output_mode || "content";
