@@ -188,6 +188,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Which agent harness backs this chat. OpenClaw uses the gateway WebSocket;
+  // Hermes uses the /setup-api/hermes/chat HTTP route (hermes -z, persistent
+  // session). Loaded once on mount; connect() is gated on `harnessLoaded` so we
+  // never open the OpenClaw WS in Hermes mode.
+  const harnessRef = useRef<'openclaw' | 'hermes'>('openclaw')
+  const [harnessLoaded, setHarnessLoaded] = useState(false)
+  // Reactive copy of the harness for rendering (the ref drives connect/send at
+  // call-time; this drives which header controls show).
+  const [harnessMode, setHarnessMode] = useState<'openclaw' | 'hermes'>('openclaw')
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -487,6 +496,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const connect = useCallback(async () => {
+    // Hermes mode: no gateway WebSocket. Mark connected so the composer is
+    // enabled; startRun routes sends to /setup-api/hermes/chat instead.
+    if (harnessRef.current === 'hermes') {
+      setStatus('connected')
+      return
+    }
     // Cancel any pending retry / auth-backoff timer so an explicit reconnect
     // (e.g. the "Try again" button) can't race with a previously scheduled one
     // and fire a duplicate connect later.
@@ -1019,6 +1034,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
+  // Hermes send: POST the turn to the HTTP route (hermes -z keeps a persistent
+  // session, so multi-turn memory works without threading context). No
+  // streaming yet — the reply lands whole. Attachments are OpenClaw-only for now.
+  // Holds the in-flight Hermes request so Stop can abort it (which aborts the
+  // fetch → the route sees request.signal abort → kills the `hermes` process).
+  const hermesAbortRef = useRef<AbortController | null>(null)
+  const dispatchHermes = useCallback(async (text: string) => {
+    const controller = new AbortController()
+    hermesAbortRef.current = controller
+    try {
+      const res = await fetch('/setup-api/hermes/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+        signal: controller.signal,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
+      setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
+    } catch (err) {
+      // A user-initiated Stop shows nothing, not an error line.
+      if ((err as Error)?.name !== 'AbortError') {
+        setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      }
+    } finally {
+      hermesAbortRef.current = null
+      setSending(false)
+      setStreaming('')
+      runIdRef.current = null
+    }
+  }, [])
+
   const startRun = useCallback((text: string, sendAttachments: { name: string; path: string; type: string }[]) => {
     const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
@@ -1027,12 +1074,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setStreaming('')
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
+    if (harnessRef.current === 'hermes') {
+      void dispatchHermes(text)
+      return
+    }
     if (status !== 'connected') {
       pendingSendsRef.current.push({ text, attachments: sendAttachments, idempotencyKey })
       return
     }
     void dispatchSend(text, sendAttachments, idempotencyKey)
-  }, [status, dispatchSend])
+  }, [status, dispatchSend, dispatchHermes])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -1102,6 +1153,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Abort generation
   const abort = useCallback(async () => {
+    if (harnessRef.current === 'hermes') {
+      hermesAbortRef.current?.abort()
+      return
+    }
     try {
       await wsRequest('chat.abort', { sessionKey: sessionKeyRef.current })
     } catch {}
@@ -1199,13 +1254,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     await switchChatModel({ model: target.model, label: target.label })
   }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
-  // Pre-warm the gateway WebSocket on mount so opening chat is instant —
-  // the WS handshake happens silently while the user is still on the desktop.
-  // onClose's retry budget covers a dropped pre-warm; no need for the isOpen
-  // effect to also call connect().
+  // Resolve the active harness once, before connecting, so we never open the
+  // OpenClaw WS in Hermes mode.
   useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/setup-api/harness/active', { cache: 'no-store' })
+        const data = await res.json()
+        if (!cancelled && data?.active === 'hermes') {
+          harnessRef.current = 'hermes'
+          setHarnessMode('hermes')
+        }
+      } catch {
+        // default to openclaw
+      }
+      if (!cancelled) setHarnessLoaded(true)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Pre-warm the connection on mount so opening chat is instant. In OpenClaw
+  // mode this silently completes the gateway WS handshake; in Hermes mode
+  // connect() just marks connected (no WS). Gated on the harness resolving.
+  useEffect(() => {
+    if (!harnessLoaded) return
     connect()
-  }, [connect])
+  }, [connect, harnessLoaded])
 
   useEffect(() => {
     if (isOpen) {
@@ -1482,6 +1557,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           touchAction: 'none',
         }}>
         <div className="chat-header-pills">
+          {harnessMode === 'hermes' ? (
+            // Hermes manages its own provider/model config — the OpenClaw
+            // provider/model/reasoning pills don't apply, so show a plain label.
+            <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+          ) : (<>
           {chatModelState && (() => {
             const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
             const activeOption = chatModelState.options.find(o => o.id === activeId)
@@ -1606,6 +1686,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               popoverWidth={180}
             />
           )}
+          </>)}
         </div>
         <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (
@@ -1871,6 +1952,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
       }}>
+        {/* Hermes chat is text-only (the `hermes -z` CLI takes no attachments),
+            so hide the attach control there — otherwise a user could attach a
+            file that startRun silently drops on the Hermes path. */}
+        {harnessMode !== 'hermes' && (
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={status !== 'connected'}
@@ -1887,6 +1972,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
         </button>
+        )}
         <textarea
           ref={inputRef}
           value={input}
