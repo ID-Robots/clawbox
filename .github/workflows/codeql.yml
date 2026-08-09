@@ -41,9 +41,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          # security-extended adds higher-signal security queries on top of the
-          # default set without the noisier code-quality suite.
-          queries: security-extended
+          # Config file carries the security-extended query suite plus
+          # paths-ignore for non-runtime code (tests, CI scripts).
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
