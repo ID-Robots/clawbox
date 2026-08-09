@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { getAll, setMany } from "@/lib/config-store";
+import { DATA_DIR, getAll, setMany } from "@/lib/config-store";
 import {
   restartGateway,
   findOpenclawBin,
@@ -437,11 +437,49 @@ export async function POST(request: Request) {
       scope?: ConfigureScope;
       clawaiTier?: string;
       model?: string;
+      oauthHandoff?: boolean;
     };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    // Server-side OAuth token handoff: on the subscription handoff path the
+    // browser posts no provider tokens — device-poll persisted them to a
+    // server-only file. Read them here, consume the file, and splice them into
+    // the body so everything downstream (validation + persistence) is unchanged.
+    if (body.authMode === "subscription" && body.oauthHandoff) {
+      const tokensPath = path.join(DATA_DIR, "oauth-device-tokens.json");
+      let handoff: {
+        access_token?: string;
+        id_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        createdAt?: number;
+      };
+      try {
+        handoff = JSON.parse(await fs.readFile(tokensPath, "utf-8"));
+      } catch {
+        return NextResponse.json(
+          { error: "No pending OAuth tokens. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      await fs.unlink(tokensPath).catch(() => {});
+      if (
+        !handoff.access_token ||
+        (handoff.createdAt && Date.now() - handoff.createdAt > 15 * 60 * 1000)
+      ) {
+        return NextResponse.json(
+          { error: "OAuth tokens missing or expired. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      body.apiKey = handoff.access_token;
+      body.idToken = handoff.id_token;
+      body.refreshToken = handoff.refresh_token;
+      body.expiresIn = handoff.expires_in;
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
