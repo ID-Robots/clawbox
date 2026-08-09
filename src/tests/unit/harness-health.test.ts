@@ -2,11 +2,13 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 // harnessHealthy probes the harness's loopback server and, for hermes, falls
 // back to the CLI binary. Mock fetch + fs so we can drive both paths.
-vi.mock("fs", () => ({
-  default: { accessSync: vi.fn() },
-  accessSync: vi.fn(),
-  constants: { X_OK: 1 },
-}));
+vi.mock("fs", () => {
+  const accessSync = vi.fn();
+  const constants = { X_OK: 1 };
+  // harness.ts does `import fs from "fs"` then `fs.accessSync` + `fs.constants`,
+  // so the default export must carry both.
+  return { default: { accessSync, constants }, accessSync, constants };
+});
 
 import fs from "fs";
 import { harnessHealthy } from "@/lib/harness";
