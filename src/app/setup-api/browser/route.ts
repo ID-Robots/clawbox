@@ -30,7 +30,20 @@ function isPrivateIp(ip: string): boolean {
   // fe80::/10 link-local spans fe80–febf, not just the fe80 prefix; fc00::/7
   // unique-local is fc/fd. ff00::/8 is multicast.
   if (/^fe[89ab]/.test(lc) || lc.startsWith("fc") || lc.startsWith("fd") || lc.startsWith("ff")) return true;
-  if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7));
+  if (lc.startsWith("::ffff:")) {
+    // IPv4-mapped IPv6. WHATWG URL normalizes these to the HEX form
+    // (::ffff:7f00:1), so a plain recurse on the suffix (expecting dotted
+    // ::ffff:127.0.0.1) misses loopback/private targets. Canonicalize both
+    // forms to dotted IPv4; fail closed on any unrecognized ::ffff: shape.
+    const mapped = lc.slice(7);
+    if (net.isIPv4(mapped)) return isPrivateIp(mapped);
+    const hx = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
+    if (hx) {
+      const hi = parseInt(hx[1], 16), lo = parseInt(hx[2], 16);
+      return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    }
+    return true;
+  }
   return false;
 }
 
@@ -74,6 +87,41 @@ async function validateNavUrl(url: string): Promise<string | null> {
     return "Host did not resolve";
   }
   return null;
+}
+
+// validateNavUrl only vets the URL the caller passes; page.goto then follows
+// HTTP 3xx redirects and re-resolves DNS itself, so a public URL that 302s to
+// (or DNS-rebinds onto) an internal host would still be reached and screenshot.
+// Install a request-level guard on the page that re-validates every top-level
+// navigation — including each redirect hop — against the same private-address
+// rules, aborting before the browser connects. Idempotent per page.
+type GuardablePage = {
+  route: (glob: string, handler: (route: {
+    request: () => { url: () => string; isNavigationRequest: () => boolean };
+    abort: (reason?: string) => Promise<void>;
+    continue: () => Promise<void>;
+  }) => void | Promise<void>) => Promise<void>;
+  __navGuardInstalled?: boolean;
+};
+async function installNavGuard(page: GuardablePage): Promise<void> {
+  if (page.__navGuardInstalled) return;
+  page.__navGuardInstalled = true;
+  await page.route("**/*", async (route) => {
+    const req = route.request();
+    // Only pay the DNS-resolution cost on top-level navigations — the requests
+    // whose rendered result gets screenshot and where redirect/rebind SSRF
+    // lands. Subresources continue unblocked.
+    if (!req.isNavigationRequest()) {
+      await route.continue();
+      return;
+    }
+    const err = await validateNavUrl(req.url());
+    if (err) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
 }
 
 // Playwright key name mapping (browser KeyboardEvent.key → Playwright key names)
@@ -227,6 +275,7 @@ export async function POST(req: Request) {
       }
 
       const page = context.pages().at(-1) ?? await context.newPage();
+      await installNavGuard(page as unknown as GuardablePage);
       await page.bringToFront().catch(() => {});
 
       const { url } = body;
@@ -274,6 +323,7 @@ export async function POST(req: Request) {
       case "navigate": {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
+        await installNavGuard(page as unknown as GuardablePage);
         const navErr = await validateNavUrl(url);
         if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
