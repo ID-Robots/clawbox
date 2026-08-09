@@ -130,7 +130,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const stat = fs.statSync(abs);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EACCES" || code === "EPERM") {
+      return NextResponse.json({ error: "Permission denied" }, { status: 403 });
+    }
+    return NextResponse.json({ error: "Failed to read directory" }, { status: 500 });
+  }
   if (!stat.isDirectory()) return NextResponse.json({ error: "Not a directory" }, { status: 400 });
 
   // Recursive search mode: walk the tree from `abs` and return matches with
@@ -146,7 +155,18 @@ export async function GET(req: NextRequest) {
   // Return everything including dotfiles. The client (FilesApp) hides
   // them by default and toggles visibility via the visibility/visibility_off
   // button — filtering server-side would defeat that toggle.
-  const entries = fs.readdirSync(abs);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(abs);
+  } catch (err) {
+    // A 700 / root-owned directory yields EACCES from scandir — return a clean
+    // 403 instead of a 500 that leaks the absolute path in the syscall string.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EACCES" || code === "EPERM") {
+      return NextResponse.json({ error: "Permission denied" }, { status: 403 });
+    }
+    return NextResponse.json({ error: "Failed to read directory" }, { status: 500 });
+  }
   const files = entries
     .map((name) => {
       try {

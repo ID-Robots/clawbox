@@ -423,8 +423,8 @@ export default function FilesApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "mkdir", name }),
     });
-    const data = await res.json();
-    if (!res.ok) { setStatusMsg(`Error: ${data.error}`); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
     setStatusMsg("Folder created");
     setTimeout(() => setStatusMsg(null), 2000);
     load(currentPath);
@@ -439,8 +439,8 @@ export default function FilesApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ newName }),
     });
-    const data = await res.json();
-    if (!res.ok) { setStatusMsg(`Error: ${data.error}`); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
     setStatusMsg("Renamed");
     setTimeout(() => setStatusMsg(null), 2000);
     refreshView();
@@ -451,8 +451,8 @@ export default function FilesApp() {
   const deleteEntry = async (entry: FileEntry) => {
     const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
     const res = await fetch(url, { method: "DELETE" });
-    const data = await res.json();
-    if (!res.ok) { setStatusMsg(`Error: ${data.error}`); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
     setStatusMsg("Deleted");
     setTimeout(() => setStatusMsg(null), 2000);
     refreshView();
