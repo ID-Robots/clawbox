@@ -1952,8 +1952,10 @@ step_vnc_install() {
   # --privileged container. Only the GDM-mirror path is shortcut via
   # CLAWBOX_VNC_MODE=virtual, which start-vnc.sh already honors.
   wait_for_apt
-  # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, and a lightweight WM
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel
+  # Install x11vnc, Xvfb (virtual framebuffer fallback), websockify, a lightweight
+  # WM, and xclip (the VNC clipboard bridge — setup-api/vnc/clipboard shells out
+  # to it; without it the paste modal 503s).
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel xclip
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"

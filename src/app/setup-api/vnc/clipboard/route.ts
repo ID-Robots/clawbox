@@ -33,6 +33,20 @@ interface XclipResult {
   code: number;
 }
 
+// `xclip` may not be installed (or the guest X display may be absent). spawn
+// then fails with ENOENT — surface a clean 503 the UI can show ("clipboard
+// bridge unavailable") instead of leaking a raw "spawn xclip ENOENT" 500.
+function unavailableResponse(err: unknown): NextResponse | null {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === "ENOENT") {
+    return NextResponse.json(
+      { error: "Clipboard bridge unavailable: xclip is not installed on this device.", unavailable: true },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  return null;
+}
+
 function runXclip(args: string[], display: string, input?: string): Promise<XclipResult> {
   return new Promise((resolve, reject) => {
     const isWrite = input !== undefined;
@@ -116,7 +130,7 @@ export async function GET() {
     }
     return NextResponse.json({ text: stdout }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
-    return NextResponse.json(
+    return unavailableResponse(err) ?? NextResponse.json(
       { error: err instanceof Error ? err.message : "xclip read failed" },
       { status: 500 },
     );
@@ -163,7 +177,7 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
-    return NextResponse.json(
+    return unavailableResponse(err) ?? NextResponse.json(
       { error: err instanceof Error ? err.message : "xclip write failed" },
       { status: 500 },
     );
