@@ -57,7 +57,7 @@ export default function HarnessPicker() {
         setSwitching(null);
       }
     },
-    [switching, status, load],
+    [switching, status],
   );
 
   return (

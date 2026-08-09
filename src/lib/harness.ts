@@ -13,7 +13,9 @@ import { get, set } from "@/lib/config-store";
 
 export type Harness = "openclaw" | "hermes";
 
-const HERMES_BIN =
+// Where the Hermes CLI lives — the single source of truth (the chat route
+// imports this rather than re-deriving it).
+export const HERMES_BIN =
   process.env.HERMES_BIN || path.join(process.env.HOME || "/home/clawbox", ".local", "bin", "hermes");
 
 export const HARNESS_CONFIG_KEY = "active_harness";
@@ -64,12 +66,14 @@ export async function setActiveHarness(harness: Harness): Promise<void> {
  * doesn't stall the status route.
  */
 export async function harnessHealthy(harness: Harness): Promise<boolean> {
-  // Prefer a live server probe (any HTTP response = the process is up).
+  // Prefer a live server probe: any HTTP response means the process is up.
   try {
     const res = await fetch(`${HARNESSES[harness].baseUrl}/`, {
       signal: AbortSignal.timeout(2500),
     });
-    if (res.status > 0) return true;
+    // Drain the body we don't read so undici frees the pooled socket now.
+    res.body?.cancel();
+    return true;
   } catch {
     // fall through
   }

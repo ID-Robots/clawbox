@@ -1243,7 +1243,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     let cancelled = false
     void (async () => {
       try {
-        const res = await fetch('/setup-api/harness/status', { cache: 'no-store' })
+        const res = await fetch('/setup-api/harness/active', { cache: 'no-store' })
         const data = await res.json()
         if (!cancelled && data?.active === 'hermes') harnessRef.current = 'hermes'
       } catch {

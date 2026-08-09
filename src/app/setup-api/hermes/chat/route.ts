@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
+import { HERMES_BIN } from "@/lib/harness";
 
 // Chat turn against the Hermes harness. Uses `hermes -z <message>` (one-shot),
 // which — verified on-device — reuses Hermes' persistent default session, so
@@ -14,7 +15,6 @@ import path from "path";
 // upgrade (the Hermes serve WS supports them).
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
-const HERMES_BIN = process.env.HERMES_BIN || path.join(HOME_DIR, ".local", "bin", "hermes");
 const HERMES_TIMEOUT_MS = 90_000;
 // Hermes uses `vendor/model` IDs (routed via its base_url, default OpenRouter).
 // ClawBox's chat model picker is OpenClaw-specific, so when the desktop chat
