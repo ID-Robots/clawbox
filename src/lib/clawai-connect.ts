@@ -30,6 +30,13 @@ export interface ClawAiConnectSession {
   verificationUrl?: string;
   error?: string | null;
   completedAt?: number;
+  /**
+   * When the session entered the `configuring` state. Used by the poll
+   * route to time out a session whose background configure never reported
+   * back (e.g. the process died mid gateway-restart), instead of leaving
+   * the UI polling `configuring` forever.
+   */
+  configuringStartedAt?: number;
 }
 
 const STATE_PATH = path.join(DATA_DIR, "clawai-connect-state.json");

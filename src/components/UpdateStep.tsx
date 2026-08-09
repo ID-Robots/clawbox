@@ -62,6 +62,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  // Bumped by the fetchError-branch "Retry" to re-run the status GET below.
+  // Retry must only re-check status — never kick off a full update+reboot.
+  const [statusReloadCount, setStatusReloadCount] = useState(0);
   // The update reboots the device at the "Updating ClawBox and restarting"
   // step. Once the server stops answering, hand off to the reconnecting overlay
   // so the user gets the same animated loop as a manual restart; it polls until
@@ -125,6 +128,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   useEffect(() => {
     const controller = new AbortController();
     async function init() {
+      setFetchError(false);
+      setLoading(true);
       try {
         const res = await fetch("/setup-api/update/status", {
           signal: controller.signal,
@@ -150,7 +155,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       controller.abort();
       stopPolling();
     };
-  }, [startPolling, stopPolling]);
+  }, [startPolling, stopPolling, statusReloadCount]);
 
   const triggerUpdate = async () => {
     actionControllerRef.current?.abort();
@@ -231,7 +236,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={triggerUpdate}
+              onClick={() => setStatusReloadCount((c) => c + 1)}
               className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
             >
               {t("retry")}

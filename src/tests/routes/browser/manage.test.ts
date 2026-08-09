@@ -20,6 +20,9 @@ vi.mock("fs/promises", () => ({
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn().mockResolvedValue({ tools: { profile: "full" } }),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
+  // enable/disable now route their config writes through this helper instead
+  // of shelling out directly; default it to a successful no-op.
+  runOpenclawConfigSet: vi.fn().mockResolvedValue({ stdout: "", stderr: "" }),
 }));
 
 vi.mock("@/lib/sqlite-store", () => ({

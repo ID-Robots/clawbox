@@ -6,7 +6,7 @@ import { promisify } from "util";
 import { constants as fsConstants } from "fs";
 import fs from "fs/promises";
 import path from "path";
-import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
+import { readConfig, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 
 const exec = promisify(execFile);
@@ -230,10 +230,9 @@ export async function POST(req: Request) {
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
 
-        const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 30000 });
-          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 30000 });
+          await runOpenclawConfigSet(["tools.profile", "full"]);
+          await runOpenclawConfigSet(["tools.web.search.enabled", "true", "--json"]);
           await persistBrowserEnabled(true);
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
@@ -255,9 +254,8 @@ export async function POST(req: Request) {
       }
 
       case "disable": {
-        const openclawBin = findOpenclawBin();
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 30000 });
+          await runOpenclawConfigSet(["tools.profile", "coding"]);
           await persistBrowserEnabled(false);
         } catch (err) {
           console.error("[browser] Failed to unset tools config:", err);

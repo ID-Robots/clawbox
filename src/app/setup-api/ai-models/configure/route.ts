@@ -1099,11 +1099,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (err) {
+    // Never surface the raw error: it can carry CLI internals and filesystem
+    // paths. Log it server-side for diagnosis and return a generic, actionable
+    // message (mirrors the sanitized gateway-restart branch above).
+    console.error("[configure] Failed to configure AI model:", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Failed to configure AI model",
-      },
+      { error: "Failed to configure AI model. Please check your credentials and try again." },
       { status: 500 }
     );
   }

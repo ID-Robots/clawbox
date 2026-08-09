@@ -44,7 +44,7 @@ export async function POST(req: Request) {
           "config", "set",
           `skills.entries.${appId}.enabled`,
           enabled ? "true" : "false",
-          "--strict-json",
+          "--json",
         ], {
           timeout: 10_000,
           env: { ...process.env, PATH: `${path.dirname(OPENCLAW_BIN)}:${process.env.PATH}` },
