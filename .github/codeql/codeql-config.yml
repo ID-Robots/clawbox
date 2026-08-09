@@ -1,0 +1,20 @@
+name: "ClawBox CodeQL config"
+
+# Keep the higher-signal security queries used by the workflow.
+queries:
+  - uses: security-extended
+
+# Exclude test code from security analysis. Test fixtures and unit/route
+# tests are not part of the device's attack surface — alerts there
+# (e.g. js/insecure-temporary-file across src/tests/**) are noise.
+#
+# NOTE: scripts/** is intentionally NOT excluded — it holds security-critical
+# runtime code (scripts/terminal-server.ts WebSocket server, browser launcher)
+# that must stay under CodeQL coverage. CI-only script alerts are dismissed
+# individually instead.
+paths-ignore:
+  - "src/tests/**"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.test.js"
+  - "**/*.test.mjs"
