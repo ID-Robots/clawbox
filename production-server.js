@@ -50,17 +50,20 @@ function resolveUpgradeTarget(reqUrl) {
 // base64url payload carries { exp }). Mirrored here in CJS because upgrades
 // bypass Next.js. Fails closed when the secret is absent.
 function hasValidSession(req) {
-  const secret = process.env.SESSION_SECRET;
-  if (!secret) return false;
-  const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.cookie || "");
-  if (!m) return false;
-  const cookie = decodeURIComponent(m[1]);
-  const dot = cookie.indexOf(".");
-  if (dot < 0) return false;
-  const payload = cookie.slice(0, dot);
-  const sig = cookie.slice(dot + 1);
-  if (!payload || !sig) return false;
+  // Fails closed on ANY error. This runs inside the 'upgrade' listener, so an
+  // uncaught throw here (e.g. `decodeURIComponent` on a malformed `%` cookie)
+  // would crash the whole server — hence the single all-encompassing try.
   try {
+    const secret = process.env.SESSION_SECRET;
+    if (!secret) return false;
+    const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.cookie || "");
+    if (!m) return false;
+    const cookie = decodeURIComponent(m[1]);
+    const dot = cookie.indexOf(".");
+    if (dot < 0) return false;
+    const payload = cookie.slice(0, dot);
+    const sig = cookie.slice(dot + 1);
+    if (!payload || !sig) return false;
     const expected = require("crypto").createHmac("sha256", secret).update(payload).digest("hex");
     const sigBuf = Buffer.from(sig);
     const expBuf = Buffer.from(expected);
@@ -225,7 +228,7 @@ function startHttpsServer(httpServer) {
         return rejectUpgrade(socket);
       }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
-        const { targetPort, url } = resolveUpgradeTarget(req.url || "/");
+        const { targetPort, url } = gate;
         const upstreamUrl = `ws://127.0.0.1:${targetPort}${url}`;
         const upstream = new WebSocket(upstreamUrl, {
           headers: {

@@ -21,14 +21,34 @@ function isPrivateIp(ip: string): boolean {
     if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
     if (p[0] === 192 && p[1] === 168) return true;
     if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64/10 CGNAT
     if (p[0] >= 224) return true;
     return false;
   }
   const lc = ip.toLowerCase();
   if (lc === "::1" || lc === "::") return true;
-  if (lc.startsWith("fe80") || lc.startsWith("fc") || lc.startsWith("fd")) return true;
+  // fe80::/10 link-local spans fe80–febf, not just the fe80 prefix; fc00::/7
+  // unique-local is fc/fd. ff00::/8 is multicast.
+  if (/^fe[89ab]/.test(lc) || lc.startsWith("fc") || lc.startsWith("fd") || lc.startsWith("ff")) return true;
   if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7));
   return false;
+}
+
+// getaddrinfo runs on the libuv threadpool (size 4 by default). A hostile or
+// dead resolver can hang each lookup for the OS timeout, and enough concurrent
+// nav requests would exhaust the pool and stall unrelated fs/crypto work. Cap
+// the wait so validateNavUrl fails closed instead of blocking indefinitely.
+const DNS_TIMEOUT_MS = 3000;
+async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("DNS lookup timed out")), DNS_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([dnsLookup(host, { all: true }), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Returns an error message if the URL is not safe to navigate to, else null. */
@@ -48,7 +68,7 @@ async function validateNavUrl(url: string): Promise<string | null> {
     return isPrivateIp(host) ? "Blocked internal address" : null;
   }
   try {
-    const results = await dnsLookup(host, { all: true });
+    const results = await lookupWithTimeout(host);
     if (results.some((r) => isPrivateIp(r.address))) return "Blocked internal address";
   } catch {
     return "Host did not resolve";

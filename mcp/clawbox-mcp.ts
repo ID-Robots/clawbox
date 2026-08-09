@@ -14,7 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
 import type { Dirent } from "fs";
-import { readFileSync } from "fs";
+import { readFileSync, realpathSync } from "fs";
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir, unlink } from "fs/promises";
 import { resolve, relative, dirname, extname, join, basename } from "path";
 import net from "net";
@@ -54,16 +54,21 @@ function isPrivateIp(ip: string): boolean {
     if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
     if (p[0] === 192 && p[1] === 168) return true;
     if (p[0] === 169 && p[1] === 254) return true; // link-local / cloud metadata
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64/10 CGNAT
     if (p[0] >= 224) return true; // multicast / reserved
     return false;
   }
   const lc = ip.toLowerCase();
   if (lc === "::1" || lc === "::") return true;
-  if (lc.startsWith("fe80")) return true; // link-local
-  if (lc.startsWith("fc") || lc.startsWith("fd")) return true; // unique-local
+  if (/^fe[89ab]/.test(lc)) return true; // fe80::/10 link-local (fe80–febf)
+  if (lc.startsWith("fc") || lc.startsWith("fd")) return true; // fc00::/7 unique-local
+  if (lc.startsWith("ff")) return true; // ff00::/8 multicast
   if (lc.startsWith("::ffff:")) return isPrivateIp(lc.slice(7)); // IPv4-mapped
   return false;
 }
+
+// Auth-bearing headers that must not follow a redirect to a different origin.
+const SENSITIVE_HEADERS = ["authorization", "cookie", "proxy-authorization"];
 
 /** Reject a host that is an internal IP or resolves to one. */
 async function assertPublicHost(hostname: string): Promise<void> {
@@ -90,12 +95,24 @@ async function assertPublicHost(hostname: string): Promise<void> {
  * accepted here — closing it fully needs IP-pinned connects.)
  */
 async function safeFetch(url: string, init: RequestInit, maxRedirects = 5): Promise<Response> {
-  let current = url;
+  let currentUrl = new URL(url);
+  // Normalize headers up front so we can strip auth on cross-origin redirects.
+  const headers = new Headers(init.headers);
   for (let i = 0; i <= maxRedirects; i++) {
-    await assertPublicHost(new URL(current).hostname);
-    const res = await fetch(current, { ...init, redirect: "manual" });
-    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      current = new URL(res.headers.get("location")!, current).toString();
+    if (currentUrl.protocol !== "http:" && currentUrl.protocol !== "https:") {
+      throw new Error(`blocked redirect scheme: ${currentUrl.protocol}`);
+    }
+    await assertPublicHost(currentUrl.hostname);
+    const res = await fetch(currentUrl, { ...init, headers, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      const next = new URL(location, currentUrl);
+      // Don't leak credentials across origins: drop auth headers when the
+      // scheme/host/port changes (matches browser + undici redirect behavior).
+      if (next.origin !== currentUrl.origin) {
+        for (const h of SENSITIVE_HEADERS) headers.delete(h);
+      }
+      currentUrl = next;
       continue;
     }
     return res;
@@ -491,6 +508,31 @@ function isSecretPath(absPath: string): boolean {
   return false;
 }
 
+// Single chokepoint the read/write/edit file tools share (was duplicated inline
+// at three sites). A path is blocked if it — or, after resolving symlinks, its
+// real target — is a device node, /proc/self, or a secret store. The realpath
+// pass defeats symlink escapes (CWE-59): a benignly-named link pointing at
+// ~/.ssh or auth-profiles.json would otherwise sail past the literal-path denylist.
+function isBlockedPath(absPath: string): boolean {
+  const hit = (p: string) =>
+    BLOCKED_PATHS.has(p) || p.startsWith("/dev/") || p.startsWith("/proc/self/") || isSecretPath(p);
+  if (hit(absPath)) return true;
+  try {
+    const real = realpathSync(absPath);
+    return real !== absPath && hit(real);
+  } catch {
+    // Leaf doesn't exist yet (e.g. a fresh write target). Resolve the parent
+    // dir instead so a symlinked ancestor can't smuggle a write into a secret
+    // location; the literal-path check above already covered the leaf name.
+    try {
+      const real = join(realpathSync(dirname(absPath)), basename(absPath));
+      return real !== absPath && hit(real);
+    } catch {
+      return false;
+    }
+  }
+}
+
 function isImageFile(p: string): boolean { return IMAGE_EXTS.has(extname(p).toLowerCase()); }
 function isBinaryFile(p: string): boolean { return BINARY_EXTS.has(extname(p).toLowerCase()); }
 function isPdfFile(p: string): boolean { return extname(p).toLowerCase() === ".pdf"; }
@@ -799,8 +841,8 @@ Usage:
   async ({ file_path, offset, limit }) => {
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/") || isSecretPath(absPath)) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot read device path: ${file_path}` }], isError: true };
     }
 
@@ -916,8 +958,8 @@ IMPORTANT:
   async ({ file_path, content }) => {
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/") || isSecretPath(absPath)) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot write to device path: ${file_path}` }], isError: true };
     }
 
@@ -988,8 +1030,8 @@ RULES:
 
     const absPath = resolvePath(file_path);
 
-    // Blocked device paths
-    if (BLOCKED_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/self/") || isSecretPath(absPath)) {
+    // Blocked device paths / secret stores (incl. symlink escapes)
+    if (isBlockedPath(absPath)) {
       return { content: [{ type: "text", text: `Cannot edit device path: ${file_path}` }], isError: true };
     }
 

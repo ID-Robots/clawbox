@@ -30,14 +30,16 @@ function writeKV(data: Record<string, string>): void {
   const tmp = KV_PATH + ".tmp";
   // 0o600: kv is an untyped string store (callers may stash anything), so it
   // should not default to world-readable. Written on the tmp file before the
-  // atomic rename so the final file is never briefly 0644.
+  // atomic rename so the final file is never briefly 0644. chmod the tmp too:
+  // writeFileSync's `mode` is ignored if a stale tmp survived a crash at 0644,
+  // and rename would otherwise carry those perms onto the live file.
   fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-  fs.renameSync(tmp, KV_PATH);
   try {
-    fs.chmodSync(KV_PATH, 0o600);
+    fs.chmodSync(tmp, 0o600);
   } catch {
     // best-effort
   }
+  fs.renameSync(tmp, KV_PATH);
 }
 
 export function kvGet(key: string): string | null {

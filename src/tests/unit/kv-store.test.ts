@@ -118,6 +118,30 @@ describe("kv-store", () => {
       writeFileSyncSpy.mockRestore();
       renameSyncSpy.mockRestore();
     });
+
+    // POSIX-only: mode bits are meaningless on Windows dev machines. CI runs on
+    // the Linux device, where these assertions are the ones that actually matter.
+    const posixOnly = process.platform === "win32" ? it.skip : it;
+
+    posixOnly("writes the live file at 0600 (verified via statSync)", () => {
+      kvStore.kvSet("secretish", "value");
+      const mode = fsSync.statSync(KV_PATH).mode & 0o777;
+      expect(mode).toBe(0o600);
+    });
+
+    posixOnly("re-hardens to 0600 even when a stale 0644 tmp pre-exists", () => {
+      // Simulate a tmp left behind by a crashed write at world-readable perms.
+      // writeFileSync's `mode` is ignored for an existing file, so without the
+      // explicit chmod-before-rename the stale perms would ride onto the live
+      // file. The final file must still land at 0600.
+      fsSync.writeFileSync(KV_PATH + ".tmp", "{}", { mode: 0o644 });
+      fsSync.chmodSync(KV_PATH + ".tmp", 0o644);
+
+      kvStore.kvSet("afterStaleTmp", "value");
+
+      const mode = fsSync.statSync(KV_PATH).mode & 0o777;
+      expect(mode).toBe(0o600);
+    });
   });
 
   describe("kvDelete", () => {
