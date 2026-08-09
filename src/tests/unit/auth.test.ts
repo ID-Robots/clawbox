@@ -299,4 +299,41 @@ describe("auth", () => {
       expect(auth.verifySessionCookie(upperCookie, secret)).toBe(true);
     });
   });
+
+  describe("session generation binding", () => {
+    const secret = "test-secret-for-unit-tests-long-enough";
+
+    it("accepts a cookie whose generation matches the expected one", () => {
+      const cookie = auth.createSessionCookie(3600, secret, 2);
+      expect(auth.verifySessionCookie(cookie, secret, 2)).toBe(true);
+    });
+
+    it("rejects a cookie minted under an older generation", () => {
+      const cookie = auth.createSessionCookie(3600, secret, 1);
+      // Generation was bumped to 2 (e.g. password change) → old cookie revoked.
+      expect(auth.verifySessionCookie(cookie, secret, 2)).toBe(false);
+    });
+
+    it("treats a cookie with no generation as generation 0", () => {
+      const cookie = auth.createSessionCookie(3600, secret); // defaults gen 0
+      expect(auth.verifySessionCookie(cookie, secret, 0)).toBe(true);
+      expect(auth.verifySessionCookie(cookie, secret, 1)).toBe(false);
+    });
+
+    it("skips the generation check when no expected generation is given", () => {
+      const cookie = auth.createSessionCookie(3600, secret, 5);
+      expect(auth.verifySessionCookie(cookie, secret)).toBe(true);
+    });
+
+    it("treats a truly legacy cookie (payload has no gen field) as generation 0", () => {
+      // createSessionCookie always stamps gen; hand-build a payload with ONLY
+      // exp — the shape minted before this feature existed — and sign it.
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+      const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+      const legacy = `${payload}.${sig}`;
+      expect(auth.verifySessionCookie(legacy, secret, 0)).toBe(true);
+      expect(auth.verifySessionCookie(legacy, secret, 1)).toBe(false);
+    });
+  });
 });

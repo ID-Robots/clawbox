@@ -143,7 +143,10 @@ describe("/setup-api/browser", () => {
   it("launches a browser session by attaching to desktop Chromium over CDP", async () => {
     const { body } = await launchSession();
 
-    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", { timeout: 30_000 });
+    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", {
+      timeout: 30_000,
+      headers: { Origin: "http://127.0.0.1:18800" },
+    });
     expect(mockPage.bringToFront).toHaveBeenCalled();
     expect(body.sessionId).toBeDefined();
     expect(body.url).toBe("https://www.google.com");

@@ -31,6 +31,28 @@ describe("login-rate-limit", () => {
     expect(r.locked).toBe(false);
   });
 
+  it("caps the lock at maxLockMs for the untrusted shared bucket (DoS guard)", async () => {
+    // 20 failures would normally reach the 24h tier; with maxLockMs it must not
+    // exceed the cap, so an attacker can't lock the owner out for a day.
+    let last: import("@/lib/login-rate-limit").LockoutCheck = { locked: false, retryAfterSeconds: 0 };
+    for (let i = 0; i < 20; i++) {
+      last = await lib.recordFailure("global", { maxLockMs: lib.SHARED_BUCKET_MAX_LOCK_MS });
+    }
+    expect(last.locked).toBe(true);
+    // ~5 min cap (allow a small margin), never the 24h tier.
+    expect(last.retryAfterSeconds).toBeLessThanOrEqual(lib.SHARED_BUCKET_MAX_LOCK_MS / 1000 + 1);
+    expect(last.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("keeps the full escalation for a trusted per-client key", async () => {
+    let last: import("@/lib/login-rate-limit").LockoutCheck = { locked: false, retryAfterSeconds: 0 };
+    for (let i = 0; i < 20; i++) {
+      last = await lib.recordFailure("cf:1.2.3.4");
+    }
+    // No cap → reaches the 24h tier.
+    expect(last.retryAfterSeconds).toBeGreaterThan(lib.SHARED_BUCKET_MAX_LOCK_MS / 1000);
+  });
+
   it("locks after 5 consecutive failures and reports a positive Retry-After", async () => {
     let last: import("@/lib/login-rate-limit").LockoutCheck = { locked: false, retryAfterSeconds: 0 };
     for (let i = 0; i < 5; i++) {
