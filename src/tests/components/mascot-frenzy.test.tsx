@@ -13,7 +13,13 @@ vi.mock("@/lib/client-kv", () => ({
 }));
 vi.mock("@/lib/mascot-client", () => ({
   fetchUserName: () => Promise.resolve(null),
-  fetchPhraseSet: () => Promise.resolve({ phrases: null, snippets: [] }),
+  // Must resolve a REAL phrase set — the component reads `phrases.sass` on load.
+  // Dynamic-import the (unmocked) phrases module inside the factory so this
+  // survives vi.mock's hoisting above the top-level imports.
+  fetchPhraseSet: async () => ({
+    phrases: (await import("@/lib/mascot-phrases")).INSPIRATION_PHRASES,
+    snippets: [],
+  }),
   pickNameGreeting: () => "",
 }));
 
