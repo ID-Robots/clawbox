@@ -139,6 +139,7 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
   "/setup-api/apps/install",
   "/setup-api/apps/uninstall",
+  "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token
 ];
 // Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
