@@ -79,7 +79,13 @@ export default function StandaloneAppPage() {
             <iframe
               src={`/setup-api/webapps?app=${encodeURIComponent(id.replace("installed-", ""))}`}
               style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-              sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+              // No allow-same-origin: webapps are served from the ClawBox origin,
+              // so allow-scripts + allow-same-origin together would give the
+              // framed app the REAL origin — letting a malicious/agent-built app
+              // fetch() the session-authenticated /setup-api routes and script
+              // the parent desktop. Dropping allow-same-origin forces an opaque
+              // origin; self-contained webapps still run fine.
+              sandbox="allow-scripts allow-forms allow-popups"
               title={id}
             />
           );

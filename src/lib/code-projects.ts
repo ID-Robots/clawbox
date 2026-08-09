@@ -87,6 +87,21 @@ function safePath(projectId: string, filePath: string): string {
   return resolved;
 }
 
+/**
+ * Guard a mutating (write/edit/delete) target. The raw-string `=== "project.json"`
+ * checks were bypassable with equivalent spellings ("./project.json"), and a
+ * path resolving to the project root itself ("." / "./") would let a single
+ * file-delete recursively wipe the whole project. Check the RESOLVED path.
+ */
+function assertMutableTarget(projectId: string, absPath: string): void {
+  if (path.basename(absPath) === "project.json") {
+    throw new ValidationError("Cannot modify project.json");
+  }
+  if (absPath === path.join(PROJECTS_DIR, projectId)) {
+    throw new ValidationError("Refusing to target the project root");
+  }
+}
+
 function projectDir(projectId: string): string {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
   return path.join(PROJECTS_DIR, projectId);
@@ -187,13 +202,20 @@ h1 {
       "utf-8"
     );
 
+    // The name is written into app.js — once as a line comment and once inside
+    // a JS template literal assigned to innerHTML. escapeHtml alone leaves the
+    // template-literal metacharacters (` $ \) and newlines untouched, so a name
+    // like "`;fetch('/setup-api/...')`" would break out of the literal and run
+    // as code when the built app loads on the ClawBox origin (stored XSS).
+    const commentName = name.replace(/[\r\n]+/g, " ");
+    const innerName = jsTemplateEscape(escapeHtml(name));
     await fs.writeFile(
       path.join(dir, "app.js"),
-      `// ${escapeHtml(name)} — ClawBox Web App
+      `// ${commentName} — ClawBox Web App
 document.addEventListener('DOMContentLoaded', () => {
   const app = document.getElementById('app');
   app.innerHTML = \`
-    <h1>${escapeHtml(name)}</h1>
+    <h1>${innerName}</h1>
     <p>Edit the project files to build your app.</p>
   \`;
 });
@@ -289,8 +311,8 @@ export async function writeFile(
   filePath: string,
   content: string
 ): Promise<void> {
-  if (filePath === "project.json") throw new ValidationError("Cannot overwrite project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
 
   const size = Buffer.byteLength(content, "utf-8");
   if (size > MAX_FILE_SIZE) {
@@ -318,8 +340,8 @@ export async function editFile(
   newString: string,
   replaceAll = false
 ): Promise<{ applied: number }> {
-  if (filePath === "project.json") throw new ValidationError("Cannot edit project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
   let content = await fs.readFile(absPath, "utf-8");
 
   if (!content.includes(oldString)) {
@@ -357,8 +379,8 @@ export async function editFile(
 }
 
 export async function deleteFile(projectId: string, filePath: string): Promise<void> {
-  if (filePath === "project.json") throw new ValidationError("Cannot delete project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
   await fs.rm(absPath, { recursive: true });
   await touchProject(projectId);
 }
@@ -377,14 +399,25 @@ export async function searchFiles(
 
   let matcher: (line: string) => boolean;
   if (opts?.regex) {
-    const flags = opts.caseSensitive ? "g" : "gi";
+    // Cap the pattern length to limit worst-case backtracking a caller can set
+    // up (JS has no native regex timeout; a pattern like "(a+)+$" over a long
+    // line backtracks exponentially and would block the single-threaded event
+    // loop). Combined with the per-line slice below this bounds the work.
+    if (pattern.length > 200) {
+      throw new ValidationError("Regex pattern too long (max 200 chars)");
+    }
+    // No global flag: only test() is used, and the 'g' flag makes test()
+    // stateful (persisting lastIndex), which silently skips alternating matches.
+    const flags = opts.caseSensitive ? "" : "i";
     let re: RegExp;
     try {
       re = new RegExp(pattern, flags);
     } catch {
       throw new ValidationError(`Invalid regex pattern: ${pattern}`);
     }
-    matcher = (line) => re.test(line);
+    // Bound each test to a slice so a pathological pattern against a very long
+    // line (files can be up to 512 KB) can't hang the process.
+    matcher = (line) => re.test(line.length > 2000 ? line.slice(0, 2000) : line);
   } else {
     const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
     matcher = (line) =>
@@ -464,7 +497,9 @@ export async function buildProject(
         const jsPath = safePath(projectId, src);
         const js = await fs.readFile(jsPath, "utf-8");
         filesInlined++;
-        return `<script>\n${js}\n</script>`;
+        // Neutralize any literal "</script>" in the source so it can't close
+        // the inlined block early and dump the remainder into the DOM.
+        return `<script>\n${escapeScriptClose(js)}\n</script>`;
       } catch {
         return match;
       }
@@ -539,6 +574,19 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/** Escape a value for safe embedding inside a JS template literal (`...`). */
+function jsTemplateEscape(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\$/g, "\\$");
+}
+
+/** Neutralize a literal `</script` so inlined JS can't break out of a <script>. */
+function escapeScriptClose(s: string): string {
+  return s.replace(/<\/(script)/gi, "<\\/$1");
 }
 
 function isExternalUrl(href: string): boolean {
