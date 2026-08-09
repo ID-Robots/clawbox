@@ -15,8 +15,10 @@ export async function POST(request: Request) {
 
   const model = body.model || "llama3.2:3b";
 
-  // Validate model name format (e.g. "llama3.2:3b", "mistral", "qwen2.5-coder:1.5b")
-  if (!/^[a-z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/i.test(model)) {
+  // Validate model name format. Mirrors the delete route's MODEL_RE so
+  // namespaced refs ("user/model:tag", "hf.co/...") that Ollama accepts
+  // aren't rejected here.
+  if (!/^[a-zA-Z0-9._:/-]+$/.test(model)) {
     return NextResponse.json(
       { error: "Invalid model name format" },
       { status: 400 },
@@ -63,8 +65,10 @@ export async function POST(request: Request) {
                 const parsed = JSON.parse(line);
                 if (parsed.error) {
                   controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: parsed.error }) + "\n"));
-                  controller.close();
                   hasError = true;
+                  // Let the single `finally` close the controller — closing
+                  // here too would double-close and reject the stream with
+                  // "Controller is already closed".
                   return;
                 }
               } catch {

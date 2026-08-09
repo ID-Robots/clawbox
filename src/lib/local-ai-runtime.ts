@@ -206,6 +206,15 @@ export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<voi
     if (state.startPromise === startPromise) {
       state.startPromise = null;
     }
+    // Re-arm the idle-stop timer for callers that don't go through
+    // begin/endLocalAiUse (the ollama pull/delete routes only call
+    // ensureLocalAiReady). Without this, a pull/delete leaves a big model
+    // resident forever on the 8GB Jetson. When activeRequests > 0 an
+    // in-flight proxy request owns the lifecycle, so we leave it alone —
+    // beginLocalAiUse will have cleared this timer anyway.
+    if (state.activeRequests === 0) {
+      scheduleIdleStop(provider);
+    }
   }
 }
 
