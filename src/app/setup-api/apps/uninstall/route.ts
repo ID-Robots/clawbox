@@ -1,17 +1,15 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
+import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
-const HOME = process.env.HOME || "/home/clawbox";
-
 export async function POST(req: Request) {
   try {
     const { appId } = await req.json();
-    if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
+    if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 
@@ -23,8 +21,10 @@ export async function POST(req: Request) {
     }
     await fs.rm(skillDir, { recursive: true, force: true });
 
-    // Remove cached icon
-    const iconPath = path.join(HOME, "clawbox", "data", "icons", `${appId}.png`);
+    // Remove cached icon from the same location the install/icon routes use
+    // (DATA_DIR/icons). The old hardcoded ~/clawbox/data/icons path diverged
+    // whenever CLAWBOX_ROOT != $HOME/clawbox, orphaning the PNG on disk.
+    const iconPath = path.join(DATA_DIR, "icons", `${appId}.png`);
     await fs.rm(iconPath, { force: true }).catch(() => {});
 
     // Keep the desktop's `installed_apps` and `installed_meta` preferences

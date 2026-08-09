@@ -74,7 +74,12 @@ async function downloadIcon(appId: string): Promise<{ saved: boolean }> {
   const iconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
   const iconPath = path.join(ICONS_DIR, `${appId}.png`);
   try {
-    const [res] = await Promise.all([fetch(iconUrl), fs.mkdir(ICONS_DIR, { recursive: true })]);
+    // Bound the icon fetch: it's awaited inline before the install proceeds, so
+    // a stalled ClawHub host would otherwise hang the whole install request.
+    const [res] = await Promise.all([
+      fetch(iconUrl, { signal: AbortSignal.timeout(10_000) }),
+      fs.mkdir(ICONS_DIR, { recursive: true }),
+    ]);
     if (!res.ok) return { saved: false };
     const buffer = Buffer.from(await res.arrayBuffer());
     await fs.writeFile(iconPath, buffer);
@@ -188,7 +193,10 @@ async function reloadGatewaySafely(): Promise<string | undefined> {
 export async function POST(req: Request) {
   try {
     const { appId } = await req.json();
-    if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
+    // Reject a leading hyphen: appId is passed positionally to
+    // `openclaw skills install <appId>`, so "-x"/"--force" would be parsed as a
+    // CLI flag rather than a package name.
+    if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 

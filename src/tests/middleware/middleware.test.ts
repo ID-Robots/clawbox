@@ -474,6 +474,7 @@ describe("middleware", () => {
       "/setup-api/tunnel/enable",
       "/setup-api/portal/start", // same privileged tunnel control as /tunnel
       "/setup-api/portal/stop",
+      "/setup-api/apps/settings",
       "/setup-api/apps/install",
       "/setup-api/apps/uninstall",
       "/setup-api/gateway/ws-config",
