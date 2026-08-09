@@ -27,6 +27,8 @@ vi.mock("@/lib/auth", () => ({
   isSafePasswordChars: (s: string) => !/[\r\n\x00-\x1f\x7f]/.test(s),
   verifyPassword: vi.fn(async () => true),
   bumpSessionGeneration: vi.fn(async () => 1),
+  getSessionSigningSecret: vi.fn(async () => "test-secret"),
+  createSessionCookie: vi.fn(() => "reissued.cookie"),
 }));
 
 
@@ -213,6 +215,31 @@ describe("POST /setup-api/system/credentials", () => {
 
     expect(res.status).toBe(429);
     expect(body.error).toContain("Too many attempts");
+  });
+
+  it("bumps the session generation and re-issues the caller's cookie on a real change", async () => {
+    const { get } = await import("@/lib/config-store");
+    vi.mocked(get).mockResolvedValue(true); // password_configured → this is a change
+    const { bumpSessionGeneration } = await import("@/lib/auth");
+
+    const res = await credentialsPost(jsonRequest({
+      password: "newsecurepassword123",
+      currentPassword: "oldpassword123",
+    }));
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(bumpSessionGeneration)).toHaveBeenCalled();
+    // A fresh session cookie is set so the admin isn't force-logged-out.
+    expect(res.headers.get("set-cookie")).toContain("clawbox_session=reissued.cookie");
+  });
+
+  it("does NOT bump the generation on first-boot password set", async () => {
+    // get() defaults to false (password_configured unset) → first-boot path.
+    const { bumpSessionGeneration } = await import("@/lib/auth");
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(bumpSessionGeneration)).not.toHaveBeenCalled();
+    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("resets rate limit on successful password change", async () => {
