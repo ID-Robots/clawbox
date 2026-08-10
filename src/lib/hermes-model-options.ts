@@ -49,13 +49,18 @@ export const MODEL_ID_RE = HERMES_MODEL_ID_RE;
 export const isSafeModelId = isSafeHermesModelId;
 
 /**
- * COLD START ONLY — a factory device with no dashboard and no catalog on disk.
- * These are the only two ids we have *proven* route on this hardware, and they
- * are ClawBox AI's (a vendor-prefixed slug gets HTTP 400 "Model not allowed"
- * from the proxy). We deliberately do NOT ship guesses for providers we cannot
- * query: the old fallback listed OpenRouter slugs like "anthropic/claude-opus-4.8"
- * which would then be offered — and saved — under the direct Anthropic
- * provider, i.e. exactly the provider/model mismatch this module exists to stop.
+ * The ids we have *proven* route on this hardware — ClawBox AI's two tier
+ * models (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the
+ * proxy). Used twice:
+ *   1. cold start — a factory device with no dashboard and no catalog on disk;
+ *   2. to seed the ClawBox AI row (see normalizeRow), because Hermes can only
+ *      report the single id our custom-provider config declares, while the
+ *      product actually serves both — which is what OpenClaw's picker shows.
+ *
+ * We deliberately do NOT ship guesses for providers we cannot query: the old
+ * fallback listed OpenRouter slugs like "anthropic/claude-opus-4.8" which would
+ * then be offered — and saved — under the direct Anthropic provider, i.e.
+ * exactly the provider/model mismatch this module exists to stop.
  */
 const COLD_START_MODELS: Record<string, string[]> = {
   [CLAWAI_PROVIDER]: ["deepseek-v4-flash", "deepseek-v4-pro"],
@@ -216,6 +221,24 @@ function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
     });
   }
 
+  // ClawBox AI is a CUSTOM provider, so Hermes can only report what our own
+  // config declares — and that is a single id (`model.default`, the current
+  // tier's model). The product actually serves both tier models, which is why
+  // OpenClaw's chat header offers a model picker for it. Without this, the
+  // Hermes header hides the model pill entirely (it needs >1 option) and the
+  // two harnesses disagree about the same provider.
+  //
+  // Only ClawBox AI is seeded: these are ids we have PROVEN route on this
+  // hardware. We never invent ids for a third-party provider — that is the
+  // mismatch class this module exists to prevent.
+  if (id === CLAWAI_PROVIDER) {
+    for (const known of COLD_START_MODELS[CLAWAI_PROVIDER] ?? []) {
+      if (seen.has(known)) continue;
+      seen.add(known);
+      models.push({ id: known, description: "" });
+    }
+  }
+
   const warning = asString(raw.warning);
   return {
     id,
@@ -223,7 +246,11 @@ function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
     isUserDefined: raw.is_user_defined === true,
     source: asString(raw.source) || "unknown",
-    total: typeof raw.total_models === "number" ? raw.total_models : models.length,
+    // `total_models` is the dashboard's count; after seeding it would understate
+    // what we actually offer, so report the list we return.
+    total: id === CLAWAI_PROVIDER
+      ? models.length
+      : (typeof raw.total_models === "number" ? raw.total_models : models.length),
     models,
     ...(warning ? { warning } : {}),
   };
