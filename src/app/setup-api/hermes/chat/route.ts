@@ -11,7 +11,11 @@ import {
   isPlausibleHermesProviderId,
   isSafeHermesModelId,
 } from "@/lib/hermes-providers";
-import { isHermesReasoningLevel } from "@/lib/hermes-reasoning";
+import {
+  hermesReasoningLevelsFor,
+  isHermesReasoningLevel,
+  isReasoningLevelAllowedFor,
+} from "@/lib/hermes-reasoning";
 import {
   getModelOptions,
   isAllowedProvider,
@@ -235,6 +239,25 @@ export async function POST(request: Request) {
     // what hermes falls back to. `current` comes from `hermes config get`, so
     // it is accurate even when the model lists themselves are stale.
     const effectiveProvider = wantsProvider ? rawProvider : payload.current.provider;
+
+    // The CLI accepting a level does not mean the PROVIDER does — Hermes passes
+    // it through as `reasoning_effort` and the upstream API can reject it.
+    // Verified: ClawBox AI answers `ultra` with HTTP 400 "reasoning_effort:
+    // unknown". Refuse here with something actionable rather than spending the
+    // turn to have the proxy refuse it.
+    if (
+      rawReasoning
+      && isHermesReasoningLevel(rawReasoning)
+      && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning)
+    ) {
+      return NextResponse.json(
+        {
+          error: `Provider "${effectiveProvider}" does not support the "${rawReasoning}" reasoning effort.`,
+          allowed: hermesReasoningLevelsFor(effectiveProvider),
+        },
+        { status: 400 },
+      );
+    }
 
     // Same pairing gate the config POST enforces: a provider must never run a
     // foreign vendor's model id. shouldEnforcePairing decides when we actually

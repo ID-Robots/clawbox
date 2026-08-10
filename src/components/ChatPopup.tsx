@@ -161,7 +161,8 @@ import {
 import {
   HERMES_REASONING_DEFAULT,
   HERMES_REASONING_LABELS,
-  HERMES_REASONING_LEVELS,
+  clampReasoningForProvider,
+  hermesReasoningLevelsFor,
   isHermesReasoningLevel,
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
@@ -365,7 +366,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { hermesScopeReadyRef.current = Boolean(hermesScope) }, [hermesScope])
   useEffect(() => { hermesProviderRef.current = hermesProvider }, [hermesProvider])
   useEffect(() => { hermesModelRef.current = hermesModel }, [hermesModel])
-  useEffect(() => { hermesReasoningRef.current = hermesReasoning }, [hermesReasoning])
+  // Only the levels the SELECTED provider actually accepts. ClawBox AI rejects
+  // `ultra` outright (HTTP 400 reasoning_effort: unknown), so offering it would
+  // be offering a guaranteed failed turn.
+  const hermesReasoningOptions = useMemo(
+    () => hermesReasoningLevelsFor(hermesProvider),
+    [hermesProvider],
+  )
+  // What the pill DISPLAYS and what we send: a user sitting on Ultra who
+  // switches to ClawBox AI lands on the nearest supported level rather than
+  // showing a value with no matching option.
+  const hermesEffectiveReasoning = useMemo(
+    () => clampReasoningForProvider(hermesProvider, hermesReasoning),
+    [hermesProvider, hermesReasoning],
+  )
+  useEffect(() => { hermesReasoningRef.current = hermesEffectiveReasoning }, [hermesEffectiveReasoning])
   useEffect(() => { hermesDeviceRef.current = hermesDevice }, [hermesDevice])
 
   const hermesProviderName = useCallback(
@@ -377,6 +392,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (id === hermesProviderRef.current) return
     setHermesProvider(id)
     writeHermesChatPrefs({ provider: id })
+    // Start a NEW Hermes session. The turn is routed correctly either way
+    // (verified: the billing record shows the new provider), but a resumed
+    // session keeps the system prompt it was created with — so the agent
+    // answers "What model are you?" with the OLD one and repeats its earlier
+    // claims from the transcript. That reads as a broken switch. OpenClaw
+    // already resets its session on a provider change; match it.
+    hermesSessionRef.current = ''
     setMessages(msgs => [...msgs, {
       role: 'system',
       text: `Switched to ${hermesProviderName(id)}.`,
@@ -392,6 +414,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Read-modify-write: `models` is a nested map, so a shallow merge of the
     // patch alone would drop every other provider's remembered pick.
     writeHermesChatPrefs({ models: { ...readHermesChatPrefs().models, [provider]: id } })
+    // Same reason as the provider switch: a resumed session keeps the system
+    // prompt (and the transcript's claims) from the model it started on, so the
+    // agent would keep naming the old model after the change.
+    hermesSessionRef.current = ''
   }, [])
 
   const changeHermesReasoning = useCallback((next: string) => {
@@ -1868,9 +1894,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     hide it for. */}
                 <HeaderDropdown
                   ariaLabel="Reasoning effort"
-                  value={hermesReasoning}
-                  triggerLabel={`Thinking: ${HERMES_REASONING_LABELS[hermesReasoning]}`}
-                  options={HERMES_REASONING_LEVELS.map(level => ({
+                  value={hermesEffectiveReasoning}
+                  triggerLabel={`Thinking: ${HERMES_REASONING_LABELS[hermesEffectiveReasoning]}`}
+                  options={hermesReasoningOptions.map(level => ({
                     id: level,
                     label: HERMES_REASONING_LABELS[level],
                   }))}
