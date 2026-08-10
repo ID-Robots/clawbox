@@ -5,7 +5,6 @@ import { spawn } from "child_process";
 import path from "path";
 import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
-import { runHermesCli } from "@/lib/hermes-cli";
 import {
   HERMES_AUTO_PROVIDER,
   isHermesCliProvider,
@@ -140,26 +139,23 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
 const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
 
 /**
- * The id of the most recently touched session. `hermes sessions list` prints a
- * table whose last column is the id; there is no --json. Best-effort: a failure
- * only costs conversation continuity on the NEXT turn, never this reply, so it
- * must not throw into the response path.
+ * Split the `session_id: <id>` line `hermes chat -q` prints ahead of the reply
+ * off the rest of the output. (`-z` documents itself as printing "no session_id
+ * line", which is exactly why it cannot thread a conversation.)
  */
-async function latestSessionId(): Promise<string> {
-  try {
-    const r = await runHermesCli(["sessions", "list", "--limit", "1"], {
-      timeoutMs: 10_000,
-      env: { COLUMNS: "200" },
-    });
-    if (r.code !== 0) return "";
-    for (const line of r.stdout.split(/\r?\n/)) {
-      const match = /([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/.exec(line.trim());
-      if (match) return match[1];
+function splitSessionLine(raw: string): { sessionId: string; text: string } {
+  const lines = raw.split(/\r?\n/);
+  let sessionId = "";
+  const kept: string[] = [];
+  for (const line of lines) {
+    const match = /^\s*session_id:\s*([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/.exec(line);
+    if (match && !sessionId) {
+      sessionId = match[1];
+      continue;
     }
-  } catch {
-    /* continuity is best-effort */
+    kept.push(line);
   }
-  return "";
+  return { sessionId, text: kept.join("\n").trim() };
 }
 
 export async function POST(request: Request) {
@@ -277,7 +273,13 @@ export async function POST(request: Request) {
   // A message starting with "-" gets a leading space so hermes reads it as the
   // prompt value (the UI shows ClawBox's own copy of the message, not this one).
   const safeMessage = message.startsWith("-") ? ` ${message}` : message;
-  const args = ["-z", safeMessage];
+  // `chat -q` (single query, non-interactive) NOT `-z` (one-shot). Verified
+  // on-device: `-z` starts a brand-new session every invocation and ignores
+  // --resume, so every turn met an agent with no history — a follow-up like
+  // "is it removed now?" was answered with "what are we trying to remove?".
+  // `chat -q` threads: resuming returns the SAME session id and the prior
+  // turns are in context. `-Q` is its documented programmatic/quiet mode.
+  const args = ["chat", "-q", safeMessage, "-Q"];
   // No model → omit -m and let hermes use config.yaml's model.default, which is
   // by definition valid for the configured provider. (The previous hardcoded
   // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
@@ -296,13 +298,16 @@ export async function POST(request: Request) {
   if (rawSessionId) args.push("--resume", rawSessionId);
 
   try {
-    const text = await runHermes(args, request.signal);
-    // Report the session this turn belongs to so the next one can resume it.
-    // Re-read every turn rather than only on the first: whether `--resume`
-    // continues in place or forks a new row is Hermes' business, and this way
-    // the client always carries the id that actually holds the history.
-    const sessionId = (await latestSessionId()) || rawSessionId || undefined;
-    return NextResponse.json({ text, harness: "hermes", ...(sessionId ? { sessionId } : {}) });
+    const raw = await runHermes(args, request.signal);
+    // The reply carries its own session id on stdout — no DB race, no guessing
+    // from `sessions list`. Hand it back so the next turn can resume it.
+    const { sessionId, text } = splitSessionLine(raw);
+    const threaded = sessionId || rawSessionId;
+    return NextResponse.json({
+      text,
+      harness: "hermes",
+      ...(threaded ? { sessionId: threaded } : {}),
+    });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       // Client hit Stop / disconnected; the child was already killed.
