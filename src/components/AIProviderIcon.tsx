@@ -11,7 +11,13 @@ interface AIProviderIconProps {
 
 function normalizeProvider(provider: string | null | undefined): string {
   if (provider === "deepseek") return "clawai";
-  return provider?.trim().toLowerCase() || "";
+  const p = provider?.trim().toLowerCase() || "";
+  // Hermes provider ids → the icon we render for them.
+  if (p === "gemini") return "google";
+  if (p === "openai-codex") return "openai";
+  if (p === "nous-api") return "nous";
+  if (p === "kimi-coding") return "kimi";
+  return p;
 }
 
 function SvgFrame({
@@ -168,6 +174,57 @@ export default function AIProviderIcon({
         <rect x="3.5" y="4" width="17" height="16" rx="3" fill="#1E293B" stroke="#F97316" strokeWidth="1.3" />
         <path d="m8 10 2.6 2L8 14" stroke="#FDBA74" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         <path d="M12.9 14.6h3.1" stroke="#FDBA74" strokeWidth="1.6" strokeLinecap="round" />
+      </SvgFrame>
+    );
+  }
+
+  // Nous Research — indigo prism/triangle mark.
+  if (normalized === "nous") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <path fill="#818CF8" d="M12 3l8 15H4L12 3zm0 4.3L7.2 16h9.6L12 7.3z" />
+      </SvgFrame>
+    );
+  }
+
+  // z.ai / Zhipu GLM — sky-blue tile with a white "Z".
+  if (normalized === "zai") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <rect x="3" y="3" width="18" height="18" rx="4" fill="#0EA5E9" />
+        <path d="M8 8.5h8L8 15.5h8" fill="none" stroke="#fff" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" />
+      </SvgFrame>
+    );
+  }
+
+  // Moonshot Kimi — navy disc with a periwinkle crescent moon.
+  if (normalized === "kimi") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <circle cx="12" cy="12" r="9" fill="#111827" />
+        <path d="M15 6.2A6.5 6.5 0 1 0 15 17.8 7.8 7.8 0 0 1 15 6.2z" fill="#A5B4FC" />
+      </SvgFrame>
+    );
+  }
+
+  // GitHub Copilot — pale goggles/robot face.
+  if (normalized === "copilot") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <path d="M12 5.4c-1.7 0-2.9 1-3.3 3M12 5.4c1.7 0 2.9 1 3.3 3" stroke="#F3F4F6" strokeWidth="1.4" fill="none" strokeLinecap="round" />
+        <rect x="3.5" y="8.4" width="17" height="8.6" rx="4.3" fill="#F3F4F6" />
+        <circle cx="9" cy="12.8" r="1.5" fill="#111827" />
+        <circle cx="15" cy="12.8" r="1.5" fill="#111827" />
+      </SvgFrame>
+    );
+  }
+
+  // "Auto" — a slate sparkle, for the detect-from-credentials option.
+  if (normalized === "auto") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <path fill="#94A3B8" d="M12 3c.4 4.2 1.4 5.2 5.6 5.6-4.2.4-5.2 1.4-5.6 5.6-.4-4.2-1.4-5.2-5.6-5.6 4.2-.4 5.2-1.4 5.6-5.6z" />
+        <circle cx="18" cy="17" r="1.5" fill="#64748B" />
       </SvgFrame>
     );
   }

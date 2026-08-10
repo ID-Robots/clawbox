@@ -23,7 +23,7 @@ export interface HermesCliResult {
 
 export function runHermesCli(
   args: string[],
-  opts: { timeoutMs?: number; input?: string } = {},
+  opts: { timeoutMs?: number; input?: string; env?: Record<string, string> } = {},
 ): Promise<HermesCliResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return new Promise<HermesCliResult>((resolve, reject) => {
@@ -34,6 +34,7 @@ export function runHermesCli(
         ...process.env,
         HOME: HOME_DIR,
         PATH: `${path.dirname(HERMES_BIN)}:${process.env.PATH || ""}`,
+        ...opts.env,
       },
     });
 

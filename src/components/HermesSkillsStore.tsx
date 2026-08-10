@@ -113,38 +113,40 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
     fetchInstalled();
   }, [fetchInstalled]);
 
-  // Debounced search (browse tab only). Empty query clears results.
+  // Browse tab: an empty query shows a default listing (`browse`); typing runs
+  // a search. Both honor the source filter. Debounce search; load browse eagerly.
   useEffect(() => {
     if (tab !== "browse") return;
     const q = query.trim();
-    if (!q) {
-      setResults([]);
-      setSearchError(null);
-      setLoading(false);
-      return;
-    }
     const controller = new AbortController();
-    const timer = setTimeout(async () => {
+    const load = async () => {
       setLoading(true);
       setSearchError(null);
       try {
-        const params = new URLSearchParams({ q, limit: String(SEARCH_LIMIT) });
-        if (source && source !== "all") params.set("source", source);
-        const res = await fetch(`/setup-api/hermes/skills/search?${params}`, {
-          signal: controller.signal,
-        });
+        let url: string;
+        if (q) {
+          const params = new URLSearchParams({ q, limit: String(SEARCH_LIMIT) });
+          if (source && source !== "all") params.set("source", source);
+          url = `/setup-api/hermes/skills/search?${params}`;
+        } else {
+          const params = new URLSearchParams({ size: String(SEARCH_LIMIT) });
+          if (source && source !== "all") params.set("source", source);
+          url = `/setup-api/hermes/skills/browse?${params}`;
+        }
+        const res = await fetch(url, { signal: controller.signal });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
         setResults(Array.isArray(data.skills) ? (data.skills as HermesSkill[]) : []);
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
-          setSearchError(err instanceof Error ? err.message : "Search failed");
+          setSearchError(err instanceof Error ? err.message : "Couldn't load skills");
           setResults([]);
         }
       } finally {
         setLoading(false);
       }
-    }, 300);
+    };
+    const timer = setTimeout(load, q ? 300 : 0);
     return () => {
       clearTimeout(timer);
       controller.abort();
@@ -419,7 +421,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   }
 
   const showResults = tab === "browse";
-  const emptyBrowse = showResults && !loading && !searchError && query.trim() && results.length === 0;
+  const emptyBrowse = showResults && !loading && !searchError && results.length === 0;
 
   return (
     <div
@@ -507,11 +509,6 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
             )}
             {searchError && (
               <div className="text-center py-12 text-red-400 text-sm">{searchError}</div>
-            )}
-            {!query.trim() && !loading && (
-              <div className="text-center py-12 text-[var(--text-secondary)] text-sm">
-                Type to search the Hermes skill registries.
-              </div>
             )}
             {emptyBrowse && (
               <div className="text-center py-12 text-[var(--text-secondary)] text-sm">
