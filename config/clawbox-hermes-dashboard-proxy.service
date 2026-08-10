@@ -1,0 +1,18 @@
+[Unit]
+Description=ClawBox Hermes Dashboard Auth Proxy (LAN :8090, clawbox_session-gated)
+After=clawbox-hermes-dashboard.service clawbox-setup.service
+Wants=clawbox-hermes-dashboard.service
+
+[Service]
+Type=simple
+User=clawbox
+WorkingDirectory=/home/clawbox/clawbox
+Environment=HOME=/home/clawbox
+Environment=CLAWBOX_ROOT=/home/clawbox/clawbox
+Environment=HERMES_DASH_PROXY_PORT=8090
+ExecStart=/usr/bin/node /home/clawbox/clawbox/scripts/hermes-dashboard-proxy.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

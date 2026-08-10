@@ -61,6 +61,18 @@ PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
 
+# ── Edition (single-harness lock) ────────────────────────────────────────────
+# openclaw | hermes | dual. Baked at flash time via env CLAWBOX_EDITION or
+# config/edition.txt. Empty/unknown → "dual" (today's full behavior, unchanged).
+# On the "hermes" edition install.sh skips the OpenClaw gateway steps and stands
+# up Hermes + the dashboard proxy instead (see scripts/setup-hermes-edition.sh).
+CLAWBOX_EDITION="${CLAWBOX_EDITION:-}"
+if [ -z "$CLAWBOX_EDITION" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
+  CLAWBOX_EDITION="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
+fi
+case "$CLAWBOX_EDITION" in openclaw|hermes|dual) ;; *) CLAWBOX_EDITION="dual" ;; esac
+is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }
+
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
 # llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
 # installer can run inside a CI container. See e2e-install/README.md.
@@ -113,6 +125,20 @@ EXPECTED_INSTALLED_SERVICES=(
   clawbox-ap-watchdog.service
   clawbox-codex-auth-sync.service
 )
+
+# Hermes edition runs no OpenClaw gateway — drop it from the active set and add
+# the Hermes dashboard + auth-proxy so the generic service loop installs them.
+if is_hermes_edition; then
+  _active_svcs=()
+  for _s in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
+    [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
+  done
+  EXPECTED_ACTIVE_SERVICES=(
+    "${_active_svcs[@]}"
+    clawbox-hermes-dashboard.service
+    clawbox-hermes-dashboard-proxy.service
+  )
+fi
 
 # Load persisted WiFi interface if available
 IFACE_ENV="$PROJECT_DIR/data/network.env"
@@ -756,12 +782,14 @@ step_build() {
 }
 
 step_openclaw_setup() {
+  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw install"; return 0; }
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
 }
 
 step_openclaw_install() {
+  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Always re-assert the .bashrc PATH stanza before any early-return. The
   # function is idempotent (greps before appending), and skipping it here
   # was the root cause of the recurring `bash: openclaw: command not found`
@@ -963,6 +991,7 @@ step_clawkeep_install() {
 }
 
 step_openclaw_patch() {
+  is_hermes_edition && return 0
   # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
   # releases ship .d.ts declaration files alongside bundled JS, and literal
   # type strings would otherwise match files we cannot patch.
@@ -1060,6 +1089,7 @@ oc_config_set() {
 }
 
 step_openclaw_config() {
+  is_hermes_edition && return 0
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
   local CLAWBOX_AI_ENV="$PROJECT_DIR/.env"
   local CLAWBOX_AI_KEY="${CLAWBOX_AI_API_KEY:-}"
@@ -1783,6 +1813,7 @@ step_recover() {
 }
 
 step_gateway_setup() {
+  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
   # Mask any leftover user-level openclaw-gateway.service. Standalone
@@ -2408,6 +2439,15 @@ ensure_clawbox_bashrc_path
 
 log "Starting services..."
 step_start_services
+
+# Hermes edition: seed shared identity, bake the edition lock, (re)start the
+# dashboard + auth-proxy. Runs after services so the lock's clawbox-setup
+# restart lands last. No-op on openclaw/dual editions.
+if is_hermes_edition; then
+  log "Applying Hermes edition (lock + dashboard + shared identity)..."
+  bash "$PROJECT_DIR/scripts/setup-hermes-edition.sh" \
+    || echo "  Warning: hermes-edition setup failed (non-fatal)"
+fi
 
 log "Validating services..."
 step_validate_services

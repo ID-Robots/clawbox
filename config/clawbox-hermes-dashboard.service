@@ -1,0 +1,20 @@
+[Unit]
+Description=ClawBox Hermes Dashboard (loopback web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawbox
+WorkingDirectory=/home/clawbox
+Environment=HOME=/home/clawbox
+Environment=PATH=/home/clawbox/.local/bin:/usr/local/bin:/usr/bin:/bin
+# `hermes dashboard` builds the web dist on first run, so allow a generous
+# start window before the health check gives up.
+ExecStart=/home/clawbox/.local/bin/hermes dashboard --host 127.0.0.1 --port 9119 --no-open
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
