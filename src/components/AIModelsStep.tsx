@@ -397,6 +397,15 @@ const PROVIDERS: Provider[] = [
     description: "Claude models by Anthropic",
     authOptions: [
       {
+        // Redirect-based OAuth (auth-code). Gated by availableOAuth, which
+        // already includes "anthropic" (OAUTH_PROVIDERS.anthropic), so this
+        // surfaces the Claude Pro/Max subscription sign-in in the wizard.
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your Claude Pro/Max subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-ant-api03-...",

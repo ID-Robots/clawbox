@@ -197,6 +197,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Reactive copy of the harness for rendering (the ref drives connect/send at
   // call-time; this drives which header controls show).
   const [harnessMode, setHarnessMode] = useState<'openclaw' | 'hermes'>('openclaw')
+  // Hermes model picker: Hermes manages its own catalog, so we fetch its models
+  // + configured default and let the header switch models per turn. The ref
+  // feeds dispatchHermes at send-time without re-creating the callback.
+  const [hermesModels, setHermesModels] = useState<{ id: string }[]>([])
+  const [hermesModel, setHermesModel] = useState('')
+  const hermesModelRef = useRef('')
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -1047,7 +1053,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const res = await fetch('/setup-api/hermes/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          ...(hermesModelRef.current ? { model: hermesModelRef.current } : {}),
+        }),
         signal: controller.signal,
       })
       const data = await res.json()
@@ -1265,6 +1274,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!cancelled && data?.active === 'hermes') {
           harnessRef.current = 'hermes'
           setHarnessMode('hermes')
+          // Load Hermes' model catalog + configured default for the picker.
+          try {
+            const mRes = await fetch('/setup-api/hermes/models', { cache: 'no-store' })
+            const mData = await mRes.json()
+            if (!cancelled && Array.isArray(mData?.models)) {
+              setHermesModels(mData.models)
+              const initial = typeof mData.current === 'string' && mData.current
+                ? mData.current
+                : (mData.models[0]?.id ?? '')
+              setHermesModel(initial)
+              hermesModelRef.current = initial
+            }
+          } catch { /* picker falls back to a plain label */ }
         }
       } catch {
         // default to openclaw
@@ -1560,9 +1582,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }}>
         <div className="chat-header-pills">
           {harnessMode === 'hermes' ? (
-            // Hermes manages its own provider/model config — the OpenClaw
-            // provider/model/reasoning pills don't apply, so show a plain label.
-            <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+            // Hermes manages its own catalog — offer a model picker (falls back
+            // to a plain label until the catalog loads).
+            hermesModels.length > 0 ? (
+              <HeaderDropdown
+                ariaLabel="Hermes model"
+                value={hermesModel}
+                triggerLabel={hermesModel.includes('/') ? hermesModel.split('/').slice(1).join('/') : (hermesModel || 'Hermes')}
+                options={hermesModels.map((m) => ({ id: m.id, label: m.id }))}
+                onChange={(id) => { setHermesModel(id); hermesModelRef.current = id }}
+                onPointerDown={stopHeaderDrag}
+                triggerMaxWidth={150}
+                popoverWidth={260}
+              />
+            ) : (
+              <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+            )
           ) : (<>
           {chatModelState && (() => {
             const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
