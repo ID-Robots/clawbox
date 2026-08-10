@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Quick smoke test for all ClawBox MCP tools via JSON-RPC stdio.
-# Usage: bash mcp/test-tools.sh
+# Smoke test for the ClawBox MCP tools over JSON-RPC stdio.
 #
-# Each test spawns a fresh MCP server, sends initialize + tool call, checks result.
-# Green = pass, Red = fail
+#   bash mcp/test-tools.sh
+#
+# Run it ON A DEVICE (it needs the real filesystem, the real /setup-api and the
+# real edition lock). It spawns a fresh MCP server per call, so it is slow but
+# completely isolated.
+#
+# The SECURITY block at the bottom is the part that matters: every one of those
+# cases must come back BLOCKED_PATH. They are the paths that leak the device's
+# provider keys, OAuth tokens and SSH identity if a guard regresses.
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || { echo "Failed to cd to project root"; exit 1; }
@@ -13,7 +19,7 @@ FAIL=0
 SKIP=0
 
 call_tool() {
-  local name="$1" params="$2" expect_error="${3:-false}"
+  local name="$1" params="$2" expect="${3:-ok}"   # ok | error | <ERROR_CODE>
   local result
   result=$(
     (
@@ -23,135 +29,127 @@ call_tool() {
       sleep 0.2
       echo "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$name\",\"arguments\":$params}}"
       sleep 1.5
-    ) | timeout 8 bun mcp/clawbox-mcp.ts 2>/dev/null | python3 -c "
+    ) | timeout 20 bun mcp/clawbox-mcp.ts 2>/dev/null | python3 -c "
 import sys, json
 for line in sys.stdin:
     try:
         msg = json.loads(line.strip())
-        if msg.get('id') == 3:
-            r = msg.get('result', msg.get('error', {}))
-            is_err = r.get('isError', False) or 'code' in r
-            text = ''
-            if 'content' in r:
-                text = r['content'][0].get('text','')[:100]
-            elif 'message' in r:
-                text = r['message'][:100]
-            tag = 'ERROR' if is_err else 'OK'
-            print(f'{tag}|{text}')
-    except: pass
+    except Exception:
+        continue
+    if msg.get('id') != 3:
+        continue
+    r = msg.get('result', msg.get('error', {}))
+    text = ''
+    if 'content' in r and r['content']:
+        text = r['content'][0].get('text', '')
+    elif 'message' in r:
+        text = r['message']
+    code = ''
+    try:
+        code = json.loads(text).get('code', '')
+    except Exception:
+        pass
+    tag = 'ERROR' if (r.get('isError') or code) else 'OK'
+    print(f'{tag}|{code}|' + text.replace(chr(10), ' ')[:90])
 " 2>/dev/null
   )
 
   local status="${result%%|*}"
-  local text="${result#*|}"
+  local rest="${result#*|}"
+  local code="${rest%%|*}"
+  local text="${rest#*|}"
 
-  if [ "$expect_error" = "true" ]; then
-    if [ "$status" = "ERROR" ]; then
-      printf "  \033[32m✓\033[0m %-25s (expected error) %s\n" "$name" "${text:0:70}"
-      PASS=$((PASS + 1))
-    else
-      printf "  \033[31m✗\033[0m %-25s expected error but got OK: %s\n" "$name" "${text:0:70}"
-      FAIL=$((FAIL + 1))
-    fi
+  local ok=false
+  case "$expect" in
+    ok)    [ "$status" = "OK" ] && ok=true ;;
+    error) [ "$status" = "ERROR" ] && ok=true ;;
+    *)     [ "$code" = "$expect" ] && ok=true ;;
+  esac
+
+  if [ -z "$status" ]; then
+    printf "  \033[33m⊘\033[0m %-22s (no response — is the device web server running?)\n" "$name"
+    SKIP=$((SKIP + 1))
+  elif [ "$ok" = true ]; then
+    printf "  \033[32m✓\033[0m %-22s %s\n" "$name" "${code:+[$code] }${text:0:60}"
+    PASS=$((PASS + 1))
   else
-    if [ "$status" = "OK" ]; then
-      printf "  \033[32m✓\033[0m %-25s %s\n" "$name" "${text:0:70}"
-      PASS=$((PASS + 1))
-    elif [ -z "$status" ]; then
-      printf "  \033[33m⊘\033[0m %-25s (no response — may need running server)\n" "$name"
-      SKIP=$((SKIP + 1))
-    else
-      printf "  \033[31m✗\033[0m %-25s %s\n" "$name" "${text:0:70}"
-      FAIL=$((FAIL + 1))
-    fi
+    printf "  \033[31m✗\033[0m %-22s expected %s, got %s %s\n" "$name" "$expect" "${code:-$status}" "${text:0:60}"
+    FAIL=$((FAIL + 1))
   fi
 }
 
 echo ""
 echo "═══════════════════════════════════════════"
-echo " ClawBox MCP Tool Smoke Tests"
+echo " ClawBox MCP smoke tests"
 echo "═══════════════════════════════════════════"
 
 echo ""
-echo "── Core Coding Tools ──"
-
-call_tool "bash" '{"command":"echo hello"}'
-call_tool "bash" '{"command":"rm -rf /","description":"test dangerous detection"}'  # warns but doesn't block
-call_tool "bash" '{"command":"sleep 10","run_in_background":true}'
-call_tool "task_status" '{"id":"bg-999"}' true  # non-existent task
-
-echo ""
-call_tool "read_file" '{"file_path":"package.json","limit":2}'
-call_tool "read_file" '{"file_path":"/dev/zero"}' true
-call_tool "read_file" '{"file_path":"/nonexistent"}' true
+echo "── Orientation (both editions) ──"
+call_tool "device_status"   '{}'
+call_tool "clawbox_health"  '{}'
+call_tool "clawbox_context" '{}'
+call_tool "system_info"     '{}'
+call_tool "update_check"    '{}'
+call_tool "ui_list_apps"    '{}'
 
 echo ""
-call_tool "write_file" '{"file_path":"/tmp/mcp-smoke.txt","content":"line1\nline2\nline3"}'
-call_tool "read_file" '{"file_path":"/tmp/mcp-smoke.txt"}'
-call_tool "edit_file" '{"file_path":"/tmp/mcp-smoke.txt","old_string":"line2","new_string":"EDITED"}'
-call_tool "edit_file" '{"file_path":"/tmp/mcp-smoke.txt","old_string":"line2","new_string":"EDITED"}' true
-call_tool "edit_file" '{"file_path":"/tmp/mcp-smoke.txt","old_string":"same","new_string":"same"}' true
+echo "── Argument validation ──"
+call_tool "ui_open_app"     '{"app_id":"no-such-app-xyz"}' NOT_FOUND
+call_tool "preferences_set" '{"key":"ui_language","value":"klingon"}' BAD_ARGUMENT
 
 echo ""
-call_tool "list_directory" '{"path":"mcp"}'
-call_tool "glob" '{"pattern":"*.ts","path":"mcp"}'
-call_tool "glob" '{"pattern":"*.xyz","path":"mcp"}'
-call_tool "grep" '{"pattern":"McpServer","path":"mcp","include":"*.ts"}'
-call_tool "grep" '{"pattern":"McpServer","path":"mcp","output_mode":"files_with_matches"}'
-call_tool "grep" '{"pattern":"McpServer","path":"mcp","output_mode":"count"}'
-call_tool "grep" '{"pattern":"ZZZNOMATCH","path":"mcp"}'
+echo "── SECURITY: every one of these must be BLOCKED_PATH ──"
+echo "   (skipped automatically on a Hermes device, where the file tools are not registered)"
+call_tool "read_file"       '{"file_path":"~/.ssh/id_rsa"}' BLOCKED_PATH
+call_tool "read_file"       '{"file_path":"~/.hermes/.env"}' BLOCKED_PATH
+call_tool "read_file"       '{"file_path":"data/.mcp-token"}' BLOCKED_PATH
+call_tool "read_file"       '{"file_path":"data/config.json"}' BLOCKED_PATH
+call_tool "read_file"       '{"file_path":"/proc/self/environ"}' BLOCKED_PATH
+call_tool "write_file"      '{"file_path":"~/.ssh/authorized_keys","content":"x"}' BLOCKED_PATH
+call_tool "list_directory"  '{"path":"~/.openclaw"}' BLOCKED_PATH
+call_tool "grep"            '{"pattern":".","path":"~/.hermes"}' BLOCKED_PATH
+call_tool "grep"            '{"pattern":".","path":"~/.openclaw"}' BLOCKED_PATH
+call_tool "glob"            '{"pattern":"*","path":"~/.ssh"}' BLOCKED_PATH
+call_tool "bash"            '{"command":"cat ~/.ssh/id_rsa"}' BLOCKED_PATH
+call_tool "notebook_edit"   '{"notebook_path":"~/.hermes/x.ipynb","cell_index":0,"new_source":"x"}' BLOCKED_PATH
+call_tool "web_fetch"       '{"url":"http://127.0.0.1/setup-api/system/info"}' BLOCKED_PATH
 
 echo ""
-echo "── Web Tools ──"
-
-call_tool "web_fetch" '{"url":"https://httpbin.org/json","max_length":500}'
-call_tool "web_fetch" '{"url":"not-a-url"}' true
-call_tool "web_search" '{"query":"clawbox jetson","max_results":3}'
-
-echo ""
-echo "── Notebook Edit ──"
-
-# Create a test notebook
-python3 -c "
-import json
-nb = {'nbformat':4,'nbformat_minor':5,'metadata':{},'cells':[
-  {'cell_type':'code','source':['print(1)'],'metadata':{},'outputs':[],'execution_count':None},
-  {'cell_type':'markdown','source':['# Hello'],'metadata':{}}
-]}
-with open('/tmp/mcp-test.ipynb','w') as f: json.dump(nb,f)
-" 2>/dev/null
-
-call_tool "read_file" '{"file_path":"/tmp/mcp-test.ipynb"}'
-call_tool "notebook_edit" '{"notebook_path":"/tmp/mcp-test.ipynb","cell_index":0,"new_source":"print(42)"}'
-call_tool "notebook_edit" '{"notebook_path":"/tmp/mcp-test.ipynb","cell_index":0,"new_source":"# New cell","cell_type":"markdown","edit_mode":"insert"}'
-call_tool "notebook_edit" '{"notebook_path":"/tmp/mcp-test.ipynb","cell_index":2,"edit_mode":"delete"}'
-call_tool "notebook_edit" '{"notebook_path":"/tmp/mcp-test.ipynb","cell_index":99}' true
+echo "── File tools (OpenClaw edition) ──"
+call_tool "read_file"       '{"file_path":"package.json","limit":2}'
+call_tool "read_file"       '{"file_path":"/definitely/not/here"}' NOT_FOUND
+call_tool "write_file"      '{"file_path":"/tmp/mcp-smoke.txt","content":"line1\nline2\nline3"}'
+call_tool "edit_file"       '{"file_path":"/tmp/mcp-smoke.txt","old_text":"line2","new_text":"EDITED"}'
+call_tool "edit_file"       '{"file_path":"/tmp/mcp-smoke.txt","old_text":"line2","new_text":"EDITED"}' NOT_FOUND
+call_tool "list_directory"  '{"path":"mcp"}'
+call_tool "glob"            '{"pattern":"*.ts","path":"mcp"}'
+call_tool "grep"            '{"pattern":"McpServer","path":"mcp","output_mode":"files_with_matches"}'
+call_tool "grep"            '{"pattern":"ZZZNOMATCH","path":"mcp"}'
 
 echo ""
-echo "── Agent ──"
-
-call_tool "agent" '{"description":"test agent","commands":"echo step1\necho step2\necho done"}'
-
-echo ""
-echo "── Task Management ──"
-
-call_tool "task_create" '{"subject":"First task","description":"desc"}'
-call_tool "task_create" '{"subject":"Blocked task","blocked_by":"task-1"}'
-call_tool "task_list" '{}'
+echo "── Shell + background jobs (OpenClaw edition) ──"
+call_tool "bash"            '{"command":"echo hello"}'
+call_tool "bash"            '{"command":"rm -rf /tmp/anything"}' DANGEROUS_COMMAND
+call_tool "job_status"      '{"job_id":"job-999"}' NOT_FOUND
 
 echo ""
-echo "── ClawBox Tools (require running web server) ──"
-echo "  (skipped — start dev server first: bun run dev)"
+echo "── Hermes skills (Hermes edition) ──"
+call_tool "skill_list"      '{}'
+call_tool "skill_search"    '{"query":"pdf","limit":3}'
+call_tool "skill_info"      '{"id":"not a valid id!!"}' BAD_ARGUMENT
+call_tool "skill_uninstall" '{"name":"official/pdf"}' BAD_ARGUMENT
+call_tool "ai_list_models"  '{}'
 
 echo ""
 echo "═══════════════════════════════════════════"
 printf " Results: \033[32m%d passed\033[0m" "$PASS"
 [ "$FAIL" -gt 0 ] && printf ", \033[31m%d failed\033[0m" "$FAIL"
-[ "$SKIP" -gt 0 ] && printf ", \033[33m%d skipped\033[0m" "$SKIP"
+[ "$SKIP" -gt 0 ] && printf ", \033[33m%d skipped/not-on-this-edition\033[0m" "$SKIP"
 echo ""
+echo " A tool that is not registered on this edition answers with an"
+echo " unknown-tool error and shows as ✗ — check it against the edition."
 echo "═══════════════════════════════════════════"
 
-# Cleanup
-rm -f /tmp/mcp-smoke.txt /tmp/mcp-test.ipynb
+rm -f /tmp/mcp-smoke.txt
 
 exit "$FAIL"

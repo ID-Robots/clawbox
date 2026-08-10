@@ -28,6 +28,15 @@ export function zText(max: number, description: string) {
   return z.string().min(1).max(max).describe(description);
 }
 
+/**
+ * A length-capped string that may be empty — for a replacement value where ""
+ * legitimately means "delete this". Never use `.or()` to express this: a union
+ * emits anyOf, which the two harnesses rewrite differently.
+ */
+export function zMaybeEmptyText(max: number, description: string) {
+  return z.string().max(max).describe(description);
+}
+
 /** A length-capped optional string. */
 export function zOptText(max: number, description: string) {
   return z.string().min(1).max(max).optional().describe(description);

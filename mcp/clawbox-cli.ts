@@ -18,6 +18,8 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
+import { installEdition } from "./lib/edition";
+import { builtInApps } from "./lib/context";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
@@ -61,16 +63,21 @@ async function api(path: string, options?: RequestInit) {
   if (!headers.has("authorization")) {
     headers.set("authorization", `Bearer ${getApiToken()}`);
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, redirect: "manual" });
+  if (res.status >= 300 && res.status < 400) {
+    console.error("The device rejected this request's token. Check data/.mcp-token, or restart the device.");
+    process.exit(1);
+  }
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.error(`Error ${res.status}: ${body}`);
+    // Never echo the upstream body: route errors carry python tracebacks,
+    // binary paths and occasionally a token an upstream reflected back.
+    console.error(`The device refused this request (HTTP ${res.status}). Check the device logs for details.`);
     process.exit(1);
   }
   try {
     return await res.json();
-  } catch (err) {
-    console.error(`Error: invalid JSON response: ${err instanceof Error ? err.message : err}`);
+  } catch {
+    console.error("The device returned a response this command could not read.");
     process.exit(1);
   }
 }
@@ -101,6 +108,26 @@ const args = process.argv.slice(2);
 const cmd = args[0];
 const sub = args[1];
 
+/**
+ * Value of a `--flag value` pair.
+ *
+ * The old form additionally required the value NOT to start with "--", so
+ * `--content "--force is now the default"` silently discarded the value and
+ * fell through to reading stdin, which then blocked forever or wrote an empty
+ * file. A flag that is present with no following argument is now an error, not
+ * a silent fallback.
+ */
+function flagValue(name: string): string | null {
+  const i = args.indexOf(name);
+  if (i === -1) return null;
+  const value = args[i + 1];
+  if (value === undefined) {
+    console.error(`${name} needs a value.`);
+    process.exit(1);
+  }
+  return value;
+}
+
 async function main() {
   if (cmd === "webapp" && sub === "create") {
     const appId = args[2];
@@ -112,13 +139,7 @@ async function main() {
     }
 
     // Get HTML from --html flag or stdin (don't capture another flag as content)
-    let html: string;
-    const htmlIdx = args.indexOf("--html");
-    if (htmlIdx !== -1 && args[htmlIdx + 1] && !args[htmlIdx + 1].startsWith("--")) {
-      html = args[htmlIdx + 1];
-    } else {
-      html = await readStdin();
-    }
+    const html = flagValue("--html") ?? (await readStdin());
 
     if (!html.trim()) {
       console.error("No HTML content provided. Use --html '<html>...' or pipe via stdin.");
@@ -156,13 +177,7 @@ async function main() {
       console.error("Usage: clawbox webapp update <appId> --html '<html>...' OR pipe HTML via stdin");
       process.exit(1);
     }
-    const htmlIdx = args.indexOf("--html");
-    let html: string;
-    if (htmlIdx !== -1 && args[htmlIdx + 1] && !args[htmlIdx + 1].startsWith("--")) {
-      html = args[htmlIdx + 1];
-    } else {
-      html = await readStdin();
-    }
+    const html = flagValue("--html") ?? (await readStdin());
     await apiPost("/setup-api/webapps", { appId, html });
     console.log(`✅ Updated webapp "${appId}".`);
 
@@ -179,9 +194,16 @@ async function main() {
     console.log(`✅ Opening ${appId} on desktop.`);
 
   } else if (cmd === "app" && sub === "list") {
-    const builtIn = ["settings", "openclaw", "terminal", "files", "store", "browser", "vnc"];
-    console.log("Built-in apps:");
-    builtIn.forEach(a => console.log(`  ${a}`));
+    // The list is EDITION-dependent: a Hermes device has no OpenClaw chat app
+    // and no app store, and printing them sends the user to a window that
+    // cannot open. Resolved from the root-owned edition lock, same as the app.
+    const edition = installEdition();
+    const harness = edition === "hermes" ? "hermes" : "openclaw";
+    console.log(`Built-in apps (${edition} edition):`);
+    for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
+
+  } else if (cmd === "edition") {
+    console.log(installEdition());
 
   } else if (cmd === "notify") {
     const message = args.slice(1).join(" ");
@@ -248,28 +270,19 @@ async function main() {
       console.error("Usage: clawbox code write <projectId> <filePath> --content '...' OR pipe via stdin");
       process.exit(1);
     }
-    const contentIdx = args.indexOf("--content");
-    let content: string;
-    if (contentIdx !== -1 && contentIdx + 1 < args.length && !args[contentIdx + 1].startsWith("--")) {
-      content = args[contentIdx + 1];
-    } else {
-      content = await readStdin();
-    }
+    const content = flagValue("--content") ?? (await readStdin());
     await apiPost("/setup-api/code", { action: "file-write", projectId, filePath, content });
     console.log(`✅ Written: ${filePath}`);
 
   } else if (cmd === "code" && sub === "edit") {
     const projectId = args[2];
     const filePath = args[3];
-    const oldIdx = args.indexOf("--old");
-    const newIdx = args.indexOf("--new");
-    if (!projectId || !filePath || oldIdx === -1 || newIdx === -1 ||
-        oldIdx + 1 >= args.length || newIdx + 1 >= args.length) {
+    const oldString = flagValue("--old");
+    const newString = flagValue("--new");
+    if (!projectId || !filePath || oldString === null || newString === null) {
       console.error("Usage: clawbox code edit <projectId> <filePath> --old 'old text' --new 'new text'");
       process.exit(1);
     }
-    const oldString = args[oldIdx + 1];
-    const newString = args[newIdx + 1];
     const data = await apiPost("/setup-api/code", { action: "file-edit", projectId, filePath, oldString, newString });
     console.log(`✅ Edited ${filePath}`);
     console.log(JSON.stringify(data, null, 2));
@@ -324,6 +337,14 @@ async function main() {
     console.log(`✅ Deleted project "${projectId}".`);
 
   } else if (cmd === "update") {
+    // Re-running install.sh on a Hermes device risks unmasking the OpenClaw
+    // gateway and breaking the edition lock, which is a support call, not an
+    // update. Updating a Hermes box is done from Settings -> System Update.
+    if (installEdition() === "hermes") {
+      console.error("This is a Hermes-edition ClawBox: `clawbox update` would re-run the OpenClaw installer and break the edition lock.");
+      console.error("Update it from Settings -> System Update on the desktop instead.");
+      process.exit(1);
+    }
     // ClawBox system update: re-run the full installer in place. It git-syncs
     // to the latest pinned code, then runs every step (system packages,
     // OpenClaw at the pinned version, gateway config) and rebuilds — the same
@@ -359,7 +380,8 @@ Usage:
   clawbox notify <message>
   clawbox system stats
   clawbox system info
-  clawbox update                       Update ClawBox + OpenClaw in place (runs the installer; needs sudo)
+  clawbox edition                      Print this device's edition (openclaw | hermes | dual)
+  clawbox update                       Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
 
 Code Projects:
   clawbox code init <projectId> <name> [template] [color]

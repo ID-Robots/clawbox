@@ -40,7 +40,13 @@ import {
 // serve WS supports it).
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
-const HERMES_TIMEOUT_MS = 90_000;
+// An agentic turn is not a completion: the agent may run a dozen tools, launch
+// a browser, wait on a page. 90s killed exactly those — "open facebook on the
+// browser" died mid-run, and a plain file-checking turn had already taken 42s
+// across 6 tool calls on this hardware. The client can still abort at any time
+// (Stop), and the model itself has iteration limits, so this ceiling exists
+// only to stop a truly wedged process living forever.
+const HERMES_TIMEOUT_MS = Number(process.env.HERMES_CHAT_TIMEOUT_MS || 600_000);
 // A chat reply can't legitimately exceed this; cap the buffer so a runaway
 // process can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 2_000_000;

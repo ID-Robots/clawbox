@@ -50,6 +50,8 @@ export interface RegisteredToolInfo {
   name: string;
   description: string;
   params: string[];
+  /** Kept so mcp/check-tools.ts can measure the real tools/list payload. */
+  shape: Shape;
   opts: ToolOpts;
 }
 
@@ -130,6 +132,7 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         name,
         description,
         params: Object.keys(shape),
+        shape,
         opts,
       };
       for (const violation of contractViolations(info)) {

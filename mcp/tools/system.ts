@@ -167,7 +167,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "system_stats",
     "Read live device metrics: CPU, memory, temperature, GPU, network and the top processes. For disk-space questions use disk_usage, and for version questions use update_check — both give a shorter, more direct answer than this.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 6_000 },
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => json(await apiGet("/setup-api/system/stats", { timeoutMs: 15_000 })),
   );
 
@@ -373,7 +373,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "preferences_get",
-    `Read the user's device settings: ${READABLE_PREFS.join(", ")}. Call it before preferences_set so you report the current value rather than guessing. It cannot read credentials or tokens.`,
+"Read the user's device settings. Call it before preferences_set so you report the current value rather than guessing. It cannot read credentials or tokens.",
     {
       key: zEnumOf(READABLE_PREFS, "One setting to read. Omit to read all of them.").optional(),
     },

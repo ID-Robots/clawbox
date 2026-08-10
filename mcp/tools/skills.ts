@@ -148,20 +148,22 @@ export function registerSkillTools(reg: Registrar): void {
 
   reg.tool(
     "skill_list",
-    "List the skills already installed on this device, with the short name each one is removed by. Call this before skill_install to avoid installing something twice, and before skill_uninstall to get the exact name.",
+    "List the skills already installed on this device, with the short name each one is removed by. Call this before skill_install to avoid installing something twice, and before skill_uninstall to get the exact name. Skills without an origin came with the device and cannot be removed.",
     {},
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
       const body = await apiGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
+      // A device ships ~77 built-in skills, so this stays deliberately terse:
+      // name + category for every skill, and a flag only when it is unusual.
+      // The full record per skill would not fit a small model's context.
       const skills = (body.skills ?? []).map((s) => ({
         name: s.name,
         category: s.category,
-        source: s.source,
-        origin: s.origin,
-        enabled: s.enabled !== false,
-        ...(s.incompatible ? { incompatible: true } : {}),
+        ...(s.origin && s.origin !== "builtin" ? { origin: s.origin } : {}),
+        ...(s.incompatible ? { works_here: false } : {}),
+        ...(s.enabled === false ? { enabled: false } : {}),
       }));
-      return json({ installed: skills, counts: body.counts ?? { total: skills.length } });
+      return json({ counts: body.counts ?? { total: skills.length }, installed: skills });
     },
   );
 
@@ -178,47 +180,73 @@ export function registerSkillTools(reg: Registrar): void {
           "Call skill_search and pass the id field from its results, unchanged.",
         );
       }
-      const detail = await apiGet<Record<string, unknown>>("/setup-api/hermes/skills/inspect", {
-        query: { id, docs: 1 },
-        timeoutMs: 30_000,
-        rules: [
-          {
-            status: 404,
-            code: "NOT_FOUND",
-            message: "No skill with that id.",
-            next: "Call skill_search and use an id from its results.",
-          },
-          ...CATALOG_RULES,
-        ],
-      });
-      if ((detail as { ambiguous?: boolean }).ambiguous === true) {
-        const candidates = ((detail as { candidates?: BrowseSkill[] }).candidates ?? [])
-          .slice(0, 8)
-          .map((c) => c.id);
+      // The route answers in TWO phases and the shapes differ, which is easy
+      // to get wrong: `?id=` returns { skill } off disk and the catalogue and
+      // never spawns the CLI; `?id=&docs=1` returns ONLY { delta } with the
+      // remote documentation. Asking for docs=1 alone gets you no metadata at
+      // all, so the second call is made only when the first says it would add
+      // something.
+      const phase1 = await apiGet<{ skill?: Record<string, unknown>; ambiguous?: boolean; candidates?: BrowseSkill[] }>(
+        "/setup-api/hermes/skills/inspect",
+        {
+          query: { id },
+          timeoutMs: 30_000,
+          rules: [
+            {
+              status: 404,
+              code: "NOT_FOUND",
+              message: "No skill with that id.",
+              next: "Call skill_search and use an id from its results.",
+            },
+            ...CATALOG_RULES,
+          ],
+        },
+      );
+      if (phase1.ambiguous === true) {
+        const candidates = (phase1.candidates ?? []).slice(0, 8).map((c) => c.id);
         throw new ToolError(
           "BAD_ARGUMENT",
           "That id matches more than one skill.",
           `Pick one exact id and call skill_info again: ${candidates.join(", ")}`,
         );
       }
-      const security = detail.security as { verdict?: string; summary?: string } | undefined;
+      const detail = phase1.skill;
+      if (!detail) {
+        throw new ToolError(
+          "NOT_FOUND",
+          "No skill with that id.",
+          "Call skill_search and use an id from its results, unchanged.",
+        );
+      }
+
+      let description = typeof detail.description === "string" ? detail.description : "";
+      let documentation = typeof detail.body === "string" ? detail.body : "";
+      if (detail.needsRemoteDocs === true) {
+        const phase2 = await apiGet<{ delta?: { description?: string; body?: string } }>(
+          "/setup-api/hermes/skills/inspect",
+          { query: { id, docs: 1 }, timeoutMs: 30_000 },
+        ).catch(() => null);
+        if (phase2?.delta?.body) documentation = phase2.delta.body;
+        if (!description && phase2?.delta?.description) description = phase2.delta.description;
+      }
+
+      const security = detail.security as { verdict?: string } | undefined;
       const requirements = detail.requirements as
-        | { commands?: { name: string; present: boolean | null }[]; secrets?: { label: string }[] }
+        | { commands?: { name: string }[]; secrets?: { label: string }[] }
         | undefined;
-      const body = typeof detail.body === "string" ? detail.body : "";
       return json({
         id: detail.id,
         name: detail.name,
-        description: detail.description,
+        description,
         source: detail.source,
         trust: detail.trust,
         author: detail.author,
         license: detail.license,
-        incompatible: detail.incompatible === true,
-        security_verdict: security?.verdict ?? "unknown",
+        works_here: detail.incompatible === true ? false : true,
+        security_verdict: security?.verdict ?? "not scanned",
         needs_commands: (requirements?.commands ?? []).map((c) => c.name),
-        needs_secrets: (requirements?.secrets ?? []).map((s) => s.label),
-        documentation: body.length > 4_000 ? `${body.slice(0, 4_000)}…` : body,
+        needs_secrets: (requirements?.secrets ?? []).map((sec) => sec.label),
+        documentation: documentation.length > 4_000 ? `${documentation.slice(0, 4_000)}…` : documentation,
       });
     },
   );

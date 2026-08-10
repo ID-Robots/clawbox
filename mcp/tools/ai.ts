@@ -21,7 +21,8 @@ import type { McpContext } from "../lib/context";
 interface ModelRow {
   id: string;
   description?: string;
-  pricing?: unknown;
+  /** Per-million-token prices, already formatted by the route. */
+  pricing?: { input?: string; output?: string; free?: boolean };
 }
 
 interface ProviderRow {
@@ -118,7 +119,13 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
           },
         ],
       });
-      const models = (body.models ?? []).slice(0, MODEL_LIMIT).map((m) => m.id);
+      // Price is what a customer's "which model should I use" question is
+      // actually about, so it travels with the id rather than being dropped.
+      const models = (body.models ?? []).slice(0, MODEL_LIMIT).map((m) =>
+        m.pricing
+          ? { id: m.id, price_per_million: `in ${m.pricing.input ?? "?"} / out ${m.pricing.output ?? "?"}` }
+          : { id: m.id },
+      );
       return json({
         in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" },
         thinking: body.reasoning ?? "unknown",

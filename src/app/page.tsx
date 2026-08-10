@@ -46,7 +46,7 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "clawbox", name: "Claw", color: "#0a0f1a", type: "chat", pinned: true },
+  { id: "clawbox", name: "app.chat", color: "#0a0f1a", type: "chat", pinned: true },
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
   // Hermes dashboard — only shown on the Hermes edition. Opened via the
   // auth-gated dashboard proxy (url computed at click time from the host).

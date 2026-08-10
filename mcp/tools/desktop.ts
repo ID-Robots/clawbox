@@ -50,7 +50,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "ui_open_app",
     `Open a window on the ClawBox desktop, so the user can see or do something themselves. Built-in apps here: ${appLine}. For an app the user installed or you built, pass "installed-<id>" — call ui_list_apps first to get the id. To browse the web, use browser_open, not the "browser" app.`,
     {
-      app_id: zText(80, `A built-in app id (${appLine}) or "installed-<id>" for an installed app.`),
+      app_id: zText(80, "A built-in app id, or \"installed-<id>\" for an installed app."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
     async ({ app_id }: { app_id: string }) => {
@@ -173,11 +173,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "webapp_create",
-    "Create a one-file web app and put it on the ClawBox desktop. Give it complete standalone HTML with the CSS and JavaScript inline and no links to the internet. For an app of more than one file, use code_project_init instead. Call clawbox_context first for the storage and styling rules.",
+    "Create a one-file web app on the ClawBox desktop from complete standalone HTML, with CSS and JavaScript inline and no links to the internet. For an app of more than one file, use code_project_init. Call clawbox_context first for the storage and styling rules.",
     {
       app_id: zSlug("Unique id, lowercase with hyphens, e.g. \"todo-list\""),
       name: zText(60, "Name shown under the desktop icon"),
-      html: zText(400_000, "The complete HTML document, with CSS and JS inline"),
+      html: zText(400_000, "The complete HTML document"),
       color: zOptText(7, "Icon colour as a hex code, e.g. \"#f97316\""),
       open_after_create: zBool(true, "Open it on the desktop straight away."),
     },
@@ -210,7 +210,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "Replace the HTML of a web app you created earlier with webapp_create. The whole document is replaced, so send the complete HTML, not just the changed part.",
     {
       app_id: zSlug("The id you passed to webapp_create"),
-      html: zText(400_000, "The complete replacement HTML document"),
+      html: zText(400_000, "The complete replacement HTML"),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ app_id, html }: { app_id: string; html: string }) => {
@@ -226,11 +226,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "code_project_init",
-    "Start a multi-file web app project on the ClawBox. It creates a folder with index.html, style.css and app.js and returns the path. Write the files with your own file-editing tools, then call code_project_build to bundle and install it on the desktop. Call clawbox_context first for the storage rules.",
+    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns its path; write the files with your own file-editing tools, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
     {
       project_id: zSlug("Unique id, lowercase with hyphens"),
       name: zText(60, "Name shown under the desktop icon"),
-      template: zEnumOf(["app", "blank"], "app = index.html + style.css + app.js. blank = index.html only.").default("app"),
+      template: zEnumOf(["app", "blank"], "app = HTML, CSS and JS files. blank = one HTML file.").default("app"),
       color: zOptText(7, "Icon colour as a hex code"),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, maxChars: 3_000 },
