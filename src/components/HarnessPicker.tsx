@@ -10,6 +10,9 @@ interface HarnessEntry {
 interface HarnessStatus {
   active: string;
   harnesses: HarnessEntry[];
+  /** Single-harness edition (or dual without a premium license) → no switcher. */
+  locked?: boolean;
+  edition?: string;
 }
 
 // Lets the user pick which agent harness (OpenClaw / Hermes) backs the device.
@@ -74,6 +77,22 @@ export default function HarnessPicker() {
       <p className="text-xs text-[var(--text-muted)] mb-3">
         The engine that runs your agent. One shared identity; each harness keeps its own providers.
       </p>
+      {status?.locked ? (
+        // Single-harness edition: no switcher, just a read-only badge for the
+        // one agent this device runs.
+        <div className="flex items-center justify-between rounded-xl border border-[var(--coral-bright)] bg-orange-500/10 p-3">
+          <span className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            <span className="text-sm text-[var(--text-primary)] font-medium">
+              {status.harnesses.find((h) => h.id === status.active)?.label ?? status.active}
+            </span>
+          </span>
+          <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+            <span className="material-symbols-rounded" style={{ fontSize: 13 }}>lock</span>
+            This edition
+          </span>
+        </div>
+      ) : (
       <div className="grid grid-cols-2 gap-3">
         {(status?.harnesses ?? []).map((h) => {
           const active = status?.active === h.id;
@@ -101,6 +120,7 @@ export default function HarnessPicker() {
           );
         })}
       </div>
+      )}
       {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
     </div>
   );

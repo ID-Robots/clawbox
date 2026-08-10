@@ -10,6 +10,7 @@
 import fs from "fs";
 import path from "path";
 import { get, set } from "@/lib/config-store";
+import { verifyDualLicense, isDualLicenseEnforced } from "@/lib/edition-license";
 
 export type Harness = "openclaw" | "hermes";
 
@@ -20,6 +21,55 @@ export const HERMES_BIN =
 
 export const HARNESS_CONFIG_KEY = "active_harness";
 export const DEFAULT_HARNESS: Harness = "openclaw";
+
+// ── Edition lock ─────────────────────────────────────────────────────────────
+//
+// A ClawBox image ships as one of three editions, baked at install time into a
+// root-owned systemd EnvironmentFile (NOT the user-writable config.json), so a
+// customer can't flip it:
+//   - "openclaw" | "hermes": single-harness. The device runs exactly that agent,
+//     the Settings switcher is hidden, and /harness/select is refused. The other
+//     harness's runtime isn't even installed, so there is nothing to switch to.
+//   - "dual": both harnesses installed + the runtime switcher enabled. This is a
+//     PREMIUM feature: it only actually unlocks with a valid signed license (see
+//     verifyDualLicense) — a customer can't enable dual just by setting the env,
+//     because the switcher stays disabled until a license we signed verifies.
+export type Edition = Harness | "dual";
+
+/** The build/install edition. Defaults to "dual" so existing installs are
+ *  unchanged until an image is explicitly built single-harness. */
+export function getEdition(): Edition {
+  const raw = (process.env.CLAWBOX_EDITION || "").trim().toLowerCase();
+  if (raw === "openclaw" || raw === "hermes" || raw === "dual") return raw;
+  return "dual";
+}
+
+/**
+ * True when the dual/switcher feature is active. Requires edition "dual"; when
+ * license enforcement is turned on (a signing key is configured) it also
+ * requires a valid license. Until enforcement is enabled, dual stays open so
+ * existing installs keep their switcher — flipping the pubkey on makes dual
+ * license-gated everywhere.
+ */
+export function isDualUnlocked(): boolean {
+  if (getEdition() !== "dual") return false;
+  return isDualLicenseEnforced() ? verifyDualLicense() : true;
+}
+
+/** True when the device is pinned to a single harness (switcher disabled) —
+ *  either a single-harness edition, or "dual" without a valid license. */
+export function isSingleHarnessEdition(): boolean {
+  return !isDualUnlocked();
+}
+
+/** The harness this device is locked to, or null when the switcher is unlocked.
+ *  A single edition locks to itself; "dual" without a license degrades to the
+ *  default harness rather than exposing a switcher. */
+export function lockedHarness(): Harness | null {
+  if (isDualUnlocked()) return null;
+  const e = getEdition();
+  return e === "hermes" ? "hermes" : e === "openclaw" ? "openclaw" : DEFAULT_HARNESS;
+}
 
 export interface HarnessInfo {
   id: Harness;
@@ -47,6 +97,11 @@ export function isHarness(value: unknown): value is Harness {
 }
 
 export async function getActiveHarness(): Promise<Harness> {
+  // A locked (single-harness / unlicensed-dual) device ignores the stored value
+  // entirely — the edition is the source of truth, so editing config.json can't
+  // change which agent runs.
+  const locked = lockedHarness();
+  if (locked) return locked;
   try {
     const value = await get(HARNESS_CONFIG_KEY);
     return isHarness(value) ? value : DEFAULT_HARNESS;
@@ -56,6 +111,11 @@ export async function getActiveHarness(): Promise<Harness> {
 }
 
 export async function setActiveHarness(harness: Harness): Promise<void> {
+  // Refuse to persist a switch on a locked device (defense-in-depth — the
+  // /harness/select route also rejects, and the UI hides the switcher).
+  if (isSingleHarnessEdition()) {
+    throw new Error("Harness switching is disabled on this edition");
+  }
   await set(HARNESS_CONFIG_KEY, harness);
 }
 

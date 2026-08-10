@@ -238,6 +238,17 @@ function ChromeDesktopInner() {
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
   const [installedMeta, setInstalledMeta] = useState<Record<string, InstalledMeta>>({});
 
+  // ─── Active agent harness (openclaw | hermes) ───
+  // On a Hermes device the OpenClaw gateway isn't installed, so hide the
+  // OpenClaw-only Control UI app rather than surface a broken window.
+  const [activeHarness, setActiveHarness] = useState<string>("openclaw");
+  useEffect(() => {
+    fetch("/setup-api/harness/active", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.active) setActiveHarness(d.active); })
+      .catch(() => {});
+  }, []);
+
   // ─── Desktop shortcuts for built-in apps ───
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
@@ -955,8 +966,14 @@ function ChromeDesktopInner() {
         });
       }
     }
+    // Hide OpenClaw-only apps (the gateway Control UI) when this device runs
+    // Hermes — its gateway isn't installed, so the app would just error.
+    const OPENCLAW_ONLY_APP_IDS = ["openclaw"];
+    const harnessApps = activeHarness === "hermes"
+      ? apps.filter((a) => !OPENCLAW_ONLY_APP_IDS.includes(a.id))
+      : apps;
     return [
-      ...apps,
+      ...harnessApps,
       ...installedAppDefs,
       {
         id: "setup",
@@ -968,7 +985,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta]);
+  }, [installedApps, installedMeta, activeHarness]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -1500,8 +1517,9 @@ function ChromeDesktopInner() {
     })
     .filter((a): a is StoreApp => a !== null);
 
-  // Built-in apps with desktop shortcuts
+  // Built-in apps with desktop shortcuts (hide OpenClaw-only apps on Hermes).
   const desktopBuiltinApps = desktopApps
+    .filter((appId) => !(activeHarness === "hermes" && appId === "openclaw"))
     .map((appId) => apps.find((a) => a.id === appId))
     .filter((a): a is AppDef => !!a);
 
