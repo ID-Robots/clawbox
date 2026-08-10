@@ -5,6 +5,7 @@ import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
+import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
   getLlamaCppOverlayProgress,
@@ -1734,29 +1735,10 @@ export default function AIModelsStep({
   const embeddedConnectLabel = t("settings.connect");
 
   // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
-  // provider config this step drives — show a short panel and let setup proceed.
+  // provider config this step drives — render Hermes' own model/provider/key
+  // config instead.
   if (edition === "hermes") {
-    return (
-      <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-        <div className="card-surface rounded-2xl p-5 sm:p-8">
-          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">Hermes agent</h1>
-          <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
-            This device runs on Hermes, which manages its own providers and models.
-            Choose a model any time from the chat header, or open the Hermes dashboard
-            to configure providers and keys — no setup needed here.
-          </p>
-          {!embedded && (
-            <button
-              type="button"
-              onClick={() => onNext?.()}
-              className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity"
-            >
-              Continue
-            </button>
-          )}
-        </div>
-      </div>
-    );
+    return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
   }
 
   return (

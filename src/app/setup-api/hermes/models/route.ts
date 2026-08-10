@@ -3,6 +3,16 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+import { runHermesCli } from "@/lib/hermes-cli";
+
+// Inference providers Hermes understands (mirrors the `model.provider` comment
+// block in ~/.hermes/config.yaml). "auto" lets Hermes pick from whatever
+// credentials are present. Anything outside this set is rejected so a POST
+// can't smuggle an arbitrary value into the config.
+const ALLOWED_PROVIDERS = new Set([
+  "auto", "openrouter", "nous", "nous-api", "anthropic",
+  "openai-codex", "copilot", "gemini", "zai", "kimi-coding",
+]);
 
 // Hermes keeps a curated model catalog + the user's default in its own config
 // (Hermes manages providers itself — it does NOT use openclaw.json). Surface
@@ -72,4 +82,55 @@ export async function GET() {
     models.unshift({ id: current, description: "current" });
   }
   return NextResponse.json({ models, current });
+}
+
+// Set the Hermes default model and/or inference provider. Persists via
+// `hermes config set` (the same store the GET above reads back), so the change
+// survives restarts and applies to `hermes -z` chats. Both fields optional;
+// at least one required.
+export async function POST(request: Request) {
+  let body: { model?: string; provider?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const model = typeof body.model === "string" ? body.model.trim() : "";
+  const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+
+  if (!model && !provider) {
+    return NextResponse.json({ error: "model or provider is required" }, { status: 400 });
+  }
+  // Reject flag-smuggling (a value starting with "-") and any charset the
+  // config store shouldn't see. `runHermesCli` never uses a shell, but a
+  // leading "-" could still be parsed by hermes as an option.
+  if (model && (!MODEL_ID_RE.test(model) || model.startsWith("-"))) {
+    return NextResponse.json({ error: "Invalid model id" }, { status: 400 });
+  }
+  if (provider && !ALLOWED_PROVIDERS.has(provider)) {
+    return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
+  }
+
+  try {
+    if (model) {
+      const r = await runHermesCli(["config", "set", "model.default", model]);
+      if (r.code !== 0) {
+        return NextResponse.json({ error: r.stderr || "Failed to set model" }, { status: 502 });
+      }
+    }
+    if (provider) {
+      const r = await runHermesCli(["config", "set", "model.provider", provider]);
+      if (r.code !== 0) {
+        return NextResponse.json({ error: r.stderr || "Failed to set provider" }, { status: 502 });
+      }
+    }
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "hermes config failed" },
+      { status: 502 },
+    );
+  }
+
+  return NextResponse.json({ ok: true, model: model || undefined, provider: provider || undefined });
 }
