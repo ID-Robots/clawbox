@@ -7,6 +7,17 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     mockReset: true,
+    // Keep the suite HERMETIC. src/lib/edition-source.ts reads the device's
+    // real /etc/clawbox/edition.env to resolve the SKU, so running the tests on
+    // an actual ClawBox made them assert against that box's edition instead of
+    // their own fixtures: on a Hermes device the edition tests flipped to
+    // "hermes" and every app-store route returned 404 (correctly hidden on that
+    // SKU) — 20 failures that appear only on hardware. Point the lookup at a
+    // path that cannot exist so tests fall back to process.env, which they
+    // control; the individual edition tests override this with a real tmp file.
+    env: {
+      CLAWBOX_EDITION_FILE: "/nonexistent/clawbox-test-edition.env",
+    },
     projects: [
       {
         extends: true,
