@@ -28,7 +28,24 @@ const jobs = new Map<string, BgJob>();
 const MAX_AGE_MS = 3_600_000;
 const MAX_KEPT = 50;
 const MAX_OUTPUT = 4 * 1024 * 1024; // per stream
+/** How long to keep collecting output after the shell has already exited. */
+const DRAIN_MS = 250;
 let seq = 0;
+
+/**
+ * Kill the shell AND anything it backgrounded. Both spawns below use
+ * `detached: true` so the shell leads its own process group; without the group
+ * kill, `npm run dev &` outlives the call it was started from and keeps our
+ * stdout pipe open.
+ */
+export function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already gone */ }
+  }
+}
 
 // Hard blocks. These are TYPO PROTECTION, not a security boundary: `bash` runs
 // an arbitrary shell string, so anything this list catches can be spelled
@@ -102,34 +119,63 @@ export function startJob(
   };
   jobs.set(id, job);
 
-  const child = spawn("bash", ["-c", command], { timeout: timeoutMs, cwd, env: { ...process.env, HOME } });
+  // `detached` + our own timer, not spawn's `timeout`: spawn's timeout only
+  // signals the direct child, and the job was only ever marked finished from
+  // `close`, which never fires while a backgrounded grandchild holds the pipe.
+  // Such a job was reported "running" by job_status forever.
+  const child = spawn("bash", ["-c", command], { cwd, env: { ...process.env, HOME }, detached: true });
   job.process = child;
   let truncated = false;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const settle = (code: number | null, note?: string) => {
+    if (job.status !== "running") return;
+    clearTimeout(hardTimer);
+    if (drainTimer) clearTimeout(drainTimer);
+    if (truncated) job.stderr += "\n[output truncated: the job produced too much]";
+    if (note) job.stderr += note;
+    job.exitCode = code ?? 1;
+    job.status = code === 0 ? "completed" : "failed";
+    job.completedAt = Date.now();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    job.process = null;
+  };
+
+  const hardTimer = setTimeout(() => {
+    killTree(child, "SIGKILL");
+    setTimeout(() => settle(124, `\n[stopped: the job ran longer than ${Math.round(timeoutMs / 1000)}s]`), DRAIN_MS);
+  }, timeoutMs);
+
   const append = (which: "stdout" | "stderr") => (d: Buffer) => {
     if (job[which].length >= MAX_OUTPUT) return;
     job[which] += d.toString();
     if (job[which].length >= MAX_OUTPUT) {
       truncated = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      killTree(child, "SIGKILL");
+      setTimeout(() => settle(1), DRAIN_MS);
     }
   };
   child.stdout?.on("data", append("stdout"));
   child.stderr?.on("data", append("stderr"));
-  child.on("close", (code) => {
-    if (truncated) job.stderr += "\n[output truncated: the job produced too much]";
-    job.exitCode = code ?? 1;
-    job.status = code === 0 ? "completed" : "failed";
-    job.completedAt = Date.now();
-    job.process = null;
+  child.on("close", (code) => settle(code));
+  child.on("exit", (code) => {
+    if (job.status !== "running" || drainTimer) return;
+    drainTimer = setTimeout(() => settle(code), DRAIN_MS);
   });
   child.on("error", (err: Error) => {
     job.stderr += err.message;
-    job.exitCode = 1;
-    job.status = "failed";
-    job.completedAt = Date.now();
-    job.process = null;
+    settle(1);
   });
   return job;
+}
+
+/** Stop a running job and everything it started. */
+export function stopJob(job: BgJob): void {
+  if (job.process) killTree(job.process, "SIGTERM");
+  job.status = "failed";
+  job.completedAt = Date.now();
+  job.process = null;
 }
 
 export function getJob(id: string): BgJob | undefined {
@@ -143,25 +189,56 @@ export function runShell(
   cwd: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolveP) => {
-    const child = spawn("bash", ["-c", command], { timeout: timeoutMs, cwd, env: { ...process.env, HOME } });
+    // Same shape as startJob, and for the same reason: `bash -c "sleep 30 &"`
+    // exits in milliseconds but its grandchild keeps stdout open, so a promise
+    // that resolved from `close` never settled and the tool call hung for the
+    // rest of the session. Nothing above this has a per-request timeout.
+    const child = spawn("bash", ["-c", command], { cwd, env: { ...process.env, HOME }, detached: true });
     let stdout = "";
     let stderr = "";
     let truncated = false;
+    let timedOut = false;
+    let settled = false;
+    let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      if (drainTimer) clearTimeout(drainTimer);
+      if (truncated) stderr += "\n[output truncated: the command produced too much]";
+      if (timedOut) stderr += `\n[stopped: the command ran longer than ${Math.round(timeoutMs / 1000)}s]`;
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolveP({ stdout, stderr, exitCode: code ?? 1 });
+    };
+
+    const hardTimer = setTimeout(() => {
+      timedOut = true;
+      killTree(child, "SIGKILL");
+      setTimeout(() => finish(124), DRAIN_MS);
+    }, timeoutMs);
+
     const onData = (which: "out" | "err") => (d: Buffer) => {
       if (stdout.length + stderr.length >= MAX_OUTPUT) return;
       if (which === "out") stdout += d.toString();
       else stderr += d.toString();
       if (stdout.length + stderr.length >= MAX_OUTPUT) {
         truncated = true;
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        killTree(child, "SIGKILL");
+        setTimeout(() => finish(1), DRAIN_MS);
       }
     };
     child.stdout?.on("data", onData("out"));
     child.stderr?.on("data", onData("err"));
-    child.on("close", (code) => {
-      if (truncated) stderr += "\n[output truncated: the command produced too much]";
-      resolveP({ stdout, stderr, exitCode: code ?? 1 });
+    child.on("close", (code) => finish(code));
+    child.on("exit", (code) => {
+      if (settled || drainTimer) return;
+      drainTimer = setTimeout(() => finish(code), DRAIN_MS);
     });
-    child.on("error", (err: Error) => resolveP({ stdout, stderr: err.message, exitCode: 127 }));
+    child.on("error", (err: Error) => {
+      stderr += err.message;
+      finish(127);
+    });
   });
 }

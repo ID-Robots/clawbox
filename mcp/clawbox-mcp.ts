@@ -84,6 +84,12 @@ export async function buildServer(edition: Ed, profile: Profile = resolveProfile
   registerBrowserTools(reg);
   registerCodingTools(reg);
 
+  // LAST. It takes over tools/call so that argument-validation failures come
+  // back as the { error, code, message, next } envelope instead of the SDK's
+  // raw zod dump, and McpServer installs its own dispatcher on the first
+  // registerTool() call — so this has to come after all of them.
+  reg.finalize();
+
   return { server, reg, ctx };
 }
 

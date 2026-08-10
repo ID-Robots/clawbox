@@ -101,12 +101,28 @@ echo ""
 echo "── Argument validation ──"
 call_tool "ui_open_app"     '{"app_id":"no-such-app-xyz"}' NOT_FOUND
 call_tool "preferences_set" '{"key":"ui_language","value":"klingon"}' BAD_ARGUMENT
+# Schema rejections must come back as the BAD_ARGUMENT envelope, not as the
+# SDK's raw zod issue array. And a small `lines` must simply work.
+call_tool "logs_tail"       '{"unit":"clawbox-setup","lines":3}'
+call_tool "logs_tail"       '{"unit":"clawbox-setup","lines":9999}' BAD_ARGUMENT
+call_tool "system_power"    '{"action":"reboot"}' BAD_ARGUMENT
 
 echo ""
 if [ "$EDITION" = "openclaw" ]; then
 echo "── SECURITY: every one of these must be BLOCKED_PATH ──"
 call_tool "read_file"       '{"file_path":"~/.ssh/id_rsa"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"~/.hermes/.env"}' BLOCKED_PATH
+# Dotenv files, by name and by relative path. The project root is the default
+# search root, so these have to be refused on the plain spelling too, not only
+# on a fully-qualified one — and refused for writes as well as reads.
+call_tool "read_file"       '{"file_path":".env"}' BLOCKED_PATH
+call_tool "read_file"       '{"file_path":".env.local"}' BLOCKED_PATH
+call_tool "write_file"      '{"file_path":".env","content":"X=1"}' BLOCKED_PATH
+# bash's pre-flight is a guard rail, not a boundary (see mcp/tools/coding.ts).
+# These pin the spellings it does recognise, including indirect ones.
+call_tool "bash"            '{"command":"cat ${HOME}/.hermes/.env"}' BLOCKED_PATH
+call_tool "bash"            '{"command":"D=.hermes; cat /home/clawbox/$D/.env"}' BLOCKED_PATH
+call_tool "bash"            '{"command":"find /home/clawbox -maxdepth 2 -name .env -exec cat {} +"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"data/.mcp-token"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"data/config.json"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"/proc/self/environ"}' BLOCKED_PATH
@@ -130,6 +146,9 @@ call_tool "list_directory"  '{"path":"mcp"}'
 call_tool "glob"            '{"pattern":"*.ts","path":"mcp"}'
 call_tool "grep"            '{"pattern":"McpServer","path":"mcp","output_mode":"files_with_matches"}'
 call_tool "grep"            '{"pattern":"ZZZNOMATCH","path":"mcp"}'
+# A search whose include pattern targets dotenv files must come back empty: hits
+# are filtered per RESULT, not only by checking the search root.
+call_tool "grep"            '{"pattern":"[A-Z_]+=","include":"*.env"}'
 
 echo ""
 echo "── Shell + background jobs ──"

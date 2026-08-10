@@ -9,7 +9,8 @@
 // harness switching, telegram configuration, and any cleanup tool that takes a
 // PATH rather than a closed target name.
 
-import { readFile, unlink } from "fs/promises";
+import { mkdtemp, readFile, rm } from "fs/promises";
+import { tmpdir } from "os";
 import { join } from "path";
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { redact, ToolError, type ErrorRule } from "../lib/errors";
@@ -17,6 +18,11 @@ import { HOME, spawnArgv } from "../lib/guard";
 import { json, text, type Registrar, type ToolResult } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
+
+// Raw bytes whose base64 still fits under the 1 MiB image cap in
+// lib/register.ts (base64 is 4/3 of the input). Anything larger is dropped
+// there, so returning it just wastes the round trip.
+const MAX_SCREEN_BYTES = 700_000;
 
 // ── Disk ─────────────────────────────────────────────────────────────────────
 
@@ -275,7 +281,9 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       "Read the most recent log lines from one ClawBox service, to diagnose why something on the device is failing. Read-only. Credentials in the log are blanked out before you see them.",
       {
         unit: zEnumOf(units, "Which service's log to read."),
-        lines: zInt(10, 200, 50, "How many of the most recent lines to return."),
+        // Floor 1, not 10: "show me the last 5 lines" is a normal request and
+        // was a hard schema rejection. Only the ceiling protects anything.
+        lines: zInt(1, 200, 50, "How many of the most recent lines to return."),
       },
       { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 8_000 },
       async ({ unit, lines }: { unit: string; lines: number }) => {
@@ -304,42 +312,76 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       {},
       { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
       async (): Promise<ToolResult> => {
-        // scrot writes JPEG when the target ends in .jpg, which is what keeps
-        // the base64 payload small enough for a local model's context. The
-        // other grabbers only do PNG.
-        const jpeg = grabber === "scrot";
-        const file = join("/tmp", `clawbox-mcp-screen.${jpeg ? "jpg" : "png"}`);
-        const args =
-          grabber === "scrot"
-            ? ["-o", "-q", "55", file]
-            : grabber === "gnome-screenshot"
-              ? ["-f", file]
-              : grabber === "spectacle"
-                ? ["-b", "-n", "-o", file]
-                : ["-window", "root", file]; // ImageMagick `import`
-        const r = await spawnArgv(grabber, args, {
-          timeoutMs: 15_000,
-          extraEnv: { DISPLAY: process.env.DISPLAY || ":0" },
-        });
-        let buf: Buffer;
+        // A private 0700 directory per call, never a fixed name in the shared
+        // /tmp. A predictable output path in a world-writable directory is not
+        // a safe place to have a subprocess create a file, and reusing one name
+        // across calls means a failed grab reads back the PREVIOUS capture and
+        // presents it as the current screen. Both go away with mkdtemp.
+        const dir = await mkdtemp(join(tmpdir(), "clawbox-screen-"));
         try {
-          buf = await readFile(file);
-        } catch {
-          throw new ToolError(
-            "ENDPOINT_DOWN",
-            "The desktop screen could not be captured.",
-            r.timedOut
-              ? "Retry once. If it fails again, tell the user the desktop may be asleep."
-              : "Tell the user the desktop display is not available right now.",
-          );
+          // scrot writes JPEG when the target ends in .jpg. The other grabbers
+          // only do PNG, and a 1080p PNG is over the image cap on its own.
+          const jpeg = grabber === "scrot";
+          const file = join(dir, `screen.${jpeg ? "jpg" : "png"}`);
+          const args =
+            grabber === "scrot"
+              ? ["-o", "-q", "55", file]
+              : grabber === "gnome-screenshot"
+                ? ["-f", file]
+                : grabber === "spectacle"
+                  ? ["-b", "-n", "-o", file]
+                  : ["-window", "root", file]; // ImageMagick `import`
+          const r = await spawnArgv(grabber, args, {
+            timeoutMs: 15_000,
+            extraEnv: { DISPLAY: process.env.DISPLAY || ":0" },
+          });
+          const failed = (): ToolError =>
+            new ToolError(
+              "ENDPOINT_DOWN",
+              "The desktop screen could not be captured.",
+              r.timedOut
+                ? "Retry once. If it fails again, tell the user the desktop may be asleep."
+                : "Tell the user the desktop display is not available right now.",
+            );
+          if (r.exitCode !== 0) throw failed();
+          let buf = await readFile(file).catch(() => null);
+          if (!buf) throw failed();
+          let mime = jpeg ? "image/jpeg" : "image/png";
+
+          // This is what ctx.capabilities.imageConvert is probed for. Without
+          // it a PNG capture is dropped by the image cap in lib/register.ts and
+          // the agent is told to "ask for a smaller region" — advice it cannot
+          // follow, because this tool deliberately takes no parameters.
+          if (!jpeg && ctx.capabilities.imageConvert) {
+            const smaller = join(dir, "screen-small.jpg");
+            const c = await spawnArgv("convert", [file, "-resize", "1280x1280>", "-quality", "55", smaller], {
+              timeoutMs: 20_000,
+            });
+            if (c.exitCode === 0) {
+              const shrunk = await readFile(smaller).catch(() => null);
+              if (shrunk) {
+                buf = shrunk;
+                mime = "image/jpeg";
+              }
+            }
+          }
+
+          if (buf.length > MAX_SCREEN_BYTES) {
+            throw new ToolError(
+              "TOO_LARGE",
+              "The picture of the screen is too big to return from this device.",
+              "Do not retry. Tell the user you cannot show the screen here and ask them to describe what is on it.",
+            );
+          }
+          return {
+            content: [
+              { type: "text", text: "The ClawBox desktop, as shown on the monitor." },
+              { type: "image", data: buf.toString("base64"), mimeType: mime },
+            ],
+          };
+        } finally {
+          await rm(dir, { recursive: true, force: true }).catch(() => { /* best effort */ });
         }
-        await unlink(file).catch(() => { /* best effort */ });
-        return {
-          content: [
-            { type: "text", text: "The ClawBox desktop, as shown on the monitor." },
-            { type: "image", data: buf.toString("base64"), mimeType: jpeg ? "image/jpeg" : "image/png" },
-          ],
-        };
       },
     );
   }
@@ -373,7 +415,10 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "preferences_get",
-"Read the user's device settings. Call it before preferences_set so you report the current value rather than guessing. It cannot read credentials or tokens.",
+    // The read list is wider than the write list, and steering the model to
+    // "read it, then set it" without saying so walked it into a rejection:
+    // wp_bg_color reads fine and cannot be written. Name the read-only keys.
+    "Read the user's device settings. It cannot read credentials or tokens. These can also be changed with preferences_set: ui_language, ui_user_name, ui_mascot_hidden, wp_opacity, wp_fit. These are READ-ONLY and no tool can change them — wp_bg_color, installed_apps, pinned_apps, hidden_installed; for those, tell the user to change it in Settings.",
     {
       key: zEnumOf(READABLE_PREFS, "One setting to read. Omit to read all of them.").optional(),
     },

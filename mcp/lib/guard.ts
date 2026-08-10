@@ -7,11 +7,13 @@
 // it inconsistently for files outside the root tsconfig include, and it drags
 // server-only Next.js code into this stdio process.
 //
-// The secret denylist is src/lib/file-guard.ts and nothing else. The MCP used
-// to carry its own parallel copy (SECRET_PATH_RES), which had drifted: it never
-// knew about ~/.hermes, so `grep -r . ~/.hermes` printed every provider key and
-// the ClawBox AI billing token. One list, symlink-resolving, shared with the
-// Files API.
+// The secret denylist is src/lib/file-guard.ts PLUS the two MCP-local rules
+// below — ONE list, not two. The MCP previously kept a parallel copy of the
+// rules, which is a shape that drifts: two lists of the same thing eventually
+// disagree, and the weaker one wins wherever it is consulted. What stays here is
+// only what file-guard cannot express, because file-guard is shared with the
+// Files API, where the user drives the file manager themselves and the trust
+// decision is a different one.
 
 import { spawn } from "child_process";
 import { join, resolve, isAbsolute, normalize } from "path";
@@ -38,6 +40,26 @@ function isDevicePath(abs: string): boolean {
   return false;
 }
 
+// Dotenv files, anywhere — read AND write.
+//
+// <CLAWBOX_ROOT>/.env is a credential store (see .env.example for what the
+// install keeps there), and it is also configuration: clawbox-setup.service
+// loads it as an EnvironmentFile, so its contents shape how the web server comes
+// up on the next restart (src/lib/edition-source.ts explains why the edition
+// lock deliberately sits in a root-owned file instead). Neither role belongs to
+// an agent-facing tool, so the whole family is out of reach here.
+//
+// This rule is MCP-local rather than in file-guard because file-guard also backs
+// the Files app, where a user browsing their own project folder is a different
+// trust decision from a tool acting on content the device did not author.
+// The backslash alternative is only for the dev machines this file is unit-run
+// on; the device is POSIX.
+const DOTENV_RE = /(^|[/\\])(\.env(\.[^/\\]*)?|\.envrc)$/;
+
+function isDotenvPath(abs: string): boolean {
+  return DOTENV_RE.test(abs);
+}
+
 /**
  * Expand `~`, resolve relative paths against the project root, and reject
  * anything that cannot be a real path. Returns an absolute, normalised path.
@@ -62,8 +84,16 @@ export function resolveUserPath(input: string): string {
 /** True when this path may be read, listed, searched or written by a tool. */
 export function isAllowedPath(abs: string): boolean {
   if (isDevicePath(abs)) return false;
+  if (isDotenvPath(abs)) return false;
   return !isProtectedFilePath(abs);
 }
+
+/**
+ * Basenames that mean "a credential store" wherever they appear in a string.
+ * Used by the `bash` pre-flight, which sees a shell string rather than a path.
+ */
+export const SECRET_NAME_RE =
+  /(^|[^\w.-])\.(ssh|hermes|openclaw|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
 
 /**
  * Throw a BLOCKED_PATH the agent can act on. The message deliberately names no
@@ -94,6 +124,9 @@ export interface SpawnResult {
   timedOut: boolean;
   truncated: boolean;
 }
+
+/** How long to keep collecting output after the child has already exited. */
+const DRAIN_MS = 250;
 
 export interface SpawnOptions {
   timeoutMs?: number;
@@ -135,10 +168,31 @@ export function spawnArgv(
     let truncated = false;
     let timedOut = false;
     let settled = false;
+    let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = (exitCode: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (drainTimer) clearTimeout(drainTimer);
+      // Release pipes a surviving grandchild may still hold, so this process
+      // does not accumulate open handles once per hung call.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolveP({ stdout, stderr, exitCode, timedOut, truncated });
+    };
+
+    // Kill, then settle on OUR schedule. Killing the direct child does not
+    // necessarily close the pipes — a grandchild can hold them open — so waiting
+    // for an event after the kill is waiting for something that may never come.
+    const hardStop = (exitCode: number) => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      setTimeout(() => finish(exitCode), DRAIN_MS);
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      hardStop(124);
     }, timeoutMs);
 
     const onChunk = (which: "out" | "err") => (d: Buffer) => {
@@ -148,20 +202,24 @@ export function spawnArgv(
       else stderr += text;
       if (stdout.length + stderr.length >= maxBytes) {
         truncated = true;
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        hardStop(1);
       }
     };
 
     child.stdout?.on("data", onChunk("out"));
     child.stderr?.on("data", onChunk("err"));
 
-    const finish = (exitCode: number) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolveP({ stdout, stderr, exitCode, timedOut, truncated });
-    };
     child.on("close", (code) => finish(code ?? 1));
+    // `close` waits for every stdio pipe to reach EOF. A child that backgrounds
+    // a grandchild (`find … -exec … &`, anything daemonising) leaves the pipe
+    // open forever, so `close` never fires. That hung the STARTUP PROBES in
+    // lib/context.ts, which buildContext awaits before server.connect() — the
+    // whole tool surface silently failed to appear. Settle from `exit` plus a
+    // short drain window instead.
+    child.on("exit", (code) => {
+      if (settled || drainTimer) return;
+      drainTimer = setTimeout(() => finish(code ?? 1), DRAIN_MS);
+    });
     child.on("error", (err: Error) => {
       stderr += err.message;
       finish(127);

@@ -1,4 +1,5 @@
 import { runHermesCli } from "@/lib/hermes-cli";
+import { get } from "@/lib/config-store";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
@@ -65,6 +66,48 @@ export async function applyLocalAiToHermes(options: {
 
   invalidateModelOptions();
   return { provider: HERMES_LOCAL_PROVIDER, model };
+}
+
+let reconciled = false;
+
+/**
+ * Register the local model if it was configured BEFORE this code existed.
+ *
+ * The write above only happens when the customer enables local AI. Every device
+ * that already had Gemma 4 on would otherwise keep the symptom — configured,
+ * running, absent from the picker — until someone thought to toggle it off and
+ * on again. So the picker's own read repairs it, once per process, and only
+ * when there is genuinely something to repair.
+ */
+export async function reconcileLocalAiWithHermes(): Promise<void> {
+  if (reconciled) return;
+  reconciled = true;
+  try {
+    const configured = await get("local_ai_configured");
+    if (configured !== true) return;
+    const provider = await get("local_ai_provider");
+    if (provider !== "llamacpp" && provider !== "ollama") return;
+    // Already registered? Then this is a normal device and we are done.
+    const existing = await runHermesCli(
+      ["config", "get", `providers.${HERMES_LOCAL_PROVIDER}.base_url`],
+      { timeoutMs: 15_000 },
+    );
+    if (existing.code === 0 && existing.stdout.trim()) return;
+
+    const stored = await get("local_ai_model");
+    // Stored as "llamacpp/gemma4-e2b-it-q4_0"; Hermes wants the bare id.
+    const model = typeof stored === "string" ? stored.split("/").pop() || "" : "";
+    await applyLocalAiToHermes({ provider, model });
+  } catch (err) {
+    // Never let a repair break the read it is attached to.
+    console.error("[hermes-local-ai] reconcile failed:", err);
+    reconciled = false;
+  }
+}
+
+/** Test seam. */
+export function _resetLocalAiReconcileForTests(): void {
+  reconciled = false;
 }
 
 /**

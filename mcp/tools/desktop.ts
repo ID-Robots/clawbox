@@ -158,12 +158,34 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     },
   );
 
+  // Registered on BOTH editions, unlike app_search / app_install, because this
+  // is also the removal path for a web app made by webapp_create or
+  // code_project_build — and both of those exist on Hermes. What it actually
+  // does is remove the DESKTOP ENTRY (and, on OpenClaw, the store app's skill
+  // folder). It used to describe itself as the app-store uninstaller on Hermes
+  // too, where /setup-api/apps/uninstall deletes an OpenClaw skills directory
+  // that does not exist and still answers 200 — the "silently half-works" case.
+  // The installed-list pre-check below is what closes that: a skill name now
+  // gets a clear NOT_FOUND pointing at skill_uninstall instead of a cheerful
+  // "Removed" for something that was never touched.
   reg.tool(
     "app_uninstall",
-    "Remove an app the user installed from the ClawBox app store. On a Hermes device use skill_uninstall instead — that is where its capabilities come from. Ask the user to confirm first.",
+    ctx.edition === "hermes"
+      ? "Remove an app icon from the ClawBox desktop: a web app you built, or something the user installed. It does NOT remove one of your own skills — use skill_uninstall for those. Call ui_list_apps first to get the id, and ask the user to confirm."
+      : "Remove an app the user installed from the ClawBox app store, or a web app you built, from the desktop. Call ui_list_apps first to get the id, and ask the user to confirm.",
     { app_id: zSlug("App id, as ui_list_apps reports it without the installed- prefix") },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },
     async ({ app_id }: { app_id: string }) => {
+      const installed = await installedAppIds();
+      if (!installed.includes(app_id)) {
+        throw new ToolError(
+          "NOT_FOUND",
+          "There is no installed app with that id on this ClawBox.",
+          ctx.edition === "hermes"
+            ? "Call ui_list_apps for the desktop apps. To remove one of your own skills, call skill_list and then skill_uninstall."
+            : "Call ui_list_apps and use an id from its installed_apps list, without the \"installed-\" prefix.",
+        );
+      }
       await apiPost("/setup-api/apps/uninstall", { appId: app_id }, { timeoutMs: 60_000 });
       return text(`Removed "${app_id}" from the desktop.`);
     },

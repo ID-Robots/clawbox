@@ -82,6 +82,24 @@ else
   fail "$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh missing"
 fi
 
+# ── 2c. Register the ClawBox MCP server with Hermes. ────────────────────────
+# Without this the agent on a Hermes box has no device tools at all: the only
+# thing that ever registered the MCP was scripts/gateway-pre-start.sh, an
+# ExecStartPre of the gateway unit this SKU masks in §4b below. Runs as the
+# clawbox user, which owns ~/.hermes/config.yaml (0600).
+#
+# production-server.js runs the same script on every web-server boot, so a
+# device also repairs itself after a restart or an update without a reinstall.
+# Both paths are idempotent.
+if [ -f "$PROJECT_DIR/scripts/register-mcp.sh" ]; then
+  log "registering the ClawBox MCP server with Hermes"
+  runuser -u "$CLAWBOX_USER" -- env CLAWBOX_ROOT="$PROJECT_DIR" CLAWBOX_EDITION="$EDITION" \
+    bash "$PROJECT_DIR/scripts/register-mcp.sh" \
+    || fail "MCP registration returned non-zero — the agent will have no device tools"
+else
+  fail "$PROJECT_DIR/scripts/register-mcp.sh missing"
+fi
+
 # ── 3. Install + enable the Hermes dashboard + auth-proxy services. ─────────
 for unit in clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy; do
   src="$PROJECT_DIR/config/$unit.service"

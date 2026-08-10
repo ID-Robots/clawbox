@@ -113,12 +113,29 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     );
   }
 
-  // A redirect here is always the login gate: the bearer was missing or stale.
+  // A redirect is one of the app's two gates, and WHICH one matters:
+  //   -> /login   the bearer was missing or stale        → AUTH_FAILED
+  //   -> anything else (in practice /setup): this build has no such route, so
+  //      the request fell through to the setup-completion redirect
+  //                                                      → NOT_SUPPORTED_HERE
+  // Treating every 3xx as AUTH_FAILED made a MISSING route report "the token was
+  // rejected" while clawbox_health, in the same session, reported the same token
+  // present and two other bearer-authenticated checks passing. A small model has
+  // no way out of that: it re-reads the token and retries forever. Observed live
+  // on a Hermes box whose build predates /setup-api/hermes/skills/*.
   if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("location") || "";
+    if (!location || /(^|\/)login(\/|\?|#|$)/.test(location)) {
+      throw new ToolError(
+        "AUTH_FAILED",
+        "The ClawBox API token was rejected.",
+        "Call clawbox_health; the device may have restarted since this session began.",
+      );
+    }
     throw new ToolError(
-      "AUTH_FAILED",
-      "The ClawBox API token was rejected.",
-      "Call clawbox_health; the device may have restarted since this session began.",
+      "NOT_SUPPORTED_HERE",
+      "This ClawBox does not have that feature: its software version does not provide it, or setup was never finished.",
+      "Do not retry and do not call this tool again this session. Call device_status, then tell the user which version the device is on.",
     );
   }
 

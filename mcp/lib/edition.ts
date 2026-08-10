@@ -11,11 +11,43 @@
 // ClawBox tool offline for the agent. A tool that cannot work here must be
 // absent from tools/list, not present-and-erroring.
 
+import { readFileSync, statSync } from "fs";
 import { readEdition } from "../../src/lib/edition-source";
 
 export type Ed = "openclaw" | "hermes";
 
 const HARNESS_TIMEOUT_MS = 3_000;
+
+// Same path src/lib/edition-source.ts reads; re-stated (not exported from there)
+// only to tell "the lock is absent" apart from "the lock is unreadable".
+const EDITION_FILE = process.env.CLAWBOX_EDITION_FILE || "/etc/clawbox/edition.env";
+
+/**
+ * True when the lock file EXISTS but this process cannot get an edition out of
+ * it (permissions changed, a partial reflash, a truncated write).
+ *
+ * readEdition() collapses that case into its "openclaw" default, which is the
+ * conservative answer for the APP (openclaw is the non-premium SKU) and the
+ * wrong direction here: openclaw is the LARGER tool set and the only one
+ * carrying bash, write_file, edit_file, grep and glob. "I could not read the
+ * lock" must therefore resolve to the SMALLER set, so a transient read failure
+ * cannot widen the surface a device was deliberately configured without.
+ *
+ * An ABSENT file is a different case — dev machines, CI and pre-3.x installs
+ * never had one — and keeps the documented env fallback.
+ */
+function lockUnreadable(): boolean {
+  try {
+    statSync(EDITION_FILE);
+  } catch {
+    return false;
+  }
+  try {
+    return !/CLAWBOX_EDITION\s*=/.test(readFileSync(EDITION_FILE, "utf-8"));
+  } catch {
+    return true;
+  }
+}
 
 /**
  * The tool set to register.
@@ -27,6 +59,13 @@ const HARNESS_TIMEOUT_MS = 3_000;
  * harness src/lib/harness.ts also degrades to.
  */
 export async function resolveEdition(apiBase: string, authHeader: string | null): Promise<Ed> {
+  if (lockUnreadable()) {
+    console.error(
+      "[clawbox-mcp] /etc/clawbox/edition.env exists but no edition could be read from it. "
+      + "Registering the SMALLER Hermes tool set: the shell and file tools stay off until the lock is readable.",
+    );
+    return "hermes";
+  }
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
 

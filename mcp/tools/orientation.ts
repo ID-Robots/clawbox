@@ -155,7 +155,17 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
             redirect: "manual",
             signal: AbortSignal.timeout(5_000),
           });
-          if (res.status >= 300 && res.status < 400) return { ok: false, detail: "token rejected" };
+          // Same split as lib/api.ts: only a redirect to /login is an auth
+          // problem. A redirect anywhere else means the route is absent from
+          // this build, and reporting that as "token rejected" next to
+          // "api_token: present" is the contradiction that loops a small model.
+          if (res.status >= 300 && res.status < 400) {
+            const loc = res.headers.get("location") || "";
+            return !loc || /(^|\/)login(\/|\?|#|$)/.test(loc)
+              ? { ok: false, detail: "token rejected" }
+              : { ok: false, detail: "not present in this software version" };
+          }
+          if (res.status === 404) return { ok: false, detail: "not present in this software version" };
           if (!res.ok) return { ok: false, detail: `HTTP ${res.status}` };
           await res.json();
           return { ok: true, detail: "ok" };

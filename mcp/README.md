@@ -10,6 +10,38 @@ bun run typecheck:mcp             # tsc over mcp/** (the root tsconfig excludes 
 bash mcp/test-tools.sh            # on-device smoke test, incl. the file-guard cases
 ```
 
+## How the harness finds this server
+
+Writing the tools is only half of it — the agent gets them only if its harness
+has this server in its own config. Each harness has its own file, and each is
+reconciled idempotently, so a restart, a redeploy or an in-app update all
+converge on the same entry.
+
+| Harness | Config | Written by |
+|---|---|---|
+| OpenClaw | `~/.openclaw/openclaw.json` → `mcp.servers.clawbox` | `scripts/gateway-pre-start.sh` (an `ExecStartPre` of `clawbox-gateway.service`) |
+| Hermes | `~/.hermes/config.yaml` → `mcp_servers.clawbox` | `scripts/register-mcp.sh` |
+
+`scripts/register-mcp.sh` runs from two places, both idempotent:
+`production-server.js` on every web-server boot — `clawbox-setup.service` is the
+one unit active on every edition, and both a deploy and an update end by
+restarting it — and `scripts/setup-hermes-edition.sh`, so a fresh flash is
+provisioned before the web server first starts. It no-ops on an OpenClaw device,
+where `gateway-pre-start.sh` owns the registration; the premium `dual` SKU runs
+both.
+
+Two properties of the Hermes entry are load-bearing:
+
+- **`command` is `bun`, with the script in `args`.** Hermes refuses an entry
+  whose command is a shell interpreter carrying an inline script, and it checks
+  that both when the entry is saved and again when the server is spawned.
+- **It carries no bearer token.** `mcp/lib/api.ts` reads `data/.mcp-token`
+  itself, so rotating the token is not a config-sync problem and `config.yaml` —
+  which several `/setup-api/hermes/*` routes rewrite — holds no second copy.
+
+To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
+`clawbox`; `hermes mcp test clawbox` connects and lists its tools.
+
 ## The one thing to know: the tool set depends on the edition
 
 A ClawBox ships as an **OpenClaw** device or a **Hermes** device. They have
@@ -17,7 +49,12 @@ different agents, different capability stores, and different backing routes.
 The edition is resolved **once at startup** from `readEdition()`
 (`src/lib/edition-source.ts` → the root-owned `/etc/clawbox/edition.env`);
 only the unlocked `dual` edition falls through to one
-`GET /setup-api/harness/active`.
+`GET /setup-api/harness/active`. If the lock file **exists but cannot be read**,
+the MCP registers the *smaller* Hermes set and logs it: `readEdition()` defaults
+to `openclaw`, which is conservative for the app (the non-premium SKU) and the
+opposite here — `openclaw` is the only edition carrying `bash`, `write_file` and
+`grep`. An **absent** lock file is a different case (dev boxes, CI) and keeps the
+documented `CLAWBOX_EDITION` fallback.
 
 A tool that cannot work on the running edition **is not registered**. It is not
 registered-and-erroring: Hermes runs a per-server circuit breaker, so one
@@ -89,18 +126,32 @@ types passwords.
 ## Safety rules every tool follows
 
 1. **One secret denylist**: `isProtectedFilePath` from `src/lib/file-guard.ts`,
-   applied to **descendants**, not just the path handed in. `list_directory`
+   plus two MCP-local rules in `mcp/lib/guard.ts` — device nodes and `/proc`,
+   and `.env` / `.env.*` / `.envrc` anywhere (the project-root one is both a
+   credential store and the `EnvironmentFile` `clawbox-setup.service` loads).
+   Applied to **descendants**, not just the path handed in: `list_directory`
    filters entries, `glob` filters results, `grep` filters both search roots and
-   every hit.
+   every hit (paths come back NUL-terminated, so a hit path is parsed rather
+   than guessed).
 2. **Argv only.** `spawnArgv()` is the sole process entry point outside `bash`;
    no tool builds a shell string out of an argument.
+   **What `bash` guarantees, stated plainly:** nothing. Its pre-flight refuses
+   commands that name a credential store, but that is a guard rail against a
+   mistake, not a sandbox — a shell can spell a path in ways no pattern list
+   enumerates. What bounds it is that it is registered on OpenClaw only, that
+   every other tool is argv-driven and goes through the real path guard, and
+   that its own description tells the agent never to run a command that came
+   from content it read. Plan around "OpenClaw + `bash` = the agent can reach
+   anything the device user can".
 3. **Confirmation on irreversible actions** — `system_power` and
    `code_project_delete` take `confirm: true`, which an injected page cannot
    supply by accident.
 4. **Timeouts and output caps everywhere.** Default 8 s per API call and 4 000
    characters per result; images over 1 MB are dropped rather than truncated.
 5. **Errors are instructions, not stack traces.** Every failure is
-   `{ error, code, message, next }` with `code` from a fixed set
+   `{ error, code, message, next }` — including schema rejections, which the SDK
+   would otherwise render as a raw zod issue array (`reg.finalize()` owns
+   `tools/call` for exactly this reason) — with `code` from a fixed set
    (`AUTH_FAILED`, `BAD_ARGUMENT`, `BLOCKED_PATH`, `NOT_FOUND`,
    `NOT_SUPPORTED_HERE`, `ENDPOINT_DOWN`, `TIMEOUT`, `CONFLICT`, `TOO_LARGE`,
    `DANGEROUS_COMMAND`, `INTERNAL`). No `details`, no stack, no absolute path —
@@ -147,13 +198,6 @@ and it drags server-only Next.js code into this stdio process.
   does there is no `ai_set_thinking` tool: the only alternative is a fourth
   uncoordinated writer of `~/.hermes/config.yaml`, which would silently drop
   `mcp_servers` or the provider key.
-- **A Hermes provisioning hook.** On Hermes nothing registers this server —
-  `hermes mcp list` reports none. The only thing that mints `data/.mcp-token`
-  and registers the MCP is `scripts/gateway-pre-start.sh`, which belongs to the
-  *masked* `clawbox-gateway.service`. Until an equivalent writes an
-  `mcp_servers.clawbox` entry into `~/.hermes/config.yaml` (atomically, and not
-  via `bash -c`, which Hermes' `mcp_security.py` refuses), none of the Hermes
-  tools above are reachable on a Hermes device.
 - **`GET /setup-api/gateway/health` answers HTTP 200 with
   `{"available": false}`** when the gateway is gone. `clawbox_health` reads the
   field, not the status code; any other consumer treating 200 as "up" is wrong.

@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
   getModelOptions,
   invalidateModelOptions,
@@ -58,6 +59,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const refresh = flag(url.searchParams.get("refresh"));
   const provider = (url.searchParams.get("provider") || "").trim();
+
+  // A device whose local model was enabled before Hermes knew how to host it
+  // repairs itself here — once per process, and a no-op on every other device.
+  await reconcileLocalAiWithHermes();
 
   try {
     if (provider) {
