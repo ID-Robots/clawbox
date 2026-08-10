@@ -81,6 +81,10 @@ export function isSafeHermesModelId(value: unknown): value is string {
 // which is only ~130px wide when the panel is docked.
 const PROVIDER_LABEL_OVERRIDES: Record<string, { label: string; pill: string }> = {
   clawai: { label: "ClawBox AI", pill: "ClawBox" },
+  // The on-device model. Named for what it IS to the customer — the model
+  // running on their box — not for the slug we register it under, and not for
+  // the runtime hosting it, which they never chose and cannot change.
+  clawlocal: { label: "Gemma 4 (on-device)", pill: "Gemma 4" },
   openrouter: { label: "OpenRouter", pill: "OpenRouter" },
   moa: { label: "Mixture of Agents", pill: "MoA" },
   anthropic: { label: "Anthropic", pill: "Claude" },
