@@ -261,6 +261,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // reply reports one; every later turn resumes it, which is what gives the
   // conversation memory. Cleared when the user starts a new chat.
   const hermesSessionRef = useRef('')
+  // What the LAST turn actually ran on. A resumed session keeps the system
+  // prompt it was created with, so after a switch the agent would still answer
+  // "What model are you?" with the old one (and echo its earlier claims from
+  // the transcript) even though the turn is genuinely routed to the new
+  // provider. Comparing against these lets the next turn state the change
+  // rather than discarding the conversation to get a fresh system prompt.
+  const hermesSentProviderRef = useRef('')
+  const hermesSentModelRef = useRef('')
   const [hermesReasoning, setHermesReasoning] = useState<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   const hermesReasoningRef = useRef<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   // False until the level is real (from localStorage, from the device's
@@ -392,13 +400,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (id === hermesProviderRef.current) return
     setHermesProvider(id)
     writeHermesChatPrefs({ provider: id })
-    // Start a NEW Hermes session. The turn is routed correctly either way
-    // (verified: the billing record shows the new provider), but a resumed
-    // session keeps the system prompt it was created with — so the agent
-    // answers "What model are you?" with the OLD one and repeats its earlier
-    // claims from the transcript. That reads as a broken switch. OpenClaw
-    // already resets its session on a provider change; match it.
-    hermesSessionRef.current = ''
+    // The session is deliberately KEPT: switching provider mid-conversation
+    // must not throw the conversation away. The turn is routed correctly on a
+    // resumed session (verified — the billing record shows the new provider);
+    // the only casualty was the agent's SELF-knowledge, because a resumed
+    // session keeps the system prompt it was created with and the transcript
+    // still contains its earlier "I am X" claims. dispatchHermes therefore
+    // tells it about the switch on the next turn instead.
     setMessages(msgs => [...msgs, {
       role: 'system',
       text: `Switched to ${hermesProviderName(id)}.`,
@@ -414,10 +422,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Read-modify-write: `models` is a nested map, so a shallow merge of the
     // patch alone would drop every other provider's remembered pick.
     writeHermesChatPrefs({ models: { ...readHermesChatPrefs().models, [provider]: id } })
-    // Same reason as the provider switch: a resumed session keeps the system
-    // prompt (and the transcript's claims) from the model it started on, so the
-    // agent would keep naming the old model after the change.
-    hermesSessionRef.current = ''
+    // Session kept — see changeHermesProvider. The next turn announces the
+    // change to the agent rather than starting the conversation over.
   }, [])
 
   const changeHermesReasoning = useCallback((next: string) => {
@@ -1245,11 +1251,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             + 'Add credentials for it in Settings, or pick another provider.'
           : `Still loading ${hermesProviderLabel(provider)}'s models — try again in a moment.`)
       }
+      // Announce a mid-conversation switch. Only when we are RESUMING (a fresh
+      // session already gets a correct system prompt) and only when something
+      // actually changed, so a normal turn carries no extra text.
+      const switched = Boolean(hermesSessionRef.current)
+        && (hermesSentProviderRef.current !== provider || hermesSentModelRef.current !== model)
+        && Boolean(hermesSentProviderRef.current || hermesSentModelRef.current)
+      const outbound = switched
+        ? `[System note: this conversation has just been switched to model "${model || 'the provider default'}" `
+          + `via provider "${hermesProviderLabel(provider)}". You are now that model — disregard any earlier `
+          + `statement in this conversation about which model you are. Keep the conversation and its context.]\n\n`
+          + text
+        : text
       const res = await fetch('/setup-api/hermes/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: text,
+          message: outbound,
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),
           ...(reasoning ? { reasoning } : {}),
@@ -1265,6 +1283,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (typeof data.sessionId === 'string' && data.sessionId) {
         hermesSessionRef.current = data.sessionId
       }
+      // Record what this turn ran on, so the NEXT one only announces a switch
+      // if something really changed. Set after success: a failed turn didn't
+      // establish anything, and the announcement should survive to be made.
+      hermesSentProviderRef.current = provider
+      hermesSentModelRef.current = model
       setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.

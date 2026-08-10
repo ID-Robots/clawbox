@@ -306,7 +306,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-    await loadClawai();
+    await reloadClawai();
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
     setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
