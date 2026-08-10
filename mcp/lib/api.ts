@@ -96,6 +96,9 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
+    // Field debugging only, and only on stderr — the harness log, never the
+    // model's context. The agent still gets the scrubbed envelope below.
+    if (process.env.CLAWBOX_MCP_DEBUG === "1") console.error("[clawbox-mcp] api failure:", path, err);
     if (err instanceof Error && /abort|timeout/i.test(err.message)) {
       throw new ToolError(
         "TIMEOUT",

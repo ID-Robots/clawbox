@@ -191,6 +191,42 @@ function normalizePricing(entry: unknown): HermesModelOption["pricing"] {
   return { ...(input ? { input } : {}), ...(output ? { output } : {}), ...(free !== undefined ? { free } : {}) };
 }
 
+/** Hermes' virtual "Mixture of Agents" provider. */
+const MOA_PROVIDER = "moa";
+const HERMES_CONFIG_PATH = path.join(
+  process.env.HERMES_HOME || path.join(process.env.HOME || "/home/clawbox", ".hermes"),
+  "config.yaml",
+);
+
+let moaCache: { mtimeMs: number; configured: boolean } | null = null;
+
+/**
+ * True when `hermes moa configure` has actually filled in the aggregator's
+ * slots. There is no API for this — the dashboard reports moa as authenticated
+ * regardless, because a virtual provider has no credential to check — so the
+ * only honest signal is whether a populated `moa:` block exists in config.yaml.
+ * Cached by mtime: this is consulted on every catalogue build.
+ */
+async function isMoaConfigured(): Promise<boolean> {
+  try {
+    const stat = await fs.stat(HERMES_CONFIG_PATH);
+    if (moaCache && moaCache.mtimeMs === stat.mtimeMs) return moaCache.configured;
+    const raw = await fs.readFile(HERMES_CONFIG_PATH, "utf8");
+    // A top-level `moa:` key followed by at least one indented, non-comment
+    // line. `moa:` on its own (or with only comments under it) is the shape
+    // Hermes ships by default and means "not set up".
+    const block = /(?:^|\n)moa:[ \t]*\n((?:[ \t]+.*\n|[ \t]*\n)*)/.exec(raw);
+    const configured = Boolean(
+      block && block[1].split(/\r?\n/).some((line) => line.trim() && !line.trim().startsWith("#")),
+    );
+    moaCache = { mtimeMs: stat.mtimeMs, configured };
+    return configured;
+  } catch {
+    // No config yet (fresh device) → nothing is configured.
+    return false;
+  }
+}
+
 function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
   const id = asString(raw.slug);
   if (!isPlausibleHermesProviderId(id)) return null;
@@ -280,9 +316,23 @@ async function fetchFromDashboard(refresh: boolean): Promise<ModelOptionsPayload
   if (!Array.isArray(body.providers)) return null;
 
   const providers: HermesProviderRow[] = [];
+  const moaReady = await isMoaConfigured();
   for (const raw of body.providers) {
     const row = normalizeRow((raw ?? {}) as DashboardProviderRow);
-    if (row) providers.push(row);
+    if (!row) continue;
+    // Mixture of Agents is a VIRTUAL provider: the dashboard always reports it
+    // as authenticated with a single placeholder model called "default",
+    // because there is no credential to check. But it does nothing until its
+    // slots are filled in (`hermes moa configure`), so offering it in a picker
+    // is offering a provider that cannot answer. Present it only once it is
+    // actually set up; `authenticated: false` is the flag every consumer
+    // already understands (the chat header filters it, the panel greys it, and
+    // the pairing guard refuses it).
+    if (row.id === MOA_PROVIDER && !moaReady) {
+      providers.push({ ...row, authenticated: false });
+      continue;
+    }
+    providers.push(row);
   }
 
   const currentProvider = asString(body.provider);
