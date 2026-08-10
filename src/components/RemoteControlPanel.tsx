@@ -341,7 +341,7 @@ export default function RemoteControlPanel() {
                 className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">devices</span>
-                {t("remoteControl.checkDevices")}
+                {t("remoteControl.addDevice")}
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
               </a>
               <button

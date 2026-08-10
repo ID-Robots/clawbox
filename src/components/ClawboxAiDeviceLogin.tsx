@@ -22,6 +22,12 @@ interface ClawboxAiDeviceLoginProps {
   /** Kick-off in flight (OpenClaw passes its `saving` flag). */
   busy: boolean;
   onStart: () => void;
+  /**
+   * Apply a token the user pasted from the portal. Optional: a host that hasn't
+   * wired the manual path simply doesn't render it. Rejecting with an Error
+   * shows its message inline.
+   */
+  onSubmitToken?: (token: string) => Promise<void>;
 }
 
 export default function ClawboxAiDeviceLogin({
@@ -30,10 +36,37 @@ export default function ClawboxAiDeviceLogin({
   polling,
   busy,
   onStart,
+  onSubmitToken,
 }: ClawboxAiDeviceLoginProps) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The manual path is collapsed by default: the device-code flow is the one
+  // we want people on, and showing a token field next to it invites pasting
+  // the wrong string. It matters for the cases the code flow can't serve —
+  // no browser to hand off to, a handoff that failed, or a token issued
+  // elsewhere in the portal.
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [token, setToken] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+
+  const submitToken = async () => {
+    if (!onSubmitToken) return;
+    const value = token.trim();
+    if (!value) return;
+    setTokenBusy(true);
+    setTokenError(null);
+    try {
+      await onSubmitToken(value);
+      setToken("");
+      setTokenOpen(false);
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : "Could not apply that token.");
+    } finally {
+      setTokenBusy(false);
+    }
+  };
 
   // Cancel any in-flight "Copied" flash on unmount so the timer doesn't
   // call setState on an unmounted component.
@@ -106,6 +139,55 @@ export default function ClawboxAiDeviceLogin({
           >
             Get a new code
           </button>
+        </div>
+      )}
+
+      {onSubmitToken && (
+        <div className="mt-3 pt-3 border-t border-[var(--border-subtle)]">
+          {!tokenOpen ? (
+            <button
+              type="button"
+              onClick={() => setTokenOpen(true)}
+              className="bg-transparent border-none text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-xs underline cursor-pointer p-0 transition-colors"
+            >
+              Have an API token? Enter it instead
+            </button>
+          ) : (
+            <div>
+              <label
+                htmlFor="clawai-token"
+                className="block text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-1.5"
+              >
+                ClawBox AI API token
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="clawai-token"
+                  type="password"
+                  value={token}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Paste the token from the portal"
+                  onChange={(e) => { setToken(e.target.value); setTokenError(null); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") void submitToken(); }}
+                  className="flex-1 min-w-0 rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--coral-bright)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => void submitToken()}
+                  disabled={tokenBusy || token.trim().length < 16}
+                  className="shrink-0 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--coral-bright)] hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center gap-2"
+                >
+                  {tokenBusy && ButtonSpinner}
+                  {tokenBusy ? t("connecting") : t("save")}
+                </button>
+              </div>
+              {tokenError && <p className="mt-1.5 text-xs text-red-400">{tokenError}</p>}
+              <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+                Find it in the ClawBox portal under your device&apos;s settings.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

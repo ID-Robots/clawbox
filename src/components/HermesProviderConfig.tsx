@@ -290,6 +290,28 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // Compared in UI-tier space (Free/Pro/Max), not device-tier space.
   const clawaiDirty = !clawai?.active || appliedUiTier === null || uiTier !== appliedUiTier;
 
+  /**
+   * Apply a token the user pasted from the portal instead of running the
+   * device-code handoff. OpenClaw has offered this for ClawBox AI all along (its
+   * "API key" auth tab); the Hermes panel only had the code flow, so a device
+   * that couldn't complete the handoff had no way in. The route stores the
+   * token and configures the provider in one call — errors propagate so the
+   * field can show them inline.
+   */
+  async function applyClawaiToken(token: string): Promise<void> {
+    const res = await fetch("/setup-api/hermes/clawai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, tier: uiTierToDeviceTier(uiTier) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    await loadClawai();
+    setSelectedProvider(CLAWAI_PROVIDER);
+    notifyChatHeader();
+    setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+  }
+
   async function applyClawai() {
     setApplyingClawai(true);
     setClawaiStatus(null);
@@ -506,6 +528,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   polling={login.polling}
                   busy={loginBusy}
                   onStart={() => { void login.start(); }}
+                  onSubmitToken={applyClawaiToken}
                 />
               )}
               {statusLine(clawaiStatus)}

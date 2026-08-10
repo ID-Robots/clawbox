@@ -100,6 +100,8 @@ export interface SpawnOptions {
   maxBytes?: number;
   cwd?: string;
   input?: string;
+  /** Extra environment for this child only (e.g. DISPLAY for a screen grab). */
+  extraEnv?: Record<string, string>;
 }
 
 /**
@@ -113,11 +115,11 @@ export function spawnArgv(
   args: string[],
   options: SpawnOptions = {},
 ): Promise<SpawnResult> {
-  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd = DEFAULT_CWD, input } = options;
+  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd = DEFAULT_CWD, input, extraEnv } = options;
   return new Promise((resolveP) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(bin, args, { cwd, env: { ...process.env, HOME }, shell: false });
+      child = spawn(bin, args, { cwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
     } catch (err) {
       resolveP({
         stdout: "",

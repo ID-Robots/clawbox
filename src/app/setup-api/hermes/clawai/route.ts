@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
+import { get, setMany } from "@/lib/config-store";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { getActiveHarness } from "@/lib/harness";
 import {
@@ -16,6 +16,18 @@ import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tier
 async function readToken(): Promise<string> {
   const t = await get("clawai_token");
   return typeof t === "string" ? t.trim() : "";
+}
+
+/**
+ * Shape check for a pasted ClawBox AI token. Deliberately a charset+length
+ * test rather than a prefix match: the token becomes `providers.clawai.api_key`
+ * via argv, so what matters is that it cannot be read as a flag or carry
+ * anything argv-hostile. Whether it is a VALID credential is the proxy's call —
+ * a wrong-but-well-formed token surfaces as an auth failure on the first turn,
+ * which is a clearer signal than us guessing at the format.
+ */
+function isPlausibleClawaiToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{15,255}$/.test(value);
 }
 
 /** The RAW stored tier, before the display coercion below. `null` means the
@@ -84,12 +96,27 @@ export async function POST(request: Request) {
     tier = uiTierToDeviceTier(uiTier);
   }
 
-  const token = await readToken();
+  // A caller may PASTE a token instead of running the device-code flow — the
+  // portal shows one, and on a device that can't open a browser (or where the
+  // handoff failed) that is the only way in. A supplied token is stored first
+  // so the rest of the product (the wizard's status route, ClawKeep pairing,
+  // a later re-apply) sees the same value the config does.
+  const suppliedToken = typeof (body as { token?: unknown } | null)?.token === "string"
+    ? ((body as { token?: string }).token || "").trim()
+    : "";
+  if (suppliedToken) {
+    if (!isPlausibleClawaiToken(suppliedToken)) {
+      return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
+    }
+    await setMany({ clawai_token: suppliedToken });
+  }
+
+  const token = suppliedToken || (await readToken());
   // A token starting with "-" would be read by hermes as a flag, so it is as
   // unusable as no token at all.
   if (!token || token.startsWith("-")) {
     return NextResponse.json(
-      { error: "Sign in to ClawBox AI first to get a device token." },
+      { error: "Sign in to ClawBox AI first, or paste a token from the portal." },
       { status: 409 },
     );
   }
