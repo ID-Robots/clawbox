@@ -27,6 +27,7 @@ import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
+import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
 import {
   layoutIcons,
@@ -1388,7 +1389,7 @@ function ChromeDesktopInner() {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
-        setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+        setPairingRequests((prev) => prev.filter((r) => !samePairingToken(r.code, code)));
         window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Approved — the bot let them know." } }));
       } else {
@@ -1419,7 +1420,7 @@ function ChromeDesktopInner() {
   useEffect(() => {
     const onApproved = (e: Event) => {
       const code = (e as CustomEvent<{ code?: string }>).detail?.code;
-      if (code) setPairingRequests((prev) => prev.filter((r) => (r.code || "").toUpperCase() !== code.toUpperCase()));
+      if (code) setPairingRequests((prev) => prev.filter((r) => !samePairingToken(r.code, code)));
     };
     window.addEventListener("clawbox:telegram-approved", onApproved);
     return () => window.removeEventListener("clawbox:telegram-approved", onApproved);

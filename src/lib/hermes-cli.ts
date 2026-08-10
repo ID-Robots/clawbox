@@ -10,6 +10,7 @@ import { HERMES_BIN } from "@/lib/harness";
 // "-") — pass those through a strict allowlist/charset first.
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
+const SUDO_BIN = "/usr/bin/sudo";
 const DEFAULT_TIMEOUT_MS = 30_000;
 // A config/auth command's output is tiny; cap the buffer so a misbehaving
 // child can't grow it unbounded.
@@ -33,11 +34,21 @@ export function runHermesCli(
      * timeout). Optional — callers that don't pass one behave exactly as before.
      */
     signal?: AbortSignal;
+    /**
+     * Run the call through `sudo -n`. Only for the handful of subcommands that
+     * genuinely need root (`gateway install --system`, which writes a
+     * /etc/systemd/system unit). `-n` means a box without a passwordless rule
+     * fails immediately instead of blocking on a password prompt — a route
+     * handler must never be able to hang on a prompt.
+     */
+    sudo?: boolean;
   } = {},
 ): Promise<HermesCliResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const bin = opts.sudo ? SUDO_BIN : HERMES_BIN;
+  const argv = opts.sudo ? ["-n", HERMES_BIN, ...args] : args;
   return new Promise<HermesCliResult>((resolve, reject) => {
-    const child = spawn(HERMES_BIN, args, {
+    const child = spawn(bin, argv, {
       stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       cwd: HOME_DIR,
       env: {

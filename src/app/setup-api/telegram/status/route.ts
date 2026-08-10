@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { get } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
+import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
 
 export const dynamic = "force-dynamic";
 
@@ -58,12 +60,66 @@ async function fetchBotInfo(token: string): Promise<TelegramBotInfo | null> {
   return pending;
 }
 
+// ── Hermes: ask Hermes, don't just report that a token is stored ────────────
+//
+// On a Hermes device a stored token proves nothing — the OpenClaw path used to
+// save one on a box with no gateway to consume it, and the flag still read
+// "configured" while the bot never answered. So the flag comes from Hermes
+// itself. Both probes are CLI calls (~10 s of Python start-up on a Jetson), so
+// they run concurrently behind a short cache; Settings polls this on open.
+
+interface HermesTelegramProbe {
+  registered: boolean | null;
+  gateway: { installed: boolean; running: boolean };
+}
+
+const HERMES_PROBE_TTL = 15_000;
+let cachedHermesProbe: { probe: HermesTelegramProbe; at: number } | null = null;
+let inFlightHermesProbe: Promise<HermesTelegramProbe> | null = null;
+
+async function probeHermes(): Promise<HermesTelegramProbe> {
+  if (cachedHermesProbe && Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL) {
+    return cachedHermesProbe.probe;
+  }
+  if (inFlightHermesProbe) return inFlightHermesProbe;
+  inFlightHermesProbe = (async () => {
+    const [registered, gateway] = await Promise.all([
+      hermesTelegramRegistered(),
+      hermesGatewayStatus(),
+    ]);
+    const probe: HermesTelegramProbe = { registered, gateway };
+    cachedHermesProbe = { probe, at: Date.now() };
+    return probe;
+  })().finally(() => {
+    inFlightHermesProbe = null;
+  });
+  return inFlightHermesProbe;
+}
+
 export async function GET() {
   try {
     const token = await get("telegram_bot_token");
     if (!token || typeof token !== "string") {
       return NextResponse.json({ configured: false });
     }
+
+    if ((await getActiveHarness()) === "hermes") {
+      const { registered, gateway } = await probeHermes();
+      // `null` = Hermes couldn't be asked; fall back to the stored token rather
+      // than reporting a working bot as gone.
+      const configured = registered ?? true;
+      const info = configured ? await fetchBotInfo(token) : null;
+      return NextResponse.json({
+        configured,
+        // Whether the answer came from Hermes or from the stored token alone.
+        verified: registered !== null,
+        // Telegram is only LIVE when something is listening for updates.
+        receiving: configured && gateway.running,
+        gateway,
+        ...info,
+      });
+    }
+
     const info = await fetchBotInfo(token);
     return NextResponse.json({ configured: true, ...info });
   } catch (err) {

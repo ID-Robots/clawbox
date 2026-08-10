@@ -19,6 +19,7 @@ import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -1155,7 +1156,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const onApproved = (e: Event) => {
       const code = (e as CustomEvent<{ code?: string }>).detail?.code;
       refreshPairing();
-      if (code) setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code.toUpperCase()) : prev));
+      if (code) setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
     };
     window.addEventListener("clawbox:telegram-approved", onApproved);
     return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
@@ -1203,8 +1204,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [t]);
 
   const approvePairingCode = useCallback(async (rawCode: string) => {
-    const code = rawCode.trim().toUpperCase();
-    if (!/^[A-Z0-9]{8}$/.test(code)) {
+    // Either the 8-char code the bot DM'd, or a Hermes request id from the
+    // pending list — see src/lib/telegram-pairing-token.ts.
+    const code = normalizePairingToken(rawCode);
+    if (!isPairingToken(code)) {
       setTgPairingStatus({ type: "error", message: t("settings.pairingInvalidCode") });
       return;
     }
@@ -1220,7 +1223,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (r.ok && d.success) {
         if (Array.isArray(d.approved)) setTgApproved(d.approved);
         setTgPairingCode("");
-        setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
         window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
       } else {
