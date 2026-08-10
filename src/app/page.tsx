@@ -47,6 +47,9 @@ const apps: AppDef[] = [
   { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
   { id: "clawbox", name: "Claw", color: "#0a0f1a", type: "chat", pinned: true },
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
+  // Hermes dashboard — only shown on the Hermes edition. Opened via the
+  // auth-gated dashboard proxy (url computed at click time from the host).
+  { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
@@ -56,6 +59,8 @@ const apps: AppDef[] = [
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];
 const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
+// LAN port of the auth-gated Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js).
+const HERMES_DASH_PROXY_PORT = 8090;
 
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
@@ -64,6 +69,11 @@ function MIcon({ name, className = "", size = 24 }: { name: string; className?: 
 
 function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
+
+  if (id === "hermes") {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} style={{ objectFit: "contain", borderRadius: 6 }} />;
+  }
 
   if (id === "browser") {
     return (
@@ -966,12 +976,13 @@ function ChromeDesktopInner() {
         });
       }
     }
-    // Hide OpenClaw-only apps (the gateway Control UI) when this device runs
-    // Hermes — its gateway isn't installed, so the app would just error.
+    // Per-harness apps: OpenClaw's gateway Control UI ("openclaw") only on
+    // OpenClaw; the Hermes dashboard ("hermes") only on Hermes. The other
+    // harness's backend isn't installed, so its app would just error.
     const OPENCLAW_ONLY_APP_IDS = ["openclaw"];
-    const harnessApps = activeHarness === "hermes"
-      ? apps.filter((a) => !OPENCLAW_ONLY_APP_IDS.includes(a.id))
-      : apps;
+    const HERMES_ONLY_APP_IDS = ["hermes"];
+    const hideIds = activeHarness === "hermes" ? OPENCLAW_ONLY_APP_IDS : HERMES_ONLY_APP_IDS;
+    const harnessApps = apps.filter((a) => !hideIds.includes(a.id));
     return [
       ...harnessApps,
       ...installedAppDefs,
@@ -999,7 +1010,12 @@ function ChromeDesktopInner() {
     if (!app) return;
 
     if (app.type === "external" && app.url) {
-      window.open(app.url, "_blank", "noopener,noreferrer");
+      // The Hermes dashboard opens through its auth-gated proxy on the same
+      // host (port 8090), computed at click time so it works over LAN/mDNS/cable.
+      const url = app.url === "hermes-dashboard"
+        ? `${window.location.protocol}//${window.location.hostname}:${HERMES_DASH_PROXY_PORT}/`
+        : app.url;
+      window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
 
@@ -1517,9 +1533,9 @@ function ChromeDesktopInner() {
     })
     .filter((a): a is StoreApp => a !== null);
 
-  // Built-in apps with desktop shortcuts (hide OpenClaw-only apps on Hermes).
+  // Built-in apps with desktop shortcuts (hide the other harness's app).
   const desktopBuiltinApps = desktopApps
-    .filter((appId) => !(activeHarness === "hermes" && appId === "openclaw"))
+    .filter((appId) => !(activeHarness === "hermes" ? appId === "openclaw" : appId === "hermes"))
     .map((appId) => apps.find((a) => a.id === appId))
     .filter((a): a is AppDef => !!a);
 
