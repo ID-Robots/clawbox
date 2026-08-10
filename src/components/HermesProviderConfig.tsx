@@ -97,7 +97,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
 
   // ClawBox AI first (when available), then the native providers.
   const providerList: (ProviderDef & { special?: boolean; tier?: string })[] = useMemo(() => {
-    const base = [...PROVIDERS];
+    const base: (ProviderDef & { special?: boolean; tier?: string })[] = [...PROVIDERS];
     if (clawai?.hasToken) {
       base.unshift({ id: "clawai", name: "ClawBox AI", description: clawai.model, special: true, tier: clawai.tier });
     }
