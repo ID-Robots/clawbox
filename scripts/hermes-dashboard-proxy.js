@@ -38,7 +38,18 @@ const UPSTREAM_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
 const UPSTREAM_PORT = parseInt(process.env.HERMES_PORT || "9119", 10);
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
+// The dashboard's WS Host/Origin guard (_ws_host_origin_is_allowed) rejects any
+// upgrade whose Origin doesn't target the bound host, and its HTTP layer checks
+// Host the same way. Since we bind 127.0.0.2, forward Host AND Origin/Referer as
+// that authority — otherwise a browser's real Origin (the LAN proxy URL) trips
+// the guard and every dashboard WebSocket closes before accept (code 1006).
+const UPSTREAM_ORIGIN = `http://${UPSTREAM_AUTHORITY}`;
 const DASH_USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";
+
+// Rewrite the origin part of a Referer to the upstream authority, keeping path.
+function rewriteReferer(value) {
+  return typeof value === "string" ? value.replace(/^https?:\/\/[^/]+/i, UPSTREAM_ORIGIN) : value;
+}
 const MAX_RETRY_BODY = 5 * 1024 * 1024; // cap buffered request body for a retry
 
 // ---------------------------------------------------------------------------
@@ -192,6 +203,10 @@ function mergeCookie(existing, injected) {
 // retry (bodyBuf must be buffered for the retry to resend it).
 function forward(req, res, injected, bodyBuf, allowRelogin) {
   const headers = { ...req.headers, host: UPSTREAM_AUTHORITY };
+  // Present the upstream authority as Origin/Referer so the dashboard's
+  // Host/Origin guard (which compares against its bound host) accepts us.
+  if (headers.origin) headers.origin = UPSTREAM_ORIGIN;
+  if (headers.referer) headers.referer = rewriteReferer(headers.referer);
   if (injected) {
     headers.cookie = mergeCookie(req.headers.cookie, injected.cookieHeader);
   }
@@ -301,6 +316,12 @@ server.on("upgrade", (req, clientSocket, head) => {
         const lower = name.toLowerCase();
         if (lower === "host") {
           headerLines.push(`${name}: ${UPSTREAM_AUTHORITY}`);
+        } else if (lower === "origin") {
+          // Must target the bound host or the dashboard's WS Origin guard
+          // rejects the upgrade (closes before accept → browser code 1006).
+          headerLines.push(`Origin: ${UPSTREAM_ORIGIN}`);
+        } else if (lower === "referer") {
+          headerLines.push(`Referer: ${rewriteReferer(req.rawHeaders[i + 1])}`);
         } else if (lower === "cookie") {
           const value = injected ? mergeCookie(req.rawHeaders[i + 1], injected.cookieHeader) : req.rawHeaders[i + 1];
           headerLines.push(`Cookie: ${value}`);
