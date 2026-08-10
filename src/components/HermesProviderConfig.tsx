@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { CLAWBOX_AI_TIER_LABEL } from "@/lib/clawbox-ai-models";
 
 // Hermes-edition replacement for the OpenClaw AI-provider step. Hermes manages
 // its own providers/models, so instead of ClawBox's openclaw.json flow we drive
@@ -49,6 +50,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [savingKey, setSavingKey] = useState(false);
   const [keyStatus, setKeyStatus] = useState<Status>(null);
 
+  // ClawBox AI — a managed provider that still runs THROUGH Hermes (custom
+  // base_url). Only its device-login is ClawBox-custom.
+  const [clawai, setClawai] = useState<{ hasToken: boolean; tier: string; active: boolean; model: string } | null>(null);
+  const [applyingClawai, setApplyingClawai] = useState(false);
+  const [clawaiStatus, setClawaiStatus] = useState<Status>(null);
+
   useEffect(() => {
     let alive = true;
     fetch("/setup-api/hermes/models")
@@ -62,6 +69,36 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/setup-api/hermes/clawai")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => { if (alive) setClawai(d); })
+      .catch(() => { /* ClawBox AI just won't show; non-fatal */ });
+    return () => { alive = false; };
+  }, []);
+
+  async function useClawai() {
+    setApplyingClawai(true);
+    setClawaiStatus(null);
+    try {
+      const res = await fetch("/setup-api/hermes/clawai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setClawai((c) => (c ? { ...c, active: true } : c));
+      if (typeof data.model === "string") setModel(data.model);
+      setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+    } catch (e) {
+      setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : "Couldn't switch to ClawBox AI" });
+    } finally {
+      setApplyingClawai(false);
+    }
+  }
 
   const modelOptions = useMemo(() => {
     // Ensure the current default is present even if it's not in the catalog.
@@ -129,6 +166,36 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           This device runs on Hermes. Pick the default model and inference provider,
           and add a provider API key — no need to open the dashboard.
         </p>
+
+        {/* ClawBox AI — managed provider, still served through Hermes. */}
+        {clawai?.hasToken && (
+          <div className="mb-6 rounded-xl border border-[var(--coral-bright)]/40 bg-[var(--coral-bright)]/5 p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--coral-bright)]/15 text-lg" aria-hidden="true">🧠</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">ClawBox AI</span>
+                  <span className="rounded bg-[var(--coral-bright)]/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--coral-bright)]">
+                    {CLAWBOX_AI_TIER_LABEL[(clawai.tier as "flash" | "pro")] ?? clawai.tier}
+                  </span>
+                  {clawai.active && (
+                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-400">Active</span>
+                  )}
+                </div>
+                <p className="truncate text-xs text-[var(--text-secondary)]">{clawai.model}</p>
+              </div>
+              <button
+                type="button"
+                onClick={useClawai}
+                disabled={applyingClawai || clawai.active}
+                className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {clawai.active ? "In use" : applyingClawai ? "Switching…" : "Use ClawBox AI"}
+              </button>
+            </div>
+            {statusLine(clawaiStatus)}
+          </div>
+        )}
 
         {/* Model + provider */}
         <div className="space-y-4">
