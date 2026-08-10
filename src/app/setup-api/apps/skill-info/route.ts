@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
@@ -62,6 +63,11 @@ async function doLoadSkills(): Promise<SkillInfo[]> {
 }
 
 export async function GET(request: NextRequest) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   const appId = request.nextUrl.searchParams.get("appId");
   const skills = await loadSkills();
 

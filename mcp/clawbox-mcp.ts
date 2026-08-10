@@ -2028,15 +2028,37 @@ tool("preferences_set", "Set ClawBox user preferences",
 // DESKTOP UI
 // ══════════════════════════════════════════════════════════════════════
 
-const AVAILABLE_APPS = [
-  { id: "settings", name: "Settings", description: "Device settings" },
+// Apps that exist on only one harness. Advertising the other harness's apps
+// would have the agent open windows onto a backend that isn't installed (and
+// hit the 404 the setup-api guards now return).
+const OPENCLAW_ONLY_APPS = [
   { id: "openclaw", name: "OpenClaw", description: "AI chat" },
+  { id: "store", name: "Store", description: "App store" },
+];
+const HERMES_ONLY_APPS = [
+  { id: "hermes-skills", name: "Hermes Skills", description: "Install skills for the Hermes agent" },
+];
+const COMMON_APPS = [
+  { id: "settings", name: "Settings", description: "Device settings" },
   { id: "terminal", name: "Terminal", description: "Shell" },
   { id: "files", name: "Files", description: "File manager" },
-  { id: "store", name: "Store", description: "App store" },
   { id: "browser", name: "Browser Setup", description: "Browser integration settings panel, not the real browsing window" },
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
 ];
+
+async function activeHarness(): Promise<string> {
+  try {
+    const r = await api("/setup-api/harness/active");
+    return typeof r?.active === "string" ? r.active : "openclaw";
+  } catch {
+    return "openclaw";
+  }
+}
+
+async function availableApps(): Promise<{ id: string; name: string; description: string }[]> {
+  const harness = await activeHarness();
+  return [...COMMON_APPS, ...(harness === "hermes" ? HERMES_ONLY_APPS : OPENCLAW_ONLY_APPS)];
+}
 
 tool("ui_open_app", "Open an app on the ClawBox desktop. For real web browsing, use browser_open or browser_launch instead of opening the 'browser' app.",
   { appId: z.string().describe("App ID") },
@@ -2050,7 +2072,8 @@ tool("ui_open_app", "Open an app on the ClawBox desktop. For real web browsing, 
         }],
       };
     }
-    return { content: [{ type: "text", text: `Opening ${AVAILABLE_APPS.find(a => a.id === appId)?.name ?? appId}.` }] };
+    const known = await availableApps();
+    return { content: [{ type: "text", text: `Opening ${known.find(a => a.id === appId)?.name ?? appId}.` }] };
   }
 );
 
@@ -2060,7 +2083,7 @@ tool("ui_list_apps", "List apps available on the ClawBox desktop", async () => {
     const r = await runShell("ls /home/clawbox/.openclaw/skills/ 2>/dev/null");
     if (r.exitCode === 0) installed = r.stdout.trim().split("\n").filter(Boolean).map((n: string) => ({ id: `installed-${n}`, name: n }));
   } catch {}
-  const all = [...AVAILABLE_APPS.map(a => `${a.id} — ${a.name}: ${a.description}`), ...installed.map(a => `${a.id} — ${a.name} (installed)`)];
+  const all = [...(await availableApps()).map(a => `${a.id} — ${a.name}: ${a.description}`), ...installed.map(a => `${a.id} — ${a.name} (installed)`)];
   return { content: [{ type: "text", text: `Apps:\n${all.join("\n")}` }] };
 });
 

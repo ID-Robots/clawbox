@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { invalidateModelOptions } from "@/lib/hermes-model-options";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
 // keeps the credential in its own pooled-auth store (~/.hermes), NOT ClawBox's
@@ -10,8 +11,13 @@ import { runHermesCli } from "@/lib/hermes-cli";
 //
 // Only api-key providers are accepted here; OAuth providers (nous, openai-codex,
 // copilot) authenticate through a browser flow, not a pasted key.
+// NB: no "nous-api" — it is not a Hermes provider slug (verified on-device:
+// absent from both CANONICAL_PROVIDERS and PROVIDER_REGISTRY, and
+// normalize_provider doesn't alias it). Accepting it here would store a
+// credential under a provider Hermes never reads. Nous is `nous`, and it
+// authenticates by OAuth, not a pasted key.
 const API_KEY_PROVIDERS = new Set([
-  "openrouter", "anthropic", "nous-api", "gemini", "zai", "kimi-coding",
+  "openrouter", "anthropic", "gemini", "zai", "kimi-coding",
 ]);
 
 // Printable ASCII, no whitespace/control chars, reasonable length. Passed as an
@@ -53,6 +59,11 @@ export async function POST(request: Request) {
       { status: 502 },
     );
   }
+
+  // A new credential flips this provider's `authenticated` flag and unlocks its
+  // model list, so the cached catalogue is now wrong — the panel's very next
+  // request must see the provider as usable rather than wait out FRESH_MS.
+  invalidateModelOptions();
 
   return NextResponse.json({ ok: true, provider });
 }

@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { isValidSkillName } from "@/lib/hermes-skills";
-import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
+import { hermesSkillsGuard, invalidateInstalledCache } from "@/lib/hermes-skills-server";
 
 // Uninstall a Hermes skill. The positional argument is the skill NAME (the
 // lock.json key, e.g. "1password"), NOT the full registry identifier. There is
@@ -29,10 +29,16 @@ export async function POST(request: Request) {
       timeoutMs: 30_000,
       input: "y\n",
     });
+    // The skill directory is gone — drop the cached installed list before we
+    // answer so the client's re-fetch can't be served the pre-removal walk.
+    invalidateInstalledCache();
     if (r.code !== 0) {
-      return NextResponse.json({ error: r.stderr || "Uninstall failed" }, { status: 502 });
+      // Raw stderr can carry a Python traceback with the binary path and local
+      // install dirs — log it, never send it to the browser.
+      console.error("[hermes skills uninstall] exit", r.code, r.stderr);
+      return NextResponse.json({ error: "Uninstall failed" }, { status: 502 });
     }
-    return NextResponse.json({ ok: true, id });
+    return NextResponse.json({ ok: true, id, name: id });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Hermes uninstall failed" },

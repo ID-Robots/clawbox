@@ -14,5 +14,19 @@ ExecStart=/usr/bin/node /home/clawbox/clawbox/scripts/hermes-dashboard-proxy.js
 Restart=always
 RestartSec=3
 
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+# This process only READS (the session secret, the dashboard password) and
+# forwards TCP to 127.0.0.2:9119, so it can be locked down harder than the
+# dashboard itself. ProtectSystem=full rather than strict so a future need to
+# write under /home doesn't turn into a silent read-only failure.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
 [Install]
 WantedBy=multi-user.target

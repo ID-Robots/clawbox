@@ -18,6 +18,18 @@ Restart=always
 RestartSec=3
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 EnvironmentFile=-/home/clawbox/clawbox/.env
+# MUST stay LAST of the EnvironmentFile= lines. /home/clawbox/clawbox/.env is
+# owned by the clawbox user — writable from SSH, the in-UI terminal and the
+# agent's run_command — and config/clawbox-sudoers grants that same user
+# NOPASSWD `systemctl restart clawbox-setup`. systemd documents EnvironmentFile=
+# as overriding Environment=, and later files override earlier ones, so before
+# this line a customer could append CLAWBOX_EDITION=dual to .env, restart, and
+# unlock the premium SKU — the "root-owned edition lock" was not a lock at all.
+# /etc/clawbox/edition.env is root:root 0644, written by install.sh's
+# step_edition_lock, and being last it wins.
+# (The web server also reads the file directly via src/lib/edition-source.ts;
+# this line keeps the process environment consistent with it.)
+EnvironmentFile=-/etc/clawbox/edition.env
 Environment=NODE_ENV=production
 Environment=BUN_ENV=production
 Environment=PORT=80

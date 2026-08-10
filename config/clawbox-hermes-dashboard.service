@@ -13,6 +13,17 @@ Environment=PATH=/home/clawbox/.local/bin:/usr/local/bin:/usr/bin:/bin
 # (avoids an "address already in use" crash loop if a serve/dashboard from a
 # CLI chat or a prior run is still holding the port). Best-effort (`-`).
 ExecStartPre=-/home/clawbox/.local/bin/hermes dashboard --stop
+# Re-assert the dashboard's password auth provider on every start. This is what
+# makes a factory reset survivable: the reset wipes ~/.hermes (previous owner's
+# provider keys, OAuth tokens, chat DB, dashboard signing secret) and data/
+# (the proxy's copy of the password), and nothing else on the box would ever
+# re-create them — install.sh does not run at boot, so the dashboard would come
+# up with no auth provider on its non-loopback bind and crash-loop forever.
+# The script is idempotent: it verifies the stored hash against the stored
+# password and exits early when they already agree.
+# `-` prefix: a provisioning failure is logged to the journal but must not stop
+# the dashboard from starting (install-time validation catches a dead proxy).
+ExecStartPre=-/bin/bash /home/clawbox/clawbox/scripts/setup-hermes-dashboard-auth.sh
 # Bind 127.0.0.2, NOT 127.0.0.1: Hermes only engages its cookie-session auth
 # gate on a non-loopback bind (plain loopback uses a legacy shared-token mode
 # that ignores session cookies, which a reverse proxy can't satisfy). 127.0.0.2
@@ -24,6 +35,21 @@ ExecStart=/home/clawbox/.local/bin/hermes dashboard --host 127.0.0.2 --port 9119
 Restart=always
 RestartSec=5
 TimeoutStartSec=300
+
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+# Matches config/clawbox-codex-auth-sync.service. Deliberately conservative:
+# ProtectSystem=full (NOT strict) because Hermes builds its web dist and writes
+# its config/logs/memories under /home/clawbox — strict would make the whole
+# hierarchy read-only and turn every start into a failure. No PrivateTmp: the
+# ExecStartPre `dashboard --stop` above has to be able to see a stray hermes
+# started from a CLI chat in the host /tmp namespace.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

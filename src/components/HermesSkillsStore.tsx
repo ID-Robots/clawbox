@@ -1,957 +1,660 @@
-"use client";
+'use client';
 
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   type HermesSkill,
-  type HermesSkillDetail,
   type InstalledHermesSkill,
-  HERMES_SKILL_SOURCES,
-} from "@/lib/hermes-skills";
-import { renderText } from "@/lib/chat-markdown";
+  type SortOption,
+  SORT_OPTIONS,
+  sourceLabel,
+  trustMeta,
+} from '@/lib/hermes-skills';
+import { COPY, relativeDate } from './hermes-skills/copy';
+import {
+  Alert,
+  EmptyState,
+  FOCUS_RING,
+  GhostButton,
+  PrimaryButton,
+} from './hermes-skills/primitives';
+import { CardSkeleton, SkillCard, SkillGrid } from './hermes-skills/SkillCard';
+import { ConfirmDialog } from './hermes-skills/ConfirmDialog';
+import { SkillDetail } from './hermes-skills/SkillDetail';
+import { useSkillCatalog } from './hermes-skills/useSkillCatalog';
+import { useInstalledSkills } from './hermes-skills/useInstalledSkills';
+import { useSkillDetail } from './hermes-skills/useSkillDetail';
 
-// Hermes-flavored skills store. Fully self-contained: unlike the OpenClaw
-// AppStore it manages its own installed list, creates no desktop icons, and
-// drives Hermes' own CLI (~/.hermes/skills) through /setup-api/hermes/skills/*.
-// No parent props required.
+// Hermes-flavoured skills store — the Hermes edition's equivalent of the
+// OpenClaw App Store. Fully self-contained: it manages its own installed list,
+// creates no desktop icons, and drives Hermes' own CLI (~/.hermes/skills)
+// through /setup-api/hermes/skills/*. No parent props required.
+//
+// This file is the SHELL: tab state, the toolbar, the two grids, the mutations
+// and the routing between grid and detail. The data lives in the three hooks and
+// the presentation in ./hermes-skills/*.
 
-type ProgressState = { status: "working" | "success" | "error"; message?: string };
+type AnySkill = HermesSkill | InstalledHermesSkill;
+type ProgressState = { status: 'working' | 'success' | 'error'; message?: string };
 
-const SEARCH_LIMIT = 50;
+/**
+ * What a Remove button needs: the lock.json key the CLI takes, the key this
+ * component tracks progress under, and the detail-cache key(s) the answer is
+ * stored beneath. The last one is why `identifier` is carried separately — the
+ * detail cache is keyed by registry identifier, so invalidating only the lock
+ * name left a removed skill still reading as installed on its Browse card.
+ */
+type UninstallTarget = { name: string; key: string; identifier?: string };
 
-// Friendly labels for the source filter. Values must match the route allowlist.
-const SOURCE_LABELS: Record<string, string> = {
-  all: "All sources",
-  official: "Official",
-  "skills-sh": "skills.sh",
-  "skills.sh": "skills.sh",
-  "well-known": "Well-known",
-  github: "GitHub",
-  clawhub: "ClawHub",
-  lobehub: "LobeHub",
-  "browse-sh": "browse.sh",
-  builtin: "Built-in",
-  nvidia: "NVIDIA",
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  huggingface: "Hugging Face",
-  voltagent: "VoltAgent",
-  gstack: "gstack",
-  minimax: "MiniMax",
-};
-
-function trustBadgeClass(trust?: string): string {
-  switch (trust) {
-    case "builtin":
-    case "official":
-      return "bg-[var(--coral-bright)]/15 text-[var(--coral-bright)]";
-    case "trusted":
-      return "text-emerald-400 bg-emerald-400/10";
-    default:
-      return "text-[var(--text-secondary)] bg-[var(--surface-card)]";
-  }
-}
-
-// Best-effort, confidence-gated source link derived purely from the identifier.
-// https-only so it passes any safe-href check; returns null when unsure — never
-// fabricates a URL for official/skills-sh/clawhub/bare ids.
-function deriveSourceUrl(id?: string): { href: string; label: string } | null {
-  if (!id) return null;
-  const [head, ...rest] = id.split("/");
-  if (head === "github" && rest.length >= 2) {
-    return { href: `https://github.com/${rest[0]}/${rest[1]}`, label: "View on GitHub" };
-  }
-  if (head === "browse-sh" && rest.length >= 1) {
-    const host = rest[0];
-    if (host === "github.com" && rest.length >= 3) {
-      return { href: `https://github.com/${rest[1]}/${rest[2]}`, label: "View on GitHub" };
-    }
-    if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) {
-      return { href: `https://${host}`, label: `Source: ${host}` };
-    }
-  }
-  return null;
-}
-
-function SkillTile({
-  name,
-  category,
-  large,
-}: {
-  name: string;
-  category?: string;
-  large?: boolean;
-}) {
-  // Category-tinted generated tile (no icon CDN for skills). Deterministic hue
-  // from the category/name so the same skill always gets the same color.
-  const seed = category || name || "?";
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
-  return (
-    <div
-      className={`shrink-0 flex items-center justify-center text-white font-semibold ${
-        large ? "w-14 h-14 rounded-2xl text-2xl" : "w-11 h-11 rounded-xl text-lg"
-      }`}
-      style={{ backgroundColor: `hsl(${h} 45% 32%)` }}
-      aria-hidden="true"
-    >
-      {(name[0] || "?").toUpperCase()}
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <div className="mb-6">
-      <h3 className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-2">
-        {title}
-      </h3>
-      {children}
-    </div>
-  );
-}
-
-function TrustChip({ trust }: { trust: string }) {
-  const verified = trust === "builtin" || trust === "official" || trust === "trusted";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${trustBadgeClass(
-        trust,
-      )}`}
-    >
-      {verified && (
-        <span className="material-symbols-rounded" style={{ fontSize: 12 }}>
-          verified
-        </span>
-      )}
-      {trust}
-    </span>
-  );
-}
-
-function MetaChip({ icon, text }: { icon: string; text: string }) {
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-[var(--surface-card)] text-[var(--text-secondary)] max-w-full">
-      <span className="material-symbols-rounded shrink-0" style={{ fontSize: 12 }}>
-        {icon}
-      </span>
-      <span className="truncate">{text}</span>
-    </span>
-  );
-}
-
-function SkillCard({
-  skill,
-  onOpen,
-  action,
-}: {
-  skill: HermesSkill | InstalledHermesSkill;
-  onOpen: () => void;
-  action: ReactNode;
-}) {
-  const scanVerdict = "scanVerdict" in skill ? skill.scanVerdict : undefined;
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-      aria-label={`View ${skill.name}`}
-      className="card-surface rounded-2xl p-3 min-h-[7.5rem] flex cursor-pointer border border-[var(--border-subtle)]
-                 hover:border-[var(--coral-bright)]/40 hover:-translate-y-0.5 hover:shadow-lg
-                 focus-visible:ring-2 focus-visible:ring-[var(--coral-bright)] outline-none transition-all"
-    >
-      <div className="flex gap-3 w-full">
-        <SkillTile name={skill.name} category={skill.category} />
-        <div className="flex-1 min-w-0 flex flex-col">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <h3 className="font-medium text-sm truncate">{skill.name}</h3>
-            {skill.trust && (
-              <span className="shrink-0">
-                <TrustChip trust={skill.trust} />
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1 flex-wrap mt-1 min-w-0">
-            {skill.source && (
-              <MetaChip icon="hub" text={SOURCE_LABELS[skill.source] || skill.source} />
-            )}
-            {skill.category && <MetaChip icon="category" text={skill.category} />}
-            {scanVerdict && (
-              <span
-                className={`px-1.5 py-0.5 rounded-full text-[9px] ${
-                  scanVerdict === "safe"
-                    ? "text-emerald-400 bg-emerald-400/10"
-                    : "text-amber-400 bg-amber-400/10"
-                }`}
-              >
-                scan: {scanVerdict}
-              </span>
-            )}
-          </div>
-          {skill.description && (
-            <p className="text-xs text-[var(--text-secondary)] mt-1 line-clamp-2">
-              {skill.description}
-            </p>
-          )}
-          <div className="mt-auto pt-2" onClick={(e) => e.stopPropagation()}>
-            {action}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CardSkeleton() {
-  return (
-    <div
-      className="card-surface rounded-2xl p-3 min-h-[7.5rem] border border-[var(--border-subtle)] animate-pulse"
-      aria-hidden="true"
-    >
-      <div className="flex gap-3">
-        <div className="w-11 h-11 rounded-xl bg-[var(--surface-card)]" />
-        <div className="flex-1 space-y-2 pt-1">
-          <div className="h-3 w-1/2 rounded bg-[var(--surface-card)]" />
-          <div className="h-2 w-1/3 rounded bg-[var(--surface-card)]" />
-          <div className="h-2 w-full rounded bg-[var(--surface-card)]" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DetailSkeleton() {
-  return (
-    <div className="space-y-2 animate-pulse mb-6" aria-hidden="true">
-      {[...Array(5)].map((_, i) => (
-        <div
-          key={i}
-          className="h-3 rounded bg-[var(--surface-card)]"
-          style={{ width: `${90 - i * 8}%` }}
-        />
-      ))}
-    </div>
-  );
-}
+const SELECT_CLS =
+  'rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] ' +
+  'focus:outline-none focus:border-[var(--coral-bright)]';
 
 export default function HermesSkillsStore({ testId }: { testId?: string }) {
-  const [tab, setTab] = useState<"installed" | "browse">("installed");
-  const [query, setQuery] = useState("");
-  const [source, setSource] = useState("all");
-  const [results, setResults] = useState<HermesSkill[]>([]);
-  const [installedList, setInstalledList] = useState<InstalledHermesSkill[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadingInstalled, setLoadingInstalled] = useState(true);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [tab, setTab] = useState<'installed' | 'browse'>('installed');
+  const [selected, setSelected] = useState<AnySkill | null>(null);
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
-  const [selected, setSelected] = useState<HermesSkill | InstalledHermesSkill | null>(null);
-  const [detail, setDetail] = useState<HermesSkillDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
   const [confirmInstall, setConfirmInstall] = useState<HermesSkill | null>(null);
-  const detailCache = useRef<Map<string, HermesSkillDetail>>(new Map());
-  // Tracks the in-flight inspect request so a stale response for a
-  // previously-selected skill can't overwrite the current detail.
-  const detailReq = useRef<{ controller: AbortController; id: string } | null>(null);
+  const [confirmUninstall, setConfirmUninstall] = useState<UninstallTarget | null>(null);
+  const [installedQuery, setInstalledQuery] = useState('');
+  const [installedCategory, setInstalledCategory] = useState('all');
+  const [live, setLive] = useState('');
 
-  // Installed lookups for marking search results. Match on stable ids only —
-  // a shared display name (two different 'search' skills) must NOT be treated
-  // as the same skill, or Remove would uninstall an unrelated local skill.
+  const catalog = useSkillCatalog(tab === 'browse');
+  const installed = useInstalledSkills();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  // One timer per skill key; cleared on replacement AND on unmount so a fast
+  // install→uninstall→install sequence can't leave a stale "error" behind.
+  const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+      map.clear();
+    };
+  }, []);
+
+  const inspectId = useMemo(() => {
+    if (!selected) return null;
+    return ('identifier' in selected && selected.identifier) || selected.id;
+  }, [selected]);
+  // A skill picked from the Installed tab is identified by its DIRECTORY name,
+  // which the route may only resolve against disk when it knows that's where
+  // the id came from (bare registry ids collide with bundled directories).
+  const detail = useSkillDetail(inspectId, !!selected && 'origin' in selected);
+
+  // Match a browse row against the installed set on the REGISTRY IDENTIFIER
+  // only. clawhub identifiers are bare names (`notion`, `arxiv`, `pdf`) and 40
+  // of them are byte-identical to a bundled skill's directory, so matching on
+  // the lock/directory name marked skills the user never installed as
+  // "Installed" — and offered a Remove that would delete the bundled one.
+  // A hub-installed skill's lock key IS a real install target, so it still
+  // counts; a builtin/local one never does.
   const installedIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const s of installedList) {
+    for (const s of installed.skills) {
       if (s.identifier) ids.add(s.identifier);
-      ids.add(s.id);
+      if (s.origin === 'hub') ids.add(s.id);
     }
-    return { ids };
-  }, [installedList]);
-
-  const isInstalled = useCallback(
-    (skill: { id: string }) => installedIds.ids.has(skill.id),
-    [installedIds],
+    return ids;
+  }, [installed.skills]);
+  const installedNames = useMemo(
+    () => new Set(installed.skills.map((s) => s.id)),
+    [installed.skills],
   );
 
-  const fetchInstalled = useCallback(async () => {
-    setLoadingInstalled(true);
-    try {
-      const res = await fetch("/setup-api/hermes/skills/installed", { cache: "no-store" });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && Array.isArray(data.skills)) {
-        setInstalledList(data.skills as InstalledHermesSkill[]);
-      }
-    } catch {
-      /* best-effort — the installed tab just shows empty */
-    } finally {
-      setLoadingInstalled(false);
-    }
-  }, []);
+  const isInstalled = useCallback((skill: { id: string }) => installedIds.has(skill.id), [installedIds]);
 
-  useEffect(() => {
-    fetchInstalled();
-  }, [fetchInstalled]);
-
-  // Browse tab: an empty query shows a default listing (`browse`); typing runs
-  // a search. Both honor the source filter. Debounce search; load browse eagerly.
-  useEffect(() => {
-    if (tab !== "browse") return;
-    const q = query.trim();
-    const controller = new AbortController();
-    const load = async () => {
-      setLoading(true);
-      setSearchError(null);
-      try {
-        let url: string;
-        if (q) {
-          const params = new URLSearchParams({ q, limit: String(SEARCH_LIMIT) });
-          if (source && source !== "all") params.set("source", source);
-          url = `/setup-api/hermes/skills/search?${params}`;
-        } else {
-          const params = new URLSearchParams({ size: String(SEARCH_LIMIT) });
-          if (source && source !== "all") params.set("source", source);
-          url = `/setup-api/hermes/skills/browse?${params}`;
-        }
-        const res = await fetch(url, { signal: controller.signal });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-        setResults(Array.isArray(data.skills) ? (data.skills as HermesSkill[]) : []);
-      } catch (err) {
-        if ((err as Error).name !== "AbortError") {
-          setSearchError(err instanceof Error ? err.message : "Couldn't load skills");
-          setResults([]);
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-    const timer = setTimeout(load, q ? 300 : 0);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [query, source, tab, reloadKey]);
-
-  // Open the detail view: paint the header from the card payload immediately,
-  // then fetch inspect depth lazily (cached by id).
-  const openDetail = useCallback((skill: HermesSkill | InstalledHermesSkill) => {
-    // Cancel any prior in-flight inspect so its late response can't clobber this.
-    detailReq.current?.controller.abort();
-    detailReq.current = null;
-    setSelected(skill);
-    const idForInspect =
-      "identifier" in skill && skill.identifier ? skill.identifier : skill.id;
-    const cached = detailCache.current.get(idForInspect);
-    if (cached) {
-      setDetail(cached);
-      setDetailError(null);
-      setDetailLoading(false);
-      return;
-    }
-    setDetail(null);
-    setDetailError(null);
-    setDetailLoading(true);
-    const controller = new AbortController();
-    const req = { controller, id: idForInspect };
-    detailReq.current = req;
-    (async () => {
-      try {
-        const res = await fetch(
-          `/setup-api/hermes/skills/inspect?id=${encodeURIComponent(idForInspect)}`,
-          { signal: controller.signal, cache: "no-store" },
-        );
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-        const d = data.skill as HermesSkillDetail;
-        detailCache.current.set(idForInspect, d);
-        // Ignore if a newer request superseded this one.
-        if (detailReq.current !== req) return;
-        setDetail(d);
-      } catch (err) {
-        if ((err as Error).name !== "AbortError" && detailReq.current === req) {
-          setDetailError(err instanceof Error ? err.message : "Couldn't load details");
-        }
-      } finally {
-        if (detailReq.current === req) {
-          detailReq.current = null;
-          setDetailLoading(false);
-        }
-      }
-    })();
-  }, []);
-
-  const closeDetail = useCallback(() => {
-    detailReq.current?.controller.abort();
-    detailReq.current = null;
-    setSelected(null);
-    setDetail(null);
-    setDetailError(null);
-    setDetailLoading(false);
-  }, []);
+  /** How a browse result would be removed, when the store installed it. */
+  const uninstallTargetFor = useCallback(
+    (skill: { id: string }): UninstallTarget | null => {
+      const match = installed.skills.find(
+        (s) => s.identifier === skill.id || (s.origin === 'hub' && s.id === skill.id),
+      );
+      // Only hub-installed skills are removable: `hermes skills uninstall`
+      // works off the lock, so a Remove for anything else can only fail.
+      if (!match || match.origin !== 'hub') return null;
+      return { name: match.id, key: skill.id, identifier: match.identifier || skill.id };
+    },
+    [installed.skills],
+  );
 
   const setProgressAutoClear = useCallback((key: string, state: ProgressState, ms: number) => {
     setProgress((p) => ({ ...p, [key]: state }));
-    setTimeout(() => {
-      setProgress((p) => {
-        const n = { ...p };
-        delete n[key];
-        return n;
-      });
-    }, ms);
+    const existing = timers.current.get(key);
+    if (existing) clearTimeout(existing);
+    timers.current.set(
+      key,
+      setTimeout(() => {
+        timers.current.delete(key);
+        setProgress((p) => {
+          const next = { ...p };
+          delete next[key];
+          return next;
+        });
+      }, ms),
+    );
   }, []);
 
   const doInstall = useCallback(
     async (skill: HermesSkill) => {
       setConfirmInstall(null);
       const key = skill.id;
-      setProgress((p) => ({ ...p, [key]: { status: "working" } }));
+      setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
+      setLive(`Installing ${skill.name}`);
       try {
-        const res = await fetch("/setup-api/hermes/skills/install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: skill.id, category: skill.category }),
+        const res = await fetch('/setup-api/hermes/skills/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: skill.id }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-        setProgressAutoClear(key, { status: "success" }, 2000);
-        await fetchInstalled();
+        setProgressAutoClear(key, { status: 'success' }, 2000);
+        // The detail answer changes completely once a skill is on disk (full
+        // SKILL.md, scan report, size). Dropping the cache is not enough — the
+        // open detail view keys its fetch on the id, which did not change, so
+        // it has to be told to run again.
+        detail.refresh(key);
+        setLive(`${skill.name} installed`);
+        await installed.refresh();
       } catch (err) {
         setProgressAutoClear(
           key,
-          { status: "error", message: err instanceof Error ? err.message : "Install failed" },
+          { status: 'error', message: err instanceof Error ? err.message : 'Install failed' },
           6000,
         );
+        setLive(`Could not install ${skill.name}`);
       }
     },
-    [fetchInstalled, setProgressAutoClear],
+    [detail, installed, setProgressAutoClear],
   );
 
   const doUninstall = useCallback(
-    async (name: string, key: string) => {
-      setProgress((p) => ({ ...p, [key]: { status: "working" } }));
+    async ({ name, key, identifier }: UninstallTarget) => {
+      setConfirmUninstall(null);
+      setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
+      setLive(`Removing ${name}`);
       try {
-        const res = await fetch("/setup-api/hermes/skills/uninstall", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+        const res = await fetch('/setup-api/hermes/skills/uninstall', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: name }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        const timer = timers.current.get(key);
+        if (timer) clearTimeout(timer);
+        timers.current.delete(key);
         setProgress((p) => {
-          const n = { ...p };
-          delete n[key];
-          return n;
+          const next = { ...p };
+          delete next[key];
+          return next;
         });
-        await fetchInstalled();
+        // Three possible cache keys for one skill: the lock name (Installed
+        // tab), the registry identifier (Browse card and the detail view), and
+        // whatever the button tracked progress under.
+        detail.refresh(key, name, identifier);
+        setLive(`${name} removed`);
+        await installed.refresh();
       } catch (err) {
         setProgressAutoClear(
           key,
-          { status: "error", message: err instanceof Error ? err.message : "Uninstall failed" },
+          { status: 'error', message: err instanceof Error ? err.message : 'Uninstall failed' },
           6000,
         );
+        setLive(`Could not remove ${name}`);
       }
     },
-    [fetchInstalled, setProgressAutoClear],
+    [detail, installed, setProgressAutoClear],
   );
 
-  // Resolve the uninstall name (lock.json key) for a search result.
-  const installedNameFor = useCallback(
-    (skill: { id: string }): string | null => {
-      const match = installedList.find((s) => s.identifier === skill.id || s.id === skill.id);
-      return match ? match.id : null;
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const renderBrowseAction = useCallback(
+    (skill: HermesSkill, size: 'card' | 'detail' = 'card'): ReactNode => {
+      const state = progress[skill.id];
+      if (state?.status === 'working') {
+        return (
+          <span className="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+            <span className="w-16 h-1 rounded-full bg-[var(--surface-card)] overflow-hidden" aria-hidden="true">
+              <span className="block h-full w-1/2 bg-[var(--coral-bright)] animate-pulse" />
+            </span>
+            {COPY.installing}
+          </span>
+        );
+      }
+      if (state?.status === 'error') {
+        return (
+          <span className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+              {state.message}
+            </span>
+            <GhostButton tone="danger" onClick={() => setConfirmInstall(skill)}>
+              {COPY.retry}
+            </GhostButton>
+          </span>
+        );
+      }
+      const target = uninstallTargetFor(skill);
+      if (state?.status === 'success' || isInstalled(skill)) {
+        return (
+          <span className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400">
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+                check_circle
+              </span>
+              {COPY.installed}
+            </span>
+            {target && (
+              <GhostButton tone="danger" onClick={() => setConfirmUninstall(target)}>
+                {COPY.remove}
+              </GhostButton>
+            )}
+          </span>
+        );
+      }
+      return (
+        <span data-testid="skill-install-btn">
+          <PrimaryButton size={size === 'detail' ? 'lg' : 'sm'} onClick={() => setConfirmInstall(skill)}>
+            {COPY.install}
+          </PrimaryButton>
+        </span>
+      );
     },
-    [installedList],
+    [progress, uninstallTargetFor, isInstalled],
   );
 
-  const selectCls =
-    "w-full rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]";
-
-  // ── Install button for a browse result ──
-  const renderResultAction = (skill: HermesSkill) => {
-    const installed = isInstalled(skill);
-    const st = progress[skill.id];
-    if (st?.status === "working") {
-      return <span className="text-xs text-[var(--text-secondary)]">Installing…</span>;
-    }
-    if (st?.status === "error") {
-      return (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-red-400 line-clamp-1" title={st.message}>
-            {st.message}
+  const renderInstalledAction = useCallback(
+    (skill: InstalledHermesSkill): ReactNode => {
+      const state = progress[skill.id];
+      if (state?.status === 'working') {
+        return <span className="text-xs text-[var(--text-secondary)]">{COPY.removing}</span>;
+      }
+      if (state?.status === 'error') {
+        return (
+          <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+            {state.message}
           </span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setConfirmInstall(skill);
-            }}
-            className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-          >
-            Retry
-          </button>
-        </div>
-      );
-    }
-    if (st?.status === "success" || installed) {
-      const name = installedNameFor(skill);
-      return (
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1 text-xs font-medium text-emerald-400">
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }}>
-              check_circle
+        );
+      }
+      // Only skills the STORE installed are removable: `hermes skills uninstall`
+      // works off the hub lock, so offering Remove for a bundled skill or one
+      // the agent wrote itself would be a button that can only fail.
+      if (skill.origin !== 'hub') {
+        return (
+          <span className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+              {skill.origin === 'builtin' ? 'lock' : 'draw'}
             </span>
-            Installed
+            {skill.origin === 'builtin' ? COPY.builtinLocked : COPY.originLocal}
           </span>
-          {name && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                doUninstall(name, skill.id);
-              }}
-              className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-            >
-              Remove
-            </button>
-          )}
-        </div>
-      );
-    }
-    return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          setConfirmInstall(skill);
-        }}
-        className="px-4 py-1.5 rounded-md text-xs font-semibold bg-[var(--coral-bright)] text-white hover:opacity-90 transition-opacity"
-      >
-        Install
-      </button>
-    );
-  };
-
-  // ── Action for an installed-tab card (builtin skills are not removable) ──
-  const renderInstalledAction = (skill: InstalledHermesSkill) => {
-    const st = progress[skill.id];
-    if (st?.status === "working") {
-      return <span className="text-xs text-[var(--text-secondary)]">Removing…</span>;
-    }
-    if (st?.status === "error") {
+        );
+      }
       return (
-        <span className="text-xs text-red-400 line-clamp-1" title={st.message}>
-          {st.message}
-        </span>
+        <GhostButton
+          tone="danger"
+          onClick={() =>
+            setConfirmUninstall({ name: skill.id, key: skill.id, identifier: skill.identifier })
+          }
+        >
+          {COPY.remove}
+        </GhostButton>
       );
-    }
-    if (skill.source === "builtin") {
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
-          <span className="material-symbols-rounded" style={{ fontSize: 14 }}>
-            lock
-          </span>
-          Built-in
-        </span>
-      );
-    }
-    return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          doUninstall(skill.id, skill.id);
-        }}
-        className="px-3 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-      >
-        Uninstall
-      </button>
-    );
-  };
-
-  // ── Install-confirm modal ──
-  const confirmModal = confirmInstall && (
-    <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={() => setConfirmInstall(null)}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") setConfirmInstall(null);
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="hs-confirm-title"
-    >
-      <div
-        className="card-surface rounded-2xl p-6 max-w-sm mx-4 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-[var(--coral-bright)]">
-            <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }}>
-              extension
-            </span>
-          </div>
-          <h3 id="hs-confirm-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Install {confirmInstall.name}?
-          </h3>
-        </div>
-        <div className="rounded-lg p-3 mb-4 bg-yellow-500/10 border border-yellow-500/20">
-          <div className="flex gap-2">
-            <span
-              className="material-symbols-rounded text-yellow-400 shrink-0"
-              style={{ fontSize: 18 }}
-            >
-              warning
-            </span>
-            <p className="text-sm text-yellow-200/80">
-              This skill runs inside your Hermes agent. Hermes scans it for safety before enabling
-              it — only install skills you trust.
-            </p>
-          </div>
-        </div>
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={() => setConfirmInstall(null)}
-            className="px-4 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)] transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => doInstall(confirmInstall)}
-            className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--coral-bright)] hover:opacity-90 transition-opacity"
-          >
-            Install
-          </button>
-        </div>
-      </div>
-    </div>
+    },
+    [progress],
   );
 
-  // ── Detail view ──
-  if (selected) {
-    const installed = isInstalled(selected);
-    const uninstallName = installedNameFor(selected);
-    const isBuiltin = "source" in selected && selected.source === "builtin";
-    const idForDerive =
-      ("identifier" in selected && selected.identifier) || selected.id;
-    const src = detail?.sourceUrl
-      ? { href: detail.sourceUrl, label: "View source" }
-      : deriveSourceUrl(idForDerive);
-    const tags = detail?.tags ?? [];
-    const description = selected.description || detail?.description;
-    const meta = [
-      detail?.version && { label: "Version", value: detail.version },
-      detail?.author && { label: "Author", value: detail.author },
-      detail?.license && { label: "License", value: detail.license },
-      (detail?.category || selected.category) && {
-        label: "Category",
-        value: (detail?.category || selected.category) as string,
+  // ── Load-more sentinel (browse) ───────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== 'browse' || !catalog.hasMore) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) catalog.loadMore();
       },
-    ].filter(Boolean) as { label: string; value: string }[];
-    const hasSetup =
-      !!detail?.setupHelpUrl || !!detail?.detailUrl || (detail?.secrets?.length ?? 0) > 0;
+      { root: scrollRef.current, rootMargin: '400px' },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [tab, catalog.hasMore, catalog.loadMore, catalog]);
+
+  // ── Installed list filtering ──────────────────────────────────────────────
+  const installedFiltered = useMemo(() => {
+    const q = installedQuery.trim().toLowerCase();
+    return installed.skills.filter((s) => {
+      if (installedCategory !== 'all' && s.category !== installedCategory) return false;
+      if (!q) return true;
+      return (
+        s.name.toLowerCase().includes(q) ||
+        s.id.toLowerCase().includes(q) ||
+        (s.description || '').toLowerCase().includes(q)
+      );
+    });
+  }, [installed.skills, installedQuery, installedCategory]);
+
+  // The facet lists are the top 12 for the CURRENT query, so a source (or
+  // publisher) the user picked can drop out of them. A <select> whose value
+  // matches no option displays the FIRST one — it would read "All sources"
+  // while the request still carried the filter. Append the selection instead.
+  const sourceOptions = useMemo(() => {
+    const opts = catalog.sources.map((f) => ({
+      // The index writes `skills.sh`; the query param takes the flag spelling.
+      id: f.id === 'skills.sh' ? 'skills-sh' : f.id,
+      label: `${f.label} (${f.count.toLocaleString()})`,
+    }));
+    if (catalog.source !== 'all' && !opts.some((o) => o.id === catalog.source)) {
+      opts.push({ id: catalog.source, label: sourceLabel(catalog.source) });
+    }
+    return opts;
+  }, [catalog.sources, catalog.source]);
+
+  const providerOptions = useMemo(() => {
+    const opts = catalog.providers.map((p) => ({ id: p.id, label: `${p.id} (${p.count})` }));
+    if (catalog.provider && !opts.some((o) => o.id === catalog.provider)) {
+      opts.push({ id: catalog.provider, label: catalog.provider });
+    }
+    return opts;
+  }, [catalog.providers, catalog.provider]);
+
+  // Stable handlers: the confirm dialog installs a focus trap keyed to them, so
+  // a new identity on every parent render would yank focus back to Cancel while
+  // the user is tabbing (the detail fetch resolves under the open dialog).
+  const closeInstallDialog = useCallback(() => setConfirmInstall(null), []);
+  const closeUninstallDialog = useCallback(() => setConfirmUninstall(null), []);
+
+  // Grid ↔ detail navigation. Both the scroll offset and the focused card are
+  // restored on Back: the grid unmounts, so without this a user who opened the
+  // 70th card came back to card 1 with focus on <body>.
+  const browseScroll = useRef(0);
+  const returnFocusId = useRef<string | null>(null);
+  const openDetail = useCallback((skill: AnySkill) => {
+    // Only when we're coming FROM the grid: this same handler moves between two
+    // details (the ambiguity chooser, the related-skill chips), and those must
+    // not overwrite the grid position we still have to return to.
+    if (scrollRef.current) {
+      browseScroll.current = scrollRef.current.scrollTop;
+      returnFocusId.current = skill.id;
+    }
+    setSelected(skill);
+  }, []);
+  const closeDetail = useCallback(() => setSelected(null), []);
+
+  useLayoutEffect(() => {
+    if (selected || !scrollRef.current) return;
+    scrollRef.current.scrollTop = browseScroll.current;
+    const id = returnFocusId.current;
+    if (!id) return;
+    returnFocusId.current = null;
+    // Match on the dataset rather than a built selector: skill ids come from
+    // registries and are not guaranteed to be selector-safe.
+    for (const node of scrollRef.current.querySelectorAll<HTMLElement>('[data-skill-open]')) {
+      if (node.dataset.skillOpen === id) {
+        node.focus();
+        break;
+      }
+    }
+  }, [selected]);
+
+  // ── Dialogs ───────────────────────────────────────────────────────────────
+  const installDialog = confirmInstall && (
+    <ConfirmDialog
+      title={COPY.installTitle(confirmInstall.name)}
+      icon="extension"
+      confirmLabel={COPY.install}
+      onConfirm={() => doInstall(confirmInstall)}
+      onCancel={closeInstallDialog}
+    >
+      <p className="font-mono text-xs break-all text-[var(--text-primary)]">{confirmInstall.id}</p>
+      <p className="text-xs">
+        {sourceLabel(confirmInstall.source)} · {trustMeta(confirmInstall.trust).label}
+      </p>
+      {confirmInstall.trust === 'community' || confirmInstall.trust === 'unknown' || !confirmInstall.trust ? (
+        <Alert tone="warn" icon="groups">
+          {COPY.installCommunityBody}
+        </Alert>
+      ) : (
+        <p>{COPY.installTrustedBody}</p>
+      )}
+      {detail.detail?.requirements?.secrets.length ? (
+        <p className="text-xs">{COPY.installWillAsk(detail.detail.requirements.secrets.map((s) => s.label))}</p>
+      ) : null}
+    </ConfirmDialog>
+  );
+
+  const uninstallDialog = confirmUninstall && (
+    <ConfirmDialog
+      title={COPY.uninstallTitle(confirmUninstall.name)}
+      icon="delete"
+      tone="danger"
+      confirmLabel={COPY.remove}
+      onConfirm={() => doUninstall(confirmUninstall)}
+      onCancel={closeUninstallDialog}
+    >
+      <p>{COPY.uninstallBody(detail.detail?.install?.installPath)}</p>
+    </ConfirmDialog>
+  );
+
+  const liveRegion = (
+    <>
+      <p className="sr-only" role="status" aria-live="polite">
+        {live}
+      </p>
+    </>
+  );
+
+  // ── Detail view ───────────────────────────────────────────────────────────
+  if (selected) {
+    // Same rule as the installed cards: only hub-installed skills get an action.
+    const fixedOrigin = 'origin' in selected && selected.origin !== 'hub' ? selected.origin : null;
+    const action = fixedOrigin ? (
+      <span className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)]">
+        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+          {fixedOrigin === 'builtin' ? 'lock' : 'draw'}
+        </span>
+        {fixedOrigin === 'builtin' ? COPY.builtinLocked : COPY.originLocal}
+      </span>
+    ) : detail.ambiguous ? (
+      // The id resolved to several skills, so it names none of them: installing
+      // it can only fail. The chooser below is the whole action here.
+      <span className="text-sm text-[var(--text-secondary)]">{COPY.ambiguousPickFirst}</span>
+    ) : (
+      renderBrowseAction(selected as HermesSkill, 'detail')
+    );
 
     return (
-      <div
-        className="h-full flex flex-col bg-[var(--bg-deep)] text-[var(--text-primary)]"
-        data-testid={testId || "hermes-skills-store"}
-      >
-        {confirmModal}
-        {/* Back bar */}
-        <div className="shrink-0 px-4 py-3 border-b border-[var(--border-subtle)] flex items-center gap-3">
-          <button
-            onClick={closeDetail}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[var(--surface-card)] transition-colors"
-            aria-label="Back to skills"
-          >
-            <span
-              className="material-symbols-rounded text-[var(--text-secondary)]"
-              style={{ fontSize: 20 }}
-            >
-              arrow_back
-            </span>
-          </button>
-          <span className="text-sm font-medium text-[var(--text-secondary)]">Hermes Skills</span>
-        </div>
-
-        <div className="flex-1 overflow-y-auto @container">
-          <div className="p-6 max-w-3xl w-full mx-auto">
-            {/* Header */}
-            <div className="flex gap-4 mb-5">
-              <SkillTile name={selected.name} category={detail?.category || selected.category} large />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h2 className="text-xl font-bold">{selected.name}</h2>
-                  {selected.trust && <TrustChip trust={selected.trust} />}
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
-                  {selected.source && (
-                    <MetaChip icon="hub" text={SOURCE_LABELS[selected.source] || selected.source} />
-                  )}
-                  {tags.slice(0, 6).map((t) => (
-                    <span
-                      key={t}
-                      className="px-2 py-0.5 rounded-full text-[10px] bg-[var(--surface-card)] text-[var(--text-secondary)]"
-                    >
-                      #{t}
-                    </span>
-                  ))}
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] mt-2 break-all font-mono">
-                  {selected.id}
-                </p>
-                <div className="mt-3 flex items-center gap-3 flex-wrap">
-                  {isBuiltin ? (
-                    <span className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>
-                        lock
-                      </span>
-                      Built-in
-                    </span>
-                  ) : (
-                    renderResultAction(selected as HermesSkill)
-                  )}
-                  {src && (
-                    <a
-                      href={src.href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-[var(--coral-bright)] hover:underline"
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>
-                        open_in_new
-                      </span>
-                      {src.label}
-                    </a>
-                  )}
-                </div>
-                {installed && uninstallName && !isBuiltin && (
-                  <p className="text-xs text-[var(--text-secondary)] mt-2">
-                    Installed as <span className="font-mono">{uninstallName}</span>
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Metadata strip */}
-            {meta.length > 0 && (
-              <div className="grid grid-cols-2 @sm:grid-cols-4 gap-2 mb-5">
-                {meta.map((m) => (
-                  <div
-                    key={m.label}
-                    className="card-surface rounded-xl px-3 py-2 border border-[var(--border-subtle)]"
-                  >
-                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
-                      {m.label}
-                    </div>
-                    <div className="text-sm truncate" title={m.value}>
-                      {m.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* About — from the card payload, always instant */}
-            {description && (
-              <Section title="About">
-                <p className="text-sm leading-relaxed text-[var(--text-primary)]/80 whitespace-pre-line">
-                  {description}
-                </p>
-              </Section>
-            )}
-
-            {/* Detail depth: skeleton / error / SKILL.md body */}
-            {detailLoading && <DetailSkeleton />}
-            {detailError && !detailLoading && (
-              <div className="rounded-lg p-3 mb-6 bg-[var(--surface-card)] border border-[var(--border-subtle)] text-sm text-[var(--text-secondary)]">
-                Couldn’t load the full skill details. {detailError}
-              </div>
-            )}
-            {detail?.body && !detailLoading && (
-              <Section title="Skill details">
-                <div className="text-sm leading-relaxed text-[var(--text-primary)]/85 [&_a]:text-[var(--coral-bright)] [&_a]:underline">
-                  {renderText(detail.body)}
-                </div>
-                {detail.markdownTruncated && (
-                  <p className="text-[11px] text-[var(--text-secondary)] mt-2 italic">
-                    Preview — install the skill to read the full SKILL.md.
-                  </p>
-                )}
-              </Section>
-            )}
-
-            {/* Setup & requirements */}
-            {hasSetup && !detailLoading && (
-              <Section title="Setup & requirements">
-                <div className="flex flex-col gap-2">
-                  {detail?.setupHelpUrl && (
-                    <a
-                      href={detail.setupHelpUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-sm text-[var(--coral-bright)] hover:underline w-fit"
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>
-                        menu_book
-                      </span>
-                      Setup guide
-                    </a>
-                  )}
-                  {detail?.detailUrl && (
-                    <a
-                      href={detail.detailUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-sm text-[var(--coral-bright)] hover:underline w-fit"
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>
-                        description
-                      </span>
-                      Detail page
-                    </a>
-                  )}
-                  {detail?.secrets?.map((s, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center gap-2 text-sm text-[var(--text-secondary)]"
-                    >
-                      <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }}>
-                        key
-                      </span>
-                      <span>Requires {s.provider || "an API key"}</span>
-                      {s.providerUrl && (
-                        <a
-                          href={s.providerUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[var(--coral-bright)] hover:underline"
-                        >
-                          Get one
-                        </a>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )}
-          </div>
-        </div>
+      <div className="h-full" data-testid={testId || 'hermes-skills-store'}>
+        {installDialog}
+        {uninstallDialog}
+        {liveRegion}
+        <SkillDetail
+          skill={selected}
+          detail={detail.detail}
+          phase={detail.phase}
+          error={detail.error}
+          ambiguous={detail.ambiguous}
+          action={action}
+          breadcrumb={'origin' in selected ? COPY.breadcrumbInstalled : COPY.breadcrumbBrowse}
+          installedNames={installedNames}
+          onBack={closeDetail}
+          onOpenSkill={openDetail}
+        />
       </div>
     );
   }
 
-  const showResults = tab === "browse";
-  const emptyBrowse = showResults && !loading && !searchError && results.length === 0;
-  const q = query.trim();
+  // ── Grid view ─────────────────────────────────────────────────────────────
+  const browsing = tab === 'browse';
+  const q = catalog.query.trim();
+  const rangeFrom = catalog.results.length ? 1 : 0;
+  const showFirstRun = browsing && catalog.loading && (catalog.slow || catalog.catalog?.origin === 'warming');
+  // Dated by the DOWNLOAD, not the publisher's build stamp — the latter never
+  // moves on a refetch, so it said "21 days ago" about a fresh catalogue.
+  const staleWhen = catalog.catalog?.stale ? relativeDate(catalog.catalog.fetchedAt) : undefined;
 
   return (
     <div
       className="h-full flex flex-col bg-[var(--bg-deep)] text-[var(--text-primary)]"
-      data-testid={testId || "hermes-skills-store"}
+      data-testid={testId || 'hermes-skills-store'}
     >
-      {confirmModal}
+      {installDialog}
+      {uninstallDialog}
+      {liveRegion}
+
       {/* Header */}
       <div className="@container shrink-0 px-4 py-3 border-b border-[var(--border-subtle)]">
         <div className="flex items-center gap-3 mb-3">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--coral-bright)]">
-            <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }}>
+            <span className="material-symbols-rounded text-white" style={{ fontSize: 20 }} aria-hidden="true">
               extension
             </span>
           </div>
-          <div>
-            <h1 className="text-lg font-semibold">Hermes Skills</h1>
-            <p className="text-xs text-[var(--text-secondary)]">
-              Add capabilities to your Hermes agent
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold">{COPY.title}</h1>
+            <p className="text-xs text-[var(--text-secondary)] truncate">
+              {catalog.catalog?.skillCount
+                ? COPY.subtitleWithCount(catalog.catalog.skillCount)
+                : COPY.subtitleFallback}
             </p>
           </div>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-1.5 mb-3" role="tablist" aria-label="Skills view">
-          {(["installed", "browse"] as const).map((tk) => (
+          {(['installed', 'browse'] as const).map((key) => (
             <button
-              key={tk}
+              key={key}
+              type="button"
               role="tab"
-              id={`hs-tab-${tk}`}
-              aria-selected={tab === tk}
+              id={`hs-tab-${key}`}
+              data-testid={`skill-tab-${key}`}
+              aria-selected={tab === key}
               aria-controls="hs-tabpanel"
-              onClick={() => setTab(tk)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                tab === tk
-                  ? "bg-[var(--coral-bright)] text-white"
-                  : "bg-[var(--surface-card)] text-[var(--text-secondary)] hover:opacity-90"
+              onClick={() => setTab(key)}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${FOCUS_RING} ${
+                tab === key
+                  ? 'bg-[var(--coral-bright)] text-white'
+                  : 'bg-[var(--surface-card)] text-[var(--text-secondary)] hover:opacity-90'
               }`}
             >
-              {tk === "installed"
-                ? `Installed${installedList.length ? ` (${installedList.length})` : ""}`
-                : "Browse"}
+              {key === 'installed' ? COPY.tabInstalled(installed.counts.total) : COPY.tabBrowse}
             </button>
           ))}
         </div>
 
-        {showResults && (
-          <>
-            <div className="flex flex-col @sm:flex-row gap-2">
-              <div className="relative flex-1">
-                <span
-                  className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]"
-                  style={{ fontSize: 16 }}
-                >
-                  search
-                </span>
-                <input
-                  type="text"
-                  placeholder="Search skills…"
-                  aria-label="Search skills"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  className="w-full h-10 pl-9 pr-9 rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none focus:border-[var(--coral-bright)]"
-                />
-                {loading && (
-                  <div
-                    className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-[var(--border-subtle)] rounded-full animate-spin"
-                    style={{ borderTopColor: "var(--coral-bright)" }}
-                    role="status"
-                    aria-label="Loading"
-                  />
-                )}
-                {!loading && query && (
-                  <button
-                    onClick={() => setQuery("")}
-                    aria-label="Clear search"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--surface-card)] transition-colors"
-                  >
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>
-                      close
-                    </span>
-                  </button>
-                )}
-              </div>
+        {browsing ? (
+          <div className="flex flex-col gap-2">
+            {/* One row only once there is room for it: the container's @sm is
+                384 px, where search + two selects left the input under 100 px
+                wide with its placeholder, icon and clear button overlapping. */}
+            <div className="flex flex-col @2xl:flex-row gap-2">
+              <SearchInput
+                value={catalog.query}
+                onChange={catalog.setQuery}
+                busy={catalog.loading}
+                testId="hs-browse-search"
+              />
+              <label className="sr-only" htmlFor="hs-source">
+                {COPY.sourceLabel}
+              </label>
               <select
-                value={source}
-                onChange={(e) => setSource(e.target.value)}
-                aria-label="Source filter"
-                className={`${selectCls} @sm:w-44`}
+                id="hs-source"
+                value={catalog.source}
+                onChange={(e) => catalog.setSource(e.target.value)}
+                className={`${SELECT_CLS} ${FOCUS_RING} min-w-0 @2xl:w-44`}
               >
-                {HERMES_SKILL_SOURCES.map((s) => (
+                <option value="all">{COPY.allSources}</option>
+                {sourceOptions.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+              <label className="sr-only" htmlFor="hs-sort">
+                {COPY.sortLabel}
+              </label>
+              <select
+                id="hs-sort"
+                value={catalog.sort}
+                onChange={(e) => catalog.setSort(e.target.value as SortOption)}
+                className={`${SELECT_CLS} ${FOCUS_RING} min-w-0 @2xl:w-36`}
+              >
+                {SORT_OPTIONS.filter((s) => s !== 'popular' || catalog.source === 'browse-sh').map((s) => (
                   <option key={s} value={s}>
-                    {SOURCE_LABELS[s] || s}
+                    {COPY.sortOptions[s]}
                   </option>
                 ))}
               </select>
             </div>
-            {source !== "all" && (
-              <button
-                onClick={() => setSource("all")}
-                className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-[var(--coral-bright)]/10 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/20 transition-colors"
-              >
-                Filtered: {SOURCE_LABELS[source] || source}
-                <span className="material-symbols-rounded" style={{ fontSize: 13 }}>
-                  close
-                </span>
-              </button>
+
+            {/* The publisher facet only exists for GitHub-sourced skills. */}
+            {catalog.source === 'github' && providerOptions.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label className="sr-only" htmlFor="hs-provider">
+                  {COPY.providerLabel}
+                </label>
+                <select
+                  id="hs-provider"
+                  value={catalog.provider}
+                  onChange={(e) => catalog.setProvider(e.target.value)}
+                  className={`${SELECT_CLS} ${FOCUS_RING} w-full @2xl:w-56`}
+                >
+                  <option value="">{COPY.allProviders}</option>
+                  {providerOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
-          </>
+
+            <div className="flex items-center justify-between gap-2 flex-wrap text-[11px] text-[var(--text-secondary)]">
+              <span>
+                {catalog.degraded
+                  ? catalog.results.length > 0
+                    ? COPY.degradedCount(catalog.results.length)
+                    : ''
+                  : catalog.total > 0
+                    ? COPY.showingRange(rangeFrom, catalog.results.length, catalog.total)
+                    : ''}
+              </span>
+              {staleWhen && <span>{COPY.catalogStale(staleWhen)}</span>}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col @2xl:flex-row gap-2">
+            <SearchInput value={installedQuery} onChange={setInstalledQuery} testId="hs-installed-search" />
+            {installed.categories.length > 1 && (
+              <>
+                <label className="sr-only" htmlFor="hs-category">
+                  {COPY.categoryLabel}
+                </label>
+                <select
+                  id="hs-category"
+                  value={installedCategory}
+                  onChange={(e) => setInstalledCategory(e.target.value)}
+                  className={`${SELECT_CLS} ${FOCUS_RING} min-w-0 @2xl:w-48`}
+                >
+                  <option value="all">{COPY.allCategories}</option>
+                  {installed.categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id} ({c.count})
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -960,86 +663,114 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         id="hs-tabpanel"
         role="tabpanel"
         aria-labelledby={`hs-tab-${tab}`}
+        ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 @container"
       >
-        {showResults ? (
+        {browsing ? (
           <>
-            {loading && results.length === 0 && (
-              <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 gap-3">
-                {[...Array(6)].map((_, i) => (
+            {showFirstRun && (
+              <Alert tone="info" icon="hourglass_top">
+                {COPY.buildingCatalog}
+                <span className="mt-2 block h-1 w-full rounded-full bg-[var(--surface-card)] overflow-hidden">
+                  <span className="block h-full w-1/3 bg-[var(--coral-bright)] animate-pulse" />
+                </span>
+              </Alert>
+            )}
+            {catalog.loading && catalog.results.length === 0 && (
+              <SkillGrid busy>
+                {[...Array(8)].map((_, i) => (
                   <CardSkeleton key={i} />
                 ))}
-              </div>
+              </SkillGrid>
             )}
-            {searchError && !loading && (
-              <div className="flex flex-col items-center text-center py-12 gap-2">
-                <span
-                  className="material-symbols-rounded text-red-400"
-                  style={{ fontSize: 40 }}
-                  aria-hidden="true"
-                >
-                  error
-                </span>
-                <p className="text-sm text-red-400">{searchError}</p>
-                <button
-                  onClick={() => setReloadKey((k) => k + 1)}
-                  className="mt-1 px-4 py-1.5 rounded-md text-xs font-semibold bg-[var(--coral-bright)] text-white hover:opacity-90 transition-opacity"
-                >
-                  Retry
-                </button>
-              </div>
+            {catalog.error && !catalog.loading && (
+              <EmptyState
+                icon="error"
+                tone="danger"
+                title={catalog.error}
+                action={<PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>}
+              />
             )}
-            {emptyBrowse && (
-              <div className="flex flex-col items-center text-center py-12 gap-2 text-[var(--text-secondary)]">
-                <span className="material-symbols-rounded" style={{ fontSize: 40 }} aria-hidden="true">
-                  search_off
-                </span>
-                <p className="text-sm font-medium text-[var(--text-primary)]">
-                  {q ? `No skills match “${q}”` : "No skills found"}
-                </p>
-                <p className="text-xs">Try a different term or source.</p>
-              </div>
+            {!catalog.error && !catalog.loading && catalog.results.length === 0 && (
+              <EmptyState
+                icon="search_off"
+                title={q ? COPY.emptySearch(q) : COPY.emptySource(sourceLabel(catalog.source))}
+                hint={catalog.source !== 'all' ? undefined : COPY.emptySearchHint}
+                action={
+                  catalog.source !== 'all' ? (
+                    <PrimaryButton onClick={catalog.clearFilters}>
+                      {q ? COPY.emptySearchAllSources : COPY.clearSourceFilter(sourceLabel(catalog.source))}
+                    </PrimaryButton>
+                  ) : undefined
+                }
+              />
             )}
-            {!searchError && results.length > 0 && (
-              <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 gap-3">
-                {results.map((skill) => (
+            {catalog.results.length > 0 && (
+              <SkillGrid busy={catalog.loading}>
+                {catalog.results.map((skill) => (
                   <SkillCard
                     key={skill.id}
                     skill={skill}
                     onOpen={() => openDetail(skill)}
-                    action={renderResultAction(skill)}
+                    action={renderBrowseAction(skill)}
                   />
                 ))}
+              </SkillGrid>
+            )}
+            {catalog.hasMore && (
+              <div ref={sentinelRef} className="flex flex-col items-center gap-2 py-6">
+                {catalog.appending ? (
+                  <span className="text-xs text-[var(--text-secondary)]">{COPY.loadingMore}</span>
+                ) : (
+                  <GhostButton onClick={catalog.loadMore}>{COPY.loadMore}</GhostButton>
+                )}
               </div>
             )}
           </>
         ) : (
           <>
-            {loadingInstalled && installedList.length === 0 && (
-              <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 gap-3">
-                {[...Array(4)].map((_, i) => (
+            {installed.loading && installed.skills.length === 0 && (
+              <SkillGrid busy>
+                {[...Array(6)].map((_, i) => (
                   <CardSkeleton key={i} />
                 ))}
-              </div>
+              </SkillGrid>
             )}
-            {!loadingInstalled && installedList.length === 0 && (
-              <div className="flex flex-col items-center text-center py-12 gap-2 text-[var(--text-secondary)]">
-                <span className="material-symbols-rounded" style={{ fontSize: 40 }} aria-hidden="true">
-                  extension
+            {/* A failed read and an empty list are DIFFERENT answers — and a
+                failed REFRESH is a third: the list on screen is still the last
+                good answer, so it stays and the failure is a banner above it
+                rather than an empty state contradicting the grid below. */}
+            {installed.error && !installed.loading && installed.skills.length === 0 && (
+              <EmptyState
+                icon="error"
+                tone="danger"
+                title={COPY.installedError}
+                hint={installed.error}
+                action={<PrimaryButton onClick={() => installed.refresh()}>{COPY.retry}</PrimaryButton>}
+              />
+            )}
+            {installed.error && installed.skills.length > 0 && (
+              <Alert tone="warn" icon="error">
+                <span className="flex items-center gap-3 flex-wrap">
+                  {COPY.installedStale}
+                  <GhostButton onClick={() => installed.refresh()}>{COPY.retry}</GhostButton>
                 </span>
-                <p className="text-sm font-medium text-[var(--text-primary)]">No skills installed</p>
-                <p className="text-xs">Browse the registry to add capabilities.</p>
-                <button
-                  onClick={() => setTab("browse")}
-                  className="mt-1 px-4 py-1.5 rounded-md text-xs font-semibold bg-[var(--coral-bright)] text-white hover:opacity-90 transition-opacity"
-                >
-                  Browse skills
-                </button>
-              </div>
+              </Alert>
             )}
-            {installedList.length > 0 && (
-              <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 gap-3">
-                {installedList.map((skill) => (
+            {!installed.error && !installed.loading && installed.skills.length === 0 && (
+              <EmptyState
+                icon="extension"
+                title={COPY.emptyInstalled}
+                hint={COPY.emptyInstalledHint}
+                action={<PrimaryButton onClick={() => setTab('browse')}>{COPY.browseSkills}</PrimaryButton>}
+              />
+            )}
+            {!installed.error && installed.skills.length > 0 && installedFiltered.length === 0 && (
+              <EmptyState icon="search_off" title={COPY.emptySearch(installedQuery.trim())} />
+            )}
+            {installedFiltered.length > 0 && (
+              <SkillGrid busy={installed.loading}>
+                {installedFiltered.map((skill) => (
                   <SkillCard
                     key={skill.id}
                     skill={skill}
@@ -1047,11 +778,64 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                     action={renderInstalledAction(skill)}
                   />
                 ))}
-              </div>
+              </SkillGrid>
             )}
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function SearchInput({
+  value,
+  onChange,
+  busy,
+  testId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  busy?: boolean;
+  testId?: string;
+}) {
+  return (
+    <div className="relative flex-1">
+      <span
+        className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]"
+        style={{ fontSize: 16 }}
+        aria-hidden="true"
+      >
+        search
+      </span>
+      <input
+        type="search"
+        placeholder={COPY.searchPlaceholder}
+        aria-label={COPY.searchLabel}
+        data-testid={testId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`w-full h-10 pl-9 pr-9 rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none focus:border-[var(--coral-bright)] ${FOCUS_RING}`}
+      />
+      {busy && (
+        <span
+          className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-[var(--border-subtle)] rounded-full animate-spin"
+          style={{ borderTopColor: 'var(--coral-bright)' }}
+          role="status"
+          aria-label="Loading"
+        />
+      )}
+      {!busy && value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          aria-label={COPY.clearSearch}
+          className={`absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--surface-card)] transition-colors ${FOCUS_RING}`}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+            close
+          </span>
+        </button>
+      )}
     </div>
   );
 }

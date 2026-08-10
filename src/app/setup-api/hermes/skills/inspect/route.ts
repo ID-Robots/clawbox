@@ -1,16 +1,43 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { runHermesCli } from "@/lib/hermes-cli";
-import { type HermesSkillDetail, checkInstallIdentifier } from "@/lib/hermes-skills";
-import { hermesSkillsGuard, readInstalledSkillMarkdown } from "@/lib/hermes-skills-server";
+import { runSkillsCli } from "@/lib/hermes-skills-cli";
+import {
+  type HermesSkill,
+  type HermesSkillDetail,
+  type SkillProvenance,
+  type SkillRequirements,
+  checkInstallIdentifier,
+} from "@/lib/hermes-skills";
+import {
+  type HubLockEntry,
+  findInstalledSkill,
+  hermesSkillsGuard,
+  probeCommands,
+  readOfficialSkillMarkdown,
+  readScanReport,
+  scanReportFromLock,
+  statSkillDir,
+} from "@/lib/hermes-skills-server";
+import { getCatalogRecord } from "@/lib/hermes-skill-index";
+import { extractHeadings, parseSkillFrontmatter, type SkillFrontmatter } from "@/lib/hermes-skill-frontmatter";
 
-// Deep detail for a single skill, backing the store's detail view.
+// Deep detail for a single skill, backing the store's detail view — in TWO
+// phases, because the CLI is the slow, lossy part:
 //
-// `hermes skills inspect <id>` has NO --json — it prints Rich TUI panels
-// (box-drawing). We run it with COLUMNS=200 for stable wrapping and parse the
-// panels. For skills the user already installed we skip the CLI entirely and
-// read the full SKILL.md off disk (the inspect preview is truncated).
+//   phase 1 (?id=…)          NEVER spawns the CLI. Installed skill → its full
+//                            SKILL.md off disk + the lock overlay (scan report,
+//                            timestamps, size). Not installed but `official` →
+//                            the same file from hermes-agent/optional-skills.
+//                            Otherwise → the catalog record's metadata alone.
+//   phase 2 (?id=…&docs=1)   runs `hermes skills inspect <id>` and returns ONLY
+//                            the documentation delta, for the remote skills
+//                            where phase 1 has no body (needsRemoteDocs).
+//
+// `hermes skills inspect` has no --json: it prints Rich TUI panels, wraps at the
+// terminal width and DELETES unquoted flow sequences (`platforms: [linux]`
+// renders as `platforms:`). So the preview contributes prose only — every list
+// field comes from a file we read ourselves or from the catalog.
 //
 // Safety: guard first (404 unless the active harness is Hermes); the id is
 // validated with the shared install-identifier check and passed POSITIONALLY
@@ -25,7 +52,30 @@ const TITLE_RE = /[─═━]\s+([^─═━]+?)\s+[─═━]/;
 
 // Only these keys start a new field in the Skill panel; every other line is a
 // continuation of the previous value (Rich wraps long descriptions).
-const FIELD_KEYS = ["Name", "Description", "Source", "Trust", "Identifier", "Tags", "Repo", "Detail Page"];
+//
+// REGRESSION GUARD: a key that is MISSING from this list does not merely go
+// unread — its whole line is appended to the previous field, which is how
+// `Repo:` used to end up holding "https://… Detail Page: https://…" and render
+// as a broken link. Add any new panel key here, not just the ones we display.
+const FIELD_KEYS = [
+  "Name",
+  "Description",
+  "Source",
+  "Trust",
+  "Identifier",
+  "Tags",
+  "Category",
+  "Repo",
+  "Detail Page",
+  "Index",
+  "Endpoint",
+  "Install Command",
+  "Installs",
+  "Weekly Installs",
+  "Security",
+  "Security Audits",
+  "Revision",
+];
 
 interface ParsedInspect {
   fields: Record<string, string>;
@@ -87,9 +137,7 @@ function parseInspect(stdout: string): ParsedInspect {
 
   let preview: string | null = null;
   if (previewBucket) {
-    preview = previewBucket.lines
-      .join("\n")
-      .replace(/\n?\.\.\.\s*\(\d+ more lines\)\s*$/, "");
+    preview = previewBucket.lines.join("\n").replace(/\n?\.\.\.\s*\(\d+ more lines\)\s*$/, "");
   }
 
   return {
@@ -99,184 +147,103 @@ function parseInspect(stdout: string): ParsedInspect {
   };
 }
 
-// ── Frontmatter parsing (no YAML dependency) ────────────────────────────────
-interface Frontmatter {
-  body: string;
-  version?: string;
-  author?: string;
-  license?: string;
-  category?: string;
-  tags?: string[];
-  setupHelpUrl?: string;
-  secrets?: { provider?: string; providerUrl?: string }[];
+/**
+ * `inspect <bare name>` can print a disambiguation table instead of a panel
+ * ("Multiple skills named 'notion' found" → 11 rows). Parse the three columns so
+ * the store can offer the choice rather than dead-ending on "not found".
+ */
+function parseAmbiguity(stdout: string): HermesSkill[] {
+  if (!/Multiple skills named/i.test(stdout)) return [];
+  const out: HermesSkill[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.startsWith("│")) continue;
+    const cells = line.split("│").map((c) => c.trim());
+    if (cells.length < 5) continue;
+    const [, source, trust, identifier] = cells;
+    if (!identifier || identifier === "Identifier") continue;
+    if (!checkInstallIdentifier(identifier).ok) continue;
+    out.push({
+      id: identifier,
+      name: identifier.split("/").pop() || identifier,
+      source: source || undefined,
+      trust: trust || undefined,
+    });
+    if (out.length >= 40) break;
+  }
+  return out;
 }
 
-function firstUrl(s: string): string | undefined {
-  const m = s.match(/https?:\/\/[^\s"'<>)]+/);
-  return m ? m[0] : undefined;
+// ── Small helpers ───────────────────────────────────────────────────────────
+
+function httpsOnly(value?: string): string | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  return /^https:\/\/[^\s<>"']+$/i.test(v) ? v : undefined;
 }
 
-function httpOrUndefined(s?: string): string | undefined {
-  if (!s) return undefined;
-  const v = s.trim();
-  return /^https?:\/\//i.test(v) ? v : undefined;
-}
-
-// Best-effort source URL from source + identifier (§6). Only emits when
-// confident; never fabricates for official/skills-sh/clawhub/bare ids.
+/**
+ * Best-effort source URL from source + identifier. Only emitted when confident
+ * and always flagged UNVERIFIED, so the UI can label it as a guess. Never used
+ * when the lock metadata or the catalog carries a published URL.
+ */
 function deriveSourceUrl(source: string | undefined, identifier: string): string | undefined {
   const seg = identifier.split("/").filter(Boolean);
-  // Identifiers carry the source as the first segment: github/<owner>/<repo>.
-  if (source === "github" && seg.length >= 3 && seg[0] === "github") {
-    return `https://github.com/${seg[1]}/${seg[2]}`;
+  if (source === "github" && seg.length >= 2) {
+    // github ids are `<owner>/<repo>/<path…>`.
+    return `https://github.com/${seg[0]}/${seg[1]}`;
   }
   if (source === "browse-sh" && seg.length >= 2 && seg[0] === "browse-sh") {
     const host = seg[1];
-    if (host === "github.com" && seg.length >= 4) {
-      return `https://github.com/${seg[2]}/${seg[3]}`;
-    }
-    if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) {
-      return `https://${host}`;
-    }
+    if (host === "github.com" && seg.length >= 4) return `https://github.com/${seg[2]}/${seg[3]}`;
+    if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) return `https://${host}`;
   }
   return undefined;
 }
 
-function flatScalar(block: string, key: string): string | undefined {
-  // Top-level only (no leading indent) — avoids matching nested keys.
-  const mm = block.match(new RegExp(`^${key}[ \\t]*:[ \\t]*["']?(.+?)["']?[ \\t]*$`, "m"));
-  return mm ? mm[1].trim() : undefined;
+function lockMetaUrl(lock: HubLockEntry | undefined, key: string): string | undefined {
+  const raw = lock?.metadata?.[key];
+  return typeof raw === "string" ? httpsOnly(raw) : undefined;
 }
 
-function parseTags(lines: string[]): string[] {
-  for (let i = 0; i < lines.length; i++) {
-    const inline = lines[i].match(/^[ \t]*tags[ \t]*:[ \t]*\[(.*)\][ \t]*$/);
-    if (inline) {
-      return inline[1]
-        .split(",")
-        .map((s) => s.trim().replace(/^["']|["']$/g, ""))
-        .filter(Boolean);
-    }
-    const blockStart = lines[i].match(/^([ \t]*)tags[ \t]*:[ \t]*$/);
-    if (blockStart) {
-      const baseIndent = blockStart[1].length;
-      const out: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        if (lines[j].trim() === "") continue;
-        const item = lines[j].match(/^([ \t]*)-[ \t]*(.+?)[ \t]*$/);
-        if (item && item[1].length > baseIndent) {
-          out.push(item[2].replace(/^["']|["']$/g, "").trim());
-        } else {
-          break;
-        }
-      }
-      if (out.length) return out;
-    }
-  }
-  return [];
-}
+async function requirementsFrom(fm: SkillFrontmatter, probe: boolean): Promise<SkillRequirements | undefined> {
+  const hasAny =
+    fm.prerequisiteCommands.length ||
+    fm.prerequisiteEnvVars.length ||
+    fm.dependencies.length ||
+    fm.credentialFiles.length ||
+    fm.compatibility ||
+    fm.setup;
+  if (!hasAny) return undefined;
 
-// Apply one `key: value` line onto a secret entry. `provider:` wins as the
-// label; `env_var:` is the fallback label; `provider_url:` is the docs link.
-function applySecretField(cur: { provider?: string; providerUrl?: string }, text: string): void {
-  const provider = text.match(/^provider[ \t]*:[ \t]*["']?(.+?)["']?[ \t]*$/);
-  if (provider) {
-    cur.provider = provider[1].trim();
-    return;
-  }
-  const envVar = text.match(/^env_var[ \t]*:[ \t]*["']?(.+?)["']?[ \t]*$/);
-  if (envVar && !cur.provider) {
-    cur.provider = envVar[1].trim();
-    return;
-  }
-  const url = text.match(/^provider_url[ \t]*:[ \t]*(.+)$/);
-  if (url) cur.providerUrl = httpOrUndefined(url[1]);
-}
-
-function parseSetup(lines: string[]): {
-  setupHelpUrl?: string;
-  secrets: { provider?: string; providerUrl?: string }[];
-} {
-  const secrets: { provider?: string; providerUrl?: string }[] = [];
-  let setupHelpUrl: string | undefined;
-
-  let i = 0;
-  let setupIndent = -1;
-  for (; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)setup[ \t]*:[ \t]*$/);
-    if (m) {
-      setupIndent = m[1].length;
-      i++;
-      break;
-    }
-  }
-  if (setupIndent < 0) return { secrets };
-
-  for (; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === "") continue;
-    const indent = (line.match(/^[ \t]*/) || [""])[0].length;
-    if (indent <= setupIndent) break; // left the setup subtree
-
-    const help = line.match(/^[ \t]*help[ \t]*:[ \t]*(.+)$/);
-    if (help) {
-      setupHelpUrl = firstUrl(help[1]);
-      continue;
-    }
-
-    const cs = line.match(/^([ \t]*)collect_secrets[ \t]*:[ \t]*$/);
-    if (cs) {
-      const csIndent = cs[1].length;
-      let cur: { provider?: string; providerUrl?: string } | null = null;
-      let j = i + 1;
-      for (; j < lines.length; j++) {
-        const l = lines[j];
-        if (l.trim() === "") continue;
-        const ind = (l.match(/^[ \t]*/) || [""])[0].length;
-        if (ind <= csIndent) break;
-
-        const itemStart = l.match(/^[ \t]*-[ \t]*(.*)$/);
-        // A leading `- <key>: <val>` starts a new secret. Each secret carries a
-        // human label (`provider:`, else the `env_var:` name) and a docs link
-        // (`provider_url:`).
-        if (itemStart) {
-          cur = {};
-          secrets.push(cur);
-          applySecretField(cur, itemStart[1]);
-          continue;
-        }
-        if (cur) applySecretField(cur, l.trim());
-      }
-      i = j - 1;
-      continue;
-    }
-  }
+  // We probe PATH whenever the skill's own file is on disk — including an
+  // `official` skill the user hasn't installed yet. Knowing that `memo` is
+  // missing BEFORE installing is exactly the point of the requirements card,
+  // and the probe is a handful of fs.access calls against this same device.
+  const found = probe && fm.prerequisiteCommands.length ? await probeCommands(fm.prerequisiteCommands) : null;
 
   return {
-    setupHelpUrl,
-    secrets: secrets.filter((s) => s.provider || s.providerUrl),
+    commands: fm.prerequisiteCommands.map((name) => ({
+      name,
+      present: found ? (found[name] ?? null) : null,
+    })),
+    envVars: fm.prerequisiteEnvVars,
+    dependencies: fm.dependencies,
+    credentialFiles: fm.credentialFiles,
+    compatibility: fm.compatibility,
+    setupHelp: fm.setup?.help,
+    setupHelpUrl: fm.setup?.helpUrl,
+    secrets: (fm.setup?.secrets || []).map((s) => ({
+      label: s.label,
+      envVar: s.envVar,
+      providerUrl: s.providerUrl,
+    })),
   };
 }
 
-function parseFrontmatter(md: string): Frontmatter {
-  const m = md.match(/^\s*---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?([\s\S]*)$/);
-  if (!m) return { body: md.trim() };
-  const block = m[1];
-  const body = m[2].trim();
-  const blockLines = block.split(/\r?\n/);
-  const catMatch = block.match(/^[ \t]+category[ \t]*:[ \t]*["']?([^"'\r\n]+?)["']?[ \t]*$/m);
-  const { setupHelpUrl, secrets } = parseSetup(blockLines);
-  const tags = parseTags(blockLines);
-  return {
-    body,
-    version: flatScalar(block, "version"),
-    author: flatScalar(block, "author"),
-    license: flatScalar(block, "license"),
-    category: catMatch ? catMatch[1].trim() : undefined,
-    tags: tags.length ? tags : undefined,
-    setupHelpUrl,
-    secrets: secrets.length ? secrets : undefined,
-  };
+const MAX_BODY_CHARS = 120_000;
+
+function clampBody(body: string): string {
+  return body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}\n\n…` : body;
 }
 
 // ── Route ───────────────────────────────────────────────────────────────────
@@ -284,78 +251,20 @@ export async function GET(request: Request) {
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
 
-  const id = (new URL(request.url).searchParams.get("id") || "").trim();
+  const params = new URL(request.url).searchParams;
+  const id = (params.get("id") || "").trim();
+  const wantDocs = params.get("docs") === "1";
+  // The store says WHERE the id came from. A bare registry identifier and an
+  // installed skill's directory name look identical (40 clawhub ids collide
+  // with a bundled skill on this device), so only a request that came from the
+  // Installed tab may resolve a bare name against the disk.
+  const fromInstalled = params.get("scope") === "installed";
   if (!checkInstallIdentifier(id).ok) {
     return NextResponse.json({ error: "Invalid skill id" }, { status: 400 });
   }
 
   try {
-    // Prefer the full on-disk SKILL.md for installed skills.
-    const disk = await readInstalledSkillMarkdown(id);
-    if (disk) {
-      const fm = parseFrontmatter(disk.markdown);
-      const skill: HermesSkillDetail = {
-        id,
-        name: flatScalar(disk.markdown, "name") || id.split("/").pop() || id,
-        description: flatScalar(disk.markdown, "description"),
-        source: disk.source,
-        trust: disk.trust,
-        category: fm.category || disk.category,
-        tags: fm.tags,
-        version: fm.version,
-        author: fm.author,
-        license: fm.license,
-        body: fm.body,
-        sourceUrl: deriveSourceUrl(disk.source, id),
-        setupHelpUrl: fm.setupHelpUrl,
-        secrets: fm.secrets,
-        markdownTruncated: false,
-      };
-      return NextResponse.json({ skill });
-    }
-
-    // Remote / not-installed → inspect CLI (only source of truth).
-    const r = await runHermesCli(["skills", "inspect", id], {
-      env: { COLUMNS: "200" },
-      timeoutMs: 45_000,
-    });
-    if (r.code !== 0) {
-      // Never surface raw stderr (could carry the binary path).
-      return NextResponse.json({ error: "Could not load skill details" }, { status: 502 });
-    }
-
-    const { fields, preview, hasSkillPanel } = parseInspect(r.stdout);
-    // No Skill panel → unknown or ambiguous (disambiguation table) → 404.
-    if (!hasSkillPanel) {
-      return NextResponse.json({ error: "Skill not found" }, { status: 404 });
-    }
-
-    const fm: Frontmatter = preview ? parseFrontmatter(preview) : { body: "" };
-    const cliTags = fields.Tags
-      ? fields.Tags.split(",").map((t) => t.trim()).filter(Boolean)
-      : undefined;
-
-    const skill: HermesSkillDetail = {
-      id: fields.Identifier || id,
-      name: fields.Name || id,
-      description: fields.Description || undefined,
-      source: fields.Source || undefined,
-      trust: fields.Trust || undefined,
-      category: fm.category,
-      tags: cliTags && cliTags.length ? cliTags : fm.tags,
-      version: fm.version,
-      author: fm.author,
-      license: fm.license,
-      body: fm.body || undefined,
-      sourceUrl:
-        httpOrUndefined(fields.Repo) ||
-        deriveSourceUrl(fields.Source, fields.Identifier || id),
-      detailUrl: httpOrUndefined(fields["Detail Page"]),
-      setupHelpUrl: fm.setupHelpUrl,
-      secrets: fm.secrets,
-      markdownTruncated: true,
-    };
-    return NextResponse.json({ skill });
+    return wantDocs ? await remoteDocs(id, request.signal) : await localDetail(id, fromInstalled);
   } catch (err) {
     // runHermesCli rejects with a sanitized message (e.g. "Hermes is not
     // installed on this device") — surface that, never the binary path.
@@ -364,4 +273,211 @@ export async function GET(request: Request) {
       { status: 502 },
     );
   }
+}
+
+/** Phase 1 — everything we can prove from disk + the catalog, no CLI. */
+async function localDetail(id: string, fromInstalled: boolean): Promise<NextResponse> {
+  const installed = await findInstalledSkill(id, { allowNameFallback: fromInstalled });
+
+  if (installed) {
+    // The catalog is a 41 MB parse: consult it only when it can actually add
+    // something. A bundled or agent-written skill has no registry entry, so its
+    // detail is complete from disk alone.
+    const record = installed.origin === "hub" ? await getCatalogRecord(id) : undefined;
+    const fm = parseSkillFrontmatter(installed.markdown);
+    const lock = installed.lock;
+    const scan = scanReportFromLock(lock) || (await readScanReport(lock?.content_hash));
+    const dirStats = await statSkillDir(installed.dir);
+    const body = clampBody(fm.body);
+
+    const sourceUrl =
+      lockMetaUrl(lock, "source_url") ||
+      lockMetaUrl(lock, "url") ||
+      record?.sourceUrl ||
+      record?.repoUrl;
+    const derived = sourceUrl ? undefined : deriveSourceUrl(lock?.source || record?.source, id);
+
+    const provenance: SkillProvenance = {
+      sourceUrl: sourceUrl || derived,
+      sourceUrlVerified: !!sourceUrl,
+      repoUrl: record?.repoUrl,
+      detailUrl: record?.detailUrl,
+      homepage: fm.homepage,
+      installCount: record?.installCount,
+      hostname: record?.hostname,
+    };
+
+    const detail: HermesSkillDetail = {
+      id,
+      name: fm.name || installed.name,
+      description: fm.description || record?.description,
+      provenanceNote: record?.provenanceNote,
+      source: lock?.source || record?.source || (installed.origin === "builtin" ? "builtin" : "local"),
+      trust: lock?.trust_level || record?.trust || (installed.origin === "builtin" ? "builtin" : undefined),
+      provider: record?.provider,
+      category: installed.category || fm.category,
+      tags: fm.tags.length ? fm.tags : record?.tags,
+      version: fm.version,
+      author: fm.author,
+      license: fm.license,
+      platforms: fm.platforms.length ? fm.platforms : undefined,
+      relatedSkills: fm.relatedSkills.length ? fm.relatedSkills : undefined,
+      incompatible: fm.platforms.length > 0 && !fm.platforms.includes("linux"),
+      requirements: await requirementsFrom(fm, true),
+      provenance,
+      security: scan
+        ? {
+            verdict: scan.verdict || lock?.scan_verdict,
+            scannerVersion: scan.scannerVersion,
+            scannedAt: scan.scannedAt,
+            summary: scan.summary,
+            contentHashShort: lock?.content_hash,
+            findings: scan.findings,
+          }
+        : lock?.scan_verdict
+          ? { verdict: lock.scan_verdict, contentHashShort: lock.content_hash, findings: [] }
+          : undefined,
+      install: {
+        origin: installed.origin,
+        installedAt: lock?.installed_at,
+        updatedAt: lock?.updated_at,
+        fileCount: dirStats.files,
+        bytes: dirStats.bytes,
+        supportDirs: dirStats.supportDirs,
+        // Shown so the user knows what "Remove" deletes. Always relative to the
+        // skills dir — an absolute filesystem path is never sent to the client.
+        installPath: lock?.install_path || `${installed.category}/${installed.name}`,
+      },
+      body: body || undefined,
+      bodySource: "disk",
+      bodyTruncated: false,
+      needsRemoteDocs: false,
+      headings: body ? extractHeadings(body) : undefined,
+    };
+    return NextResponse.json({ skill: detail });
+  }
+
+  // Not installed — now the catalog IS the source of the metadata.
+  const record = await getCatalogRecord(id);
+
+  // An `official` skill still has its real file on this device.
+  if (record?.source === "official" && record.localPath) {
+    const markdown = await readOfficialSkillMarkdown(record.localPath);
+    if (markdown) {
+      const fm = parseSkillFrontmatter(markdown);
+      const body = clampBody(fm.body);
+      const detail: HermesSkillDetail = {
+        id,
+        name: fm.name || record.name,
+        description: fm.description || record.description,
+        source: record.source,
+        trust: record.trust,
+        category: fm.category || record.category,
+        tags: fm.tags.length ? fm.tags : record.tags,
+        version: fm.version,
+        author: fm.author,
+        license: fm.license,
+        platforms: fm.platforms.length ? fm.platforms : undefined,
+        relatedSkills: fm.relatedSkills.length ? fm.relatedSkills : undefined,
+        incompatible: fm.platforms.length > 0 && !fm.platforms.includes("linux"),
+        requirements: await requirementsFrom(fm, true),
+        provenance: {
+          sourceUrl: record.sourceUrl,
+          sourceUrlVerified: !!record.sourceUrl,
+          repoUrl: record.repoUrl,
+          detailUrl: record.detailUrl,
+          homepage: fm.homepage,
+        },
+        body: body || undefined,
+        bodySource: "official-disk",
+        bodyTruncated: false,
+        needsRemoteDocs: false,
+        headings: body ? extractHeadings(body) : undefined,
+      };
+      return NextResponse.json({ skill: detail });
+    }
+  }
+
+  // Catalog metadata only — the body needs the CLI (phase 2).
+  const sourceUrl = record?.sourceUrl;
+  const detail: HermesSkillDetail = {
+    id,
+    name: record?.name || id.split("/").pop() || id,
+    description: record?.description,
+    provenanceNote: record?.provenanceNote,
+    source: record?.source,
+    trust: record?.trust,
+    provider: record?.provider,
+    category: record?.category,
+    tags: record?.tags,
+    provenance: {
+      sourceUrl: sourceUrl || deriveSourceUrl(record?.source, id),
+      sourceUrlVerified: !!sourceUrl,
+      repoUrl: record?.repoUrl,
+      detailUrl: record?.detailUrl,
+      installCount: record?.installCount,
+      hostname: record?.hostname,
+    },
+    bodySource: "none",
+    bodyTruncated: false,
+    needsRemoteDocs: true,
+  };
+  return NextResponse.json({ skill: detail });
+}
+
+/** Phase 2 — the CLI preview, fetched only while the detail view is open. */
+async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse> {
+  // Queued (max 2 children) and cancelled with the request: clicking through a
+  // dozen cards must not leave a dozen Python processes resident on a Jetson.
+  const r = await runSkillsCli(["skills", "inspect", id], {
+    env: { COLUMNS: "200" },
+    timeoutMs: 45_000,
+    signal,
+  });
+  if (r.code !== 0) {
+    // Never surface raw stderr (it can carry the binary path).
+    return NextResponse.json({ error: "Could not load skill details" }, { status: 502 });
+  }
+
+  const { fields, preview, hasSkillPanel } = parseInspect(r.stdout);
+  if (!hasSkillPanel) {
+    const candidates = parseAmbiguity(r.stdout);
+    if (candidates.length) {
+      return NextResponse.json({ ambiguous: true, query: id, candidates });
+    }
+    return NextResponse.json({ error: "Skill not found" }, { status: 404 });
+  }
+
+  // ONLY prose survives the Rich panel — list fields (platforms/tags) are
+  // deleted by the renderer, so we never parse them out of the preview.
+  const fm = preview ? parseSkillFrontmatter(preview) : null;
+  const body = fm ? clampBody(fm.body) : "";
+
+  const repo = httpsOnly(fields.Repo);
+  const detailUrl = httpsOnly(fields["Detail Page"]);
+  const installsRaw = fields["Weekly Installs"] || fields.Installs;
+  const installs = installsRaw ? Number(installsRaw.replace(/[^0-9]/g, "")) : NaN;
+
+  return NextResponse.json({
+    delta: {
+      description: fields.Description || undefined,
+      version: fm?.version,
+      author: fm?.author,
+      license: fm?.license,
+      body: body || undefined,
+      bodySource: "cli-preview",
+      bodyTruncated: true,
+      needsRemoteDocs: false,
+      headings: body ? extractHeadings(body) : undefined,
+      provenance: {
+        sourceUrl: repo,
+        sourceUrlVerified: !!repo,
+        repoUrl: repo,
+        detailUrl,
+        installCommand: fields["Install Command"]?.slice(0, 200),
+        installCount: Number.isFinite(installs) && installs > 0 ? installs : undefined,
+        revision: fields.Revision?.slice(0, 60),
+      },
+    },
+  });
 }

@@ -23,7 +23,17 @@ export interface HermesCliResult {
 
 export function runHermesCli(
   args: string[],
-  opts: { timeoutMs?: number; input?: string; env?: Record<string, string> } = {},
+  opts: {
+    timeoutMs?: number;
+    input?: string;
+    env?: Record<string, string>;
+    /**
+     * Kill the child when the caller gives up (a browser that navigated away
+     * aborts its fetch, but that alone would leave the process running to its
+     * timeout). Optional — callers that don't pass one behave exactly as before.
+     */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<HermesCliResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return new Promise<HermesCliResult>((resolve, reject) => {
@@ -48,8 +58,17 @@ export function runHermesCli(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
       fn();
     };
+
+    const onAbort = () => {
+      finish(() => {
+        child.kill("SIGKILL");
+        reject(new Error("hermes call cancelled"));
+      });
+    };
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
 
     // stdout/stderr are always piped (see stdio above), so the streams are
     // present; stdin is only piped when `input` is passed.

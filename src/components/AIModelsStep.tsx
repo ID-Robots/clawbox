@@ -17,100 +17,24 @@ import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
-import { copyToClipboard } from "@/lib/clipboard";
 import {
   extractProviderModelId,
   isCatalogProvider,
   isValidModelId,
 } from "@/lib/provider-models";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
-
-type ClawaiTier = "free" | "flash" | "pro";
-const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
-
-interface ClawaiTierInfo {
-  /** Plan label rendered to the user (Free/Pro/Max). Internal "flash" is
-   *  marketed as "Pro" and internal "pro" is "Max" — preserved for
-   *  backwards-compat with stored localStorage values + portal handshake. */
-  planName: string;
-  /** Selector pill label — same as planName today, kept separate so the
-   *  pill can shorten if needed without touching the card. */
-  pillLabel: string;
-  priceEuro: number;
-  /** Subtitle on the price line — "free forever", "/month", etc. */
-  pricePeriod: string;
-  /** True for tiers that should advertise a 30-day free trial CTA. */
-  hasTrial: boolean;
-  /** Bullet copy shown in the highlight card. */
-  features: string[];
-  /** Tailwind palette classes for the highlight card + selector pill. */
-  cardClass: string;
-  cardHeadlineClass: string;
-  cardCheckClass: string;
-  pillActiveClass: string;
-}
-
-const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
-  free: {
-    planName: "Free plan",
-    pillLabel: "Free",
-    priceEuro: 0,
-    pricePeriod: "free forever",
-    hasTrial: false,
-    features: [
-      "Standard daily usage",
-      "DeepSeek V4 Flash",
-      "1 GB ClawKeep cloud backups",
-      "Portal access",
-    ],
-    cardClass: "border-white/10 bg-white/[0.03]",
-    cardHeadlineClass: "text-gray-100",
-    cardCheckClass: "text-emerald-300",
-    pillActiveClass: "bg-[var(--bg-surface)] text-gray-100",
-  },
-  flash: {
-    planName: "Pro plan",
-    pillLabel: "Pro",
-    priceEuro: 9,
-    pricePeriod: "/month",
-    // Pro bills from day one; flip to true if a trial returns.
-    hasTrial: false,
-    features: [
-      "5× more usage than Free",
-      "DeepSeek V4 Flash",
-      "5 GB ClawKeep cloud backups",
-      "Remote Desktop access",
-      "Priority processing",
-      "Email support",
-    ],
-    cardClass: "border-orange-400/20 bg-orange-500/5",
-    cardHeadlineClass: "text-orange-100",
-    cardCheckClass: "text-orange-300",
-    pillActiveClass: "bg-gradient-to-r from-orange-500/30 to-amber-500/20 text-orange-100",
-  },
-  pro: {
-    planName: "Max plan",
-    pillLabel: "Max",
-    priceEuro: 49,
-    pricePeriod: "/month",
-    hasTrial: true,
-    features: [
-      "Maximum usage",
-      "DeepSeek V4 Pro (frontier)",
-      "50 GB ClawKeep cloud backups",
-      "Remote Desktop access",
-      "Highest priority",
-      "Full Support — real humans via Call/Meeting",
-    ],
-    cardClass:
-      "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
-    cardHeadlineClass: "text-fuchsia-100",
-    cardCheckClass: "text-fuchsia-300",
-    pillActiveClass: "bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 text-pink-100",
-  },
-};
-
-const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
+import { ButtonSpinner } from "./ButtonSpinner";
+import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
+import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
+import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+// Tier data + the ClawBox AI card/row/device-login now live in shared modules so
+// the Hermes provider panel renders the SAME experience instead of a lookalike.
+import {
+  CLAWAI_TIER_STORAGE_KEY,
+  normalizeClawaiUiTier,
+  type ClawaiTier,
+} from "@/lib/clawbox-ai-tiers";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -165,10 +89,6 @@ function normalizeSelectableProvider(provider: string | null | undefined): strin
 function getConnectButtonLabel(providerName?: string | null) {
   return providerName ? `Connect to ${providerName}` : "Connect";
 }
-
-const ButtonSpinner = (
-  <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-);
 
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
@@ -546,7 +466,11 @@ export default function AIModelsStep({
   // its own providers/models), so we show a short Hermes panel instead.
   const [edition, setEdition] = useState<string | null>(null);
   useEffect(() => {
-    fetch("/setup-api/harness/status", { cache: "no-store" })
+    // /harness/active, not /harness/status: both carry `edition`, but status
+    // also runs per-harness liveness probes (~500 ms of retry sleep here).
+    // Whatever happens, `edition` always leaves null — so the loader below can
+    // never become a permanent state.
+    fetch("/setup-api/harness/active", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setEdition(typeof d?.edition === "string" ? d.edition : "openclaw"))
       .catch(() => setEdition("openclaw"));
@@ -623,9 +547,7 @@ export default function AIModelsStep({
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => {
     if (typeof window === "undefined") return "flash";
-    const stored = window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY);
-    if (stored === "free" || stored === "pro" || stored === "flash") return stored;
-    return "flash";
+    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
   });
   const persistClawaiTier = useCallback((tier: ClawaiTier) => {
     setClawaiTier(tier);
@@ -638,22 +560,6 @@ export default function AIModelsStep({
       }
     }
   }, []);
-  // ClawBox AI device-auth state — modeled after RFC 8628 / the OpenAI
-  // device flow above. The user_code is generated on the device (or
-  // upstream), shown in the Subscription tab, and the user types it on
-  // the ClawBox portal. We poll the local /clawai/poll endpoint, which
-  // in turn polls the upstream service for token issuance.
-  const [clawaiDeviceCode, setClawaiDeviceCode] = useState<string | null>(null);
-  const [clawaiCodeCopied, setClawaiCodeCopied] = useState(false);
-  const clawaiCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Cancel any in-flight "Copied" flash on unmount so the timer doesn't
-  // call setState on an unmounted component.
-  useEffect(() => () => {
-    if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
-  }, []);
-  const [clawaiVerificationUrl, setClawaiVerificationUrl] = useState<string | null>(null);
-  const [clawaiDevicePolling, setClawaiDevicePolling] = useState(false);
-
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
   const [authCode, setAuthCode] = useState("");
@@ -671,16 +577,6 @@ export default function AIModelsStep({
   const oauthStartControllerRef = useRef<AbortController | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
-  const clawAiStartControllerRef = useRef<AbortController | null>(null);
-  const clawAiPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clawAiPollControllerRef = useRef<AbortController | null>(null);
-  // Tracks whether we've already surfaced the configuring overlay for
-  // the current device-auth attempt. The poll route returns
-  // `configuring` for every tick while the background gateway restart
-  // is in flight, so without this latch the overlay would reset to
-  // phase 0 every interval and look like the progress bar is looping
-  // back to the start.
-  const clawAiConfiguringShownRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -691,27 +587,37 @@ export default function AIModelsStep({
     pollControllerRef.current?.abort();
   }, []);
 
-  const stopClawAiPolling = useCallback(() => {
-    if (clawAiPollRef.current) {
-      clearTimeout(clawAiPollRef.current);
-      clawAiPollRef.current = null;
-    }
-    clawAiPollControllerRef.current?.abort();
-    clawAiPollControllerRef.current = null;
-    clawAiStartControllerRef.current?.abort();
-    clawAiStartControllerRef.current = null;
-    clawAiConfiguringShownRef.current = false;
-    setClawaiDevicePolling(false);
-  }, []);
+  // The ClawBox AI device-auth state machine (start → poll → configuring →
+  // complete) lives in a shared hook so the Hermes provider panel runs the SAME
+  // flow. Its terminal callbacks are declared further down, so they're reached
+  // through a ref rather than a forward reference; the hook's own start/stop/
+  // reset identities are stable.
+  const clawaiFinishRef = useRef<{
+    complete: () => void;
+    error: (message: string) => void;
+    configuring: () => void;
+  }>({ complete: () => {}, error: () => {}, configuring: () => {} });
+
+  const clawaiLogin = useClawaiDeviceLogin({
+    scope: configureScope,
+    getTier: () => clawaiTier,
+    onStart: () => setStatus(null),
+    onBusyChange: setSaving,
+    onConfiguring: () => clawaiFinishRef.current.configuring(),
+    onComplete: () => clawaiFinishRef.current.complete(),
+    onError: (message) => clawaiFinishRef.current.error(message),
+  });
+  // Stable identities (see the hook) — pulled out so effects/callbacks can
+  // depend on them directly instead of on the whole result object.
+  const { start: startClawaiLogin, stop: stopClawaiLogin, reset: resetClawaiLogin } = clawaiLogin;
 
   useEffect(() => {
     if (normalizedCurrentProvider !== "clawai") return;
-    stopClawAiPolling();
+    stopClawaiLogin();
+    resetClawaiLogin();
     setSaving(false);
     setStatus((current) => (current?.type === "error" ? null : current));
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-  }, [normalizedCurrentProvider, stopClawAiPolling]);
+  }, [normalizedCurrentProvider, stopClawaiLogin, resetClawaiLogin]);
 
   useEffect(() => {
     fetch("/setup-api/ai-models/oauth/providers")
@@ -726,8 +632,6 @@ export default function AIModelsStep({
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
       pollControllerRef.current?.abort();
-      clawAiStartControllerRef.current?.abort();
-      if (clawAiPollRef.current) clearTimeout(clawAiPollRef.current);
     };
   }, []);
 
@@ -771,9 +675,7 @@ export default function AIModelsStep({
 
   const showSuccessAndContinue = useCallback(() => {
     tryCloseOAuthWindow(oauthWindowRef);
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-    setClawaiDevicePolling(false);
+    resetClawaiLogin();
     // Dispatch the gateway-restart signal as soon as we know the configure
     // round-trip succeeded — well before the success overlay's 900 ms exit
     // timer expires. The chat popup listens for this event to extend its
@@ -784,7 +686,21 @@ export default function AIModelsStep({
       window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
     }
     completeConfiguring();
-  }, [completeConfiguring, configureScope]);
+  }, [completeConfiguring, configureScope, resetClawaiLogin]);
+
+  // Wire the device-login hook's terminal callbacks now that the overlay
+  // helpers exist. Going through the ref (rather than passing them to the hook
+  // directly) keeps the hook above them in source order without a forward
+  // reference, and keeps its start/stop/reset identities stable. The device
+  // flow is only ever entered from a click, i.e. long after the first commit,
+  // so updating the ref in an effect is soon enough.
+  useEffect(() => {
+    clawaiFinishRef.current = {
+      complete: showSuccessAndContinue,
+      error: showError,
+      configuring: () => showConfiguring("generic"),
+    };
+  }, [showConfiguring, showError, showSuccessAndContinue]);
 
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
@@ -1054,125 +970,14 @@ export default function AIModelsStep({
     await saveProviderConfig(payload);
   };
 
-  // Single tick of the upstream-issuance poll. Schedules itself again
-  // every `interval` seconds while the session stays in `pending` or
-  // `configuring`. The server-side route returns `configuring` as soon
-  // as the upstream issues a token and runs the gateway-restart in the
-  // background; we keep polling at that point so the UI advances when
-  // the configure pipeline writes `complete`.
-  const pollClawAiDeviceAuth = useCallback(async (interval: number) => {
-    clawAiPollControllerRef.current?.abort();
-    const controller = new AbortController();
-    clawAiPollControllerRef.current = controller;
-    try {
-      const response = await fetch("/setup-api/ai-models/clawai/poll", {
-        method: "POST",
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: string };
-      if (data.status === "complete") {
-        stopClawAiPolling();
-        setSaving(false);
-        showSuccessAndContinue();
-        return;
-      }
-      if (data.status === "configuring") {
-        // Token landed; the device is now restarting the gateway.
-        // Surface the configuring overlay (drops the device-code page)
-        // and keep polling on the `pending` cadence so we pick up
-        // `complete` as soon as the background configure finishes.
-        // Latch via clawAiConfiguringShownRef so subsequent ticks (the
-        // server returns `configuring` for every tick while the gateway
-        // restart is in flight) don't reset the overlay back to phase
-        // 0 and make the progress bar look like it's looping.
-        if (!clawAiConfiguringShownRef.current) {
-          clawAiConfiguringShownRef.current = true;
-          setClawaiDeviceCode(null);
-          setClawaiVerificationUrl(null);
-          setClawaiDevicePolling(false);
-          setSaving(false);
-          showConfiguring("generic");
-        }
-        clawAiPollRef.current = setTimeout(() => {
-          void pollClawAiDeviceAuth(interval);
-        }, Math.max(interval, 1) * 1000);
-        return;
-      }
-      if (data.status === "error" || (!response.ok && response.status === 410)) {
-        stopClawAiPolling();
-        setSaving(false);
-        setClawaiDeviceCode(null);
-        showError(data.error || "ClawBox AI authorisation failed");
-        return;
-      }
-      // Pending (or transient upstream blip): schedule the next tick.
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, Math.max(interval, 1) * 1000);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      // Network glitch — back off and try again instead of dropping
-      // the user out of the flow.
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, Math.max(interval, 1) * 1000);
-    }
-  }, [showConfiguring, showError, showSuccessAndContinue, stopClawAiPolling]);
-
-  // Kicks off the device-authorisation handshake: asks the server for a
-  // user_code + verification_url, shows them in the Subscription tab,
-  // and starts polling for token issuance. The user types the code on
-  // the ClawBox portal — there's no popup to open here, so the embedded
-  // Chromium's pop-up blocker is no longer in the critical path.
-  const startClawaiDeviceAuth = useCallback(async () => {
-    setStatus(null);
-    setSaving(true);
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-    stopClawAiPolling();
-
-    const controller = new AbortController();
-    clawAiStartControllerRef.current = controller;
-    try {
-      const response = await fetch("/setup-api/ai-models/clawai/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: configureScope, tier: clawaiTier }),
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      if (!response.ok) {
-        throw new Error(await extractError(response, "Failed to start ClawBox AI authorisation"));
-      }
-      const data = await response.json() as { user_code?: string; verification_url?: string; interval?: number };
-      if (!data.user_code || !data.verification_url) {
-        throw new Error("ClawBox AI did not return a device code");
-      }
-      setClawaiDeviceCode(data.user_code);
-      setClawaiVerificationUrl(data.verification_url);
-      setClawaiDevicePolling(true);
-      setSaving(false);
-      const interval = typeof data.interval === "number" && data.interval > 0 ? data.interval : 5;
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, interval * 1000);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      setSaving(false);
-      showError(`Failed: ${err instanceof Error ? err.message : err}`);
-    }
-  }, [clawaiTier, configureScope, extractError, pollClawAiDeviceAuth, showError, stopClawAiPolling]);
-
   const lastHandledOfferRef = useRef(0);
   useEffect(() => {
     if (!openClawAIOfferRequest || openClawAIOfferRequest === lastHandledOfferRef.current) return;
     if (!allowedProviders.some((provider) => provider.id === "clawai")) return;
     lastHandledOfferRef.current = openClawAIOfferRequest;
     selectProvider("clawai");
-    void startClawaiDeviceAuth();
-  }, [allowedProviders, startClawaiDeviceAuth, openClawAIOfferRequest, selectProvider]);
+    void startClawaiLogin();
+  }, [allowedProviders, startClawaiLogin, openClawAIOfferRequest, selectProvider]);
 
   const lastHandledProviderSelectionRef = useRef(0);
   useEffect(() => {
@@ -1429,8 +1234,8 @@ export default function AIModelsStep({
     }
   };
 
+  // ClawBox AI's description lives in the shared row (CLAWBOX_AI_DESCRIPTION).
   const providerDesc: Record<string, string> = {
-    clawai: "All-in cloud AI for ClawBox — backups, remote desktop, full support",
     anthropic: t("ai.claudeModels"),
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
@@ -1734,6 +1539,52 @@ export default function AIModelsStep({
   const resolvedDescription = description ?? t("ai.description");
   const embeddedConnectLabel = t("settings.connect");
 
+  // Edition resolves asynchronously (see the /harness/active effect above).
+  // Until it lands, render a NEUTRAL skeleton rather than the OpenClaw
+  // radiogroup: on a Hermes device the OpenClaw provider list would otherwise
+  // paint for the length of the round-trip and then be swapped for the Hermes
+  // panel — a visible flash of the wrong product. The skeleton reuses the exact
+  // wrapper + card shell BOTH branches render (same width, padding, radius and
+  // position), so only the card's inner content changes when the edition
+  // arrives — no layout jump. `data-testid` is kept so anything waiting on the
+  // step doesn't race the fetch.
+  //
+  // The row count is taken from `displayedProviders`, which is known
+  // SYNCHRONOUSLY here: a hardcoded five rows was one too many for the wizard
+  // (4 primary providers) and four too many for Settings → Local AI (a single
+  // llamacpp row), so the card visibly collapsed the moment the edition landed.
+  // The contextual area below the list reserves the same min-height both
+  // branches use for their selected-provider controls.
+  if (edition === null) {
+    return (
+      <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
+        <div className="card-surface rounded-2xl p-5 sm:p-8" role="status" aria-busy="true">
+          <span className="sr-only">{t("ai.loadingPanel")}</span>
+          <div aria-hidden="true" className="animate-pulse">
+            <div className="h-7 sm:h-8 w-2/3 rounded bg-white/10 mb-2" />
+            <div className="h-4 w-full rounded bg-white/[0.06] mb-1.5" />
+            <div className="h-4 w-4/5 rounded bg-white/[0.06] mb-5" />
+            <div className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
+              {Array.from({ length: Math.max(1, displayedProviders.length) }, (_, row) => (
+                <div key={row} className="flex items-center gap-3 px-4 py-3.5 border-b border-gray-800 last:border-b-0">
+                  <span className="w-5 h-5 rounded-full bg-white/10 shrink-0" />
+                  <span className="w-8 h-8 rounded-lg bg-white/10 shrink-0" />
+                  <span className="flex-1 min-w-0">
+                    <span className="block h-3.5 w-1/3 rounded bg-white/10 mb-1.5" />
+                    <span className="block h-3 w-2/3 rounded bg-white/[0.06]" />
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 min-h-[240px]">
+              <div className="h-11 w-full rounded-xl bg-white/[0.06]" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
   // provider config this step drives — render Hermes' own model/provider/key
   // config instead.
@@ -1767,10 +1618,22 @@ export default function AIModelsStep({
         <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
           {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
+            // ClawBox AI's row is shared verbatim with the Hermes provider panel
+            // (same component, not a lookalike) so the two can never drift.
+            if (provider.id === "clawai") {
+              return (
+                <ClawboxAiProviderRow
+                  key={provider.id}
+                  radioName="ai-provider"
+                  selected={isSelected}
+                  onSelect={() => selectProvider(provider.id)}
+                />
+              );
+            }
             return (
               <label
                 key={provider.id}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer ${
+                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
                   isSelected
                     ? "bg-orange-500/5"
                     : "hover:bg-[var(--surface-card)]"
@@ -1802,11 +1665,6 @@ export default function AIModelsStep({
                 <div className="flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
-                    {provider.id === "clawai" && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
-                        {t("recommended")}
-                      </span>
-                    )}
                     {provider.id === "llamacpp" && (
                       <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
                         {t("ai.fullyLocal")}
@@ -1959,93 +1817,7 @@ export default function AIModelsStep({
 
         {selected?.id === "clawai" && (
           <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
-            <p className="text-xs leading-relaxed text-orange-200/90">
-              Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
-            </p>
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
-                Tier
-              </span>
-              <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-0.5">
-                {CLAWAI_TIER_ORDER.map((tier) => {
-                  const info = CLAWAI_TIER_INFO[tier];
-                  const isActive = clawaiTier === tier;
-                  const showPickerTrial = info.hasTrial;
-                  const ariaLabel = showPickerTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
-                  return (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={isActive}
-                      aria-label={ariaLabel}
-                      key={tier}
-                      onClick={() => persistClawaiTier(tier)}
-                      className={`relative px-3 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
-                        isActive
-                          ? info.pillActiveClass
-                          : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-                      }`}
-                    >
-                      {info.pillLabel}
-                      {showPickerTrial && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_2px_8px_rgba(217,70,239,0.45)] whitespace-nowrap leading-none"
-                        >
-                          Trial
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {/* Plan-tier card mirrors the portal's Subscription Plans block:
-                same name/price/feature data so the in-Settings preview and
-                the portal billing page never disagree. */}
-            {(() => {
-              const info = CLAWAI_TIER_INFO[clawaiTier];
-              return (
-                <div className={`mt-3 rounded-lg border px-3.5 py-3 ${info.cardClass}`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-baseline gap-1.5">
-                      <span className={`text-sm font-bold ${info.cardHeadlineClass}`}>
-                        {info.planName}
-                      </span>
-                      <span className="text-xs font-semibold text-[var(--text-secondary)]">
-                        €{info.priceEuro}
-                      </span>
-                      <span className="text-[11px] text-[var(--text-muted)]">{info.pricePeriod}</span>
-                    </div>
-                    {info.hasTrial && (
-                      <a
-                        href={`${PORTAL_LOGIN_URL}/dashboard`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] hover:from-fuchsia-400 hover:to-pink-400 transition-colors whitespace-nowrap"
-                      >
-                        Start 30-day free trial
-                        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
-                      </a>
-                    )}
-                  </div>
-                  <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
-                    {info.features.map((feature) => (
-                      <li key={feature} className="flex items-start gap-1.5">
-                        <span
-                          aria-hidden="true"
-                          className={`material-symbols-rounded shrink-0 ${info.cardCheckClass}`}
-                          style={{ fontSize: 12, marginTop: 2 }}
-                        >
-                          check_circle
-                        </span>
-                        <span>{feature}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              );
-            })()}
+            <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow
@@ -2057,13 +1829,12 @@ export default function AIModelsStep({
                     type="button"
                     key={opt.mode}
                     onClick={() => {
-                      stopClawAiPolling();
+                      stopClawaiLogin();
+                      resetClawaiLogin();
                       setAuthMode(opt.mode);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
-                      setClawaiDeviceCode(null);
-                      setClawaiVerificationUrl(null);
                     }}
                     className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
                       authMode === opt.mode
@@ -2081,75 +1852,13 @@ export default function AIModelsStep({
                 Render either the kick-off button (no code yet) or the
                 code + Open authorization page + polling indicator. */}
             {currentAuthMode === "subscription" && (
-              <div className="mt-4">
-                <p className="text-xs text-[var(--text-muted)] leading-relaxed mb-3">
-                  Open the ClawBox portal and enter the device code shown below. Your device finishes the handoff once you confirm on the portal.
-                </p>
-                {!clawaiDeviceCode ? (
-                  <button
-                    type="button"
-                    onClick={() => { void startClawaiDeviceAuth(); }}
-                    disabled={saving}
-                    className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
-                  >
-                    {saving && ButtonSpinner}
-                    {saving ? t("connecting") : "Get device code"}
-                  </button>
-                ) : (
-                  <div>
-                    <div className="mb-3 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
-                      <a
-                        href={clawaiVerificationUrl ?? PORTAL_LOGIN_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
-                      >
-                        Open authorization page
-                        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
-                      </a>
-                      <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
-                      <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-                        <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
-                          {clawaiDeviceCode}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const code = clawaiDeviceCode;
-                            if (!code) return;
-                            const ok = await copyToClipboard(code);
-                            if (!ok) return;
-                            setClawaiCodeCopied(true);
-                            if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
-                            clawaiCopyTimerRef.current = setTimeout(() => setClawaiCodeCopied(false), 1500);
-                          }}
-                          className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
-                        >
-                          {clawaiCodeCopied ? t("copied") : t("copy")}
-                        </button>
-                      </div>
-                      <p className="mt-2 text-xs text-[var(--text-muted)]">
-                        Code expires in 15 minutes
-                      </p>
-                    </div>
-
-                    {clawaiDevicePolling && (
-                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                        <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
-                        Waiting for authorization…
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => { void startClawaiDeviceAuth(); }}
-                      className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
-                    >
-                      Get a new code
-                    </button>
-                  </div>
-                )}
-              </div>
+              <ClawboxAiDeviceLogin
+                deviceCode={clawaiLogin.deviceCode}
+                verificationUrl={clawaiLogin.verificationUrl}
+                polling={clawaiLogin.polling}
+                busy={saving}
+                onStart={() => { void startClawaiLogin(); }}
+              />
             )}
 
             {/* API Key tab — direct token paste, same UX as other providers.

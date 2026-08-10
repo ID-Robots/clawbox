@@ -62,17 +62,83 @@ CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────
-# openclaw | hermes | dual. Baked at flash time via env CLAWBOX_EDITION or
-# config/edition.txt. Empty/unknown → "openclaw" (the native product: single,
-# locked). "dual" is premium (both harnesses + switcher) and requires a signed
-# license; "hermes" is its own SKU. On "hermes", install.sh skips the OpenClaw
-# gateway steps and stands up Hermes + the dashboard proxy instead.
-CLAWBOX_EDITION="${CLAWBOX_EDITION:-}"
-if [ -z "$CLAWBOX_EDITION" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
-  CLAWBOX_EDITION="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
+# openclaw | hermes | dual. "openclaw" is the native product (single, locked),
+# "hermes" is its own SKU, "dual" is premium (both harnesses + the runtime
+# switcher) and additionally requires a signed license at runtime.
+#
+# WHERE THE EDITION COMES FROM, and why the order matters:
+#
+#   1. $CLAWBOX_EDITION — the flash-time / QA override.
+#   2. /etc/clawbox/edition.env — ROOT-OWNED (root:root 0644), written by
+#      step_edition_lock. This is the authority on an installed box. It has to
+#      be a root-owned FILE rather than an environment variable because every
+#      environment install.sh can be launched from is reachable by the customer:
+#      the clawbox user owns $PROJECT_DIR (so config/edition.txt is writable
+#      from SSH, the in-UI terminal and the agent's run_command) and owns
+#      $PROJECT_DIR/.env, which clawbox-setup.service loads. It also has to be
+#      read HERE, not just by the web server, because the in-app updater runs
+#      `install.sh --step <name>` via clawbox-root-update@.service — a different
+#      environment again. Before this, every updater-run step on a Hermes box
+#      evaluated is_hermes_edition() as false and happily reinstalled and
+#      started the OpenClaw gateway on a Hermes appliance.
+#   3. The legacy systemd drop-in. On boxes provisioned before edition.env
+#      existed this is the ONLY durable record of the SKU, and the first update
+#      after this change runs its early steps (openclaw_install, openclaw_patch,
+#      gateway_setup) before post_update installs the new updater unit — so
+#      without this fallback that first update would still reinstall OpenClaw on
+#      the existing Hermes fleet.
+#   4. config/edition.txt — first-flash seed only (and only readable once the
+#      repo has been synced; on a genuinely bare box PROJECT_DIR doesn't exist
+#      yet at this point). Never authoritative: it lives in a customer-writable
+#      tree that `git reset --hard` does not clean.
+CLAWBOX_EDITION_FILE="/etc/clawbox/edition.env"
+LEGACY_EDITION_DROPIN="/etc/systemd/system/clawbox-setup.service.d/edition.conf"
+
+# Pull CLAWBOX_EDITION out of a systemd EnvironmentFile (`CLAWBOX_EDITION=x`)
+# or a drop-in (`Environment=CLAWBOX_EDITION=x`, optionally quoted).
+_read_edition_from_file() {
+  [ -f "$1" ] || return 0
+  local v
+  v="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\(Environment=\)\{0,1\}"\{0,1\}CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' "$1" 2>/dev/null | tail -n 1)"
+  v="$(printf '%s' "$v" | tr -d '[:space:]')"
+  v="${v%\"}"; v="${v#\"}"
+  v="${v%\'}"; v="${v#\'}"
+  printf '%s' "$v"
+}
+
+CLAWBOX_EDITION_RAW="${CLAWBOX_EDITION:-}"
+if [ -z "$CLAWBOX_EDITION_RAW" ]; then
+  CLAWBOX_EDITION_RAW="$(_read_edition_from_file "$CLAWBOX_EDITION_FILE" || true)"
 fi
-case "$CLAWBOX_EDITION" in openclaw|hermes|dual) ;; *) CLAWBOX_EDITION="openclaw" ;; esac
+if [ -z "$CLAWBOX_EDITION_RAW" ]; then
+  CLAWBOX_EDITION_RAW="$(_read_edition_from_file "$LEGACY_EDITION_DROPIN" || true)"
+fi
+if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
+  CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
+fi
+# Lower-case to match the TypeScript side (src/lib/edition-source.ts), which has
+# always normalised case — otherwise "Hermes" in edition.txt silently installs
+# an OpenClaw box.
+CLAWBOX_EDITION="$(printf '%s' "$CLAWBOX_EDITION_RAW" | tr '[:upper:]' '[:lower:]')"
+case "$CLAWBOX_EDITION" in
+  openclaw|hermes|dual) ;;
+  "") CLAWBOX_EDITION="openclaw" ;;
+  *)
+    # Loud, not silent: an unrecognised value used to degrade to openclaw with
+    # no output at all, so a typo'd SKU shipped as the wrong product.
+    echo "WARNING: unrecognised edition '$CLAWBOX_EDITION_RAW' — installing as 'openclaw'." >&2
+    echo "         Valid editions: openclaw | hermes | dual" >&2
+    CLAWBOX_EDITION="openclaw"
+    ;;
+esac
+# The Hermes SKU: Hermes is the ONLY harness, the OpenClaw gateway is removed.
 is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }
+# Editions that ship the Hermes harness + dashboard (hermes AND the premium
+# dual SKU, which runs both). Anything Hermes-side must key off this, not
+# is_hermes_edition, or dual installs silently get no Hermes at all.
+has_hermes_harness() { [ "$CLAWBOX_EDITION" = "hermes" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }
+# Editions that ship the OpenClaw gateway (openclaw AND dual).
+has_openclaw_harness() { [ "$CLAWBOX_EDITION" != "hermes" ]; }
 
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
 # llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
@@ -127,18 +193,40 @@ EXPECTED_INSTALLED_SERVICES=(
   clawbox-codex-auth-sync.service
 )
 
-# Hermes edition runs no OpenClaw gateway — drop it from the active set and add
-# the Hermes dashboard + auth-proxy so the generic service loop installs them.
+# Units that ship in config/ on EVERY edition but are only installed on the
+# SKUs that actually run them. They are deliberately absent from this edition's
+# install lists, and the drift guard in step_systemd_services accepts them for
+# that reason alone — it must NOT be satisfied by adding them to
+# EXPECTED_INSTALLED_SERVICES, because the cp + `systemctl enable` loops iterate
+# that list too. Enabling clawbox-hermes-dashboard on an OpenClaw box would
+# crash-loop it forever (Restart=always against a /home/clawbox/.local/bin/hermes
+# that doesn't exist), and enabling clawbox-gateway on Hermes would undo exactly
+# the removal step_edition_gateway_state performs.
+#
+# Anything else that appears in config/ is still a hard error until it is
+# registered in one of the two lists above.
+EDITION_SCOPED_UNITS=(
+  clawbox-gateway.service                 # openclaw + dual (removed on hermes)
+  clawbox-hermes-dashboard.service        # hermes + dual
+  clawbox-hermes-dashboard-proxy.service  # hermes + dual
+)
+
+# Hermes harness editions (hermes + the premium dual) run the Hermes dashboard
+# and its auth proxy.
+if has_hermes_harness; then
+  EXPECTED_ACTIVE_SERVICES+=(
+    clawbox-hermes-dashboard.service
+    clawbox-hermes-dashboard-proxy.service
+  )
+fi
+# The Hermes SKU runs no OpenClaw gateway at all — drop it from the active set
+# so nothing installs, enables or expects it. (dual keeps it: it runs both.)
 if is_hermes_edition; then
   _active_svcs=()
   for _s in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
     [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
   done
-  EXPECTED_ACTIVE_SERVICES=(
-    "${_active_svcs[@]}"
-    clawbox-hermes-dashboard.service
-    clawbox-hermes-dashboard-proxy.service
-  )
+  EXPECTED_ACTIVE_SERVICES=("${_active_svcs[@]}")
 fi
 
 # Load persisted WiFi interface if available
@@ -783,21 +871,29 @@ step_build() {
 }
 
 step_openclaw_setup() {
-  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw install"; return 0; }
+  # NOTE (here and at every other early-return below): plain `echo`, never
+  # `log`. log() is only defined at the very bottom of this file, AFTER the
+  # `--step` dispatch block exits — so a `log` call inside a step function is a
+  # guaranteed 127 whenever the in-app updater invokes that step, and under
+  # `set -e` an AND-list like `guard && { log …; return 0; }` takes the whole
+  # shell down with it.
+  is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw install"; return 0; }
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
 }
 
-# Install the Hermes agent (git-based install into ~/.hermes). Only on the
-# hermes edition, and only if it isn't already present.
+# Install the Hermes agent (git-based install into ~/.hermes). Needed by every
+# edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
+# previously skipped here, so a dual box got the switcher but no second
+# harness to switch to).
 step_hermes_install() {
-  is_hermes_edition || return 0
+  has_hermes_harness || return 0
   if [ -x "$CLAWBOX_HOME/.local/bin/hermes" ]; then
-    log "  Hermes already installed ($("$CLAWBOX_HOME/.local/bin/hermes" --version 2>/dev/null | head -1))"
+    echo "  Hermes already installed ($("$CLAWBOX_HOME/.local/bin/hermes" --version 2>/dev/null | head -1))"
     return 0
   fi
-  log "  Installing Hermes agent (NousResearch)..."
+  echo "  Installing Hermes agent (NousResearch)..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
   runuser -u "$CLAWBOX_USER" -- bash -c \
@@ -805,22 +901,96 @@ step_hermes_install() {
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 }
 
-# Bake the single-harness edition lock into a root-owned systemd drop-in so a
-# customer can't flip the harness by editing config.json. No-op on "dual".
+# The OpenClaw gateway is an UNAUTHENTICATED agent control surface on
+# 0.0.0.0:18789. On the Hermes SKU it has no role, so leaving it enabled was a
+# LAN-reachable pre-auth agent on a box the customer believes runs only Hermes.
+# Stop + disable is not enough on its own: config/clawbox-sudoers grants the
+# clawbox user NOPASSWD `systemctl start clawbox-gateway`, reachable from the
+# in-UI terminal, SSH and the agent's run_command — so we mask it as well.
+#
+# `systemctl mask` REFUSES while a real unit file sits in /etc/systemd/system
+# ("File … already exists"), which is why the factory-reset route has to use
+# `--runtime mask`. A --runtime mask evaporates on reboot, so it is useless
+# here: the file (and its drop-in directory) has to be removed first. That is
+# safe on this SKU because nothing puts it back — clawbox-gateway.service is not
+# in ALL_SERVICES on hermes, and step_gateway_setup early-returns.
+#
+# Idempotent, and never fatal when the unit was never installed (fresh flash).
+step_edition_gateway_state() {
+  local unit="clawbox-gateway.service"
+  if is_hermes_edition; then
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$unit"
+    rm -rf "/etc/systemd/system/$unit.d"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl mask "$unit" >/dev/null 2>&1 || true
+    echo "  [hermes edition] clawbox-gateway.service stopped, disabled and masked"
+  else
+    # Re-installing a previously-Hermes box as openclaw/dual: the mask is a
+    # symlink to /dev/null at the exact path step_systemd_services cp's the unit
+    # to, so without unmasking first the copy would silently write to /dev/null
+    # and the box would come up with no gateway at all.
+    local installed="/etc/systemd/system/$unit"
+    if [ -L "$installed" ] && [ "$(readlink -f "$installed" 2>/dev/null || true)" = "/dev/null" ]; then
+      systemctl unmask "$unit" >/dev/null 2>&1 || true
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      echo "  Cleared stale clawbox-gateway mask left by a previous Hermes install"
+    fi
+  fi
+  return 0
+}
+
+# Bake the edition lock so a customer can't flip the harness.
+#
+# The record is a ROOT-OWNED file, /etc/clawbox/edition.env. The old drop-in
+# alone did not actually lock anything: it sets `Environment=CLAWBOX_EDITION=…`
+# on clawbox-setup.service, but that unit also loads
+# `EnvironmentFile=-/home/clawbox/clawbox/.env`, which the clawbox user can
+# write — and systemd documents EnvironmentFile= as OVERRIDING Environment=.
+# Combined with the NOPASSWD `systemctl restart clawbox-setup` grant, appending
+# CLAWBOX_EDITION=dual to .env flipped the SKU. clawbox-setup.service now loads
+# edition.env as its LAST EnvironmentFile, so the root-owned value wins.
+#
+# The drop-in is still written, for two reasons: boxes that update into this
+# release read it as the H9 migration fallback, and it keeps `systemctl show
+# clawbox-setup` honest. Both records are rewritten UNCONDITIONALLY on every
+# run — a previously-hermes box re-installed as openclaw/dual used to keep its
+# stale hermes lock forever, because this step only ever wrote and never
+# reconciled. All three editions are baked now; "dual" used to return early
+# here, which is why the premium SKU could not be provisioned at all.
 step_edition_lock() {
-  case "$CLAWBOX_EDITION" in
-    openclaw|hermes) ;;
-    *) return 0 ;;
-  esac
+  install -d -o root -g root -m 0755 /etc/clawbox
+  printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
+    "$CLAWBOX_EDITION" > "$CLAWBOX_EDITION_FILE"
+  chown root:root "$CLAWBOX_EDITION_FILE"
+  chmod 0644 "$CLAWBOX_EDITION_FILE"
+
   mkdir -p /etc/systemd/system/clawbox-setup.service.d
   printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" \
-    > /etc/systemd/system/clawbox-setup.service.d/edition.conf
+    > "$LEGACY_EDITION_DROPIN"
   systemctl daemon-reload 2>/dev/null || true
-  log "  Baked edition lock: CLAWBOX_EDITION=$CLAWBOX_EDITION"
+
+  step_edition_gateway_state
+
+  echo "  Baked edition lock: CLAWBOX_EDITION=$CLAWBOX_EDITION ($CLAWBOX_EDITION_FILE)"
+}
+
+# Provision the Hermes side of the box (shared identity, dashboard auth,
+# dashboard + proxy units). Split out of the inline call at the bottom so the
+# in-app updater can dispatch it too — otherwise no update could ever repair a
+# Hermes appliance.
+step_hermes_edition() {
+  has_hermes_harness || return 0
+  if [ ! -f "$PROJECT_DIR/scripts/setup-hermes-edition.sh" ]; then
+    echo "  Warning: scripts/setup-hermes-edition.sh missing — Hermes not provisioned"
+    return 1
+  fi
+  CLAWBOX_EDITION="$CLAWBOX_EDITION" bash "$PROJECT_DIR/scripts/setup-hermes-edition.sh"
 }
 
 step_openclaw_install() {
-  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw npm install"; return 0; }
+  is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Always re-assert the .bashrc PATH stanza before any early-return. The
   # function is idempotent (greps before appending), and skipping it here
   # was the root cause of the recurring `bash: openclaw: command not found`
@@ -1278,8 +1448,14 @@ step_system_config() {
 
 step_systemd_services() {
   local ALL_SERVICES=("${EXPECTED_ACTIVE_SERVICES[@]}" "${EXPECTED_INSTALLED_SERVICES[@]}")
+  # The registry the drift guard checks against: this edition's install lists
+  # PLUS the edition-scoped units (see EDITION_SCOPED_UNITS near the top). The
+  # guard has to be edition-aware or it hard-exits on every SKU — config/ always
+  # contains all three of clawbox-gateway, clawbox-hermes-dashboard and
+  # clawbox-hermes-dashboard-proxy, but no single edition installs all three.
+  local KNOWN_UNITS=("${ALL_SERVICES[@]}" "${EDITION_SCOPED_UNITS[@]}")
   # Drift guard: every *.service / *.timer in config/ must be in
-  # ALL_SERVICES, otherwise a new unit added to the repo would silently
+  # KNOWN_UNITS, otherwise a new unit added to the repo would silently
   # not get installed on fresh devices. The opposite direction (units
   # listed but missing on disk) is caught by the per-file existence
   # check below. (clawkeep/systemd/ is intentionally NOT covered: those
@@ -1293,13 +1469,14 @@ step_systemd_services() {
     local basename
     basename="$(basename "$found_unit")"
     local registered=0
-    for svc in "${ALL_SERVICES[@]}"; do
+    for svc in "${KNOWN_UNITS[@]}"; do
       if [ "$svc" = "$basename" ]; then registered=1; break; fi
     done
     if [ "$registered" = "0" ]; then
       echo "Error: $basename exists in config/ but is not registered." >&2
       echo "       Add it to EXPECTED_ACTIVE_SERVICES or EXPECTED_INSTALLED_SERVICES" >&2
-      echo "       (the module-level constants near the top of install.sh that feed ALL_SERVICES)" >&2
+      echo "       (the module-level constants near the top of install.sh), or to" >&2
+      echo "       EDITION_SCOPED_UNITS if it only belongs on some editions," >&2
       echo "       so fresh installs pick it up." >&2
       exit 1
     fi
@@ -1418,6 +1595,13 @@ step_post_update() {
   # call, devices updating via the in-app updater never receive the mDNS
   # fixes from this PR — they'd keep failing to resolve <hostname>.local on
   # Windows until the owner did a fresh install.
+  # Re-bake the edition lock FIRST. On a box installed before /etc/clawbox/
+  # edition.env existed, the edition currently only lives in the legacy systemd
+  # drop-in; re-running the lock migrates it to the root-owned file so every
+  # LATER updater step (and the web server, and the next update) resolves the
+  # SKU correctly instead of silently defaulting to openclaw. It also re-asserts
+  # the Hermes gateway removal, which an older update could have undone.
+  step_edition_lock || echo "  Warning: edition_lock step failed (non-fatal)"
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
@@ -1448,6 +1632,19 @@ step_post_update() {
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
+  # Re-provision the Hermes side (dashboard auth, units, shared identity) on the
+  # editions that run it. Without this an update could deliver a new proxy /
+  # dashboard unit but never restart or re-configure them, and a Hermes box
+  # whose auth provider had drifted stayed broken until a full reinstall.
+  # Runs after step_systemd_services so the unit files on disk are current.
+  if has_hermes_harness; then
+    step_hermes_edition || echo "  Warning: hermes_edition step failed (non-fatal)"
+  fi
+  # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
+  # the edition straight off /etc/clawbox/edition.env on demand
+  # (src/lib/edition-source.ts stats the file per call and caches by mtime), so
+  # the re-baked lock above is live immediately — while restarting the server
+  # mid-update would kill the very process the updater is polling for progress.
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
 }
 
@@ -1457,6 +1654,10 @@ gateway_port_listening() {
 }
 
 step_gateway_legacy_state_recovery() {
+  # No gateway on the Hermes SKU — "not listening on 18789" is the CORRECT
+  # state there, and running `openclaw doctor` + restarting a masked unit would
+  # just churn (and, before the mask, resurrect it).
+  is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
   if gateway_port_listening; then
     echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
@@ -1622,7 +1823,20 @@ step_polkit_rules() {
 
 step_start_services() {
   local svc
-  for svc in clawbox-ap clawbox-setup clawbox-gateway clawbox-performance; do
+  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance)
+  # The OpenClaw gateway only exists on editions that run it. On the Hermes SKU
+  # it is never installed (and is masked by step_edition_gateway_state), and
+  # `systemctl restart` on a missing unit exits 5 — which, under the
+  # `set -euo pipefail` at the top of this file, used to kill the installer
+  # right here, BEFORE the Hermes provisioning block at the bottom ever ran.
+  # So a Hermes flash ended with no dashboard, no proxy and no shared identity.
+  if has_openclaw_harness; then
+    svcs+=(clawbox-gateway)
+  fi
+  # Hermes dashboard + proxy: started by scripts/setup-hermes-edition.sh a few
+  # lines further down (it has to run after the auth provider is configured),
+  # so they are deliberately not in this list.
+  for svc in "${svcs[@]}"; do
     # In test mode, the AP and performance services reference hardware that
     # doesn't exist (WiFi radio, nvpmodel), so they would fail. Skip them —
     # clawbox-setup + clawbox-gateway are enough to exercise the whole flow.
@@ -1630,7 +1844,12 @@ step_start_services() {
       echo "  CLAWBOX_TEST_MODE=1, skipping $svc.service"
       continue
     fi
-    systemctl restart "$svc.service"
+    # Never fatal: step_validate_services below re-checks every unit in
+    # EXPECTED_ACTIVE_SERVICES and fails the install if one didn't come up, so a
+    # transient restart failure here should surface as a warning rather than
+    # abort the run before the remaining provisioning steps get a chance.
+    systemctl restart "$svc.service" \
+      || echo "  Warning: failed to restart $svc.service (validation below will catch it)"
   done
   # clawbox-tunnel.service is started on-demand from Settings → Remote Control,
   # not at boot — skip it here.
@@ -1844,7 +2063,7 @@ step_recover() {
 }
 
 step_gateway_setup() {
-  is_hermes_edition && { log "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
+  is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
   # Mask any leftover user-level openclaw-gateway.service. Standalone
@@ -2055,7 +2274,14 @@ Requires=clawbox-vnc.service
 [Service]
 Type=simple
 User=$CLAWBOX_USER
-ExecStart=/usr/bin/websockify 6080 localhost:5900
+# Bind LOOPBACK, not 0.0.0.0. x11vnc deliberately runs -nopw -localhost, so the
+# desktop has no password of its own; websockify listening on the wildcard
+# address republished that unauthenticated desktop to the whole LAN (anyone
+# could point a noVNC client at ws://<box>:6080/ and take the session).
+# Browsers reach it through production-server.js's /novnc-ws upgrade route,
+# which gates on the clawbox_session cookie — that is the only intended path,
+# and VNCApp already uses it (same-origin, so HTTPS + the tunnel work too).
+ExecStart=/usr/bin/websockify 127.0.0.1:6080 localhost:5900
 Restart=on-failure
 RestartSec=5
 
@@ -2315,13 +2541,41 @@ step_validate_services() {
       fi
     fi
 
-    # Probe 2: OpenClaw dashboard answers HTTP on localhost:80.
+    # Probe 2: the ClawBox web server answers HTTP on localhost:80.
     local http_code
     http_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null) || http_code="000"
     case "$http_code" in
       2*|3*) ;;
-      *) failed_probe+=("OpenClaw: dashboard at http://localhost/ returned HTTP $http_code (expected 2xx or 3xx)") ;;
+      *) failed_probe+=("ClawBox: dashboard at http://localhost/ returned HTTP $http_code (expected 2xx or 3xx)") ;;
     esac
+
+    # Probe 3 (hermes only): the OpenClaw gateway must be GONE. This is the only
+    # automated guard that the Hermes SKU never ships an unauthenticated agent
+    # gateway on :18789 — a regression anywhere in the install path (a stray
+    # `systemctl enable`, a re-added unit, an update that ran edition-blind)
+    # shows up here instead of on a customer's LAN.
+    if is_hermes_edition; then
+      local gw_active
+      gw_active=$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)
+      if [ "$gw_active" = "active" ]; then
+        failed_probe+=("Hermes: clawbox-gateway.service is ACTIVE (must be disabled+masked on this SKU)")
+      fi
+      if gateway_port_listening; then
+        failed_probe+=("Hermes: something is listening on the OpenClaw gateway port ${GATEWAY_PORT:-18789}")
+      fi
+      # Probe 4 (hermes only): the dashboard auth proxy actually answers. The
+      # unit being "active" only means node started; without this, a proxy that
+      # crashed on its first request (or a dashboard with no auth provider)
+      # counted as a healthy install. Unauthenticated, so 401/403/3xx are the
+      # expected healthy answers — anything is fine except "no answer".
+      local proxy_code
+      proxy_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+        http://127.0.0.1:"${HERMES_DASH_PROXY_PORT:-8090}"/ 2>/dev/null) || proxy_code="000"
+      case "$proxy_code" in
+        2*|3*|401|403) ;;
+        *) failed_probe+=("Hermes: dashboard proxy on :${HERMES_DASH_PROXY_PORT:-8090} returned HTTP $proxy_code") ;;
+      esac
+    fi
 
     [ ${#failed_active[@]} -eq 0 ] && [ ${#failed_installed[@]} -eq 0 ] && [ ${#failed_probe[@]} -eq 0 ] && break
     [ "$(date +%s)" -ge "$deadline" ] && break
@@ -2329,11 +2583,13 @@ step_validate_services() {
   done
 
   local probe_count=2
-  is_test_mode && probe_count=1
+  if is_test_mode; then probe_count=1; fi
+  # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
+  if is_hermes_edition; then probe_count=$(( probe_count + 3 )); fi
   local total=$(( ${#active_services[@]} + ${#EXPECTED_INSTALLED_SERVICES[@]} + probe_count ))
   local fails=$(( ${#failed_active[@]} + ${#failed_installed[@]} + ${#failed_probe[@]} ))
   if [ "$fails" -eq 0 ]; then
-    echo "  ✓ All $total checks healthy (services + WiFi AP + OpenClaw dashboard)"
+    echo "  ✓ All $total checks healthy (services + WiFi AP + web dashboard + edition probes)"
     return 0
   fi
 
@@ -2358,6 +2614,10 @@ DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
   chromium_install ai_tools_install vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
+  # Edition steps must be dispatchable or no in-app update can ever re-bake the
+  # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
+  # box ended up running edition-blind updates that reinstalled OpenClaw.
+  edition_lock hermes_install hermes_edition
   network_setup set_hostname setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
@@ -2387,7 +2647,9 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=23
+# Upper bound (the Hermes provisioning step only runs on hermes/dual), so the
+# progress counter never prints "[26/23]".
+TOTAL_STEPS=26
 step=0
 log() {
   step=$((step + 1))
@@ -2424,7 +2686,7 @@ step_build
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup
 
-log "Installing Hermes (if this is the Hermes edition)..."
+log "Installing Hermes (on the hermes and dual editions)..."
 step_hermes_install
 
 log "Installing ClawKeep CLI..."
@@ -2435,6 +2697,15 @@ step_setup_config
 
 # Clean up default NVIDIA desktop shortcuts
 rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
+
+# Bake the edition lock BEFORE any unit is installed. Ordering is load-bearing
+# in both directions: on hermes the lock masks clawbox-gateway (so the unit
+# install below must already know not to ship it), and on openclaw/dual the lock
+# CLEARS a mask left by a previous hermes install — a mask is a symlink to
+# /dev/null at exactly the path step_systemd_services copies the unit to, so
+# doing this afterwards would leave the box with a gateway written to /dev/null.
+log "Baking the edition lock (CLAWBOX_EDITION=$CLAWBOX_EDITION)..."
+step_edition_lock
 
 log "Installing systemd services and polkit rules..."
 step_system_config
@@ -2471,20 +2742,26 @@ step_desktop_theme
 log "Ensuring clawbox user PATH (openclaw, claude, codex, gemini, hf, clawkeep)..."
 ensure_clawbox_bashrc_path
 
-# Bake the single-harness edition lock before services start so the first
-# clawbox-setup start already sees it (no-op on dual).
-step_edition_lock
-
 log "Starting services..."
 step_start_services
 
-# Hermes edition: seed shared identity, bake the edition lock, (re)start the
-# dashboard + auth-proxy. Runs after services so the lock's clawbox-setup
-# restart lands last. No-op on openclaw/dual editions.
-if is_hermes_edition; then
-  log "Applying Hermes edition (lock + dashboard + shared identity)..."
-  bash "$PROJECT_DIR/scripts/setup-hermes-edition.sh" \
-    || echo "  Warning: hermes-edition setup failed (non-fatal)"
+# Hermes harness editions (hermes + dual): seed shared identity, configure the
+# dashboard auth provider, (re)start the dashboard + auth proxy. Runs after
+# step_start_services because the proxy needs the web server's session secret to
+# already exist. The edition lock itself was baked much earlier (see above).
+if has_hermes_harness; then
+  log "Provisioning Hermes (dashboard + auth proxy + shared identity)..."
+  # Non-fatal on purpose — a half-provisioned Hermes box should still finish
+  # installing and come up reachable. It is NOT silent, though: the units it
+  # manages are in EXPECTED_ACTIVE_SERVICES and the proxy has a functional probe,
+  # so step_validate_services below still fails the install if this left the
+  # device broken.
+  step_hermes_edition || {
+    echo "  ############################################################"
+    echo "  # WARNING: Hermes provisioning FAILED."
+    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
+    echo "  ############################################################"
+  }
 fi
 
 log "Validating services..."

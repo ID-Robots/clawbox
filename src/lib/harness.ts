@@ -10,7 +10,8 @@
 import fs from "fs";
 import path from "path";
 import { get, set } from "@/lib/config-store";
-import { verifyDualLicense, isDualLicenseEnforced } from "@/lib/edition-license";
+import { verifyDualLicense } from "@/lib/edition-license";
+import { readEdition } from "@/lib/edition-source";
 
 export type Harness = "openclaw" | "hermes";
 
@@ -38,23 +39,34 @@ export type Edition = Harness | "dual";
 
 /** The build/install edition. Defaults to the native product edition,
  *  "openclaw" (single, locked) — "dual" is premium and must be selected AND
- *  licensed; "hermes" is its own SKU. */
+ *  licensed; "hermes" is its own SKU.
+ *
+ *  Delegates to readEdition(), which reads the ROOT-OWNED
+ *  /etc/clawbox/edition.env and only falls back to process.env when that file
+ *  doesn't exist (dev boxes, CI). Reading the env directly was not a lock:
+ *  clawbox-setup.service loads the clawbox-writable
+ *  /home/clawbox/clawbox/.env, and systemd lets EnvironmentFile= override
+ *  Environment=, so a customer with shell could set CLAWBOX_EDITION=dual and
+ *  restart the service. */
 export function getEdition(): Edition {
-  const raw = (process.env.CLAWBOX_EDITION || "").trim().toLowerCase();
-  if (raw === "openclaw" || raw === "hermes" || raw === "dual") return raw;
-  return "openclaw";
+  return readEdition();
 }
 
 /**
- * True when the dual/switcher feature is active. Requires edition "dual"; when
- * license enforcement is turned on (a signing key is configured) it also
- * requires a valid license. Until enforcement is enabled, dual stays open so
- * existing installs keep their switcher — flipping the pubkey on makes dual
- * license-gated everywhere.
+ * True when the dual/switcher feature is active: edition "dual" AND a valid
+ * license we signed.
+ *
+ * Fails CLOSED. The previous form was
+ * `isDualLicenseEnforced() ? verifyDualLicense() : true`, i.e. "no verification
+ * key ⇒ unlocked" — so anything that emptied the key (it used to be
+ * env-overridable) handed out the premium SKU for free. A missing or unusable
+ * trust anchor means we cannot verify a licence, which is a reason to stay
+ * locked, never to open up. verifyDualLicense() already returns false when no
+ * key is configured, so this is the whole check.
  */
 export function isDualUnlocked(): boolean {
   if (getEdition() !== "dual") return false;
-  return isDualLicenseEnforced() ? verifyDualLicense() : true;
+  return verifyDualLicense();
 }
 
 /** True when the device is pinned to a single harness (switcher disabled) —

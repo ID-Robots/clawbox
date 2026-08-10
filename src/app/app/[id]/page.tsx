@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -11,6 +12,13 @@ const BrowserApp = dynamic(() => import("@/components/BrowserApp"), { ssr: false
 const VNCApp = dynamic(() => import("@/components/VNCApp"), { ssr: false });
 const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: false });
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
+const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
+
+// Apps that exist on only ONE harness. This page is reachable directly
+// ("Open in new tab"), so without the same gate the desktop applies, /app/store
+// would render the whole OpenClaw App Store on a Hermes device.
+const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw"];
+const HERMES_ONLY_APP_IDS = ["hermes-skills"];
 
 const APP_TITLES: Record<string, string> = {
   settings: "Settings",
@@ -20,12 +28,48 @@ const APP_TITLES: Record<string, string> = {
   vnc: "Remote Desktop",
   store: "App Store",
   openclaw: "OpenClaw",
+  "hermes-skills": "Hermes Skills",
 };
 
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
+  // null while unresolved — a harness-only app must not paint before we know
+  // which harness this device actually runs.
+  const [harness, setHarness] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/setup-api/harness/active", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      // "unknown" rather than a guess: this route is reachable directly (a
+      // bookmark, "Open in new tab"), so falling back to "openclaw" rendered the
+      // whole OpenClaw App Store on a Hermes box whenever the probe failed.
+      .then((d) => { if (alive) setHarness(d?.active || "unknown"); })
+      .catch(() => { if (alive) setHarness("unknown"); });
+    return () => { alive = false; };
+  }, []);
 
   const renderApp = () => {
+    const appId = id ?? "";
+    if (OPENCLAW_ONLY_APP_IDS.includes(appId) || HERMES_ONLY_APP_IDS.includes(appId)) {
+      if (!harness) {
+        return <div className="h-full flex items-center justify-center text-white/40 text-sm">Loading…</div>;
+      }
+      // An unknown harness hides BOTH sets — fail closed.
+      const hidden =
+        harness === "hermes"
+          ? OPENCLAW_ONLY_APP_IDS
+          : harness === "openclaw"
+            ? HERMES_ONLY_APP_IDS
+            : [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS];
+      if (hidden.includes(appId)) {
+        return (
+          <div className="h-full flex items-center justify-center text-white/50 text-sm">
+            App not found: {appId}
+          </div>
+        );
+      }
+    }
     switch (id) {
       case "terminal":
         return <TerminalApp />;
@@ -64,6 +108,8 @@ export default function StandaloneAppPage() {
             onUninstall={() => {}}
           />
         );
+      case "hermes-skills":
+        return <HermesSkillsStore />;
       case "openclaw":
         return (
           <iframe

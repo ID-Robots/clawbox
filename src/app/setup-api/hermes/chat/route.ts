@@ -3,7 +3,22 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
+import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
+import {
+  HERMES_AUTO_PROVIDER,
+  isHermesCliProvider,
+  isPlausibleHermesProviderId,
+  isSafeHermesModelId,
+} from "@/lib/hermes-providers";
+import { isHermesReasoningLevel } from "@/lib/hermes-reasoning";
+import {
+  getModelOptions,
+  isAllowedProvider,
+  isPairAllowed,
+  shouldEnforcePairing,
+  type ModelOptionsPayload,
+} from "@/lib/hermes-model-options";
 
 // Chat turn against the Hermes harness. Uses `hermes -z <message>` (one-shot),
 // which — verified on-device — reuses Hermes' persistent default session, so
@@ -19,11 +34,6 @@ const HERMES_TIMEOUT_MS = 90_000;
 // A chat reply can't legitimately exceed this; cap the buffer so a runaway
 // process can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 2_000_000;
-// Hermes uses `vendor/model` IDs (routed via its base_url, default OpenRouter).
-// ClawBox's chat model picker is OpenClaw-specific, so when the desktop chat
-// doesn't send a Hermes model we fall back to a known-good default rather than
-// Hermes' config default (which may not resolve on the configured provider).
-const DEFAULT_MODEL = process.env.HERMES_DEFAULT_MODEL || "openai/gpt-4o-mini";
 
 function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise<string>((resolve, reject) => {
@@ -45,6 +55,12 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
     let err = "";
     let outBytes = 0;
     let errBytes = 0;
+    // Decode ACROSS chunk boundaries. `chunk.toString()` per chunk turns any
+    // multi-byte sequence straddling a pipe boundary into U+FFFD — and this
+    // product ships a Bulgarian UI, so Cyrillic (and emoji) replies are the
+    // normal case, not an edge case. Byte caps still count raw `chunk.length`.
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
 
     const cleanup = () => {
       settled = true;
@@ -70,7 +86,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
         reject(new Error("Hermes output exceeded the size limit"));
         return;
       }
-      out += chunk.toString();
+      out += outDecoder.write(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       if (settled) return;
@@ -84,7 +100,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
         reject(new Error(err.trim() || "Hermes error output exceeded the size limit"));
         return;
       }
-      err += chunk.toString();
+      err += errDecoder.write(chunk);
     });
 
     const timer = setTimeout(() => {
@@ -109,6 +125,9 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
     child.on("close", (code) => {
       if (settled) return;
       cleanup();
+      // Flush whatever partial sequence the decoders are still holding.
+      out += outDecoder.end();
+      err += errDecoder.end();
       if (code === 0) resolve(out.trim());
       else reject(new Error(err.trim() || `hermes exited with code ${code}`));
     });
@@ -116,7 +135,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
 }
 
 export async function POST(request: Request) {
-  let body: { message?: string; model?: string };
+  let body: { message?: string; model?: string; provider?: string; reasoning?: string };
   try {
     body = await request.json();
   } catch {
@@ -128,15 +147,107 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  // argv flag-smuggling guard (no shell is involved — spawn uses an arg array —
-  // but a value starting with "-" could still be parsed by hermes as a flag,
-  // e.g. `--version`). Model must match a strict charset and not start with "-";
-  // a message starting with "-" gets a leading space so hermes reads it as the
+  const rawModel = typeof body.model === "string" ? body.model.trim() : "";
+  const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
+  const rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
+
+  // Every value below reaches argv. No shell is involved (spawn takes an array)
+  // but a value starting with "-" would still be parsed by hermes as a flag, so
+  // each one is either a membership test against a literal set or a strict
+  // charset check that cannot match a leading "-". These come from fixed
+  // dropdowns, so an unrecognised value is a bug or an attack — reject it
+  // rather than silently running the turn with different settings.
+  if (rawModel && !isSafeHermesModelId(rawModel)) {
+    return NextResponse.json({ error: "Invalid model id" }, { status: 400 });
+  }
+  if (rawReasoning && !isHermesReasoningLevel(rawReasoning)) {
+    return NextResponse.json({ error: "Invalid reasoning level" }, { status: 400 });
+  }
+  // "auto" is ClawBox's pseudo-provider for "let Hermes decide", not a slug the
+  // CLI knows — it maps to omitting the flag entirely, which is exactly what
+  // hermes does without an override.
+  const wantsProvider = Boolean(rawProvider) && rawProvider !== HERMES_AUTO_PROVIDER;
+  if (wantsProvider && !isPlausibleHermesProviderId(rawProvider)) {
+    return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
+  }
+
+  // The catalogue is process-cached (60 s fresh / 6 h stale-serve) and the chat
+  // header warms it on mount, so in steady state this costs nothing. It is only
+  // consulted for the checks a static list cannot make; when it is unavailable
+  // we fall back to the static allowlist and let hermes itself judge the
+  // pairing — a chat turn must not become impossible because the dashboard
+  // blinked.
+  let payload: ModelOptionsPayload | null = null;
+  if (wantsProvider || rawModel) {
+    try {
+      payload = await getModelOptions();
+    } catch {
+      payload = null;
+    }
+  }
+
+  // Canonical slug OR a user-defined provider the live dashboard reports.
+  if (wantsProvider) {
+    const known = payload ? isAllowedProvider(payload, rawProvider) : isHermesCliProvider(rawProvider);
+    if (!known) {
+      return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
+    }
+  }
+
+  if (payload) {
+    // The provider this turn will ACTUALLY run on: the override when one is
+    // given, otherwise config.yaml's model.provider — because that is exactly
+    // what hermes falls back to. `current` comes from `hermes config get`, so
+    // it is accurate even when the model lists themselves are stale.
+    const effectiveProvider = wantsProvider ? rawProvider : payload.current.provider;
+
+    // Same pairing gate the config POST enforces: a provider must never run a
+    // foreign vendor's model id. shouldEnforcePairing decides when we actually
+    // know enough to judge — it skips a stale payload (a fallback manifest, not
+    // the provider's truth) and a CREDENTIALED provider we couldn't enumerate,
+    // but still enforces on an UNAUTHENTICATED one (which serves nothing, so
+    // any model paired with it is wrong).
+    if (
+      rawModel
+      && effectiveProvider
+      && shouldEnforcePairing(payload, effectiveProvider)
+      && !isPairAllowed(payload, effectiveProvider, rawModel)
+    ) {
+      return NextResponse.json(
+        { error: `Model "${rawModel}" is not available from provider "${effectiveProvider}"` },
+        { status: 400 },
+      );
+    }
+
+    // --provider WITHOUT -m makes hermes fall back to config.yaml's
+    // model.default, which belongs to the CONFIGURED provider. Overriding one
+    // half of the pair would run provider A against provider B's model id (on
+    // this device: clawai's bare `deepseek-v4-pro` against anthropic).
+    if (
+      wantsProvider
+      && !rawModel
+      && payload.current.provider
+      && payload.current.provider !== rawProvider
+    ) {
+      return NextResponse.json(
+        { error: `No model is available for provider "${rawProvider}"` },
+        { status: 409 },
+      );
+    }
+  }
+
+  // A message starting with "-" gets a leading space so hermes reads it as the
   // prompt value (the UI shows ClawBox's own copy of the message, not this one).
-  const rawModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_MODEL;
-  const model = /^[A-Za-z0-9_./:-]+$/.test(rawModel) && !rawModel.startsWith("-") ? rawModel : DEFAULT_MODEL;
   const safeMessage = message.startsWith("-") ? ` ${message}` : message;
-  const args = ["-z", safeMessage, "-m", model];
+  const args = ["-z", safeMessage];
+  // No model → omit -m and let hermes use config.yaml's model.default, which is
+  // by definition valid for the configured provider. (The previous hardcoded
+  // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
+  // model.provider=clawai only accepts BARE deepseek ids and answers a
+  // vendor-prefixed one with HTTP 400 "Model not allowed".)
+  if (rawModel) args.push("-m", rawModel);
+  if (wantsProvider) args.push("--provider", rawProvider);
+  if (rawReasoning) args.push("--reasoning", rawReasoning);
 
   try {
     const text = await runHermes(args, request.signal);

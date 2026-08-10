@@ -31,6 +31,10 @@ describe("isProtectedFilePath", () => {
     `${home}/.ssh`,
     `${home}/.openclaw/openclaw.json`,
     `${home}/.openclaw/agents/x/agent/y.sqlite`,
+    `${home}/.hermes/config.yaml`,        // dashboard secret + ClawBox AI token
+    `${home}/.hermes/.env`,               // provider keys
+    `${home}/.hermes/auth.json`,          // OAuth tokens
+    `${home}/.hermes/config.yaml.bak-basicauth`,
     `${home}/.codex/auth.json`,
     `${home}/.gnupg/secring.gpg`,
     `${home}/.aws/credentials`,
@@ -41,7 +45,7 @@ describe("isProtectedFilePath", () => {
   });
 
   it("flags the ClawBox data-dir secrets", () => {
-    for (const n of [".session-secret", ".mcp-token", ".local-ai-token", "config.json", "kv.json"]) {
+    for (const n of [".session-secret", ".mcp-token", ".local-ai-token", ".hermes-dashboard-pw", "config.json", "kv.json"]) {
       expect(guard.isProtectedFilePath(path.join(DATA_DIR, n))).toBe(true);
     }
   });
@@ -64,6 +68,8 @@ describe("isProtectedFilePath", () => {
     `${home}/notopenclaw/file.txt`,   // .openclaw pattern must not match without the dot
     `${home}/my.openclaw-backup/x`,   // trailing char is '-', not '/'
     `${home}/.ssh-notes.txt`,         // .ssh must be a full segment
+    `${home}/hermes-notes/todo.md`,   // .hermes must be a full dot-segment
+    `${home}/.hermes-backup.txt`,
     `${home}/.config/git/config`,     // gitconfig is NOT the credential file
     `${home}/project/.npmrc.example`, // basename must match exactly
   ])("does NOT over-block %s", (p) => {

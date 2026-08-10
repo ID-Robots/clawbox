@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -191,6 +192,11 @@ async function reloadGatewaySafely(): Promise<string | undefined> {
 }
 
 export async function POST(req: Request) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   try {
     const { appId } = await req.json();
     // Reject a leading hyphen: appId is passed positionally to
