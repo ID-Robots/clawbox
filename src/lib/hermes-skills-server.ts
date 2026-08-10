@@ -137,6 +137,105 @@ async function walkForSkillMd(
   }
 }
 
+// Resolve `<install_path>/SKILL.md` inside SKILLS_DIR, refusing anything that
+// escapes the skills tree (defense-in-depth even though install_path is our own
+// lock data).
+function safeSkillMdPath(installPath: string): string | null {
+  const rel = installPath.replace(/^[/\\]+/, "");
+  const abs = path.resolve(SKILLS_DIR, rel, "SKILL.md");
+  const root = path.resolve(SKILLS_DIR) + path.sep;
+  return abs.startsWith(root) ? abs : null;
+}
+
+// Walk for a leaf skill dir whose basename === `name`, returning its SKILL.md.
+async function findBuiltinSkillFile(
+  dir: string,
+  topCategory: string,
+  name: string,
+  depth: number,
+): Promise<{ file: string; category: string } | null> {
+  if (depth > 4) return null;
+  const entries = await readDirSafe(dir);
+  if (entries.some((e) => e.isFile() && e.name === "SKILL.md")) {
+    return path.basename(dir) === name
+      ? { file: path.join(dir, "SKILL.md"), category: topCategory }
+      : null;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    const hit = await findBuiltinSkillFile(path.join(dir, e.name), topCategory, name, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * Read the FULL, untruncated SKILL.md for an already-installed skill straight
+ * off disk (the inspect CLI preview is truncated). Matches `idOrName` against
+ * the hub lock (by name key or identifier) first, then the builtin disk walk.
+ * Returns the raw markdown plus the authoritative source/trust overlay, or null
+ * when the skill isn't installed locally (caller falls back to inspect).
+ */
+export async function readInstalledSkillMarkdown(idOrName: string): Promise<{
+  markdown: string;
+  source?: string;
+  trust?: string;
+  scanVerdict?: string;
+  category?: string;
+} | null> {
+  const hub = await readHubLock();
+
+  let entry: HubLockEntry | undefined;
+  let key: string | undefined;
+  if (Object.prototype.hasOwnProperty.call(hub, idOrName)) {
+    key = idOrName;
+    entry = hub[idOrName];
+  } else {
+    for (const [k, e] of Object.entries(hub)) {
+      if (e.identifier === idOrName) {
+        key = k;
+        entry = e;
+        break;
+      }
+    }
+  }
+
+  if (entry?.install_path) {
+    const file = safeSkillMdPath(entry.install_path);
+    if (file) {
+      try {
+        const markdown = await fs.readFile(file, "utf8");
+        return {
+          markdown,
+          source: entry.source,
+          trust: entry.trust_level,
+          scanVerdict: entry.scan_verdict,
+          category: entry.install_path.split("/")[0],
+        };
+      } catch {
+        /* fall through to the builtin walk */
+      }
+    }
+  }
+
+  const target = key || idOrName;
+  const topDirs = await readDirSafe(SKILLS_DIR);
+  for (const d of topDirs) {
+    if (!d.isDirectory() || d.name.startsWith(".")) continue;
+    const hit = await findBuiltinSkillFile(path.join(SKILLS_DIR, d.name), d.name, target, 1);
+    if (hit) {
+      try {
+        const markdown = await fs.readFile(hit.file, "utf8");
+        return { markdown, source: "builtin", category: hit.category };
+      } catch {
+        /* ignore and keep looking */
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Enumerate every installed skill. Builtin skills come from the disk walk; the
  * hub lock overlays identifier/trust/scan-verdict and authoritative source for

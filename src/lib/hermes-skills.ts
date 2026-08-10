@@ -38,6 +38,37 @@ export interface InstalledHermesSkill {
   enabled?: boolean;
 }
 
+/**
+ * Deep, lazily-fetched detail for a single skill (from the `inspect` route).
+ * Pure type so both the client component and the route handler share it. The
+ * card payload (HermesSkill) paints the header instantly; this fills in the
+ * SKILL.md body, frontmatter metadata, and setup links underneath.
+ */
+export interface HermesSkillDetail {
+  id: string;
+  name: string;
+  description?: string;
+  source?: string;
+  trust?: string;
+  category?: string;
+  tags?: string[];
+  version?: string;
+  author?: string;
+  license?: string;
+  /** SKILL.md markdown below the frontmatter — rendered via chat-markdown. */
+  body?: string;
+  /** Authoritative source URL from the CLI (skills.sh `Repo:`), when present. */
+  sourceUrl?: string;
+  /** skills.sh `Detail Page:` link, when present. */
+  detailUrl?: string;
+  /** First URL in the frontmatter `setup.help`. */
+  setupHelpUrl?: string;
+  /** frontmatter `setup.collect_secrets[]` — provider + docs link. */
+  secrets?: { provider?: string; providerUrl?: string }[];
+  /** true when `body` is only the truncated inspect preview (not read whole). */
+  markdownTruncated?: boolean;
+}
+
 // The fixed set of discovery sources Hermes' `--source` flag accepts. `all` is
 // the (default) firehose; the rest narrow to one registry. Anything outside
 // this set is rejected so a request can't smuggle an arbitrary value.
