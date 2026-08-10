@@ -12,6 +12,7 @@ import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
+import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
@@ -35,7 +36,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -50,6 +51,9 @@ const apps: AppDef[] = [
   // Hermes dashboard — only shown on the Hermes edition. Opened via the
   // auth-gated dashboard proxy (url computed at click time from the host).
   { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
+  // Hermes Skills Store — only shown on the Hermes edition (gated below via
+  // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
+  { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
@@ -120,6 +124,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
         <circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
       </svg>
     );
+  }
+
+  if (id === "hermes-skills") {
+    return <MIcon name="extension" className="text-white" size={px} />;
   }
 
   const iconMap: Record<string, string> = {
@@ -259,9 +267,12 @@ function ChromeDesktopInner() {
       .catch(() => {});
   }, []);
 
-  // The harness-specific app hidden on this edition (OpenClaw Control-UI on
-  // Hermes, Hermes dashboard on OpenClaw).
-  const harnessHiddenAppId = activeHarness === "hermes" ? "openclaw" : "hermes";
+  // The harness-specific apps hidden on this edition (OpenClaw Control-UI on
+  // Hermes; the Hermes dashboard + Hermes Skills Store on OpenClaw).
+  const harnessHiddenAppIds = useMemo<string[]>(
+    () => (activeHarness === "hermes" ? ["openclaw"] : ["hermes", "hermes-skills"]),
+    [activeHarness],
+  );
 
   // ─── Desktop shortcuts for built-in apps ───
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
@@ -269,8 +280,8 @@ function ChromeDesktopInner() {
   // use THIS (not the raw list), otherwise the hidden app reserves an empty
   // grid slot and leaves a gap.
   const visibleDesktopApps = useMemo(
-    () => desktopApps.filter((id) => id !== harnessHiddenAppId),
-    [desktopApps, harnessHiddenAppId],
+    () => desktopApps.filter((id) => !harnessHiddenAppIds.includes(id)),
+    [desktopApps, harnessHiddenAppIds],
   );
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
   const handleAddToDesktop = useCallback((appId: string) => {
@@ -724,10 +735,10 @@ function ChromeDesktopInner() {
     const overflow = allIconIds.some((id) => iconPositions[id] && iconPositions[id].col >= GRID_COLS);
     // A hidden harness app that still holds a persisted slot leaves a visual
     // gap — force a compacting re-arrange to reclaim it.
-    const staleHidden = iconPositions[`desktop-${harnessHiddenAppId}`] !== undefined;
+    const staleHidden = harnessHiddenAppIds.some((hid) => iconPositions[`desktop-${hid}`] !== undefined);
     if (missing.length === 0 && !overflow && !staleHidden) return;
     arrangeIcons();
-  }, [installedApps, hiddenInstalledApps, visibleDesktopApps, harnessHiddenAppId, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [installedApps, hiddenInstalledApps, visibleDesktopApps, harnessHiddenAppIds, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Get icon position. On mobile we ignore the persisted desktop layout
   // (which was built around a single left-aligned column) and lay icons out
@@ -994,7 +1005,7 @@ function ChromeDesktopInner() {
     // OpenClaw; the Hermes dashboard ("hermes") only on Hermes. The other
     // harness's backend isn't installed, so its app would just error.
     const OPENCLAW_ONLY_APP_IDS = ["openclaw"];
-    const HERMES_ONLY_APP_IDS = ["hermes"];
+    const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"];
     const hideIds = activeHarness === "hermes" ? OPENCLAW_ONLY_APP_IDS : HERMES_ONLY_APP_IDS;
     const harnessApps = apps.filter((a) => !hideIds.includes(a.id));
     return [
@@ -1476,6 +1487,8 @@ function ChromeDesktopInner() {
             onUninstall={requestUninstallApp}
           />
         );
+      case "hermes_skills":
+        return <HermesSkillsStore />;
       case "installed":
         return app.storeApp ? (
           <InstalledAppSettings
@@ -1549,7 +1562,7 @@ function ChromeDesktopInner() {
 
   // Built-in apps with desktop shortcuts (hide the other harness's app).
   const desktopBuiltinApps = desktopApps
-    .filter((appId) => !(activeHarness === "hermes" ? appId === "openclaw" : appId === "hermes"))
+    .filter((appId) => !harnessHiddenAppIds.includes(appId))
     .map((appId) => apps.find((a) => a.id === appId))
     .filter((a): a is AppDef => !!a);
 
