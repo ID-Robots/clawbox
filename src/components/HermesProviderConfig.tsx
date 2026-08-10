@@ -21,20 +21,23 @@ interface ProviderDef {
   name: string;
   description: string;
   keyProvider?: boolean;
+  // The Hermes OAuth-catalog id (from /api/providers/oauth), when this provider
+  // supports sign-in via Hermes' native PKCE / device-code flow.
+  oauthId?: string;
 }
 
 // ClawBox AI is inserted first (when a token exists). The rest map 1:1 to the
 // providers `hermes config set model.provider` accepts.
 const PROVIDERS: ProviderDef[] = [
   { id: "openrouter", name: "OpenRouter", description: "300+ models behind one API key", keyProvider: true },
-  { id: "anthropic", name: "Anthropic", description: "Claude models, direct", keyProvider: true },
+  { id: "anthropic", name: "Anthropic", description: "Claude — sign in or use an API key", keyProvider: true, oauthId: "anthropic" },
+  { id: "openai-codex", name: "OpenAI", description: "Sign in with OpenAI (Codex)", oauthId: "openai-codex" },
   { id: "gemini", name: "Google Gemini", description: "Gemini models, direct", keyProvider: true },
   { id: "nous-api", name: "Nous Portal", description: "Hermes / Nous models (API key)", keyProvider: true },
   { id: "zai", name: "z.ai / GLM", description: "Zhipu GLM models", keyProvider: true },
   { id: "kimi-coding", name: "Kimi", description: "Moonshot Kimi (coding)", keyProvider: true },
-  { id: "openai-codex", name: "OpenAI Codex", description: "Sign in with OpenAI" },
-  { id: "copilot", name: "GitHub Copilot", description: "Uses your GitHub token" },
-  { id: "nous", name: "Nous Portal (OAuth)", description: "Sign in with Nous" },
+  { id: "copilot", name: "GitHub Copilot", description: "Sign in with GitHub", oauthId: "copilot-acp" },
+  { id: "nous", name: "Nous Portal (OAuth)", description: "Sign in with Nous", oauthId: "nous" },
   { id: "auto", name: "Auto", description: "Detect from configured credentials" },
 ];
 
@@ -60,6 +63,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [clawai, setClawai] = useState<{ hasToken: boolean; tier: string; active: boolean; model: string } | null>(null);
   const [applyingClawai, setApplyingClawai] = useState(false);
   const [clawaiStatus, setClawaiStatus] = useState<Status>(null);
+
+  // Hermes native provider-OAuth status (anthropic PKCE, openai-codex device-code, …).
+  const [oauth, setOauth] = useState<Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }>>({});
 
   useEffect(() => {
     let alive = true;
@@ -87,6 +93,28 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       .catch(() => { /* ClawBox AI just won't show; non-fatal */ });
     return () => { alive = false; };
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/setup-api/hermes/oauth")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string }[] }) => {
+        if (!alive) return;
+        const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }> = {};
+        for (const p of d.providers ?? []) map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl };
+        setOauth(map);
+      })
+      .catch(() => { /* OAuth affordances just won't show; non-fatal */ });
+    return () => { alive = false; };
+  }, []);
+
+  // Open the Hermes dashboard's /env page (via the auth-gated proxy on :8090),
+  // where its native OAuth (PKCE / device-code) runs. Same host, dashboard port.
+  function openHermesOAuth() {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.protocol}//${window.location.hostname}:8090/env`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 
   const modelOptions = useMemo(() => {
     if (model && !models.some((m) => m.id === model)) {
@@ -244,6 +272,39 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           </div>
         ) : (
           <div className="mt-5 space-y-4">
+            {selectedDef?.oauthId && (() => {
+              const st = oauth[selectedDef.oauthId];
+              const connected = st?.loggedIn;
+              return (
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-200">Sign in with {selectedDef.name}</p>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        {connected ? "Connected — OAuth credentials active." : "OAuth through Hermes (no API key needed)."}
+                      </p>
+                    </div>
+                    {connected ? (
+                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400">
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
+                        Connected
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={openHermesOAuth}
+                        className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity"
+                      >
+                        Sign in ↗
+                      </button>
+                    )}
+                  </div>
+                  {selectedDef.keyProvider && (
+                    <p className="text-[11px] text-[var(--text-muted)] mt-2">…or paste an API key below instead.</p>
+                  )}
+                </div>
+              );
+            })()}
             <div>
               <label className={labelCls} htmlFor="hermes-model">Default model</label>
               <select
