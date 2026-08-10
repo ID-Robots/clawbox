@@ -41,8 +41,13 @@ const HERMES_TIMEOUT_MS = 90_000;
 // process can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 2_000_000;
 
-function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+/**
+ * `chat -q` writes the REPLY to stdout and its `session_id: <id>` banner to
+ * STDERR, so both streams are returned: stdout is the answer verbatim (nothing
+ * to strip), stderr is where the conversation id comes from.
+ */
+function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string; err: string }> {
+  return new Promise<{ out: string; err: string }>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("aborted", "AbortError"));
       return;
@@ -134,7 +139,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
       // Flush whatever partial sequence the decoders are still holding.
       out += outDecoder.end();
       err += errDecoder.end();
-      if (code === 0) resolve(out.trim());
+      if (code === 0) resolve({ out: out.trim(), err });
       else reject(new Error(err.trim() || `hermes exited with code ${code}`));
     });
   });
@@ -145,23 +150,13 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
 const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
 
 /**
- * Split the `session_id: <id>` line `hermes chat -q` prints ahead of the reply
- * off the rest of the output. (`-z` documents itself as printing "no session_id
- * line", which is exactly why it cannot thread a conversation.)
+ * Pull the conversation id out of `chat -q`'s stderr banner (`session_id: …`).
+ * (`-z` documents itself as printing "no session_id line" — which is exactly
+ * why one-shot mode cannot thread a conversation.)
  */
-function splitSessionLine(raw: string): { sessionId: string; text: string } {
-  const lines = raw.split(/\r?\n/);
-  let sessionId = "";
-  const kept: string[] = [];
-  for (const line of lines) {
-    const match = /^\s*session_id:\s*([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/.exec(line);
-    if (match && !sessionId) {
-      sessionId = match[1];
-      continue;
-    }
-    kept.push(line);
-  }
-  return { sessionId, text: kept.join("\n").trim() };
+function parseSessionId(stderr: string): string {
+  const match = /^\s*session_id:\s*([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/m.exec(stderr);
+  return match ? match[1] : "";
 }
 
 export async function POST(request: Request) {
@@ -304,11 +299,10 @@ export async function POST(request: Request) {
   if (rawSessionId) args.push("--resume", rawSessionId);
 
   try {
-    const raw = await runHermes(args, request.signal);
-    // The reply carries its own session id on stdout — no DB race, no guessing
+    const { out: text, err } = await runHermes(args, request.signal);
+    // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
-    const { sessionId, text } = splitSessionLine(raw);
-    const threaded = sessionId || rawSessionId;
+    const threaded = parseSessionId(err) || rawSessionId;
     return NextResponse.json({
       text,
       harness: "hermes",
