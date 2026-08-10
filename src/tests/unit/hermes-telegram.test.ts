@@ -389,7 +389,7 @@ describe("ensureHermesGateway", () => {
 });
 
 // The pairing store is read directly (not through the CLI) for the desktop
-// poll: the popup checks every 20 s and a Python cold start is ~10 s.
+// popup, which polls every 20 s and should not spawn a process each time.
 describe("pairing store reads", () => {
   let home: string;
   let storeDir: string;

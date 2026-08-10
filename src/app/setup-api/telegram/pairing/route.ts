@@ -62,8 +62,9 @@ async function buildApproved(
 }
 
 // GET — list approved senders (fast: a single file read). With `?pending=1` it
-// also runs the harness's `pairing list` CLI (slow ~10-12s cold-start on
-// Jetson), so pending is opt-in rather than fetched on every status refresh.
+// also runs the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s
+// cold start on a Jetson, so pending stays opt-in rather than being fetched on
+// every status refresh.
 export async function GET(request: Request) {
   try {
     if (!(await isConfigured())) {

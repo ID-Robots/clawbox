@@ -40,8 +40,10 @@ function pairingDirs(): string[] {
   return [path.join(home, "platforms", "pairing"), path.join(home, "pairing")];
 }
 
-// Python CLI cold start on a Jetson is ~10 s, so every call needs a lot more
-// headroom than the 30 s runHermesCli default gives a config read.
+// Measured on a Jetson ClawBox: `pairing list` ~0.8 s, `send --list` ~1.7 s,
+// `gateway status` ~2 s. The timeouts are far above that on purpose — these are
+// ceilings for a wedged CLI on a loaded box, not expectations, and `gateway
+// install --start-now` waits for the service to come up.
 const PAIRING_TIMEOUT_MS = 90_000;
 const CONFIG_TIMEOUT_MS = 90_000;
 const GATEWAY_TIMEOUT_MS = 180_000;
@@ -92,7 +94,9 @@ function optionalString(value: unknown): string | undefined {
 }
 
 /**
- * Pending Telegram access requests, read straight from Hermes' pairing store.
+ * Pending Telegram access requests, read straight from Hermes' pairing store —
+ * no CLI, so the desktop popup can poll it on a timer without spawning a
+ * process every 20 s.
  * The store key IS the request id `hermes pairing approve` accepts; the code the
  * bot DM'd is stored only as a salted hash and can never be recovered here.
  */

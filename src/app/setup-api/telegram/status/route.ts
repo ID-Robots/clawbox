@@ -65,8 +65,8 @@ async function fetchBotInfo(token: string): Promise<TelegramBotInfo | null> {
 // On a Hermes device a stored token proves nothing — the OpenClaw path used to
 // save one on a box with no gateway to consume it, and the flag still read
 // "configured" while the bot never answered. So the flag comes from Hermes
-// itself. Both probes are CLI calls (~10 s of Python start-up on a Jetson), so
-// they run concurrently behind a short cache; Settings polls this on open.
+// itself. Both answers are CLI calls (~2 s each on a Jetson), so they run
+// concurrently behind a short cache rather than serially on every panel open.
 
 interface HermesTelegramProbe {
   registered: boolean | null;
