@@ -4,6 +4,7 @@ import path from "path";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { readEdition } from "@/lib/edition-source";
 
 const exec = promisify(execFile);
 
@@ -753,14 +754,32 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
   }
 }
 
+/**
+ * True when this device has no OpenClaw gateway to restart.
+ *
+ * The Hermes edition removes it: `clawbox-gateway.service` is MASKED and port
+ * 18789 is closed. Hermes has no equivalent daemon — the CLI is invoked per
+ * request and reads its config each time — so there is nothing to bounce after
+ * a model change, and treating that as a failure is what produced "AI model
+ * configured but gateway failed to restart. Try rebooting the device." on a
+ * device where the configuration had in fact been written correctly.
+ */
+function gatewayIsAbsent(): boolean {
+  return readEdition() === "hermes";
+}
+
 export async function restartGateway(): Promise<void> {
+  if (gatewayIsAbsent()) return;
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       timeout: 60000,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (/clawbox-gateway\.service.*not found|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+    // "is masked" is the other way this unit says "I am not running here" — a
+    // masked unit is a deliberate removal, not an error to surface. Without it
+    // the message fell past this branch to the throw below.
+    if (/clawbox-gateway\.service.*(?:not found|is masked)|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
       try {
         await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           timeout: 60000,
@@ -788,6 +807,9 @@ export async function restartGateway(): Promise<void> {
 
 /** Send SIGUSR1 to the gateway so it restarts and picks up newly-installed skills. */
 export async function reloadGateway(): Promise<void> {
+  // Same story as restartGateway: no gateway on Hermes, so the PID lookup would
+  // just fall through both branches and log a warning on every skill install.
+  if (gatewayIsAbsent()) return;
   try {
     // The gateway process renames its argv to just "openclaw", so the old
     // `pgrep -f "openclaw-gateway"` matched nothing and SIGUSR1 was never sent —
