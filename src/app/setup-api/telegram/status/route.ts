@@ -74,26 +74,34 @@ interface HermesTelegramProbe {
 }
 
 const HERMES_PROBE_TTL = 15_000;
-let cachedHermesProbe: { probe: HermesTelegramProbe; at: number } | null = null;
-let inFlightHermesProbe: Promise<HermesTelegramProbe> | null = null;
+// Keyed by token, like the bot-info cache above: saving a different bot must
+// not be answered from the previous bot's probe for the next 15 seconds.
+let cachedHermesProbe: { token: string; probe: HermesTelegramProbe; at: number } | null = null;
+const inFlightHermesProbe = new Map<string, Promise<HermesTelegramProbe>>();
 
-async function probeHermes(): Promise<HermesTelegramProbe> {
-  if (cachedHermesProbe && Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL) {
+async function probeHermes(token: string): Promise<HermesTelegramProbe> {
+  if (
+    cachedHermesProbe &&
+    cachedHermesProbe.token === token &&
+    Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL
+  ) {
     return cachedHermesProbe.probe;
   }
-  if (inFlightHermesProbe) return inFlightHermesProbe;
-  inFlightHermesProbe = (async () => {
+  const existing = inFlightHermesProbe.get(token);
+  if (existing) return existing;
+  const pending = (async () => {
     const [registered, gateway] = await Promise.all([
       hermesTelegramRegistered(),
       hermesGatewayStatus(),
     ]);
     const probe: HermesTelegramProbe = { registered, gateway };
-    cachedHermesProbe = { probe, at: Date.now() };
+    cachedHermesProbe = { token, probe, at: Date.now() };
     return probe;
   })().finally(() => {
-    inFlightHermesProbe = null;
+    inFlightHermesProbe.delete(token);
   });
-  return inFlightHermesProbe;
+  inFlightHermesProbe.set(token, pending);
+  return pending;
 }
 
 export async function GET() {
@@ -104,7 +112,7 @@ export async function GET() {
     }
 
     if ((await getActiveHarness()) === "hermes") {
-      const { registered, gateway } = await probeHermes();
+      const { registered, gateway } = await probeHermes(token);
       // `null` = Hermes couldn't be asked; fall back to the stored token rather
       // than reporting a working bot as gone.
       const configured = registered ?? true;
