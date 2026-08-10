@@ -18,6 +18,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -971,6 +972,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (section !== "ai" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section, isMobile]);
+  // Which agent consumes the local model. Named the harness outright, and said
+  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
+  useEffect(() => {
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
+    return () => { alive = false; };
+  }, []);
+
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
   const [localAiError, setLocalAiError] = useState<string | null>(null);
@@ -2314,7 +2328,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {localAiStatus.running === false && !localAiStatus.standbyEnabled
                         ? "Configured, but currently offline."
                         : localAiStatus.running === false
-                          ? "Enabled with on-demand standby to free RAM until OpenClaw needs it."
+                          ? `Enabled with on-demand standby to free RAM until ${harnessLabel} needs it.`
                         : "Enabled and ready as your local backup model."}
                     </p>
                   </div>

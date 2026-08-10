@@ -16,6 +16,8 @@ import {
   parseFullyQualifiedModel,
   setProviderPlugins,
 } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
+import { applyLocalAiToHermes } from "@/lib/hermes-local-ai";
 import {
   getDefaultLlamaCppModel,
   getLlamaCppContextWindow,
@@ -875,6 +877,20 @@ export async function POST(request: Request) {
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
+      // Everything above configures OpenClaw. On a Hermes device that left the
+      // model running and unreachable: Settings said "configured" while the
+      // chat's provider picker had never heard of it, because Hermes keeps its
+      // own providers block. Register it there too — as an available provider,
+      // not as the new default, since enabling a private fallback shouldn't
+      // quietly take the device off the provider the customer chose.
+      if ((ocProvider === "llamacpp" || ocProvider === "ollama") && (await getActiveHarness()) === "hermes") {
+        try {
+          await applyLocalAiToHermes({ provider: ocProvider, model: config.defaultModel });
+        } catch (err) {
+          // Non-fatal: the local model is configured and running either way.
+          console.error("[ai-models/configure] Hermes local provider registration failed:", err);
+        }
+      }
     } else {
       await setMany({
         ai_model_configured: true,
