@@ -50,7 +50,9 @@ export function runHermesCli(
       fn();
     };
 
-    child.stdout.on("data", (chunk: Buffer) => {
+    // stdout/stderr are always piped (see stdio above), so the streams are
+    // present; stdin is only piped when `input` is passed.
+    child.stdout!.on("data", (chunk: Buffer) => {
       outBytes += chunk.length;
       if (outBytes > MAX_OUTPUT_BYTES) {
         finish(() => { child.kill("SIGKILL"); reject(new Error("hermes output exceeded the size limit")); });
@@ -58,7 +60,7 @@ export function runHermesCli(
       }
       out += chunk.toString();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr!.on("data", (chunk: Buffer) => {
       errBytes += chunk.length;
       if (errBytes > MAX_OUTPUT_BYTES) {
         finish(() => { child.kill("SIGKILL"); reject(new Error("hermes error output exceeded the size limit")); });
@@ -85,7 +87,7 @@ export function runHermesCli(
     });
 
     if (opts.input !== undefined) {
-      child.stdin.end(opts.input);
+      child.stdin?.end(opts.input);
     }
   });
 }
