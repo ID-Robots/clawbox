@@ -541,6 +541,15 @@ export default function AIModelsStep({
   );
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
+  // Device edition — on a Hermes edition this step doesn't apply (Hermes manages
+  // its own providers/models), so we show a short Hermes panel instead.
+  const [edition, setEdition] = useState<string | null>(null);
+  useEffect(() => {
+    fetch("/setup-api/harness/status", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setEdition(typeof d?.edition === "string" ? d.edition : "openclaw"))
+      .catch(() => setEdition("openclaw"));
+  }, []);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1723,6 +1732,32 @@ export default function AIModelsStep({
   const resolvedTitle = title ?? t("ai.title");
   const resolvedDescription = description ?? t("ai.description");
   const embeddedConnectLabel = t("settings.connect");
+
+  // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
+  // provider config this step drives — show a short panel and let setup proceed.
+  if (edition === "hermes") {
+    return (
+      <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
+        <div className="card-surface rounded-2xl p-5 sm:p-8">
+          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">Hermes agent</h1>
+          <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
+            This device runs on Hermes, which manages its own providers and models.
+            Choose a model any time from the chat header, or open the Hermes dashboard
+            to configure providers and keys — no setup needed here.
+          </p>
+          {!embedded && (
+            <button
+              type="button"
+              onClick={() => onNext?.()}
+              className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity"
+            >
+              Continue
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>

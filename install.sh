@@ -63,14 +63,15 @@ CLAWBOX_HOME="/home/clawbox"
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────
 # openclaw | hermes | dual. Baked at flash time via env CLAWBOX_EDITION or
-# config/edition.txt. Empty/unknown → "dual" (today's full behavior, unchanged).
-# On the "hermes" edition install.sh skips the OpenClaw gateway steps and stands
-# up Hermes + the dashboard proxy instead (see scripts/setup-hermes-edition.sh).
+# config/edition.txt. Empty/unknown → "openclaw" (the native product: single,
+# locked). "dual" is premium (both harnesses + switcher) and requires a signed
+# license; "hermes" is its own SKU. On "hermes", install.sh skips the OpenClaw
+# gateway steps and stands up Hermes + the dashboard proxy instead.
 CLAWBOX_EDITION="${CLAWBOX_EDITION:-}"
 if [ -z "$CLAWBOX_EDITION" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
   CLAWBOX_EDITION="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
 fi
-case "$CLAWBOX_EDITION" in openclaw|hermes|dual) ;; *) CLAWBOX_EDITION="dual" ;; esac
+case "$CLAWBOX_EDITION" in openclaw|hermes|dual) ;; *) CLAWBOX_EDITION="openclaw" ;; esac
 is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }
 
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
@@ -786,6 +787,36 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
+}
+
+# Install the Hermes agent (git-based install into ~/.hermes). Only on the
+# hermes edition, and only if it isn't already present.
+step_hermes_install() {
+  is_hermes_edition || return 0
+  if [ -x "$CLAWBOX_HOME/.local/bin/hermes" ]; then
+    log "  Hermes already installed ($("$CLAWBOX_HOME/.local/bin/hermes" --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  log "  Installing Hermes agent (NousResearch)..."
+  # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
+  # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
+  runuser -u "$CLAWBOX_USER" -- bash -c \
+    'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' \
+    || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
+}
+
+# Bake the single-harness edition lock into a root-owned systemd drop-in so a
+# customer can't flip the harness by editing config.json. No-op on "dual".
+step_edition_lock() {
+  case "$CLAWBOX_EDITION" in
+    openclaw|hermes) ;;
+    *) return 0 ;;
+  esac
+  mkdir -p /etc/systemd/system/clawbox-setup.service.d
+  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" \
+    > /etc/systemd/system/clawbox-setup.service.d/edition.conf
+  systemctl daemon-reload 2>/dev/null || true
+  log "  Baked edition lock: CLAWBOX_EDITION=$CLAWBOX_EDITION"
 }
 
 step_openclaw_install() {
@@ -2393,6 +2424,9 @@ step_build
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup
 
+log "Installing Hermes (if this is the Hermes edition)..."
+step_hermes_install
+
 log "Installing ClawKeep CLI..."
 step_clawkeep_install
 
@@ -2436,6 +2470,10 @@ step_desktop_theme
 # idempotent: it greps before appending.
 log "Ensuring clawbox user PATH (openclaw, claude, codex, gemini, hf, clawkeep)..."
 ensure_clawbox_bashrc_path
+
+# Bake the single-harness edition lock before services start so the first
+# clawbox-setup start already sees it (no-op on dual).
+step_edition_lock
 
 log "Starting services..."
 step_start_services

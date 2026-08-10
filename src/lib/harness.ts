@@ -36,12 +36,13 @@ export const DEFAULT_HARNESS: Harness = "openclaw";
 //     because the switcher stays disabled until a license we signed verifies.
 export type Edition = Harness | "dual";
 
-/** The build/install edition. Defaults to "dual" so existing installs are
- *  unchanged until an image is explicitly built single-harness. */
+/** The build/install edition. Defaults to the native product edition,
+ *  "openclaw" (single, locked) — "dual" is premium and must be selected AND
+ *  licensed; "hermes" is its own SKU. */
 export function getEdition(): Edition {
   const raw = (process.env.CLAWBOX_EDITION || "").trim().toLowerCase();
   if (raw === "openclaw" || raw === "hermes" || raw === "dual") return raw;
-  return "dual";
+  return "openclaw";
 }
 
 /**

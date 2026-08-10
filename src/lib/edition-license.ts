@@ -19,11 +19,15 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
-// PEM SPKI ed25519 public key. EMPTY until productionized. While empty,
-// licensing is NOT ENFORCED — dual stays open (today's behavior) so existing
-// installs aren't disrupted. Once we generate the keypair and paste the public
-// key here (or set CLAWBOX_LICENSE_PUBKEY), dual becomes license-gated.
-const DUAL_LICENSE_PUBKEY = (process.env.CLAWBOX_LICENSE_PUBKEY || "").trim();
+// PEM SPKI ed25519 PUBLIC key for the dual-harness premium license. Safe to
+// ship — it can only VERIFY licenses, never mint them (the private signing key
+// lives off-device and is never committed). With a key present, licensing is
+// ENFORCED: `dual` requires a valid signed license or it degrades to locked
+// single-harness. An operator can override the key via CLAWBOX_LICENSE_PUBKEY.
+const EMBEDDED_DUAL_LICENSE_PUBKEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAWZcFqaHm1SfUH/6Mjh6bpxwQvjnZfsPZK9gBt8fiz+E=
+-----END PUBLIC KEY-----`;
+const DUAL_LICENSE_PUBKEY = (process.env.CLAWBOX_LICENSE_PUBKEY || EMBEDDED_DUAL_LICENSE_PUBKEY).trim();
 
 /** True once a signing public key is configured, i.e. dual-license enforcement
  *  is turned on. Until then dual is unlocked without a license. */
