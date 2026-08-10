@@ -33,6 +33,17 @@ if [ -f "$PROJECT_DIR/scripts/setup-shared-identity.sh" ]; then
     || log "WARNING: shared-identity setup returned non-zero (non-fatal)"
 fi
 
+# 2b. Configure the dashboard password provider (gated-mode auth). Runs as the
+#     clawbox user (owns ~/.hermes/config.yaml). The dashboard binds a
+#     non-loopback host (127.0.0.2) and therefore REQUIRES an auth provider;
+#     the proxy uses this password to sign the user in transparently.
+if [ -f "$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh" ]; then
+  log "configuring dashboard password auth"
+  runuser -u "$CLAWBOX_USER" -- env CLAWBOX_ROOT="$PROJECT_DIR" \
+    bash "$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh" \
+    || log "WARNING: dashboard auth setup returned non-zero (non-fatal)"
+fi
+
 # 3. Install + enable the Hermes dashboard + auth-proxy services.
 for unit in clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy; do
   src="$PROJECT_DIR/config/$unit.service"
