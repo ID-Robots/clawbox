@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
+import { runHermesCli } from "@/lib/hermes-cli";
 import {
   HERMES_AUTO_PROVIDER,
   isHermesCliProvider,
@@ -134,8 +135,41 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<string> {
   });
 }
 
+// Hermes session ids are timestamped slugs: 20260810_194609_7568b9. Strict on
+// purpose — this value reaches argv, and anything looser could smuggle a flag.
+const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
+
+/**
+ * The id of the most recently touched session. `hermes sessions list` prints a
+ * table whose last column is the id; there is no --json. Best-effort: a failure
+ * only costs conversation continuity on the NEXT turn, never this reply, so it
+ * must not throw into the response path.
+ */
+async function latestSessionId(): Promise<string> {
+  try {
+    const r = await runHermesCli(["sessions", "list", "--limit", "1"], {
+      timeoutMs: 10_000,
+      env: { COLUMNS: "200" },
+    });
+    if (r.code !== 0) return "";
+    for (const line of r.stdout.split(/\r?\n/)) {
+      const match = /([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/.exec(line.trim());
+      if (match) return match[1];
+    }
+  } catch {
+    /* continuity is best-effort */
+  }
+  return "";
+}
+
 export async function POST(request: Request) {
-  let body: { message?: string; model?: string; provider?: string; reasoning?: string };
+  let body: {
+    message?: string;
+    model?: string;
+    provider?: string;
+    reasoning?: string;
+    sessionId?: string;
+  };
   try {
     body = await request.json();
   } catch {
@@ -150,6 +184,10 @@ export async function POST(request: Request) {
   const rawModel = typeof body.model === "string" ? body.model.trim() : "";
   const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
   const rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
+  const rawSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  if (rawSessionId && !SESSION_ID_RE.test(rawSessionId)) {
+    return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
 
   // Every value below reaches argv. No shell is involved (spawn takes an array)
   // but a value starting with "-" would still be parsed by hermes as a flag, so
@@ -248,10 +286,23 @@ export async function POST(request: Request) {
   if (rawModel) args.push("-m", rawModel);
   if (wantsProvider) args.push("--provider", rawProvider);
   if (rawReasoning) args.push("--reasoning", rawReasoning);
+  // Continue the SAME conversation. Without this every turn is a fresh `-z`
+  // run with its own session, so the agent has no idea what "it" refers to in
+  // a follow-up — asking "is it removed now?" got "what are we trying to
+  // remove?". We resume by explicit ID, never `--continue <name>`: that flag
+  // ignores the name and silently resumes the most recent session in the
+  // workspace, which would splice unrelated chats (and the agent's own cron
+  // runs) into each other.
+  if (rawSessionId) args.push("--resume", rawSessionId);
 
   try {
     const text = await runHermes(args, request.signal);
-    return NextResponse.json({ text, harness: "hermes" });
+    // Report the session this turn belongs to so the next one can resume it.
+    // Re-read every turn rather than only on the first: whether `--resume`
+    // continues in place or forks a new row is Hermes' business, and this way
+    // the client always carries the id that actually holds the history.
+    const sessionId = (await latestSessionId()) || rawSessionId || undefined;
+    return NextResponse.json({ text, harness: "hermes", ...(sessionId ? { sessionId } : {}) });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       // Client hit Stop / disconnected; the child was already killed.

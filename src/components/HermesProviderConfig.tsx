@@ -89,6 +89,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // Set as soon as the user touches a radio. The async device reads below must
   // never yank the selection out from under a click that already happened.
   const userPickedProviderRef = useRef(false);
+  // Set when we send the user off to the dashboard's OAuth page, so the focus
+  // listener knows this tab-return is worth re-checking credentials for.
+  const oauthTabOpenedRef = useRef(false);
   // The user's explicit pick, if any. `model` (below) is derived from this
   // plus the live scope, so a pick can never outlive the provider it belongs to.
   const [picked, setPicked] = useState("");
@@ -200,19 +203,43 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     return () => { alive = false; };
   }, [fetchClawai, fetchDeviceProvider]);
 
-  useEffect(() => {
-    let alive = true;
-    fetch("/setup-api/hermes/oauth")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: { providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string }[] }) => {
-        if (!alive) return;
-        const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }> = {};
-        for (const p of d.providers ?? []) map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl };
-        setOauth(map);
-      })
-      .catch(() => { /* OAuth affordances just won't show; non-fatal */ });
-    return () => { alive = false; };
+  const loadOauth = useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch("/setup-api/hermes/oauth", { cache: "no-store" });
+      if (!res.ok) return;
+      const d = (await res.json()) as {
+        providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string }[];
+      };
+      const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }> = {};
+      for (const p of d.providers ?? []) map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl };
+      setOauth(map);
+    } catch {
+      /* OAuth affordances just won't show; non-fatal */
+    }
   }, []);
+
+  useEffect(() => {
+    void loadOauth();
+  }, [loadOauth]);
+
+  // Sign-in happens OUT OF BAND: the user completes PKCE/device-code in the
+  // Hermes dashboard, in another tab, on another port. Nothing tells this page
+  // (or the server's model cache) that credentials appeared, so a provider the
+  // user just connected kept showing as unauthenticated with no models until
+  // the cache aged out — it looked like the sign-in hadn't worked.
+  // Re-check when the user comes back to this tab, and force a server-side
+  // refresh so Hermes re-enumerates that provider's live model list.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onFocus = () => {
+      if (!oauthTabOpenedRef.current) return;
+      oauthTabOpenedRef.current = false;
+      void loadOauth();
+      refreshModels();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadOauth, refreshModels]);
 
   const changeUiTier = useCallback((tier: ClawaiTier) => {
     setUiTier(tier);
@@ -242,9 +269,13 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
 
   // Open the Hermes dashboard's /env page (via the auth-gated proxy on :8090),
   // where its native OAuth (PKCE / device-code) runs. Same host, dashboard port.
+  // The flag is what the focus listener above keys on: we only re-check (and
+  // pay for a live provider re-enumeration) when the user actually went off to
+  // sign in, not on every incidental tab switch.
   function openHermesOAuth() {
     if (typeof window === "undefined") return;
     const url = `${window.location.protocol}//${window.location.hostname}:8090/env`;
+    oauthTabOpenedRef.current = true;
     window.open(url, "_blank", "noopener,noreferrer");
   }
 

@@ -256,6 +256,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // pick is still in that provider's live list (see the `hermesModel` memo).
   const [hermesPicks, setHermesPicks] = useState<Record<string, string>>({})
   const hermesModelRef = useRef('')
+  // The Hermes session this chat is threaded through. Empty until the first
+  // reply reports one; every later turn resumes it, which is what gives the
+  // conversation memory. Cleared when the user starts a new chat.
+  const hermesSessionRef = useRef('')
   const [hermesReasoning, setHermesReasoning] = useState<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   const hermesReasoningRef = useRef<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   // False until the level is real (from localStorage, from the device's
@@ -739,6 +743,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (!keepHistoryReload) {
               setMessages([])
               greetedRef.current = true // prevent auto-greet
+              // Clearing the transcript starts a NEW conversation, so drop the
+              // threaded Hermes session too — otherwise the agent would still
+              // carry the old context the user just cleared away.
+              hermesSessionRef.current = ''
             }
             const evt = skillEventRef.current
             skillEventRef.current = null
@@ -1219,11 +1227,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),
           ...(reasoning ? { reasoning } : {}),
+          // Continue this conversation instead of starting a fresh agent every
+          // turn — otherwise a follow-up like "is it removed now?" reaches an
+          // agent with no idea what "it" is.
+          ...(hermesSessionRef.current ? { sessionId: hermesSessionRef.current } : {}),
         }),
         signal: controller.signal,
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
+      if (typeof data.sessionId === 'string' && data.sessionId) {
+        hermesSessionRef.current = data.sessionId
+      }
       setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
