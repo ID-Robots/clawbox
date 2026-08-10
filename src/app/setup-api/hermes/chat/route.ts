@@ -20,14 +20,20 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 
-// Chat turn against the Hermes harness. Uses `hermes -z <message>` (one-shot),
-// which — verified on-device — reuses Hermes' persistent default session, so
-// multi-turn memory works without ClawBox threading context. The message is
-// passed as an argv element (no shell), so user input can't inject a command.
+// Chat turn against the Hermes harness, via `hermes chat -q <message> -Q`
+// (single query, non-interactive). The message is passed as an argv element
+// (no shell), so user input can't inject a command.
+//
+// It used to use `-z` (one-shot) on the belief that one-shot reused a
+// persistent session. That was WRONG and the chat had no memory at all: `-z`
+// starts a new session per invocation, ignores --resume, and documents itself
+// as printing "no session_id line". `chat -q` threads properly — it echoes
+// `session_id: <id>`, and passing that back via --resume continues the same
+// conversation.
 //
 // This is the desktop chat backend when the active harness is Hermes; OpenClaw
-// keeps its gateway WebSocket. Streaming + per-chat sessions are a future
-// upgrade (the Hermes serve WS supports them).
+// keeps its gateway WebSocket. Streaming is still a future upgrade (the Hermes
+// serve WS supports it).
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 const HERMES_TIMEOUT_MS = 90_000;
