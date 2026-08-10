@@ -55,6 +55,151 @@
 
   --background: var(--bg-deep);
   --foreground: var(--text-primary);
+
+  /* ─────────────────────────────────────────────────────────────────────
+     LADDERS
+     Everything below names a value the product was already painting by
+     hand. Adding a name changes nothing on its own — a component has to
+     opt in — so this block is a deliberate visual no-op.
+     ───────────────────────────────────────────────────────────────────── */
+
+  /* ── ground ────────────────────────────────────────────────────────────
+     Two grounds shipped, and they were never rivals — they were one name
+     doing two jobs. --bg-deep #111827 is the INSET colour: the well under
+     a segmented tab tray (AIModelsStep), the provider-list backing, the
+     tier pill tray. The page ground is #0a0f1a, hardcoded three times —
+     setup/page.tsx, layout.tsx's PWA themeColor twice, and page.tsx's
+     desktop fallback. #0a0f1a wins because it is what the customer's
+     browser chrome and splash screen already paint, so anything else
+     creates a seam at the edge of the viewport on a phone.
+
+     --bg-deep keeps its inset job and its value. --background still
+     resolves to it, so nothing moves today. */
+  --ground: #0a0f1a;
+  --ground-fade: rgba(10, 15, 26, 0.88);   /* header scrim, mid stop */
+  --ground-0: rgba(10, 15, 26, 0);         /* header scrim, tail     */
+
+  /* ── fill ladder ───────────────────────────────────────────────────────
+     Four rungs. The measured white alphas across src/components cluster
+     hard at .03 / .06 / .10 / .15 (14 / 46 / 75 / 28 uses); the strays in
+     between are nudges, not steps. */
+  --fill-1: rgba(255, 255, 255, 0.03);     /* quiet inset               */
+  --fill-2: rgba(255, 255, 255, 0.06);     /* inert tile, input, track  */
+  --fill-3: rgba(255, 255, 255, 0.10);     /* hover on a row            */
+  --fill-4: rgba(255, 255, 255, 0.15);     /* pressed                   */
+
+  /* ── line ──────────────────────────────────────────────────────────────
+     One OUTER border (--border-subtle, above — the product's only border
+     token) and two inner hairlines. The product does not draw internal
+     dividers in steel; it draws them in white alpha. */
+  --hair: rgba(255, 255, 255, 0.06);       /* divider inside a bordered box */
+  --hair-2: rgba(255, 255, 255, 0.10);     /* edge of a quiet control       */
+
+  /* ── the two meanings ──────────────────────────────────────────────────
+     --coral-bright is ACTION, --cyan-bright is DONE, on every box and
+     under every harness. Those two are never re-pointed; what follows only
+     names alphas that were already being typed by hand. .25 / .30 / .40
+     already have names (--shadow-coral-mid, --border-accent, --logo-glow)
+     and are not restated here. */
+  --coral-wash: rgba(249, 115, 22, 0.06);  /* selected row                  */
+  --coral-tint: rgba(249, 115, 22, 0.15);  /* badge / panel fill            */
+  --coral-halo: rgba(249, 115, 22, 0.50);  /* current step glow, ProgressBar */
+  --coral-ring: rgba(249, 115, 22, 0.60);  /* focus outline                 */
+  --cyan-wash: rgba(0, 229, 204, 0.10);
+  --cyan-edge: rgba(0, 229, 204, 0.25);
+
+  /* ── radius ────────────────────────────────────────────────────────────
+     8px dominates (210 uses of rounded-lg), then 12 for inputs, 16 for
+     cards, full for chips and radios. 9/10/11/14px do not exist here. */
+  --r-1: 8px;
+  --r-2: 12px;
+  --r-3: 16px;
+  --r-full: 999px;
+
+  /* ── type ──────────────────────────────────────────────────────────────
+     Six rungs and nothing between them. --font-display / --font-body are
+     declared in @theme above and neither webfont ships, so this all
+     renders system-ui today; the slot names stay so a future drop-in
+     reaches these surfaces too. */
+  --t-1: 11px;   /* eyebrow, rail label, chip, counter        */
+  --t-2: 12px;   /* caption, helper, small button, mono value */
+  --t-3: 13px;   /* the assurance line                        */
+  --t-4: 14px;   /* lede, list rows                           */
+  --t-5: 15px;   /* body, h2, primary button label            */
+  --t-6: 26px;   /* h1                                        */
+
+  /* Three weights. 700 is the product's font-bold on every H1, 600 its
+     font-semibold on labels and buttons, 400 for anything longer than a
+     line. There is no 500 step and no 640 — 640 is a variable-font weight
+     the system fallback cannot hit, so it rounds unpredictably. */
+  --w-body: 400;
+  --w-label: 600;
+  --w-head: 700;
+
+  /* ── space ─────────────────────────────────────────────────────────────
+     4pt. The rule: the gap BETWEEN two things is at least one rung larger
+     than the largest gap INSIDE either of them. */
+  --s-0: 2px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+  --s-9: 64px;
+
+  /* ── motion ────────────────────────────────────────────────────────────
+     Five durations on a x1.75 ladder, anchored at the bottom by the 0.1s
+     "instantaneous" threshold and capped under the 1s flow-of-thought
+     limit. Five easings, of which one is deliberately not a curve:
+     --ease-truth is linear because an easing curve fabricates a velocity
+     profile the box never reported, and a progress bar that keeps gliding
+     after the data stopped is lying. */
+  --travel: 16px;   /* X translate = a different screen  */
+  --lift: 8px;      /* Y translate = more of this screen */
+
+  --d-1: 80ms;      /* instant feedback: press, focus ring           */
+  --d-2: 140ms;     /* state change on something already on screen   */
+  --d-3: 240ms;     /* in-step reveal or dismiss                     */
+  --d-4: 400ms;     /* one step leaves and the next arrives          */
+  --d-5: 700ms;     /* reserved: the handoff, the reconnection       */
+  --d-exit: 160ms;  /* --d-4 split: 160 out …                        */
+  --d-enter: 240ms; /* … 240 in. Arrival is what must be legible.    */
+  --stagger: 40ms;  /* x4 bands, maximum                             */
+  --busy-delay: 200ms; /* before any busy affordance appears         */
+
+  --ease-entrance: cubic-bezier(0, 0, 0.38, 0.9);
+  --ease-exit: cubic-bezier(0.2, 0, 1, 0.9);
+  --ease-standard: cubic-bezier(0.2, 0, 0.38, 0.9);
+  --ease-emphasis: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-truth: linear;
+}
+
+/* Reduced motion overrides the motion tokens EXPLICITLY rather than
+   multiplying them: a multiplier lands on sub-frame durations the browser
+   rounds unpredictably, which is "off" wearing a costume. Reduced motion is
+   not no motion — opacity and colour changes survive, because removing them
+   removes information. The blanket 0.01ms rule further down still applies to
+   the perpetual decorative animations it was written for. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --travel: 0px;
+    --lift: 0px;
+    --d-1: 0ms;
+    --d-2: 100ms;
+    --d-3: 120ms;
+    --d-4: 160ms;
+    --d-5: 200ms;
+    --d-exit: 80ms;
+    --d-enter: 80ms;
+    --stagger: 0ms;
+    --ease-entrance: linear;
+    --ease-exit: linear;
+    --ease-standard: linear;
+    --ease-emphasis: linear;
+  }
 }
 
 html,
