@@ -97,8 +97,10 @@ function optionalString(value: unknown): string | undefined {
  * Pending Telegram access requests, read straight from Hermes' pairing store —
  * no CLI, so the desktop popup can poll it on a timer without spawning a
  * process every 20 s.
- * The store key IS the request id `hermes pairing approve` accepts; the code the
- * bot DM'd is stored only as a salted hash and can never be recovered here.
+ *
+ * The store key IS the request id `hermes pairing approve` accepts. The code the
+ * bot DM'd is only ever persisted as a salted hash, so it cannot be recovered
+ * here — the request id is what the UI's Approve button has to carry.
  */
 export async function readHermesPairingRequests(now = Date.now()): Promise<HermesPairingRequest[]> {
   const pending = await readPairingFile(`${PLATFORM}-pending.json`);
