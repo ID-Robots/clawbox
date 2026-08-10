@@ -439,6 +439,389 @@ h6 {
   line-height: 1.3;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SETUP WIZARD SHELL — header, progress rail, stage
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.setup-shell {
+  --setup-hdr-h: 56px;      /* matches ChromeShelf's 56px — the bar the
+                               customer meets ten minutes later */
+  --setup-gutter: 16px;
+  --setup-card-w: 520px;    /* the wizard's own measure, max-w-[520px] */
+  --setup-rail-w: 560px;    /* card + 40: 20px proud on each side, so the
+                               rail reads as the card's shoulder */
+}
+@media (min-width: 720px) {
+  .setup-shell {
+    --setup-hdr-h: 64px;
+    --setup-gutter: 24px;
+  }
+}
+
+/* ── the bar ──────────────────────────────────────────────────────────────
+   The SURFACE is full-bleed; the MEASURE is a child. Putting a max-width on
+   the element that also paints the background is what produces an opaque
+   slab with two hard vertical edges sitting on the wallpaper — one element
+   doing two jobs. .setup-chrome never takes a width, and never a border:
+   its bottom boundary is the progress rail, so the edge carries information
+   instead of just drawing a line. */
+.setup-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  width: 100%;
+  background: linear-gradient(
+    to bottom,
+    var(--ground) 0,
+    var(--ground-fade) calc(var(--setup-hdr-h) - 6px),
+    var(--ground-0) 100%
+  );
+  padding-bottom: 20px;   /* the scrim dissolves instead of cutting… */
+  margin-bottom: -20px;   /* …and the tail costs the page no height  */
+  border: 0;
+  pointer-events: none;   /* the tail must not eat clicks */
+}
+.setup-chrome > * {
+  pointer-events: auto;
+}
+
+.setup-chrome-inner {
+  height: var(--setup-hdr-h);
+  width: min(100% - (var(--setup-gutter) * 2), 1120px);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+/* ── brand lockup ────────────────────────────────────────────────────────
+   Both assets are trimmed to their ink — the crab's claws reach its right
+   edge and the wordmark's "C" starts at its left — so a nominal 8px reads
+   as almost touching. 14px is where the two stop fighting. */
+.setup-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+  min-width: 0;
+  text-decoration: none;
+}
+.setup-brand-mark {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex: none;
+}
+.setup-brand-word {
+  display: none;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: var(--w-head);
+  line-height: 1;
+  white-space: nowrap;
+}
+@media (min-width: 640px) {
+  .setup-brand-word { display: block; }
+}
+
+/* Hermes enters as a BYLINE in the metadata slot, not as a second lockup.
+   Two equal wordmarks either side of a rule is the sponsor-bar pattern and
+   no amount of styling gets you out of a structure. A middot rather than a
+   divider, and only the glyph at full strength — one small bright mark
+   reads as a badge, a bright wordmark reads as a logo. */
+.setup-cobrand {
+  display: none;
+  align-items: baseline;
+  gap: 5px;
+  font-size: var(--t-1);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: none;
+}
+.setup-cobrand::before {
+  content: "·";
+  margin-right: var(--s-1);
+  color: var(--text-muted);
+}
+.setup-cobrand .setup-caduceus {
+  font-size: var(--t-3);
+  line-height: 1;
+  color: var(--agent-ink, var(--text-secondary));
+}
+.setup-cobrand .setup-cobrand-name {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: var(--w-label);
+}
+/* On a phone keep the GLYPH and drop the words: the crisp mark survives
+   small, the words do not. */
+@media (max-width: 719px) {
+  .setup-cobrand .setup-cobrand-name,
+  .setup-cobrand::before { display: none; }
+  .setup-cobrand { margin-left: var(--s-1); }
+}
+
+/* ── actions ─────────────────────────────────────────────────────────── */
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-0);
+  flex: none;
+}
+.setup-icon-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-1);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color var(--d-2) var(--ease-standard),
+              background-color var(--d-2) var(--ease-standard);
+}
+.setup-icon-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+@media (min-width: 560px) {
+  .setup-icon-btn { width: 36px; height: 36px; }
+}
+
+/* ── the progress rail ───────────────────────────────────────────────────
+   Capped at 560 so the five labels sit 108px apart at every width from 940
+   to 1920 and the group always reads as one object rather than five words
+   spread thin across a wide bar. It never stretches.
+
+   The current station is marked by THICKNESS and LENGTH, not decoration —
+   the same move ChromeShelf makes with its 6px→16px active pill. Done
+   segments recede to teal at 55%: they are finished, they are not
+   competing with the one thing that is current. */
+.setup-rail {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.setup-rail-track {
+  display: flex;
+  gap: var(--s-1);
+  height: 5px;
+  align-items: flex-end;
+}
+.setup-seg {
+  flex: 1;
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--fill-2);
+  overflow: hidden;
+  transition: height var(--d-2) var(--ease-standard);
+}
+.setup-seg i {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--cyan-bright);
+  opacity: 0.55;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--d-3) var(--ease-standard),
+              background-color var(--d-2) var(--ease-standard),
+              opacity var(--d-2) var(--ease-standard);
+}
+.setup-seg.is-done i { transform: scaleX(1); }
+.setup-seg.is-now { height: 5px; }
+.setup-seg.is-now i {
+  transform: scaleX(1);
+  background: var(--coral-bright);
+  opacity: 1;
+  box-shadow: 0 0 8px var(--coral-halo);   /* the shipped ProgressBar glow */
+}
+/* Finish: five objects become one continuous bar. */
+.setup-rail-track.is-finished { gap: 0; }
+.setup-rail-track.is-finished .setup-seg { height: 3px; border-radius: 0; }
+.setup-rail-track.is-finished .setup-seg:first-child {
+  border-radius: var(--r-full) 0 0 var(--r-full);
+}
+.setup-rail-track.is-finished .setup-seg:last-child {
+  border-radius: 0 var(--r-full) var(--r-full) 0;
+}
+.setup-rail-track.is-finished .setup-seg i {
+  transform: scaleX(1);
+  background: var(--cyan-bright);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.setup-rail-labels { display: none; list-style: none; }
+.setup-rail-here {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--t-2);
+  color: var(--text-secondary);
+}
+.setup-rail-here b {
+  font-size: var(--t-1);
+  font-weight: var(--w-body);
+  color: var(--coral-bright);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.setup-rail-here span {
+  color: var(--text-primary);
+  font-weight: var(--w-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-rail-here.is-finished b { color: var(--cyan-bright); }
+
+/* Below the labelled breakpoint the rail's track IS the bar's bottom edge:
+   full-bleed, pinned outside the measure, so the header stays ONE row at
+   every width — including Bulgarian, whose strings run ~35% long. The
+   counter and the current station's name ride inline on that same row. */
+@media (max-width: 939px) {
+  .setup-rail-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 20px;      /* above the scrim's tail */
+    height: 2px;
+    gap: 0;
+  }
+  .setup-seg { height: 2px; border-radius: 0; }
+  .setup-seg.is-now { height: 2px; }
+  .setup-seg.is-now i { box-shadow: none; }
+}
+
+/* A 560px labelled rail plus the lockup plus three 36px buttons needs
+   ~930px of measure before the three stop colliding. Above that the rail is
+   pinned to the viewport's own centre axis — the axis the 520px card sits
+   on — so its position is independent of how wide the brand or the actions
+   happen to be in the active locale. */
+@media (min-width: 940px) {
+  .setup-chrome-inner { position: relative; }
+  .setup-rail {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: var(--setup-rail-w);
+    flex: none;
+  }
+  .setup-rail-here { display: none; }
+  .setup-rail-labels { display: flex; gap: var(--s-1); }
+  .setup-rail-labels li {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    font-size: var(--t-1);
+    font-weight: var(--w-body);
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color var(--d-2) var(--ease-standard);
+  }
+  /* Done labels recede. Four teal words would compete with the one coral
+     word that matters, and the teal segment above already says "done". */
+  .setup-rail-labels li.is-done { color: var(--text-muted); }
+  .setup-rail-labels li.is-now {
+    color: var(--coral-bright);
+    font-weight: var(--w-label);
+  }
+}
+
+/* ── the stage ───────────────────────────────────────────────────────────
+   Top-anchored, not centred. Centring is what makes the card's top edge —
+   and so its H1 — slide up and down as the steps change height, because the
+   steps range from ~430px to ~700px tall. Anchored, all five screens share
+   one horizon. The 40px measures from the bar's bottom edge, because the
+   scrim's 20px tail is negative-margined away. */
+.setup-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: var(--s-8) var(--setup-gutter) var(--s-9);
+  position: relative;
+  z-index: 1;
+}
+
+.setup-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--setup-gutter) var(--s-6);
+  position: relative;
+  z-index: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   HERMES CO-BRANDING — scoped to the wizard shell
+   ClawBox owns the frame and the wayfinding; Hermes owns the ground and the
+   agent's own surfaces. A pixel changes for Hermes if and only if it
+   describes the AGENT; it does not change if it describes the SETUP.
+
+   Palette source: hermes-agent/web/src/themes/presets.ts (defaultTheme,
+   label "Hermes Teal") and web/src/index.css. NOT the Docusaurus theme —
+   that is the marketing site, and it is where the gold came from.
+
+   #0a0f1a → #041c1c is 1.06:1. The HUE moves, the LUMINANCE does not, so
+   every contrast pairing in the wizard survives untouched: coral is 6.31:1
+   on the new ground, cyan 11.01:1, body ink 16.91:1.
+   ═══════════════════════════════════════════════════════════════════════ */
+[data-agent="hermes"] .setup-shell {
+  /* 1. the ground and the surfaces mixed from it */
+  --ground: #041c1c;
+  --ground-fade: rgba(4, 28, 28, 0.88);
+  --ground-0: rgba(4, 28, 28, 0);
+  --surface-card: rgba(14, 36, 35, 0.75);
+  --surface-card-strong: rgba(14, 36, 35, 0.9);
+  --bg-surface: #132826;
+  --bg-elevated: #182c2a;
+  --bg-deep: #0e2423;
+
+  /* 2. the agent tokens are ADDITIVE. --coral-bright and --cyan-bright are
+     deliberately NOT redefined: coral means ACTION and cyan means DONE on
+     every box, under every harness. Re-pointing them once put the wizard's
+     two opposed states 1.08:1 apart — the single most important thing a
+     setup wizard communicates, destroyed to make a tint. */
+  --agent-ink: #ffe6cb;                    /* midground: text AND accent */
+  --agent-ink-2: rgba(255, 230, 203, 0.8);
+  --agent-ink-3: rgba(255, 230, 203, 0.65);
+  --agent-on-ink: #041c1c;                 /* text ON a cream plate */
+  --agent-line: rgba(255, 230, 203, 0.15); /* the one hairline weight */
+  --agent-card: #0e2423;
+  --agent-muted: #182c2a;
+  --agent-warn: #ffbd38;                   /* the ONLY sanctioned gold */
+  --agent-live: #4ade80;
+  --agent-term-bg: #000000;
+  --agent-term-fg: #f0e6d2;
+}
+[data-agent="hermes"] .setup-cobrand { display: inline-flex; }
+
+/* Agent-scoped surfaces opt in per panel. Only a panel that describes the
+   agent takes Hermes' language; a panel that describes setup stays ClawBox.
+   Hermes separates with line, never with elevation. */
+[data-agent="hermes"] .setup-shell [data-surface="agent"] {
+  background: var(--agent-card);
+  border: 1px solid var(--agent-line);
+  border-radius: var(--r-1);
+  color: var(--agent-ink);
+  box-shadow: none;
+}
+
 /* Card surface — matching openclawhardware.dev dark sections */
 .card-surface {
   background: var(--surface-card);
