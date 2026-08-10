@@ -259,8 +259,19 @@ function ChromeDesktopInner() {
       .catch(() => {});
   }, []);
 
+  // The harness-specific app hidden on this edition (OpenClaw Control-UI on
+  // Hermes, Hermes dashboard on OpenClaw).
+  const harnessHiddenAppId = activeHarness === "hermes" ? "openclaw" : "hermes";
+
   // ─── Desktop shortcuts for built-in apps ───
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
+  // Desktop shortcuts minus the hidden harness app — the icon-layout logic must
+  // use THIS (not the raw list), otherwise the hidden app reserves an empty
+  // grid slot and leaves a gap.
+  const visibleDesktopApps = useMemo(
+    () => desktopApps.filter((id) => id !== harnessHiddenAppId),
+    [desktopApps, harnessHiddenAppId],
+  );
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
   const handleAddToDesktop = useCallback((appId: string) => {
     // Also unhide installed apps when adding to desktop
@@ -665,7 +676,7 @@ function ChromeDesktopInner() {
   // Arrange all desktop icons — desktop: single column top-left, mobile: centered grid
   const arrangeIcons = useCallback(() => {
     const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
     const allIconIds = [...visibleInstalled, ...builtinIds];
     if (allIconIds.length === 0) return;
     // Sort by current position to preserve visual order
@@ -702,18 +713,21 @@ function ChromeDesktopInner() {
       });
     }
     setIconPositions(positions);
-  }, [installedApps, hiddenInstalledApps, desktopApps, iconPositions]);
+  }, [installedApps, hiddenInstalledApps, visibleDesktopApps, iconPositions]);
 
   // Auto-arrange when icons are added/removed or grid dimensions change
   useEffect(() => {
     const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
     const allIconIds = [...visibleInstalled, ...builtinIds];
     const missing = allIconIds.filter((id) => !iconPositions[id]);
     const overflow = allIconIds.some((id) => iconPositions[id] && iconPositions[id].col >= GRID_COLS);
-    if (missing.length === 0 && !overflow) return;
+    // A hidden harness app that still holds a persisted slot leaves a visual
+    // gap — force a compacting re-arrange to reclaim it.
+    const staleHidden = iconPositions[`desktop-${harnessHiddenAppId}`] !== undefined;
+    if (missing.length === 0 && !overflow && !staleHidden) return;
     arrangeIcons();
-  }, [installedApps, hiddenInstalledApps, desktopApps, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [installedApps, hiddenInstalledApps, visibleDesktopApps, harnessHiddenAppId, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Get icon position. On mobile we ignore the persisted desktop layout
   // (which was built around a single left-aligned column) and lay icons out
@@ -721,7 +735,7 @@ function ChromeDesktopInner() {
   const mobileIconOrder = useMemo(() => {
     if (!isMobile) return null;
     const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
+    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
     const all = [...visibleInstalled, ...builtinIds];
     all.sort((a, b) => {
       const pa = iconPositions[a] || { row: 999, col: 999 };

@@ -1588,12 +1588,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               <HeaderDropdown
                 ariaLabel="Hermes model"
                 value={hermesModel}
-                triggerLabel={hermesModel.includes('/') ? hermesModel.split('/').slice(1).join('/') : (hermesModel || 'Hermes')}
+                triggerLabel={hermesModel || 'Hermes'}
                 options={hermesModels.map((m) => ({ id: m.id, label: m.id }))}
                 onChange={(id) => { setHermesModel(id); hermesModelRef.current = id }}
                 onPointerDown={stopHeaderDrag}
-                triggerMaxWidth={150}
-                popoverWidth={260}
+                triggerMaxWidth={180}
+                popoverWidth={280}
               />
             ) : (
               <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
