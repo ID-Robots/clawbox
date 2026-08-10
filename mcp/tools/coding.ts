@@ -592,21 +592,24 @@ export function registerCodingTools(reg: Registrar): void {
         if (!case_sensitive) args.push("-i");
         if (context && output_mode === "content") args.push(`-C${context}`);
         if (include) args.push(`--include=${include}`);
-        args.push("-e", pattern, "-r", target);
+        // -H forces the filename prefix even for a single-file target, which is
+        // what the hit filter below keys on to drop protected paths.
+        args.push("-H", "-e", pattern, target);
       }
       const r = await spawnArgv(useRg ? "rg" : "grep", args, { timeoutMs: 20_000, maxBytes: 8 * 1024 * 1024 });
 
       // Filter EVERY HIT, not just the search root: without this, searching a
       // parent folder printed the contents of the credential stores underneath
-      // it. Each output line begins with the absolute path of the file it came
-      // from, so the leading path segment is what gets checked.
-      const allowed = r.stdout
-        .split("\n")
-        .filter((line) => {
-          if (!line.startsWith("/")) return true; // context separators, blank lines
-          const filePath = line.split(":", 1)[0];
-          return isAllowedPath(filePath);
-        });
+      // it. `path:12:text` for matches, `path-11-text` for context lines,
+      // `path:3` for counts and a bare path in files_with_matches mode — all
+      // four shapes have to be understood, because a line whose path we fail to
+      // parse is a line we cannot vet.
+      const allowed = r.stdout.split("\n").filter((line) => {
+        if (!line.startsWith("/")) return true; // "--" separators, blank lines
+        if (output_mode === "files_with_matches") return isAllowedPath(line.trim());
+        const m = /^(\/.*?)[:-]\d+[:-]/.exec(line) || /^(\/.*):\d+$/.exec(line);
+        return isAllowedPath(m ? m[1] : line.split(":", 1)[0]);
+      });
 
       const sliced = allowed.slice(offset, offset + max_results).filter((l) => l.length > 0);
       if (!sliced.length) {

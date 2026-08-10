@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
+import { fetchHarness } from "@/lib/client-harness";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });

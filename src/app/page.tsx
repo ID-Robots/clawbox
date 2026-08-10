@@ -26,6 +26,7 @@ import ChatPopup from "@/components/ChatPopup";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
+import { fetchHarness } from "@/lib/client-harness";
 import type { InstalledMeta } from "@/lib/store-categories";
 
 
