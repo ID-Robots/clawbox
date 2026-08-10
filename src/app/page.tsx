@@ -28,6 +28,14 @@ import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import type { InstalledMeta } from "@/lib/store-categories";
+import {
+  layoutIcons,
+  layoutsEqual,
+  moveIcon,
+  storageGeometry,
+  type IconLayout,
+  type LayoutGeometry,
+} from "@/lib/desktop-icon-layout";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
@@ -64,6 +72,25 @@ const apps: AppDef[] = [
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];
 const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
+
+// Desktop icon grid metrics. Module-level so the resize listener can derive
+// `rowsPerColumn` without reaching into the component.
+const CELL_H = 110; // px — one icon cell, label included
+const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
+
+/**
+ * Declared order for icons that have no saved slot yet.
+ *
+ * Built-ins follow the order they are declared in `apps` above; store-installed
+ * apps follow the persisted install order and lead, which is where a freshly
+ * installed app has always appeared. The point is that this is DECLARED — the
+ * previous code fell back to whatever order the arrays happened to be in when
+ * the layout ran, and since the harness resolves asynchronously that order
+ * differed from load to load.
+ */
+function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
+  return [...installedAppIds, ...DEFAULT_DESKTOP_APPS.map((id) => `desktop-${id}`)];
+}
 
 // Apps that only make sense on ONE harness. The other harness's backend isn't
 // installed, so its app would open onto errors:
@@ -556,13 +583,23 @@ function ChromeDesktopInner() {
   }, []);
 
   // ─── Desktop icon grid + mobile detection (single resize listener) ───
-  const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false });
+  // `rowsPerColumn` lives in this state — not read ad hoc inside the layout
+  // function — so that a change in viewport HEIGHT reflows the icons too. It
+  // used to be sampled from window.innerHeight at arrange time while only the
+  // column count (a width derivative) could trigger an arrange, so shrinking a
+  // window vertically left the icons laid out for the old height.
+  const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false, rowsPerColumn: 6 });
   useEffect(() => {
     const update = () => {
       const w = window.innerWidth;
       const cellW = w < 500 ? 85 : 100;
       const cols = Math.max(3, Math.floor(w / cellW));
-      setGridDims({ cols, cellW, mobile: w < 768 });
+      const rowsPerColumn = Math.max(1, Math.floor((window.innerHeight - TASKBAR_RESERVE) / CELL_H));
+      setGridDims((prev) =>
+        prev.cols === cols && prev.cellW === cellW && prev.mobile === w < 768 && prev.rowsPerColumn === rowsPerColumn
+          ? prev
+          : { cols, cellW, mobile: w < 768, rowsPerColumn },
+      );
     };
     update();
     window.addEventListener("resize", update);
@@ -572,8 +609,7 @@ function ChromeDesktopInner() {
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
   const CELL_W = gridDims.cellW;
-  const CELL_H = 110; // px
-  const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>({});
+  const [iconPositions, setIconPositions] = useState<IconLayout>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
@@ -754,92 +790,64 @@ function ChromeDesktopInner() {
 
 
 
-  // Arrange all desktop icons — desktop: single column top-left, mobile: centered grid
-  const arrangeIcons = useCallback(() => {
-    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
-    const allIconIds = [...visibleInstalledAppIds, ...builtinIds];
-    if (allIconIds.length === 0) return;
-    // Sort by current position to preserve visual order
-    allIconIds.sort((a, b) => {
-      const pa = iconPositions[a] || { row: 999, col: 999 };
-      const pb = iconPositions[b] || { row: 999, col: 999 };
-      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-    });
-    const positions: Record<string, { row: number; col: number }> = {};
-    const mobile = typeof window !== "undefined" && window.innerWidth < 768;
-    if (mobile) {
-      // Mobile: top-aligned grid, filling columns left to right
-      const cols = Math.min(allIconIds.length, GRID_COLS);
-      allIconIds.forEach((id, i) => {
-        positions[id] = { row: Math.floor(i / cols), col: i % cols };
-      });
-    } else {
-      // Desktop: fill column-by-column, top-to-bottom, wrapping to the next
-      // column once the current one would overflow the visible viewport.
-      // Previously this always used col: 0, which piled every icon into a
-      // single vertical column that ran off the bottom of the screen as
-      // soon as the user had more icons than fit.
-      //
-      // Leave a small margin at the bottom for the taskbar (~60 px) so the
-      // last icon in a column isn't clipped by it.
-      const TASKBAR_RESERVE = 72;
-      const viewportHeight = typeof window !== "undefined" ? window.innerHeight : CELL_H * 6;
-      const rowsPerColumn = Math.max(1, Math.floor((viewportHeight - TASKBAR_RESERVE) / CELL_H));
-      const maxCols = Math.max(1, GRID_COLS);
-      allIconIds.forEach((id, i) => {
-        const col = Math.min(Math.floor(i / rowsPerColumn), maxCols - 1);
-        const row = i - col * rowsPerColumn;
-        positions[id] = { row, col };
-      });
-    }
-    setIconPositions(positions);
-  }, [visibleInstalledAppIds, visibleDesktopApps, iconPositions]);
+  // ─── Desktop icon layout ───
+  // Every icon drawn on the desktop, in one place. Four code paths used to
+  // rebuild this list independently; when they disagreed a hidden app kept its
+  // grid slot and left a gap.
+  const allIconIds = useMemo(
+    () => [...visibleInstalledAppIds, ...visibleDesktopApps.map((id) => `desktop-${id}`)],
+    [visibleInstalledAppIds, visibleDesktopApps],
+  );
 
-  // Auto-arrange when icons are added/removed or grid dimensions change
+  const iconCanonicalOrder = useMemo(() => canonicalIconOrder(installedApps), [installedApps]);
+
+  // Narrow viewports fill row-by-row like a phone home screen; wide ones fill
+  // column-by-column like a desktop. Both flows are DENSE and idempotent — see
+  // src/lib/desktop-icon-layout.ts.
+  const iconGeometry = useMemo<LayoutGeometry>(
+    () => ({
+      flow: isMobile ? "row" : "column",
+      cols: Math.max(1, GRID_COLS),
+      rowsPerColumn: gridDims.rowsPerColumn,
+    }),
+    [isMobile, GRID_COLS, gridDims.rowsPerColumn],
+  );
+
+  // The layout actually drawn. Derived — never stale — so a hole, a slot left
+  // behind by a hidden app, a newly installed icon, or a viewport change is
+  // repaired in the same render it appears, before anything is painted.
+  const iconLayout = useMemo(
+    () => layoutIcons(allIconIds, iconPositions, iconGeometry, iconCanonicalOrder),
+    [allIconIds, iconPositions, iconGeometry, iconCanonicalOrder],
+  );
+
+  // What gets SAVED. Always the column encoding, even while a phone draws the
+  // same icons row-by-row, so one encoding round-trips at every viewport and a
+  // rotation reflows the desktop without reordering it.
+  const storedIconLayout = useMemo(
+    () => layoutIcons(allIconIds, iconPositions, storageGeometry(iconGeometry), iconCanonicalOrder),
+    [allIconIds, iconPositions, iconGeometry, iconCanonicalOrder],
+  );
+
+  // Persist the repaired layout. `layoutIcons` is idempotent, so this settles
+  // after one pass instead of looping — and the saved `icon_grid` converges on
+  // exactly the order the user sees.
   useEffect(() => {
-    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
-    const allIconIds = [...visibleInstalledAppIds, ...builtinIds];
-    const missing = allIconIds.filter((id) => !iconPositions[id]);
-    const overflow = allIconIds.some((id) => iconPositions[id] && iconPositions[id].col >= GRID_COLS);
-    // ANY persisted slot that no longer belongs to a drawn icon leaves a hole
-    // in the grid — and isGridCellOccupied still reports that cell as taken, so
-    // the user cannot even drag an icon into the gap. Checking only the built-in
-    // harness apps missed the store-installed ones hidden on Hermes.
-    const drawn = new Set(allIconIds);
-    const staleHidden = Object.keys(iconPositions).some((id) => !drawn.has(id));
-    if (missing.length === 0 && !overflow && !staleHidden) return;
-    arrangeIcons();
-  }, [visibleInstalledAppIds, visibleDesktopApps, harnessHiddenAppIds, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (allIconIds.length === 0) return;
+    setIconPositions((prev) => (layoutsEqual(prev, storedIconLayout) ? prev : storedIconLayout));
+  }, [storedIconLayout, allIconIds.length]);
 
-  // Get icon position. On mobile we ignore the persisted desktop layout
-  // (which was built around a single left-aligned column) and lay icons out
-  // in a grid that fills the viewport row-by-row, like a phone home screen.
-  const mobileIconOrder = useMemo(() => {
-    if (!isMobile) return null;
-    const builtinIds = visibleDesktopApps.map((id) => `desktop-${id}`);
-    const all = [...visibleInstalledAppIds, ...builtinIds];
-    all.sort((a, b) => {
-      const pa = iconPositions[a] || { row: 999, col: 999 };
-      const pb = iconPositions[b] || { row: 999, col: 999 };
-      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-    });
-    const map: Record<string, { row: number; col: number }> = {};
-    all.forEach((id, i) => {
-      map[id] = { row: Math.floor(i / GRID_COLS), col: i % GRID_COLS };
-    });
-    return map;
-  }, [isMobile, visibleInstalledAppIds, visibleDesktopApps, iconPositions, GRID_COLS]);
+  const getIconPosition = useCallback(
+    (appId: string) => iconLayout[appId] ?? iconPositions[appId] ?? { row: 0, col: 0 },
+    [iconLayout, iconPositions],
+  );
 
-  const getIconPosition = useCallback((appId: string, _index: number) => {
-    if (mobileIconOrder && mobileIconOrder[appId]) return mobileIconOrder[appId];
-    return iconPositions[appId] || { row: 0, col: 0 };
-  }, [iconPositions, mobileIconOrder]);
-
-  const isGridCellOccupied = useCallback((row: number, col: number, excludeId?: string) => {
-    return Object.entries(iconPositions).some(
-      ([id, pos]) => id !== excludeId && pos.row === row && pos.col === col
-    );
-  }, [iconPositions]);
+  // "Arrange icons" means: forget the hand-made order and go back to the
+  // declared one. Compacting is no longer something the user has to ask for —
+  // the layout above is always dense — so this is now the undo for dragging.
+  const arrangeIcons = useCallback(() => {
+    setIconPositions(layoutIcons(allIconIds, {}, storageGeometry(iconGeometry), iconCanonicalOrder));
+  }, [allIconIds, iconGeometry, iconCanonicalOrder]);
 
   const snapToGrid = useCallback((clientX: number, clientY: number): { row: number; col: number } | null => {
     if (!gridRef.current) return null;
@@ -857,7 +865,6 @@ function ChromeDesktopInner() {
       e.preventDefault();
       e.stopPropagation();
     }
-    let mobileSynced = false;
     const startX = e.clientX;
     const startY = e.clientY;
     let isDragging = false;
@@ -889,12 +896,9 @@ function ChromeDesktopInner() {
       if (!isDragging && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
       if (!isDragging) {
         isDragging = true;
-        // Sync mobile-computed positions into iconPositions only once a real
-        // drag starts, so taps don't trigger redundant state writes.
-        if (isMobile && mobileIconOrder && !mobileSynced) {
-          mobileSynced = true;
-          setIconPositions(mobileIconOrder);
-        }
+        // No mobile position sync needed any more: iconPositions is kept in the
+        // storage encoding on every viewport, so a drop can be resolved against
+        // it directly.
         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
         setDraggingIcon(appId);
       }
@@ -941,46 +945,14 @@ function ChromeDesktopInner() {
               return prev;
             });
           } else {
-            // Single icon drop: insert at target and shift others right if occupied
-            setIconPositions(prev => {
-              const next = { ...prev };
-              // If target cell is empty, just move there
-              const occupantId = Object.entries(next).find(
-                ([id, pos]) => id !== appId && pos.row === target.row && pos.col === target.col
-              )?.[0];
-              if (!occupantId) {
-                return { ...next, [appId]: target };
-              }
-              // Sort all icons by position (row-major) to get current linear order
-              const allIds = Object.keys(next).filter(id => id !== appId);
-              allIds.sort((a, b) => {
-                const pa = next[a], pb = next[b];
-                return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-              });
-              // Find where to insert based on target position
-              const targetLinear = target.row * GRID_COLS + target.col;
-              let insertIdx = allIds.findIndex(id => {
-                const p = next[id];
-                return p.row * GRID_COLS + p.col >= targetLinear;
-              });
-              if (insertIdx === -1) insertIdx = allIds.length;
-              // Insert the dragged icon into the sequence
-              allIds.splice(insertIdx, 0, appId);
-              // Find the grid bounds from current layout (use the centering offsets)
-              const minRow = Math.min(...Object.values(next).map(p => p.row));
-              const minCol = Math.min(...Object.values(next).map(p => p.col));
-              // Determine cols used in current layout
-              const maxCol = Math.max(...Object.values(next).map(p => p.col));
-              const layoutCols = maxCol - minCol + 1;
-              // Re-assign positions sequentially from the same starting offset
-              const positions: Record<string, { row: number; col: number }> = {};
-              allIds.forEach((id, i) => {
-                const col = i % layoutCols;
-                const row = Math.floor(i / layoutCols);
-                positions[id] = { row: row + minRow, col: col + minCol };
-              });
-              return positions;
-            });
+            // Single icon drop: the icon takes the dropped slot and everything
+            // else closes ranks around it. A drag therefore reorders the
+            // desktop rather than pinning one icon to an absolute cell — the
+            // grid has to stay dense and has to reflow when the window changes
+            // shape, and an absolute cell survives neither.
+            setIconPositions((prev) =>
+              moveIcon(appId, target, allIconIds, prev, iconGeometry, iconCanonicalOrder),
+            );
           }
         }
       }
@@ -990,7 +962,7 @@ function ChromeDesktopInner() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  }, [snapToGrid, isGridCellOccupied, selectedIcons, isMobile, mobileIconOrder, GRID_COLS]);
+  }, [snapToGrid, selectedIcons, isMobile, allIconIds, iconGeometry, iconCanonicalOrder]);
 
 
   // Update clock
@@ -1968,9 +1940,9 @@ function ChromeDesktopInner() {
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
       <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
-      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && mobileIconOrder ? `${(Math.floor((Object.keys(mobileIconOrder).length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
-        {installedAppDefs.map((app, i) => {
-          const pos = getIconPosition(app.id, i);
+      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && allIconIds.length > 0 ? `${(Math.floor((allIconIds.length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
+        {installedAppDefs.map((app) => {
+          const pos = getIconPosition(app.id);
           const isBeingDragged = draggingIcon === app.id;
           const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== app.id && selectedIcons.size > 1 && selectedIcons.has(app.id) && selectedIcons.has(draggingIcon);
           const isRecent = recentlyInstalled === app.id;
@@ -2030,9 +2002,9 @@ function ChromeDesktopInner() {
         })}
 
         {/* Built-in app desktop shortcuts */}
-        {desktopBuiltinApps.map((app, i) => {
+        {desktopBuiltinApps.map((app) => {
           const iconId = `desktop-${app.id}`;
-          const pos = getIconPosition(iconId, installedAppDefs.length + i);
+          const pos = getIconPosition(iconId);
           const isBeingDragged = draggingIcon === iconId;
           const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== iconId && selectedIcons.size > 1 && selectedIcons.has(iconId) && selectedIcons.has(draggingIcon);
           const isSelected = selectedIcons.has(iconId);
@@ -2089,7 +2061,7 @@ function ChromeDesktopInner() {
 
         {/* Ghost indicator for drop target */}
         {draggingIcon && dragGhost && (() => {
-          const isOccupied = Object.entries(iconPositions).some(
+          const isOccupied = Object.entries(iconLayout).some(
             ([id, pos]) => id !== draggingIcon && pos.row === dragGhost.row && pos.col === dragGhost.col
           );
           if (isOccupied) {

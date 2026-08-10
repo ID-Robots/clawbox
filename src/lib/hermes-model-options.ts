@@ -26,7 +26,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import {
   CLAWAI_PROVIDER,
   HERMES_AUTO_PROVIDER,
@@ -154,6 +154,11 @@ export function invalidateModelOptions(): void {
   cached = null;
   generation += 1;
   recommendedCache.clear();
+  // The `hermes config get` memo keys on config.yaml's mtime, so a `config set`
+  // already invalidates it. Clearing it here too costs nothing and means every
+  // path that changes the selection drops both caches together — a stale
+  // provider in the chat header is not worth being clever about.
+  invalidateHermesConfigCache();
 }
 
 // ── Dashboard shapes ─────────────────────────────────────────────────────────
@@ -393,18 +398,12 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
  *  `^\s*(?:default|model)\s*:` pattern matched the FIRST `model:` anywhere in
  *  the file, so it was order-dependent and wrong on some configs). */
 async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
-  const read = async (key: string): Promise<string> => {
-    try {
-      const r = await runHermesCli(["config", "get", key], { timeoutMs: 10_000 });
-      return r.code === 0 ? r.stdout.trim() : "";
-    } catch {
-      return "";
-    }
-  };
+  // Three CLI spawns at ~600 ms each; memoised against config.yaml's mtime so
+  // repeat reads (every chat open, every Settings visit) cost a stat.
   const [provider, model, reasoning] = await Promise.all([
-    read("model.provider"),
-    read("model.default"),
-    read("agent.reasoning_effort"),
+    hermesConfigGet("model.provider"),
+    hermesConfigGet("model.default"),
+    hermesConfigGet("agent.reasoning_effort"),
   ]);
   return {
     provider: isPlausibleHermesProviderId(provider) ? provider : "",

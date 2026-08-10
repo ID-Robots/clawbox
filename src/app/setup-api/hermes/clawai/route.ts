@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { get, setMany } from "@/lib/config-store";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { getActiveHarness } from "@/lib/harness";
 import {
   CLAWAI_PROVIDER,
@@ -51,13 +51,9 @@ export async function GET() {
 
   const [token, tierStored] = await Promise.all([readToken(), readStoredTier()]);
   const tier: ClawboxAiTier = tierStored ?? "flash";
-  let active = false;
-  try {
-    const r = await runHermesCli(["config", "get", "model.provider"], { timeoutMs: 10_000 });
-    active = r.code === 0 && r.stdout.trim() === CLAWAI_PROVIDER;
-  } catch {
-    // hermes missing → not active
-  }
+  // Memoised against config.yaml's mtime: this GET runs on every chat open and
+  // every Settings visit, and the CLI spawn behind it costs ~600 ms each time.
+  const active = (await hermesConfigGet("model.provider")) === CLAWAI_PROVIDER;
   return NextResponse.json({
     hasToken: Boolean(token),
     tier,

@@ -118,7 +118,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       if (errBytes > MAX_OUTPUT_BYTES) {
         cleanup();
         child.kill("SIGKILL");
-        reject(new Error(err.trim() || "Hermes error output exceeded the size limit"));
+        reject(new Error(errorFromStderr(err) || "Hermes error output exceeded the size limit"));
         return;
       }
       err += errDecoder.write(chunk);
@@ -150,9 +150,32 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       out += outDecoder.end();
       err += errDecoder.end();
       if (code === 0) resolve({ out: out.trim(), err });
-      else reject(new Error(err.trim() || `hermes exited with code ${code}`));
+      else reject(new Error(errorFromStderr(err) || `hermes exited with code ${code}`));
     });
   });
+}
+
+/**
+ * Turn `chat -q`'s stderr into something worth showing a person.
+ *
+ * The first thing on stderr is always the `session_id:` banner, so a failed run
+ * used to surface as "Error: session_id: 20260810_221825_609d1e" — the one line
+ * on the stream that says nothing about what went wrong. The actual cause sat
+ * on the next line: "HTTP 404: Model 'claude-opus-5' not found. The requested
+ * model does not exist in our configuration or OpenRouter catalog."
+ *
+ * So: drop the banner and anything else that is pure bookkeeping, and lead with
+ * the first line that names a failure — a stack trace's later frames are worse
+ * than useless in a chat bubble.
+ */
+function errorFromStderr(stderr: string): string {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/^session_id:/i.test(l) && !/^\s*(?:Traceback|File ")/.test(l));
+  if (!lines.length) return "";
+  const named = lines.find((l) => /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
+  return (named || lines[0]).slice(0, 400);
 }
 
 // Hermes session ids are timestamped slugs: 20260810_194609_7568b9. Strict on
