@@ -27,6 +27,7 @@ import fs from "fs/promises";
 import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
+import { get } from "@/lib/config-store";
 import {
   CLAWAI_PROVIDER,
   HERMES_AUTO_PROVIDER,
@@ -161,6 +162,23 @@ export function invalidateModelOptions(): void {
   invalidateHermesConfigCache();
 }
 
+/** Hermes' id for the on-device model, mirrored from hermes-local-ai.ts. It is
+ *  declared here rather than imported because that module imports this one. */
+const HERMES_LOCAL_PROVIDER = "clawlocal";
+
+/** The bare model id this device is configured to run locally, or "". Stored as
+ *  "llamacpp/gemma4-e2b-it-q4_0"; Hermes addresses it without the prefix. */
+async function configuredLocalModelId(): Promise<string> {
+  try {
+    const stored = await get("local_ai_model");
+    if (typeof stored !== "string") return "";
+    const bare = stored.split("/").pop() || "";
+    return isSafeModelId(bare) ? bare : "";
+  } catch {
+    return "";
+  }
+}
+
 // ── Dashboard shapes ─────────────────────────────────────────────────────────
 
 interface DashboardProviderRow {
@@ -232,7 +250,7 @@ export async function isMoaConfigured(): Promise<boolean> {
   }
 }
 
-function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
+function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesProviderRow | null {
   const id = asString(raw.slug);
   if (!isPlausibleHermesProviderId(id)) return null;
 
@@ -280,6 +298,17 @@ function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
     }
   }
 
+  // The local model is the same shape of problem, for a different reason: it
+  // runs on demand. When it is asleep — which is its normal resting state, and
+  // the point of standby — nothing answers /v1/models, so the row arrives
+  // authenticated with an empty list and the picker has nothing to offer. The
+  // id is not a guess here: it is the model this device is configured to run,
+  // read from our own config store by the caller.
+  if (id === HERMES_LOCAL_PROVIDER && localModelId && !seen.has(localModelId)) {
+    seen.add(localModelId);
+    models.push({ id: localModelId, description: "on-device" });
+  }
+
   const warning = asString(raw.warning);
   return {
     id,
@@ -289,7 +318,7 @@ function normalizeRow(raw: DashboardProviderRow): HermesProviderRow | null {
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
     // what we actually offer, so report the list we return.
-    total: id === CLAWAI_PROVIDER
+    total: id === CLAWAI_PROVIDER || id === HERMES_LOCAL_PROVIDER
       ? models.length
       : (typeof raw.total_models === "number" ? raw.total_models : models.length),
     models,
@@ -322,8 +351,9 @@ async function fetchFromDashboard(refresh: boolean): Promise<ModelOptionsPayload
 
   const providers: HermesProviderRow[] = [];
   const moaReady = await isMoaConfigured();
+  const localModelId = await configuredLocalModelId();
   for (const raw of body.providers) {
-    const row = normalizeRow((raw ?? {}) as DashboardProviderRow);
+    const row = normalizeRow((raw ?? {}) as DashboardProviderRow, localModelId);
     if (!row) continue;
     // Mixture of Agents is a VIRTUAL provider: the dashboard always reports it
     // as authenticated with a single placeholder model called "default",
