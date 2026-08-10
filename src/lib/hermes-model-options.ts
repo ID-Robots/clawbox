@@ -207,7 +207,7 @@ let moaCache: { mtimeMs: number; configured: boolean } | null = null;
  * only honest signal is whether a populated `moa:` block exists in config.yaml.
  * Cached by mtime: this is consulted on every catalogue build.
  */
-async function isMoaConfigured(): Promise<boolean> {
+export async function isMoaConfigured(): Promise<boolean> {
   try {
     const stat = await fs.stat(HERMES_CONFIG_PATH);
     if (moaCache && moaCache.mtimeMs === stat.mtimeMs) return moaCache.configured;

@@ -171,6 +171,7 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
+import { fetchHarness } from '@/lib/client-harness'
 
 // Hermes model ids are `vendor/model` slugs; the header's provider pill already
 // names the vendor, so the model pill drops it. Only the LAST segment is kept,
@@ -1551,8 +1552,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const controller = new AbortController()
     void (async () => {
       try {
-        const res = await fetch('/setup-api/harness/active', { cache: 'no-store', signal: controller.signal })
-        const data = await res.json()
+        const data = await fetchHarness({ signal: controller.signal })
         if (!controller.signal.aborted && data?.active === 'hermes') {
           harnessRef.current = 'hermes'
           setHarnessMode('hermes')

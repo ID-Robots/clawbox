@@ -379,6 +379,10 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: true },
     async ({ key }: { key?: string }) => {
+      // Preference VALUES are user-controlled free text (ui_user_name is a name
+      // box). They are returned as JSON, so a value containing newlines and
+      // markdown headings arrives escaped inside a string rather than as loose
+      // prose the model could read as instructions.
       const wanted = key ? [key] : [...READABLE_PREFS];
       const body = await apiGet<Record<string, unknown>>("/setup-api/preferences", {
         query: { keys: wanted.join(",") },

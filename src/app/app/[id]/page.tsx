@@ -39,13 +39,10 @@ export default function StandaloneAppPage() {
 
   useEffect(() => {
     let alive = true;
-    fetch("/setup-api/harness/active", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      // "unknown" rather than a guess: this route is reachable directly (a
-      // bookmark, "Open in new tab"), so falling back to "openclaw" rendered the
-      // whole OpenClaw App Store on a Hermes box whenever the probe failed.
-      .then((d) => { if (alive) setHarness(d?.active || "unknown"); })
-      .catch(() => { if (alive) setHarness("unknown"); });
+    // "unknown" rather than a guess: this route is reachable directly (a
+    // bookmark, "Open in new tab"), so falling back to "openclaw" rendered the
+    // whole OpenClaw App Store on a Hermes box whenever the probe failed.
+    void fetchHarness().then((d) => { if (alive) setHarness(d?.active || "unknown"); });
     return () => { alive = false; };
   }, []);
 

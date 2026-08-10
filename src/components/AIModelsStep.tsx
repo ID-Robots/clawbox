@@ -28,6 +28,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // Tier data + the ClawBox AI card/row/device-login now live in shared modules so
 // the Hermes provider panel renders the SAME experience instead of a lookalike.
 import {
@@ -464,16 +465,25 @@ export default function AIModelsStep({
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
   // Device edition — on a Hermes edition this step doesn't apply (Hermes manages
   // its own providers/models), so we show a short Hermes panel instead.
-  const [edition, setEdition] = useState<string | null>(null);
+  // Seeded from the process-wide cache so re-opening Settings (or moving
+  // between its sections) skips the skeleton entirely — the edition cannot
+  // change under a live page. The lazy initialiser reads null on the very first
+  // mount, which is what the server rendered, so hydration still matches.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
   useEffect(() => {
+    if (edition !== null) return;
     // /harness/active, not /harness/status: both carry `edition`, but status
     // also runs per-harness liveness probes (~500 ms of retry sleep here).
     // Whatever happens, `edition` always leaves null — so the loader below can
     // never become a permanent state.
-    fetch("/setup-api/harness/active", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setEdition(typeof d?.edition === "string" ? d.edition : "openclaw"))
-      .catch(() => setEdition("openclaw"));
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive) setEdition(d?.edition || "openclaw");
+    });
+    return () => { alive = false; };
+    // Runs once: `edition` is only read to skip a redundant fetch, and it never
+    // returns to null.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -1588,7 +1598,14 @@ export default function AIModelsStep({
   // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
   // provider config this step drives — render Hermes' own model/provider/key
   // config instead.
-  if (edition === "hermes") {
+  //
+  // EXCEPT when this step is scoped to the local model (Settings → Local AI).
+  // llama.cpp and Ollama run on the device and are configured through the
+  // local-ai routes, which are the same on both harnesses — so the Hermes panel
+  // has nothing to do with them. Handing it the local section replaced a single
+  // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
+  // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
+  if (edition === "hermes" && configureScope !== "local") {
     return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
   }
 

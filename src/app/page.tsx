@@ -306,8 +306,7 @@ function ChromeDesktopInner() {
     let alive = true;
     const load = async (attempt: number): Promise<void> => {
       try {
-        const r = await fetch("/setup-api/harness/active", { cache: "no-store" });
-        const d = r.ok ? await r.json() : null;
+        const d = await fetchHarness({ force: attempt > 0 });
         if (!alive) return;
         if (d?.active) { setActiveHarness(d.active); return; }
         throw new Error("no harness");

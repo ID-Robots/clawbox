@@ -71,9 +71,9 @@ export interface Registrar {
   list(): RegisteredToolInfo[];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- one wrapper
-// cannot express every tool's parsed-arg type; the zod shape validates at
-// runtime and each handler narrows its own destructure.
+// One wrapper cannot express every tool's parsed-arg type; the zod shape
+// validates at runtime and each handler narrows its own destructure.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
 
 function capResult(result: ToolResult, maxChars: number): ToolResult {

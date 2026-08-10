@@ -148,22 +148,28 @@ export function registerSkillTools(reg: Registrar): void {
 
   reg.tool(
     "skill_list",
-    "List the skills already installed on this device, with the short name each one is removed by. Call this before skill_install to avoid installing something twice, and before skill_uninstall to get the exact name. Skills without an origin came with the device and cannot be removed.",
+    "List the skills already installed on this device, with the short name each one is removed by. Call this before skill_install so you do not install something twice, and before skill_uninstall to get the exact name. Only skills marked \"from the store\" can be removed.",
     {},
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
       const body = await apiGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
-      // A device ships ~77 built-in skills, so this stays deliberately terse:
-      // name + category for every skill, and a flag only when it is unusual.
-      // The full record per skill would not fit a small model's context.
-      const skills = (body.skills ?? []).map((s) => ({
-        name: s.name,
-        category: s.category,
-        ...(s.origin && s.origin !== "builtin" ? { origin: s.origin } : {}),
-        ...(s.incompatible ? { works_here: false } : {}),
-        ...(s.enabled === false ? { enabled: false } : {}),
-      }));
-      return json({ counts: body.counts ?? { total: skills.length }, installed: skills });
+      // A device ships ~77 built-in skills. One terse line each — pretty-printed
+      // JSON of the full records is four times the size and no clearer, and this
+      // list has to fit a 4-8B model's context alongside everything else.
+      // Only the EXCEPTIONS are annotated. Repeating "built in" on all 77 rows
+      // is 2 KB of noise that says nothing.
+      const lines = (body.skills ?? []).map((s) => {
+        const marks: string[] = [];
+        if (s.origin && s.origin !== "builtin") marks.push("from the store");
+        if (s.incompatible) marks.push("cannot run here");
+        if (s.enabled === false) marks.push("disabled");
+        return `${s.name} (${s.category ?? "other"})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
+      });
+      const c = body.counts ?? {};
+      const header = `${c.total ?? lines.length} skills installed. `
+        + "Only the ones marked \"from the store\" can be removed with skill_uninstall; "
+        + "the rest came with the device.";
+      return text([header, ...lines].join("\n"));
     },
   );
 

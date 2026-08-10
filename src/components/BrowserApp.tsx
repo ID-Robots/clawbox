@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import ErrorWithFix from "./ErrorWithFix";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -31,16 +32,15 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   // on every device — wrong, and confusing, on a Hermes box where the OpenClaw
   // gateway isn't even installed. Defaults to OpenClaw (the native SKU) and is
   // corrected as soon as the device answers.
-  const [harnessLabel, setHarnessLabel] = useState("OpenClaw");
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
 
   useEffect(() => {
     let alive = true;
-    fetch("/setup-api/harness/active", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (alive && d?.active === "hermes") setHarnessLabel("Hermes");
-      })
-      .catch(() => { /* keep the default label */ });
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
     return () => { alive = false; };
   }, []);
   const [loading, setLoading] = useState(true);

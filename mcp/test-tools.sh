@@ -18,6 +18,11 @@ PASS=0
 FAIL=0
 SKIP=0
 
+# Which tools exist here is edition-dependent, so ask the device rather than
+# running every block and calling the absent half a failure.
+EDITION=$(bun mcp/clawbox-cli.ts edition 2>/dev/null || echo openclaw)
+[ "$EDITION" = "hermes" ] || EDITION=openclaw
+
 call_tool() {
   local name="$1" params="$2" expect="${3:-ok}"   # ok | error | <ERROR_CODE>
   local result
@@ -80,7 +85,7 @@ for line in sys.stdin:
 
 echo ""
 echo "═══════════════════════════════════════════"
-echo " ClawBox MCP smoke tests"
+echo " ClawBox MCP smoke tests — $EDITION edition"
 echo "═══════════════════════════════════════════"
 
 echo ""
@@ -98,8 +103,8 @@ call_tool "ui_open_app"     '{"app_id":"no-such-app-xyz"}' NOT_FOUND
 call_tool "preferences_set" '{"key":"ui_language","value":"klingon"}' BAD_ARGUMENT
 
 echo ""
+if [ "$EDITION" = "openclaw" ]; then
 echo "── SECURITY: every one of these must be BLOCKED_PATH ──"
-echo "   (skipped automatically on a Hermes device, where the file tools are not registered)"
 call_tool "read_file"       '{"file_path":"~/.ssh/id_rsa"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"~/.hermes/.env"}' BLOCKED_PATH
 call_tool "read_file"       '{"file_path":"data/.mcp-token"}' BLOCKED_PATH
@@ -115,7 +120,7 @@ call_tool "notebook_edit"   '{"notebook_path":"~/.hermes/x.ipynb","cell_index":0
 call_tool "web_fetch"       '{"url":"http://127.0.0.1/setup-api/system/info"}' BLOCKED_PATH
 
 echo ""
-echo "── File tools (OpenClaw edition) ──"
+echo "── File tools ──"
 call_tool "read_file"       '{"file_path":"package.json","limit":2}'
 call_tool "read_file"       '{"file_path":"/definitely/not/here"}' NOT_FOUND
 call_tool "write_file"      '{"file_path":"/tmp/mcp-smoke.txt","content":"line1\nline2\nline3"}'
@@ -127,18 +132,20 @@ call_tool "grep"            '{"pattern":"McpServer","path":"mcp","output_mode":"
 call_tool "grep"            '{"pattern":"ZZZNOMATCH","path":"mcp"}'
 
 echo ""
-echo "── Shell + background jobs (OpenClaw edition) ──"
+echo "── Shell + background jobs ──"
 call_tool "bash"            '{"command":"echo hello"}'
 call_tool "bash"            '{"command":"rm -rf /tmp/anything"}' DANGEROUS_COMMAND
 call_tool "job_status"      '{"job_id":"job-999"}' NOT_FOUND
+fi
 
-echo ""
-echo "── Hermes skills (Hermes edition) ──"
+if [ "$EDITION" = "hermes" ]; then
+echo "── Hermes skills and AI configuration ──"
 call_tool "skill_list"      '{}'
 call_tool "skill_search"    '{"query":"pdf","limit":3}'
 call_tool "skill_info"      '{"id":"not a valid id!!"}' BAD_ARGUMENT
 call_tool "skill_uninstall" '{"name":"official/pdf"}' BAD_ARGUMENT
 call_tool "ai_list_models"  '{}'
+fi
 
 echo ""
 echo "═══════════════════════════════════════════"
@@ -146,8 +153,6 @@ printf " Results: \033[32m%d passed\033[0m" "$PASS"
 [ "$FAIL" -gt 0 ] && printf ", \033[31m%d failed\033[0m" "$FAIL"
 [ "$SKIP" -gt 0 ] && printf ", \033[33m%d skipped/not-on-this-edition\033[0m" "$SKIP"
 echo ""
-echo " A tool that is not registered on this edition answers with an"
-echo " unknown-tool error and shows as ✗ — check it against the edition."
 echo "═══════════════════════════════════════════"
 
 rm -f /tmp/mcp-smoke.txt
