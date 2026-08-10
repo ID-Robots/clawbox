@@ -13,6 +13,7 @@ import {
 } from "@/lib/hermes-providers";
 import {
   hermesReasoningLevelsFor,
+  providerHasReasoningControl,
   isHermesReasoningLevel,
   isReasoningLevelAllowedFor,
 } from "@/lib/hermes-reasoning";
@@ -213,7 +214,7 @@ export async function POST(request: Request) {
 
   const rawModel = typeof body.model === "string" ? body.model.trim() : "";
   const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
-  const rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
+  let rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
   const rawSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (rawSessionId && !SESSION_ID_RE.test(rawSessionId)) {
     return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
@@ -274,7 +275,14 @@ export async function POST(request: Request) {
     // Verified: ClawBox AI answers `ultra` with HTTP 400 "reasoning_effort:
     // unknown". Refuse here with something actionable rather than spending the
     // turn to have the proxy refuse it.
-    if (
+    //
+    // A provider with NO dial at all is a different case and must not 400: the
+    // on-device model's backend ignores reasoning_effort entirely, so the level
+    // is meaningless rather than wrong. Failing the turn over a parameter that
+    // could not have changed anything would be gratuitous — drop it and answer.
+    if (rawReasoning && !providerHasReasoningControl(effectiveProvider)) {
+      rawReasoning = "";
+    } else if (
       rawReasoning
       && isHermesReasoningLevel(rawReasoning)
       && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning)

@@ -1911,23 +1911,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     popoverWidth={280}
                   />
                 )}
-                {/* Always shown: `hermes --reasoning` takes the same eight
-                    levels for every provider (verified against --help), so
-                    unlike the OpenClaw pill there is no off-only provider to
-                    hide it for. */}
-                <HeaderDropdown
-                  ariaLabel="Reasoning effort"
-                  value={hermesEffectiveReasoning}
-                  triggerLabel={`Thinking: ${HERMES_REASONING_LABELS[hermesEffectiveReasoning]}`}
-                  options={hermesReasoningOptions.map(level => ({
-                    id: level,
-                    label: HERMES_REASONING_LABELS[level],
-                  }))}
-                  onChange={changeHermesReasoning}
-                  onPointerDown={stopHeaderDrag}
-                  triggerMaxWidth={120}
-                  popoverWidth={180}
-                />
+                {/* `hermes --reasoning` takes the same eight levels for every
+                    provider, but the CLI accepting a level is not the same as
+                    the backend doing anything with it. The on-device model's
+                    server ignores unknown JSON keys, so all eight settings
+                    were identical there — a dial wired to nothing. Providers
+                    with no dial report an empty level list, and get no pill. */}
+                {hermesReasoningOptions.length > 0 && (
+                  <HeaderDropdown
+                    ariaLabel="Reasoning effort"
+                    value={hermesEffectiveReasoning}
+                    triggerLabel={`Thinking: ${HERMES_REASONING_LABELS[hermesEffectiveReasoning]}`}
+                    options={hermesReasoningOptions.map(level => ({
+                      id: level,
+                      label: HERMES_REASONING_LABELS[level],
+                    }))}
+                    onChange={changeHermesReasoning}
+                    onPointerDown={stopHeaderDrag}
+                    triggerMaxWidth={120}
+                    popoverWidth={180}
+                  />
+                )}
               </>
             ) : (
               <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
