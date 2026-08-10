@@ -1391,7 +1391,35 @@ step_captive_portal_dns() {
   echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
+# Strip the build machine's git identity out of the flashed image.
+#
+# A device image captures whatever was in ~/.gitconfig on the machine it was
+# built from, so every unit flashed from it shipped with a real person's name
+# and email baked in. Nothing on a device ever commits — the updater only
+# fetches, checks out and resets — so the identity has no purpose here and is
+# pure leakage.
+#
+# Unset rather than substitute: a placeholder identity is still an identity, and
+# git only complains about a missing one when something tries to commit, which
+# on a device would itself be a bug worth surfacing. Runs on update too, so
+# units already in the field are cleaned without a reflash.
+step_scrub_git_identity() {
+  local GITCONFIG="/home/$CLAWBOX_USER/.gitconfig"
+  [ -f "$GITCONFIG" ] || return 0
+  local HAD=""
+  git config --file "$GITCONFIG" --get user.email >/dev/null 2>&1 && HAD="yes"
+  git config --file "$GITCONFIG" --get user.name  >/dev/null 2>&1 && HAD="yes"
+  [ -n "$HAD" ] || return 0
+  git config --file "$GITCONFIG" --unset-all user.email 2>/dev/null || true
+  git config --file "$GITCONFIG" --unset-all user.name  2>/dev/null || true
+  # `--unset-all` can leave an empty [user] section behind; harmless, but tidy.
+  git config --file "$GITCONFIG" --remove-section user 2>/dev/null || true
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$GITCONFIG" 2>/dev/null || true
+  echo "  Removed the build machine's git identity from $GITCONFIG"
+}
+
 step_directories_permissions() {
+  step_scrub_git_identity
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
   find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
@@ -1602,6 +1630,9 @@ step_post_update() {
   # SKU correctly instead of silently defaulting to openclaw. It also re-asserts
   # the Hermes gateway removal, which an older update could have undone.
   step_edition_lock || echo "  Warning: edition_lock step failed (non-fatal)"
+  # Units flashed from an image that carried the build machine's git identity
+  # only get cleaned if the updater does it — they will never be reflashed.
+  step_scrub_git_identity || echo "  Warning: scrub_git_identity step failed (non-fatal)"
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
