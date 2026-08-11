@@ -17,8 +17,8 @@ import { useModalDialog } from "@/hooks/useModalDialog";
  * nothing looking wrong.
  */
 
-function Harness({ open }: { open: boolean }) {
-  const panelRef = useModalDialog<HTMLDivElement>({ open, onClose: () => {} });
+function Harness({ open, onClose = () => {} }: { open: boolean; onClose?: () => void }) {
+  const panelRef = useModalDialog<HTMLDivElement>({ open, onClose });
   return (
     <div>
       <button type="button">background control</button>
@@ -41,7 +41,7 @@ function ToggleHarness() {
       <button type="button" onClick={() => setOpen(true)}>
         open it
       </button>
-      <Harness open={open} />
+      <Harness open={open} onClose={() => setOpen(false)} />
     </div>
   );
 }
@@ -70,7 +70,14 @@ describe("useModalDialog — background inerting", () => {
     expect(screen.queryByRole("button", { name: "background control" })).toBeNull();
     expect(document.querySelectorAll("[inert]").length).toBeGreaterThan(0);
 
+    // Escape really closes here — `onClose` flips the state — so this also
+    // asserts the marking is handed back rather than left on the page.
     fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "background control" })).toBeInTheDocument();
+    expect(document.querySelectorAll("[inert]")).toHaveLength(0);
+    expect(document.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
   });
 
   it("never marks the dialog's own subtree", () => {
