@@ -94,6 +94,41 @@ describe("focusableWithin", () => {
     expect(focusableWithin(host).map((el) => el.id)).toEqual(["empty", "true", "plaintext"]);
   });
 
+  it("keeps elements where `disabled` has no meaning in HTML", () => {
+    // `disabled` does nothing on a link or a plain div — both stay focusable,
+    // so dropping them would put the trap's wrap boundary in the wrong place.
+    const host = mount(`
+      <a id="link" href="#x" disabled>still focusable</a>
+      <div id="tabbable" tabindex="0" disabled>still focusable</div>
+      <button id="realControl" disabled>not focusable</button>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["link", "tabbable"]);
+  });
+
+  it("keeps a focusable control that merely turns editing off", () => {
+    // `contenteditable="false"` removes the editing affordance, not focus.
+    const host = mount(`
+      <button id="button" contenteditable="false">ok</button>
+      <div id="plainDiv" contenteditable="false">no</div>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["button"]);
+  });
+
+  it("returns tab order, not DOM order, when a positive tabindex is present", () => {
+    // Positive tabindex is visited first and ascending. The trap uses the
+    // first and last entries as its wrap boundaries, so a DOM-ordered list
+    // here would let Tab escape the dialog at the wrong end.
+    const host = mount(`
+      <button id="natural">natural</button>
+      <button id="second" tabindex="2">second</button>
+      <button id="first" tabindex="1">first</button>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["first", "second", "natural"]);
+  });
+
   it("skips anything inside an inert, hidden, or aria-hidden subtree", () => {
     const host = mount(`
       <button id="ok">ok</button>

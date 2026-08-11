@@ -53,16 +53,23 @@ const FOCUSABLE_SELECTOR = [
  * `checkVisibility` is the one the component tests do not run in.
  */
 export function focusableWithin(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
-    // `:disabled` also catches a control disabled by an ancestor <fieldset>,
-    // which the attribute check alone misses.
-    if (el.hasAttribute("disabled") || el.matches(":disabled")) return false;
+  const candidates = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
+    // `:disabled` is the EFFECTIVE state — it covers a control disabled by an
+    // ancestor <fieldset>, and equally it does not fire for `<a href disabled>`
+    // or `<div tabindex="0" disabled>`, where HTML gives the attribute no
+    // meaning and the element stays focusable. Testing the raw attribute would
+    // wrongly drop those.
+    if (el.matches(":disabled")) return false;
     // Any negative tabindex is out of the tab order, not just -1.
     if (el.hasAttribute("tabindex") && el.tabIndex < 0) return false;
     // `contenteditable` is editable at "", "true" and "plaintext-only"; only an
     // explicit "false" opts out. Read from the attribute rather than
     // `isContentEditable`, which jsdom does not implement.
-    if (el.hasAttribute("contenteditable")) {
+    //
+    // "false" removes only the EDITING affordance, so it disqualifies an
+    // element that had nothing else going for it — never a button, link or
+    // anything explicitly tabbable, all of which report tabIndex >= 0.
+    if (el.hasAttribute("contenteditable") && el.tabIndex < 0) {
       const mode = (el.getAttribute("contenteditable") || "").toLowerCase();
       if (mode === "false") return false;
     }
@@ -83,6 +90,17 @@ export function focusableWithin(container: HTMLElement): HTMLElement[] {
       return false;
     }
     return true;
+  });
+
+  // Put the list in TAB order, which is not DOM order when a positive tabindex
+  // is present: those are visited first, ascending, before everything at 0.
+  // The trap treats the first and last entries as its wrap boundaries, so a
+  // DOM-ordered list would put the boundaries in the wrong place and let Tab
+  // walk straight out of the dialog. Sort is stable, so ties keep DOM order.
+  return candidates.sort((a, b) => {
+    const ai = a.tabIndex > 0 ? a.tabIndex : Number.MAX_SAFE_INTEGER;
+    const bi = b.tabIndex > 0 ? b.tabIndex : Number.MAX_SAFE_INTEGER;
+    return ai - bi;
   });
 }
 
