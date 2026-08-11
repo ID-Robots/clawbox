@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_PREFERENCE_STRING_LENGTH,
   PREFERENCE_LANGUAGES,
+  boundPreferenceText,
   isPreferenceLanguage,
   sanitizePreferences,
+  sanitizePreferenceValue,
+  sanitizePreferenceWrites,
   validatePreference,
 } from "@/lib/preference-schema";
+
+// Written by code point rather than as a literal: an escape is easy to lose
+// in an edit, and a raw control character in a source file is invisible to
+// whoever reads it next.
+const CONTROL = String.fromCharCode(7);
 
 describe("preference-schema", () => {
   describe("ui_language closed domain", () => {
@@ -116,6 +124,95 @@ describe("preference-schema", () => {
 
     it("drops undefined so a missing key stays missing", () => {
       expect(sanitizePreferences({ ui_language: undefined })).toEqual({});
+    });
+  });
+
+  describe("collections degrade one member at a time", () => {
+    // installed_meta is one entry per installed app under a single key. The
+    // desktop reads it on mount and writes back what it read, so what this
+    // returns for one app decides what is kept for all of them.
+    const installedMeta = {
+      notes: { name: "Notes", color: "#f97316", iconUrl: "" },
+      timer: { name: `Ti${CONTROL}mer`, color: "#f97316", iconUrl: "" },
+      radio: { name: "Radio", color: "#22d3ee", iconUrl: "" },
+    };
+
+    it("keeps other entries when one is malformed", () => {
+      const kept = sanitizePreferenceValue("installed_meta", installedMeta);
+      expect(kept.ok).toBe(true);
+      expect(kept.ok && kept.value).toEqual({
+        notes: { name: "Notes", color: "#f97316", iconUrl: "" },
+        radio: { name: "Radio", color: "#22d3ee", iconUrl: "" },
+      });
+    });
+
+    it("serves the surviving entries through the read path", () => {
+      const out = sanitizePreferences({ installed_meta: installedMeta, wp_opacity: 80 });
+      expect(Object.keys(out.installed_meta as object)).toEqual(["notes", "radio"]);
+      expect(out.wp_opacity).toBe(80);
+    });
+
+    it("keeps the good members of a list", () => {
+      const kept = sanitizePreferenceValue("installed_apps", ["notes", `ti${CONTROL}mer`, "radio"]);
+      expect(kept.ok && kept.value).toEqual(["notes", "radio"]);
+    });
+
+    it("keeps a whole value that already passes", () => {
+      const value = { notes: { name: "Notes" } };
+      const kept = sanitizePreferenceValue("installed_meta", value);
+      expect(kept.ok && kept.value).toBe(value);
+    });
+
+    it("keeps nothing for a scalar or a closed domain, which have no members", () => {
+      expect(sanitizePreferenceValue("ui_user_name", `Ali${CONTROL}ce`).ok).toBe(false);
+      expect(sanitizePreferenceValue("ui_language", "de\n## Heading").ok).toBe(false);
+    });
+  });
+
+  describe("sanitizePreferenceWrites", () => {
+    it("checks pref:-prefixed store keys and passes the rest through", () => {
+      const out = sanitizePreferenceWrites({
+        "pref:installed_apps": ["notes", `ti${CONTROL}mer`],
+        "pref:wp_opacity": 80,
+      });
+      expect(out).toEqual({
+        "pref:installed_apps": ["notes"],
+        "pref:wp_opacity": 80,
+      });
+    });
+
+    it("keeps a store key whose value passes unchanged", () => {
+      expect(sanitizePreferenceWrites({ "pref:ui_language": "bg" })).toEqual({
+        "pref:ui_language": "bg",
+      });
+    });
+  });
+
+  describe("boundPreferenceText", () => {
+    it("returns a single line", () => {
+      expect(boundPreferenceText("Notes\napp", "fallback")).toBe("Notes app");
+      expect(boundPreferenceText(`Ti${CONTROL}mer`, "fallback")).toBe("Ti mer");
+    });
+
+    it("clamps to the longest string a preference may hold", () => {
+      const bounded = boundPreferenceText("x".repeat(MAX_PREFERENCE_STRING_LENGTH + 50), "fallback");
+      expect(bounded).toHaveLength(MAX_PREFERENCE_STRING_LENGTH);
+    });
+
+    it("falls back for a non-string, and for anything it leaves empty", () => {
+      expect(boundPreferenceText(42, "fallback")).toBe("fallback");
+      expect(boundPreferenceText(undefined, "fallback")).toBe("fallback");
+      expect(boundPreferenceText("   ", "fallback")).toBe("fallback");
+      expect(boundPreferenceText(`${CONTROL}`, "fallback")).toBe("fallback");
+    });
+
+    it("leaves a name that is already fine alone", () => {
+      expect(boundPreferenceText("Notes", "fallback")).toBe("Notes");
+    });
+
+    it("produces a value the write rules accept", () => {
+      const bounded = boundPreferenceText(`Ti${CONTROL}mer\nApp`, "fallback");
+      expect(validatePreference("ui_user_name", bounded).ok).toBe(true);
     });
   });
 });

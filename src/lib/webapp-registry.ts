@@ -1,4 +1,5 @@
 import { getAll, setMany } from "@/lib/config-store";
+import { boundPreferenceText, sanitizePreferenceWrites } from "@/lib/preference-schema";
 
 interface InstalledMeta {
   name: string;
@@ -33,12 +34,17 @@ export async function registerWebappInPreferences(
   const installedMeta = (prefs["pref:installed_meta"] as Record<string, InstalledMeta> | undefined) ?? {};
   const hiddenInstalled = (prefs["pref:hidden_installed"] as string[] | undefined) ?? [];
 
-  await setMany({
+  // This writes to the config store directly rather than through
+  // POST /setup-api/preferences, so the preference rules are applied here: the
+  // label is bounded before it goes in, and the whole update — including the
+  // entries carried over from the read above — goes through the same check the
+  // route applies. See src/lib/preference-schema.ts.
+  const updates = sanitizePreferenceWrites({
     "pref:installed_apps": installedApps.includes(appId) ? installedApps : [...installedApps, appId],
     "pref:installed_meta": {
       ...installedMeta,
       [appId]: {
-        name,
+        name: boundPreferenceText(name, appId),
         color: opts.color || "#f97316",
         iconUrl: opts.iconUrl || "",
         webappUrl: opts.webappUrl || `/setup-api/webapps?app=${appId}`,
@@ -47,4 +53,5 @@ export async function registerWebappInPreferences(
     // A freshly (re)created app shouldn't stay hidden.
     "pref:hidden_installed": hiddenInstalled.filter((id) => id !== appId),
   });
+  if (Object.keys(updates).length > 0) await setMany(updates);
 }

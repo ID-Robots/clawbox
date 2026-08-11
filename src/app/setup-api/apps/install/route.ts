@@ -7,6 +7,7 @@ import path from "path";
 import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
+import { boundPreferenceText, sanitizePreferenceWrites } from "@/lib/preference-schema";
 
 const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
@@ -39,8 +40,9 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
   // in the POST handler failed. Matches what AppStore.tsx's apiToStoreApp
   // stores for UI-initiated installs, so both paths produce identical meta.
   const remoteIconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
+  // The name ends up in a stored preference, so bound it to what one may hold.
   const fallback: InstalledMeta = {
-    name: titleCaseFromSlug(appId),
+    name: boundPreferenceText(titleCaseFromSlug(appId), appId),
     color: DEFAULT_CATEGORY_COLOR,
     iconUrl: remoteIconUrl,
   };
@@ -61,7 +63,7 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
       ? CATEGORY_COLORS[category]
       : DEFAULT_CATEGORY_COLOR;
     return {
-      name: match.name ?? fallback.name,
+      name: boundPreferenceText(match.name, fallback.name),
       color,
       iconUrl: remoteIconUrl,
     };
@@ -169,8 +171,13 @@ async function syncInstalledPreferences(appId: string): Promise<string | undefin
     if (!alreadyListed) {
       nextUpdates["pref:installed_apps"] = [...list, appId];
     }
-    if (Object.keys(nextUpdates).length > 0) {
-      await configSetMany(nextUpdates);
+    // This writes to the config store directly rather than through
+    // POST /setup-api/preferences, so the preference rules are applied here.
+    // The check covers the entries carried over from the read above as well as
+    // the one being added. See src/lib/preference-schema.ts.
+    const checkedUpdates = sanitizePreferenceWrites(nextUpdates);
+    if (Object.keys(checkedUpdates).length > 0) {
+      await configSetMany(checkedUpdates);
     }
     return undefined;
   } catch (err) {
