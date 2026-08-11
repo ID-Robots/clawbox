@@ -142,19 +142,37 @@ export function stripTagsToFixedPoint(text: string): string {
 }
 
 /** Crude but dependency-free HTML → readable text. */
+/**
+ * Remove a raw-text element and everything inside it.
+ *
+ * The end tag is `</name` followed by anything up to the first ">", because an
+ * end tag may legally carry attribute-like text — `</script foo="bar">` closes
+ * the element just as `</script>` does, and a pattern anchored on `>` alone
+ * walks past it and leaves the whole body in the text handed to the model.
+ * Requiring whitespace or ">" after the name keeps `</scriptish>` from matching.
+ *
+ * Applied to a fixed point: removing one element can splice the text on either
+ * side into a new opening tag, so a single pass is not enough.
+ */
+function stripRawTextElement(text: string, name: string): string {
+  const paired = new RegExp(`<${name}\\b[\\s\\S]*?</${name}(?:\\s[^>]*)?>`, "gi");
+  let prev: string;
+  let out = text;
+  do {
+    prev = out;
+    out = out.replace(paired, "");
+  } while (out !== prev);
+  // An UNCLOSED element (truncated page, or deliberately so) never matches the
+  // pair above; drop from the opening tag to the end rather than letting the
+  // body through as prose.
+  return out.replace(new RegExp(`<${name}\\b[\\s\\S]*$`, "i"), "");
+}
+
 export function htmlToText(html: string): string {
   let text = html;
-  // `\s*` before the closing ">" because `</script >` is a valid end tag that a
-  // bare `</script>` pattern walks straight past, leaving the whole script body
-  // in the text handed to the model. `\b` keeps `<scriptish>` from matching.
-  text = text.replace(/<script\b[\s\S]*?<\/script\s*>/gi, "");
-  text = text.replace(/<style\b[\s\S]*?<\/style\s*>/gi, "");
-  text = text.replace(/<noscript\b[\s\S]*?<\/noscript\s*>/gi, "");
-  // An UNCLOSED script/style (truncated page, or deliberately so) never matches
-  // the pairs above; drop from the opening tag to the end rather than letting
-  // the body through as prose.
-  text = text.replace(/<script\b[\s\S]*$/gi, "");
-  text = text.replace(/<style\b[\s\S]*$/gi, "");
+  text = stripRawTextElement(text, "script");
+  text = stripRawTextElement(text, "style");
+  text = stripRawTextElement(text, "noscript");
   text = text.replace(/<\/(p|div|h[1-6]|li|tr|blockquote|pre|section|article|header|footer|nav|main)>/gi, "\n");
   text = text.replace(/<br\s*\/?>/gi, "\n");
   text = text.replace(/<hr\s*\/?>/gi, "\n---\n");
