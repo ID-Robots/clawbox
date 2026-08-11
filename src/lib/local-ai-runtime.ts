@@ -1,6 +1,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startLlamaCppServer, stopLlamaCppServer } from "@/instrumentation-node";
+import { terminateByArgv } from "@/lib/process-match";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import {
   getLlamaCppLaunchSpec,
@@ -262,20 +263,31 @@ export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<voi
   }
 }
 
+/** argv[0] of the ollama server, whatever path it was installed at. */
+function isOllamaExecutable(argv0: string): boolean {
+  return argv0.trim().replace(/ \(deleted\)$/, "").split("/").pop() === "ollama";
+}
+
 async function stopOllama(): Promise<void> {
   try {
     await execFile("/usr/bin/systemctl", ["stop", "ollama"], { timeout: 30_000 });
     return;
   } catch {
-    const pgrep = await execFile("pgrep", ["-f", "ollama serve"], { timeout: 5_000 }).catch(() => null);
-    const pids = pgrep?.stdout?.trim().split("\n").filter(Boolean) ?? [];
-    for (const pid of pids) {
-      try {
-        process.kill(Number(pid), "SIGTERM");
-      } catch {
-        // Best effort.
-      }
-    }
+    // Was `pgrep -f "ollama serve"`, then SIGTERM to every hit. `-f` matches
+    // the pattern anywhere in a process's full argv, and on this device a chat
+    // turn runs as `hermes chat -q <the user's message>` — so a message
+    // containing the words "ollama serve" put that text in a live process's
+    // argv and this fallback terminated the turn. Same defect as the browser's
+    // pkill, reachable from the local-AI stop endpoint and from the idle-stop
+    // timer firing mid-turn.
+    //
+    // Select on the executable instead: argv[0] must BE ollama, and `serve`
+    // must be its subcommand. That is both safe and more precise than the
+    // substring match it replaces.
+    await terminateByArgv(
+      (argv) => isOllamaExecutable(argv[0]) && argv[1] === "serve",
+      isOllamaExecutable,
+    );
   }
 }
 

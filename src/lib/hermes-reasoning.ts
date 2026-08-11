@@ -71,25 +71,134 @@ const UNSUPPORTED_BY_PROVIDER: Record<string, readonly HermesReasoningLevel[]> =
 };
 
 /**
- * Providers with NO reasoning control at all — a different thing from a
- * provider that rejects some levels.
+ * REVERSAL, recorded because the evidence for it was expensive.
  *
- * VERIFIED on-device against the on-device model (gemma4-e2b-it-q4_0 on
- * llama.cpp, through our local-ai proxy). All eight levels returned 0,
- * including `ultra`, which ClawBox AI rejects outright — accepting everything
- * is the signature of a backend that never reads the field. Confirmed by
- * posting `reasoning_effort: "banana"` and then an entirely invented field
- * name: both answered HTTP 200 with a response byte-identical to sending no
- * field at all. llama.cpp's OpenAI-compatible server ignores unknown JSON keys.
+ * `clawlocal` used to be listed here as a provider with NO reasoning control,
+ * and that was correct on its own terms: llama.cpp's OpenAI-compatible server
+ * ignores `reasoning_effort` entirely, so all eight levels did the same nothing
+ * and the honest UI was no control at all. That finding STILL HOLDS —
+ * `reasoning_effort` is still inert.
  *
- * So the picker was offering eight settings that all did the same nothing —
- * worse than a rejection, which at least tells the customer. An empty list
- * means "hide the control", not "no levels allowed".
+ * It was simply the wrong question. The backend does take a thinking switch; it
+ * is spelled `chat_template_kwargs.enable_thinking`, and it works per request
+ * on a running server. See LOCAL_REASONING_LEVELS below, and
+ * src/lib/local-ai-thinking.ts for the translation.
  *
- * Note this is about the EFFORT DIAL, not about thinking: the model does emit
- * `reasoning_content`. There is simply no knob to turn.
+ * The "no control at all" shape therefore has no members today, and the empty
+ * container that used to express it is gone rather than left as a branch that
+ * can never be taken. A provider that genuinely has no dial can still be
+ * expressed — return an empty level list from hermesReasoningLevelsFor; the
+ * callers already treat that as "hide the control".
  */
-const NO_REASONING_CONTROL: ReadonlySet<string> = new Set(['clawlocal']);
+
+/**
+ * The on-device model's thinking switch, expressed in the CLI's vocabulary.
+ *
+ * TWO states, not eight, and not a graded Low/Medium/High — because two is
+ * what the backend actually has. VERIFIED against the shipped llama-server
+ * (version 1 (db7d8b2)) with the server running `--reasoning off`:
+ *
+ *   chat_template_kwargs.enable_thinking=false →   0 reasoning chars,   4 tok,  207 ms
+ *   chat_template_kwargs.enable_thinking=true  → 703 reasoning chars, 253 tok, 8416 ms
+ *
+ * Both directions work without restarting llama-server. The graded middle does
+ * not exist: `--reasoning-budget` is a launch flag and is NOT honoured per
+ * request (budget 64 → 371 reasoning chars, budget 0 → 518 — noise, not
+ * enforcement). Offering Low/Medium/High would put back exactly the failure
+ * this list was created to remove: settings that all do the same thing.
+ *
+ * `minimal` and `max` are chosen from HERMES_REASONING_LEVELS as the two ends
+ * so the value reaching `hermes --reasoning` stays inside the CLI's own
+ * vocabulary; the proxy maps them onto the boolean. `none` is deliberately not
+ * the off value — it reads as "no reasoning at all" in other providers'
+ * pickers, and this switch controls thinking, not the answer.
+ */
+export const LOCAL_REASONING_LEVELS: readonly HermesReasoningLevel[] = ['minimal', 'max'];
+
+/**
+ * The level that means "don't think". Named rather than positional: every
+ * caller needs to know which END of the pair it is holding, and deriving that
+ * from a position (`levels[0]`, or the UI's `levels[levels.length - 1]`)
+ * silently inverts the moment anyone reorders the array — labels would still
+ * look right while the "much slower" hint attached to the fast option.
+ */
+const THINKING_OFF_LEVEL: HermesReasoningLevel = 'minimal';
+
+/**
+ * The on-device model's provider id. Mirrors HERMES_LOCAL_PROVIDER in
+ * hermes-local-ai.ts, which cannot be imported here: that module pulls in the
+ * Hermes CLI and the config store, and this one is bundled into the browser.
+ */
+export const HERMES_LOCAL_REASONING_PROVIDER = 'clawlocal';
+
+/** Providers whose reasoning control is a two-state thinking switch. */
+const BINARY_REASONING_CONTROL: ReadonlyMap<string, readonly HermesReasoningLevel[]> = new Map([
+  [HERMES_LOCAL_REASONING_PROVIDER, LOCAL_REASONING_LEVELS],
+]);
+
+/** The two levels of a switch-style provider, or null for an effort scale. */
+function binaryLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] | null {
+  return BINARY_REASONING_CONTROL.get((provider || '').trim()) ?? null;
+}
+
+/** True when this provider's dial is a thinking switch rather than an effort scale. */
+export function providerHasBinaryReasoning(provider: string | null | undefined): boolean {
+  return binaryLevelsFor(provider) !== null;
+}
+
+/**
+ * Whether this level means "think" on a two-state provider.
+ *
+ * The single definition of the switch's direction. The UI's cost hint and the
+ * proxy's boolean must not each decide this for themselves — see
+ * THINKING_OFF_LEVEL.
+ */
+export function isThinkingOnLevel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): boolean {
+  return binaryLevelsFor(provider) !== null && level !== THINKING_OFF_LEVEL;
+}
+
+/**
+ * Labels for a two-state provider, or null when it uses the effort scale.
+ *
+ * `menu` is the open dropdown; `pill` is the closed trigger, where the header's
+ * width budget binds (three labels share ~168px) and the brain glyph already
+ * says which dial it is. "Minimal"/"Max" appear in neither — they are scale
+ * points borrowed to carry a boolean, and a customer reading them would
+ * reasonably expect a Medium to exist.
+ */
+const BINARY_LABELS = {
+  menu: { off: 'Thinking off', on: 'Thinking on' },
+  pill: { off: 'Off', on: 'On' },
+} as const;
+
+function binaryLabel(
+  surface: keyof typeof BINARY_LABELS,
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  if (!providerHasBinaryReasoning(provider)) return null;
+  const labels = BINARY_LABELS[surface];
+  return isThinkingOnLevel(provider, level) ? labels.on : labels.off;
+}
+
+/** The label a two-state provider shows for a level in the OPEN menu. */
+export function binaryReasoningLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  return binaryLabel('menu', provider, level);
+}
+
+/** The same value for the closed PILL, which has far less room. */
+export function binaryReasoningTriggerLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  return binaryLabel('pill', provider, level);
+}
 
 /**
  * The levels this provider will actually accept. Unknown provider → all.
@@ -98,7 +207,8 @@ const NO_REASONING_CONTROL: ReadonlySet<string> = new Set(['clawlocal']);
  */
 export function hermesReasoningLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] {
   const id = (provider || '').trim();
-  if (NO_REASONING_CONTROL.has(id)) return [];
+  const binary = BINARY_REASONING_CONTROL.get(id);
+  if (binary) return binary;
   const blocked = UNSUPPORTED_BY_PROVIDER[id];
   if (!blocked || blocked.length === 0) return HERMES_REASONING_LEVELS;
   return HERMES_REASONING_LEVELS.filter((level) => !blocked.includes(level));
@@ -135,5 +245,10 @@ export function clampReasoningForProvider(
     const candidate = HERMES_REASONING_LEVELS[i];
     if (allowed.includes(candidate)) return candidate;
   }
-  return allowed[allowed.length - 1] ?? HERMES_REASONING_DEFAULT;
+  // Nothing at or below the requested level is allowed, so the walk found no
+  // candidate — only reachable when the request sat BELOW everything on offer.
+  // Land on the lowest allowed level, keeping the same "never silently raise
+  // effort" rule as the walk itself: asking for `none` on a two-state provider
+  // must give thinking OFF, not the far end of the switch.
+  return allowed[0] ?? HERMES_REASONING_DEFAULT;
 }

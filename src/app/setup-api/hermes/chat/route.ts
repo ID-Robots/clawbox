@@ -12,7 +12,9 @@ import {
   isSafeHermesModelId,
 } from "@/lib/hermes-providers";
 import {
+  clampReasoningForProvider,
   hermesReasoningLevelsFor,
+  providerHasBinaryReasoning,
   providerHasReasoningControl,
   isHermesReasoningLevel,
   isReasoningLevelAllowedFor,
@@ -151,7 +153,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       out += outDecoder.end();
       err += errDecoder.end();
       if (code === 0) resolve({ out: out.trim(), err });
-      else reject(new Error(hermesFailureMessage(out, err) || `hermes exited with code ${code}`));
+      else reject(new Error(hermesExitMessage(code, out, err)));
     });
   });
 }
@@ -200,9 +202,67 @@ function hermesFailureMessage(stdout: string, stderr: string): string {
   return errorFromStderr(stderr) || (usefulLines(stdout)[0] ?? "");
 }
 
+/**
+ * The exit code `hermes chat -q` uses when a turn is cut short by a signal.
+ *
+ * It looks like the shell's 128+SIGINT convention, and that reading is wrong in
+ * a way that matters. Hermes installs ONE handler for SIGINT, SIGTERM and
+ * SIGHUP whose last act is to raise KeyboardInterrupt; the `-q` path catches
+ * that around the turn and calls `sys.exit(130)` explicitly. So:
+ *
+ *   - the code is numeric rather than null (a signal-KILLED child reports
+ *     `code === null`), which is why this arrives here at all rather than
+ *     through the abort path; and
+ *   - 130 does NOT identify which signal arrived. All three produce it, and the
+ *     child leaves nothing behind to tell them apart.
+ *
+ * Verified on-device by injecting each signal into a live turn: every one gave
+ * exit 130, an EMPTY stdout, and a stderr holding only the `session_id:`
+ * banner. That is precisely the input `hermesFailureMessage` cannot work with —
+ * the banner is stripped as bookkeeping, nothing else is there, and the turn
+ * used to surface as the bare "hermes exited with code 130".
+ */
+const HERMES_INTERRUPTED_EXIT_CODE = 130;
+
+/**
+ * What to tell a customer whose turn was cut short.
+ *
+ * Deliberately says "interrupted", never "cancelled" or "you stopped it": the
+ * signal's identity is unrecoverable (see above), so naming a cause we cannot
+ * know would be a guess dressed as a diagnosis. A user-initiated Stop does not
+ * reach this path at all — that aborts the request, kills the child with
+ * SIGKILL, and returns 499.
+ *
+ * The most common cause on a real device is the web server restarting (an
+ * update, or a service restart) while the model was still answering: the
+ * harness is a child of that server, so it goes down with it. Hence the
+ * reassurance — the message itself is safe, and re-sending is the fix.
+ */
+function interruptedTurnMessage(): string {
+  return "The assistant was interrupted before it could answer — this usually means "
+    + "the device restarted a service while the model was still working. "
+    + "Your message was not lost: send it again.";
+}
+
+/**
+ * The error text for a non-zero exit, preferring whatever the process actually
+ * said and falling back to a named cause instead of a raw exit code.
+ */
+function hermesExitMessage(code: number | null, stdout: string, stderr: string): string {
+  const reported = hermesFailureMessage(stdout, stderr);
+  if (reported) return reported;
+  if (code === HERMES_INTERRUPTED_EXIT_CODE) return interruptedTurnMessage();
+  return `hermes exited with code ${code}`;
+}
+
 /** Exported for tests only — these are pure string helpers, and the failure
  *  they guard was only visible in the exact stdout/stderr split below. */
-export const __test = { hermesFailureMessage, errorFromStderr };
+export const __test = {
+  hermesFailureMessage,
+  errorFromStderr,
+  hermesExitMessage,
+  HERMES_INTERRUPTED_EXIT_CODE,
+};
 
 // Hermes session ids are timestamped slugs: 20260810_194609_7568b9. Strict on
 // purpose — this value reaches argv, and anything looser could smuggle a flag.
@@ -301,12 +361,24 @@ export async function POST(request: Request) {
     // unknown". Refuse here with something actionable rather than spending the
     // turn to have the proxy refuse it.
     //
-    // A provider with NO dial at all is a different case and must not 400: the
-    // on-device model's backend ignores reasoning_effort entirely, so the level
-    // is meaningless rather than wrong. Failing the turn over a parameter that
-    // could not have changed anything would be gratuitous — drop it and answer.
+    // A provider with NO dial at all is a different case and must not 400: a
+    // backend that never reads the field makes the level meaningless rather
+    // than wrong. Failing the turn over a parameter that could not have changed
+    // anything would be gratuitous — drop it and answer.
+    //
+    // A TWO-STATE provider (the on-device model: thinking on or off, nothing in
+    // between) is a third case. Its two levels stand for the ends of a switch,
+    // so a level from the middle of the scale is still answerable — the proxy
+    // maps every level onto the boolean. A client holding a stale preference
+    // must not get a failed turn for it; clamp to the nearest end instead.
     if (rawReasoning && !providerHasReasoningControl(effectiveProvider)) {
       rawReasoning = "";
+    } else if (
+      rawReasoning
+      && isHermesReasoningLevel(rawReasoning)
+      && providerHasBinaryReasoning(effectiveProvider)
+    ) {
+      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning);
     } else if (
       rawReasoning
       && isHermesReasoningLevel(rawReasoning)

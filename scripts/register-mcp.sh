@@ -193,3 +193,53 @@ except Exception:
     raise
 print("[register-mcp] registered the ClawBox MCP server with Hermes")
 PY
+
+# ── 4. Retire the harness's own browser toolset. ────────────────────────────
+# Hermes ships a built-in `browser` toolset, and on a ClawBox it is the wrong
+# tool twice over:
+#
+#   1. It drives its OWN browser, not the Chromium on the device's desktop. The
+#      customer asks the agent to open a page, watches the screen, and nothing
+#      happens there — the page opened somewhere they cannot see. Our
+#      browser_open/browser_navigate drive the real window.
+#   2. Its engine (agent-browser) is not provisioned on this image, so an agent
+#      that reaches for it spends minutes on timeouts and "install --with-deps"
+#      advice before giving up. Observed on a Hermes device: 145-182s per turn,
+#      ending in failure, with the working MCP tools sitting right next to it.
+#
+# Point 1 is why we do not simply install the engine: that would convert a
+# visible failure into a silent one, which is worse.
+#
+# VERIFIED on-device that this is precise rather than blunt: after
+# `hermes tools disable browser`, `hermes tools list` reports the built-in
+# toolset disabled while the clawbox MCP server still reports "all tools
+# enabled", and browser_open/navigate/screenshot/close are still registered.
+# Deliberately NOT written as a config key: `hermes tools disable` is the
+# supported surface, and the state does NOT live under agent.disabled_toolsets
+# (that key still reads [] afterwards), so hand-writing config would be a guess.
+#
+# Reconciled on every boot, exactly like the MCP registration above, rather
+# than once behind a marker file.
+#
+# A marker was the first shape of this and it was wrong: the marker would live
+# in ClawBox's data/ while the state it stands for lives in Hermes' own store,
+# so the two can drift. Anything that resets ~/.hermes without wiping data/ —
+# reinstalling the agent on an existing device — would leave the marker set and
+# the toolset re-enabled PERMANENTLY, reproducing the 145-182s dead turns with
+# no way for the owner to notice or fix it. Converging every boot cannot get
+# stuck that way.
+#
+# It costs one CLI invocation per boot, and `production-server.js` runs this
+# script fire-and-forget, so it never delays the web server coming up. Nothing
+# in the product re-enables a toolset (no UI, no MCP tool, no script), so this
+# is not overriding a choice anyone can currently express; if that changes, the
+# intent belongs in a ClawBox preference this step can read, not in the absence
+# of a file.
+#
+# Never fatal: a device with its device tools registered but this step failed is
+# strictly better than a boot that aborted here.
+if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+  log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
+else
+  log "could not disable the built-in browser toolset — continuing"
+fi
