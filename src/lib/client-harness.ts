@@ -92,3 +92,18 @@ export function fetchHarness(options?: {
   if (!options?.force) inFlight = request;
   return request;
 }
+
+/**
+ * The device edition, for edition-aware UI and readiness checks.
+ *
+ * Served from the caches above, so callers can reach for it freely: once any
+ * component has asked, it costs nothing for the rest of the document's life. A
+ * device that cannot answer is treated as OpenClaw, the native product edition.
+ *
+ * Lives here rather than in a component because more than one screen has to
+ * make the same "is there an OpenClaw gateway on this box?" decision, and two
+ * copies of the fallback would eventually disagree.
+ */
+export async function resolveEdition(): Promise<string> {
+  return cachedEdition() ?? (await fetchHarness())?.edition ?? "openclaw";
+}

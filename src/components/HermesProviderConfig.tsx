@@ -51,6 +51,12 @@ interface Props {
   testId?: string;
 }
 
+// The OpenClaw AI-models step advances the wizard ~900 ms after a successful
+// configure (AIModelsStep's handleConfiguringDone), which is long enough for the
+// "connected" state to register and short enough not to feel stalled. This panel
+// is the SAME step on a Hermes device, so it advances the same way.
+const AUTO_ADVANCE_DELAY_MS = 900;
+
 function readStoredUiTier(): ClawaiTier {
   if (typeof window === "undefined") return "flash";
   try {
@@ -98,6 +104,32 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<Status>(null);
+
+  // ── Auto-advance ───────────────────────────────────────────────────────────
+  //
+  // Set ONLY once a configure round-trip has actually succeeded — a provider
+  // sign-in that happens out of band (the dashboard's own OAuth page, opened in
+  // another tab by openHermesOAuth) deliberately does NOT set it: returning from
+  // that tab has not configured anything yet, the user still has to save. So a
+  // half-finished sign-in can never carry the wizard forward.
+  const [configured, setConfigured] = useState(false);
+  const advancedRef = useRef(false);
+  // `onNext` is an inline arrow from the wizard, so its identity changes on
+  // every parent render. Held in a ref so a re-render cannot restart the timer.
+  const onNextRef = useRef(onNext);
+  useEffect(() => { onNextRef.current = onNext; }, [onNext]);
+
+  useEffect(() => {
+    // Settings embeds this panel with nowhere to advance to; only the wizard
+    // passes an onNext.
+    if (!configured || embedded) return;
+    const timer = setTimeout(() => {
+      if (advancedRef.current) return;
+      advancedRef.current = true;
+      onNextRef.current?.();
+    }, AUTO_ADVANCE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [configured, embedded]);
 
   // Tell every already-open view — the chat popup's provider picker, and this
   // panel's own scoped model list — that the device's providers/model/tier
@@ -269,12 +301,15 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     onBusyChange: setLoginBusy,
     onConfiguring: () => setClawaiStatus({ kind: "ok", msg: "Finishing setup on this device…" }),
     onComplete: () => {
+      // Only reached on the poll's terminal `complete` status, i.e. after the
+      // device finished configuring — never mid-handshake.
       void reloadClawai();
       setSelectedProvider(CLAWAI_PROVIDER);
       // The device-code handoff configures the provider server-side, so this is
       // a successful configure like any other — the chat picker has to hear it.
       notifyChatHeader();
       setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+      setConfigured(true);
     },
     onError: (msg) => setClawaiStatus({ kind: "err", msg }),
   });
@@ -322,6 +357,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
     setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+    setConfigured(true);
   }
 
   async function applyClawai() {
@@ -343,6 +379,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       setAppliedUiTier(uiTier);
       setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
       notifyChatHeader();
+      setConfigured(true);
     } catch (e) {
       setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : "Couldn't switch to ClawBox AI" });
     } finally {
@@ -412,6 +449,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       if (!modelInScope) refreshModels();
       setSaveStatus({ kind: "ok", msg: savingKey ? "Key saved — provider & model updated" : "Saved" });
       notifyChatHeader();
+      setConfigured(true);
     } catch (e) {
       setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : "Save failed" });
     } finally {
