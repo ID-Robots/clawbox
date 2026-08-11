@@ -1702,14 +1702,11 @@ step_post_update() {
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
-  # Re-provision the Hermes side (dashboard auth, units, shared identity) on the
-  # editions that run it. Without this an update could deliver a new proxy /
-  # dashboard unit but never restart or re-configure them, and a Hermes box
-  # whose auth provider had drifted stayed broken until a full reinstall.
-  # Runs after step_systemd_services so the unit files on disk are current.
-  if has_hermes_harness; then
-    step_hermes_edition || echo "  Warning: hermes_edition step failed (non-fatal)"
-  fi
+  # Hermes re-provisioning is deliberately NOT called here. The in-app updater
+  # dispatches `hermes_edition` as its own step immediately after this one, so a
+  # failure is reported instead of swallowed by `|| echo "(non-fatal)"`.
+  # Ordering is unchanged (still after step_systemd_services). Fresh installs
+  # call step_hermes_edition directly and are unaffected.
   # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
   # the edition straight off /etc/clawbox/edition.env on demand
   # (src/lib/edition-source.ts stats the file per call and caches by mtime), so
@@ -2279,6 +2276,17 @@ step_recover() {
 }
 
 step_gateway_setup() {
+  # DO NOT DELETE THIS GUARD AS "REDUNDANT" NOW THAT THE UPDATER FILTERS STEPS.
+  #
+  # The updater's `applies()` predicate drops the gateway_setup STEP on hermes,
+  # which looks like it makes this line dead. It does not: step_post_update has
+  # no such predicate — it runs on every SKU — and calls step_gateway_setup
+  # internally. This guard is the only thing standing between a Hermes box and
+  # an OpenClaw gateway being reinstalled and enabled halfway through its own
+  # update, on a SKU whose whole point is that the gateway is not there.
+  #
+  # The same applies to the guards in step_openclaw_install / step_openclaw_patch
+  # and to `install.sh --step <name>`, which can be run by hand on any edition.
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 

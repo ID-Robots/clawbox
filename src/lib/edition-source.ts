@@ -71,3 +71,20 @@ export function readEdition(): EditionName {
   }
   return normalizeEdition(process.env.CLAWBOX_EDITION) ?? "openclaw";
 }
+
+/**
+ * True when this device runs the Hermes harness — the `hermes` SKU (Hermes
+ * only) and the premium `dual` SKU (both harnesses).
+ *
+ * Mirrors install.sh's `has_hermes_harness()`, and must keep mirroring it: the
+ * updater uses this to decide whether to dispatch `install.sh --step
+ * hermes_edition`, so a device where the two disagree would either skip its own
+ * provisioning or run a step that immediately returns.
+ *
+ * Deliberately NOT the negation of `openclawIsAbsent()`: `dual` has both
+ * harnesses, so "runs Hermes" and "has no OpenClaw" are different questions.
+ */
+export function hasHermesHarness(): boolean {
+  const edition = readEdition();
+  return edition === "hermes" || edition === "dual";
+}

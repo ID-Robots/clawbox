@@ -136,6 +136,12 @@ describe("updater", () => {
     process.env.GATEWAY_HEALTH_WAIT_MS = "1";
     process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
     process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+    // Pin the SKU: the step list is edition-dependent, so without this the
+    // expectations below that look for `gateway_verify` would fail on a Hermes
+    // box, where it is (correctly) filtered out. Only the edition VALUE is set
+    // here — vitest.config.ts already points CLAWBOX_EDITION_FILE at a path
+    // that cannot exist, which is what makes process.env authoritative.
+    process.env.CLAWBOX_EDITION = "openclaw";
 
     mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
@@ -163,6 +169,10 @@ describe("updater", () => {
     delete process.env.GATEWAY_HEALTH_WAIT_MS;
     delete process.env.GATEWAY_RECOVERY_WAIT_MS;
     delete process.env.GATEWAY_WAIT_INTERVAL_MS;
+    // NOT CLAWBOX_EDITION_FILE — that is a suite-wide guarantee from
+    // vitest.config.ts, and deleting it here would leave later files in this
+    // worker reading the real /etc/clawbox/edition.env.
+    delete process.env.CLAWBOX_EDITION;
   });
 
   describe("getUpdateState", () => {
@@ -660,6 +670,143 @@ describe("updater", () => {
 
       expect(info.clawbox.updateAvailable).toBe(true);
       expect(info.clawbox.target).toBe("fix/qa-update@2222222");
+    });
+  });
+
+  /**
+   * An update on a Hermes box used to end red on `gateway_verify`: that step
+   * waits for the OpenClaw gateway on port 18789, which this SKU deliberately
+   * masks and closes. It could only ever throw, and because it is `failFast`
+   * the run stopped there — so `update_completed` was never persisted and the
+   * device kept presenting a finished update as unfinished.
+   *
+   * The same run also contradicted itself: post_update's smoke test FAILS the
+   * install if anything is listening on 18789, and the very next step demanded
+   * that something was.
+   */
+  describe("edition-aware step list", () => {
+    /** Same shape as loadHarness() in harness-edition.test.ts. */
+    async function loadUpdater(edition?: string) {
+      vi.resetModules();
+      if (edition === undefined) delete process.env.CLAWBOX_EDITION;
+      else process.env.CLAWBOX_EDITION = edition;
+      const fresh = await import("@/lib/updater");
+      fresh.resetUpdateState();
+      return fresh;
+    }
+
+    const stepIdsFor = async (edition?: string): Promise<string[]> =>
+      (await loadUpdater(edition)).getUpdateState().steps.map((s) => s.id);
+
+    it("drops the OpenClaw and gateway steps on hermes, and provisions the edition", async () => {
+      // The exact list, so this fails loudly on any drift: openclaw_install,
+      // openclaw_patch, gateway_setup and gateway_verify are all absent, and
+      // hermes_edition lands AFTER post_update — step_systemd_services has to
+      // refresh the unit files before the provisioning step restarts them.
+      const ids = await stepIdsFor("hermes");
+
+      expect(ids).toEqual([
+        "bootstrap_updater",
+        "apt_update",
+        "nvidia_jetpack",
+        "performance_mode",
+        "chromium_install",
+        "vnc_install",
+        "restart",
+        "post_update",
+        "hermes_edition",
+      ]);
+    });
+
+    it("leaves the openclaw edition unchanged apart from having no hermes step", async () => {
+      const ids = await stepIdsFor("openclaw");
+
+      expect(ids).toEqual([
+        "bootstrap_updater",
+        "apt_update",
+        "nvidia_jetpack",
+        "performance_mode",
+        "chromium_install",
+        "vnc_install",
+        "openclaw_install",
+        "openclaw_patch",
+        "gateway_setup",
+        "restart",
+        "post_update",
+        "gateway_verify",
+      ]);
+      expect(ids).not.toContain("hermes_edition");
+    });
+
+    it("runs everything on dual — it has both harnesses", async () => {
+      const ids = await stepIdsFor("dual");
+
+      for (const id of [
+        "openclaw_install",
+        "openclaw_patch",
+        "gateway_setup",
+        "gateway_verify",
+        "hermes_edition",
+      ]) {
+        expect(ids, `${id} applies on dual`).toContain(id);
+      }
+    });
+
+    it("defaults to the openclaw list when no edition is recorded", async () => {
+      const ids = await stepIdsFor();
+
+      expect(ids).toContain("gateway_verify");
+      expect(ids).not.toContain("hermes_edition");
+    });
+
+    it("refuses the OpenClaw-only update on hermes instead of failing on the gateway", async () => {
+      const fresh = await loadUpdater("hermes");
+
+      const result = fresh.startOpenclawUpdate();
+
+      expect(result.started).toBe(false);
+      expect(result.error).toMatch(/does not ship OpenClaw/i);
+      // Nothing should have been kicked off.
+      expect(fresh.getUpdateState().phase).toBe("idle");
+    });
+
+    it("still allows the OpenClaw-only update on dual", async () => {
+      const fresh = await loadUpdater("dual");
+
+      expect(fresh.startOpenclawUpdate().started).toBe(true);
+      fresh.resetUpdateState();
+    });
+
+    it("completes a hermes update and records it as completed", async () => {
+      // The gateway is closed on this SKU — the old list could not get here.
+      mockIsPortOpen.mockResolvedValue(false);
+      const fresh = await loadUpdater("hermes");
+
+      // Resume past `restart` so the test doesn't have to drive the rebuild
+      // hand-off, which never returns by design.
+      mockGet.mockResolvedValue("previous-build-id");
+      setupExecFileMock({
+        // Specific keys first — the mock returns on the first key that matches,
+        // and a bare "systemctl" would shadow this one.
+        "show clawbox-root-update@rebuild_reboot.service": { stdout: "success\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "new-build-id";
+        throw new Error("ENOENT");
+      });
+
+      expect(await fresh.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(fresh.getUpdateState().phase).toBe("completed");
+      });
+
+      const state = fresh.getUpdateState();
+      expect(state.steps.every((s) => s.status === "completed")).toBe(true);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
     });
   });
 });

@@ -80,6 +80,29 @@ describe.runIf(RUNNABLE)("hermes dashboard auth block", () => {
     }
   });
 
+  it("does not re-mint when the stored hash already verifies the stored password", () => {
+    // The in-app updater now dispatches `hermes_edition` on every update, which
+    // runs this script every time. Re-minting a working box's credentials would
+    // rotate the password the auth proxy holds — a dashboard the customer can
+    // no longer be signed into, once per update.
+    const { root, configPath } = makeRoot();
+    const pwPath = path.join(root, "data", ".hermes-dashboard-pw");
+    expect(run(root, configPath, "clawbox").status).toBe(0);
+    const passwordBefore = fs.readFileSync(pwPath, "utf-8");
+    const hashBefore = /password_hash:\s*"([^"]+)"/.exec(
+      fs.readFileSync(configPath, "utf-8"),
+    )?.[1];
+
+    const second = run(root, configPath, "clawbox");
+
+    expect(second.status).toBe(0);
+    expect(second.stdout).toContain("already configured");
+    expect(fs.readFileSync(pwPath, "utf-8")).toBe(passwordBefore);
+    expect(
+      /password_hash:\s*"([^"]+)"/.exec(fs.readFileSync(configPath, "utf-8"))?.[1],
+    ).toBe(hashBefore);
+  });
+
   it("re-mints in place after the password file is lost, without a second block", () => {
     // The factory-reset shape: data/ is wiped, ~/.hermes/config.yaml survives.
     // A second top-level `dashboard:` key would be invalid YAML.
