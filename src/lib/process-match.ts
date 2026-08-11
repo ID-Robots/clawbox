@@ -76,6 +76,16 @@ export function isClawboxBrowserArgv(
   // set of real browser processes down to the one instance we manage.
   if (!isBrowserExecutable(argv[0])) return false;
 
+  // EITHER attribute is sufficient, deliberately — not both.
+  //
+  // Both are already ClawBox-specific (our profile path, our CDP port), so
+  // neither can plausibly belong to someone else's browser; Chromium
+  // singleton-locks a profile directory, so a second instance cannot share
+  // ours. Requiring both would instead LOSE the process tree: Chromium passes
+  // `--user-data-dir` down to its renderer/GPU/zygote children but keeps
+  // `--remote-debugging-port` in the browser process alone, so an AND would
+  // match only the parent and leave orphaned children behind — the exact
+  // cleanup the old pkill did perform, and what this fallback exists for.
   const profileDir = trimSlashes(options.profileDir);
   return argv.some((arg, i) => {
     if (i === 0) return false;

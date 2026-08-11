@@ -81,8 +81,14 @@ describe("Hermes provisioning retires the built-in browser toolset", () => {
     .split("\n")
     .filter(line => !/^\s*#/.test(line));
 
-  /** The line that actually runs the disable, not one of the ones about it. */
-  const disableLine = commandLines.find(line => /tools disable browser/.test(line)) ?? "";
+  /**
+   * The line that actually runs the disable, not one of the ones about it.
+   * Requires the hermes binary too — matching the bare subcommand would accept
+   * an `if echo "tools disable browser"` that never invokes the harness.
+   */
+  const disableLine = commandLines.find(
+    line => /"\$HERMES_BIN"\s+tools\s+disable\s+browser\b/.test(line),
+  ) ?? "";
 
   it("disables the toolset through the supported CLI", () => {
     expect(disableLine).not.toBe("");

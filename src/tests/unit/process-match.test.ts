@@ -75,13 +75,28 @@ describe("isClawboxBrowserArgv", () => {
     )).toBe(true);
   });
 
-  it("matches renderer children, which carry the same binary and profile", () => {
+  /**
+   * Children matter: Chromium passes `--user-data-dir` down to its
+   * renderer/GPU/zygote processes but keeps `--remote-debugging-port` in the
+   * browser process alone. Requiring BOTH attributes would match only the
+   * parent and leave the children orphaned, which is the cleanup this matcher's
+   * caller exists to perform. Either attribute alone is sufficient, and both
+   * are ClawBox-specific enough to be safe on their own.
+   */
+  it("matches renderer children, which carry the profile but not the port", () => {
     const argv = [
       "/usr/bin/chromium",
       "--type=renderer",
       `--user-data-dir=${PROFILE_DIR}`,
     ];
     expect(isClawboxBrowserArgv(argv, MATCH)).toBe(true);
+  });
+
+  it("matches the parent, which carries the port", () => {
+    expect(isClawboxBrowserArgv(
+      ["/usr/bin/chromium", `--remote-debugging-port=${CDP_PORT}`],
+      MATCH,
+    )).toBe(true);
   });
 
   it("does NOT match a browser running someone else's profile", () => {
@@ -101,13 +116,6 @@ describe("isClawboxBrowserArgv", () => {
   it("treats a trailing slash on the profile path as the same directory", () => {
     expect(isClawboxBrowserArgv(
       ["/usr/bin/chromium", `--user-data-dir=${PROFILE_DIR}/`],
-      MATCH,
-    )).toBe(true);
-  });
-
-  it("matches on the CDP port even without the profile dir", () => {
-    expect(isClawboxBrowserArgv(
-      ["/usr/bin/chromium", `--remote-debugging-port=${CDP_PORT}`],
       MATCH,
     )).toBe(true);
   });
