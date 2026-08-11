@@ -151,7 +151,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       out += outDecoder.end();
       err += errDecoder.end();
       if (code === 0) resolve({ out: out.trim(), err });
-      else reject(new Error(errorFromStderr(err) || `hermes exited with code ${code}`));
+      else reject(new Error(hermesFailureMessage(out, err) || `hermes exited with code ${code}`));
     });
   });
 }
@@ -170,14 +170,39 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
  * than useless in a chat bubble.
  */
 function errorFromStderr(stderr: string): string {
-  const lines = stderr
+  return usefulLines(stderr)[0] ?? "";
+}
+
+/** Bookkeeping and stack noise, dropped before we look for a cause. */
+function usefulLines(stream: string): string[] {
+  const lines = stream
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l && !/^session_id:/i.test(l) && !/^\s*(?:Traceback|File ")/.test(l));
-  if (!lines.length) return "";
-  const named = lines.find((l) => /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
-  return (named || lines[0]).slice(0, 400);
+  const named = lines.filter((l) =>
+    /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
+  return (named.length ? named : lines).map((l) => l.slice(0, 400));
 }
+
+/**
+ * The message for a failed turn, from whichever stream actually carries it.
+ *
+ * Reading stderr alone was not enough. On a provider-side failure Hermes puts
+ * the explanation on STDOUT — "API call failed after 3 retries: HTTP 404:
+ * model: claude-opus-4-20250514" — and leaves stderr holding only the
+ * `session_id:` banner. Stripping that banner (correctly) then left nothing,
+ * so the customer got "hermes exited with code 1": true, and useless.
+ *
+ * stderr is still preferred when it says something, since a crash reports
+ * there; stdout is the fallback that covers the provider-error case.
+ */
+function hermesFailureMessage(stdout: string, stderr: string): string {
+  return errorFromStderr(stderr) || (usefulLines(stdout)[0] ?? "");
+}
+
+/** Exported for tests only — these are pure string helpers, and the failure
+ *  they guard was only visible in the exact stdout/stderr split below. */
+export const __test = { hermesFailureMessage, errorFromStderr };
 
 // Hermes session ids are timestamped slugs: 20260810_194609_7568b9. Strict on
 // purpose — this value reaches argv, and anything looser could smuggle a flag.
