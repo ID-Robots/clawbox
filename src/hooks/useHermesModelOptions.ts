@@ -17,6 +17,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // very mismatch this exists to fix. The abort/no-flicker discipline is reused;
 // the data is not.
 
+/**
+ * "The device's provider set or selection changed."
+ *
+ * The invalidation is deliberately a SIGNAL, not data: the server already drops
+ * both its caches on the write that precedes it (`invalidateModelOptions` on the
+ * models/provider-key/clawai routes, and the `hermes config get` memo keys on
+ * config.yaml's mtime), so every listener only has to re-ask. It must stay
+ * lightweight — see `refresh` below for what the expensive version costs.
+ */
+export const HERMES_MODEL_STATE_EVENT = "clawbox:hermes-model-state-changed";
+
+/** Emit the signal above. Call it wherever a provider configure SUCCEEDED. */
+export function notifyHermesModelState(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
+}
+
 export interface HermesScopedModel {
   id: string;
   description?: string;
@@ -82,6 +99,27 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
   const refresh = useCallback(() => {
     pendingRefreshRef.current = true;
     setNonce((n) => n + 1);
+  }, []);
+
+  // A provider configured elsewhere in the UI changes what this scope should
+  // contain, but the effect below only re-runs when the PROVIDER changes — so
+  // without this the panel and the chat header kept serving the pre-configure
+  // answer until the page was reloaded.
+  //
+  // Note what this deliberately does NOT do: call `refresh`. Bumping the nonce
+  // alone re-asks the route plainly, which is enough because the write that
+  // emitted the signal already invalidated the server's caches. Going through
+  // `refresh` would set the explicit flag and make the server bust Hermes' own
+  // per-provider disk cache and re-enumerate EVERY provider's live /v1/models —
+  // a device-wide sweep to answer "is there a new provider in the list?".
+  //
+  // It also leaves `loaded` in place, so `fresh` (and therefore `loading`) is
+  // unchanged: the chat's model pill keeps its place instead of collapsing.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onChanged = () => setNonce((n) => n + 1);
+    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged);
+    return () => window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged);
   }, []);
 
   useEffect(() => {

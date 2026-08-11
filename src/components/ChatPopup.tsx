@@ -152,7 +152,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
   HERMES_AUTO_PROVIDER,
   hermesProviderLabel,
@@ -1526,16 +1526,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Safe to re-run: every in-session choice is mirrored into localStorage by the
   // change* callbacks, and those prefs win here, so a re-sync preserves the
   // user's picks while picking up new credentials / a new device pairing.
+  //
+  // LATEST SEED WINS. Seeds overlap now that three call sites emit the
+  // invalidation (a device login, an OAuth return and a Save can land within a
+  // second of each other, and the mount seed can still be in flight when the
+  // first event arrives). They all hit the same route, so a slower EARLIER
+  // response can resolve last and reinstate the provider list, device model and
+  // selection the newer one just replaced — the same "a stale provider wins"
+  // failure the model pill guards against, reached through a different door.
+  // Each seed therefore takes a generation, cancels the one it supersedes, and
+  // writes only if it is still the newest when its answer lands.
+  const seedGenerationRef = useRef(0)
+  const seedControllerRef = useRef<AbortController | null>(null)
+
   const seedHermesHeader = useCallback(async (signal?: AbortSignal) => {
+    const generation = ++seedGenerationRef.current
+    seedControllerRef.current?.abort()
+    const controller = new AbortController()
+    seedControllerRef.current = controller
+    // The caller's signal still cancels this seed (unmount, harness switch).
+    const abortThis = () => controller.abort()
+    if (signal?.aborted) abortThis()
+    else signal?.addEventListener('abort', abortThis)
     try {
-      const mRes = await fetch('/setup-api/hermes/models', { cache: 'no-store', signal })
+      const mRes = await fetch('/setup-api/hermes/models', { cache: 'no-store', signal: controller.signal })
       const mData = await mRes.json() as {
         providers?: { id?: unknown; name?: unknown; authenticated?: unknown }[]
         provider?: unknown
         current?: unknown
         reasoning?: unknown
       }
-      if (signal?.aborted) return
+      // `aborted` alone is not enough: a response can resolve before the abort
+      // lands, and `json()` adds a second await for a newer seed to start in.
+      if (controller.signal.aborted || generation !== seedGenerationRef.current) return
       // Offer only providers Hermes has credentials for (`authenticated:
       // false` rows would give an empty model list and a failing turn).
       // `null` means the source couldn't tell — keep those.
@@ -1570,6 +1593,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       hermesReasoningKnownRef.current = knownReasoning !== null
       setHermesReasoning(knownReasoning ?? HERMES_REASONING_DEFAULT)
     } catch { /* header falls back to a plain label */ }
+    finally {
+      signal?.removeEventListener('abort', abortThis)
+      if (seedControllerRef.current === controller) seedControllerRef.current = null
+    }
   }, [])
 
   // Resolve the active harness once, before connecting, so we never open the
@@ -1594,17 +1621,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Re-seed when the settings panel changes the device's provider/model/tier or
   // adds a credential. Without this the header keeps naming the OLD provider
-  // for the rest of the session — and `hermesDevice` is the sole basis for the
+  // for the rest of the session — and a provider the user just connected never
+  // reaches the picker at all. `hermesDevice` is also the sole basis for the
   // "safe to send --provider without -m" decision, so a stale copy either
   // blocks a legal turn or lets the route answer 409.
+  //
+  // This is the plain unscoped GET, which is what makes the invalidation cheap:
+  // the per-provider model lists are NOT re-enumerated here, they stay with the
+  // scoped hook above.
+  //
+  // The controller here only stops seeds once this effect is torn down; ORDER
+  // between overlapping seeds is not its job (one controller shared by every
+  // event could not do that anyway) and is handled by the generation guard in
+  // `seedHermesHeader`.
   useEffect(() => {
     if (harnessMode !== 'hermes') return
     const controller = new AbortController()
     const onChanged = () => { void seedHermesHeader(controller.signal) }
-    window.addEventListener('clawbox:hermes-model-state-changed', onChanged)
+    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
     return () => {
       controller.abort()
-      window.removeEventListener('clawbox:hermes-model-state-changed', onChanged)
+      window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
     }
   }, [harnessMode, seedHermesHeader])
 

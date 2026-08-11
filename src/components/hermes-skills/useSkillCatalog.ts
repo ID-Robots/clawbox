@@ -13,6 +13,12 @@ const SEARCH_DEBOUNCE_MS = 300;
 // minute). Anything slower than this gets the explanatory first-run copy
 // instead of an unexplained spinner.
 const SLOW_AFTER_MS = 4000;
+// While the index builds, the endpoint ANSWERS — quickly, with zero results and
+// `catalog.origin === 'warming'`. Nothing is in flight afterwards, so without a
+// timer the view would sit on that empty answer until the user reopened the
+// window or retyped their search. Re-ask on this cadence instead; polling stops
+// by itself the moment the origin is no longer 'warming'.
+const WARM_POLL_MS = 5000;
 
 export interface CatalogController {
   query: string;
@@ -29,6 +35,17 @@ export interface CatalogController {
   loading: boolean;
   appending: boolean;
   slow: boolean;
+  /**
+   * The device is still building its offline index and has nothing to show yet.
+   *
+   * Deliberately NOT tied to `loading`: the browse endpoint completes while the
+   * index warms (it answers from the CLI fallback, which on a fresh device has
+   * nothing either), so by the time this is rendered no request is in flight.
+   * Keying the first-run panel on `loading` therefore left the generic "nothing
+   * here / try a different term" copy describing a catalogue of ~90 000 skills
+   * that simply hadn't finished unpacking.
+   */
+  preparing: boolean;
   error: string | null;
   degraded: boolean;
   catalog: CatalogMeta | null;
@@ -162,6 +179,18 @@ export function useSkillCatalog(active: boolean): CatalogController {
     return () => inFlight.current?.abort();
   }, [active, queryKey, fetchPage]);
 
+  const preparing = catalog?.origin === 'warming' && results.length === 0 && !error;
+
+  // Self-healing poll for the state above. `catalog` is a fresh object on every
+  // response, so each answer that is still 'warming' schedules the next ask and
+  // the first non-warming one ends the chain — no separate attempt counter, and
+  // nothing left running once the index is ready or the tab is left.
+  useEffect(() => {
+    if (!active || !preparing || catalog?.origin !== 'warming') return;
+    const t = setTimeout(() => setReloadKey((k) => k + 1), WARM_POLL_MS);
+    return () => clearTimeout(t);
+  }, [active, preparing, catalog]);
+
   const loadMore = useCallback(() => {
     if (loading || appending || !hasMore) return;
     fetchPage(page + 1, true);
@@ -188,6 +217,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
       loading,
       appending,
       slow,
+      preparing,
       error,
       degraded,
       catalog,
@@ -208,6 +238,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
       loading,
       appending,
       slow,
+      preparing,
       error,
       degraded,
       catalog,
