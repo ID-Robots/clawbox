@@ -797,7 +797,7 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
  * configured but gateway failed to restart. Try rebooting the device." on a
  * device where the configuration had in fact been written correctly.
  */
-function gatewayIsAbsent(): boolean {
+export function gatewayIsAbsent(): boolean {
   return readEdition() === "hermes";
 }
 

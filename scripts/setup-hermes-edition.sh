@@ -63,9 +63,19 @@ fi
 
 # ── 2. Shared-identity bridge ───────────────────────────────────────────────
 # (canonical ~/.clawbox/agent-identity → both harnesses)
+# HOME is passed EXPLICITLY to every runuser call below, and must stay that way.
+# All three scripts resolve their state from `$HOME` (`${HOME:-/home/clawbox}`),
+# so the user they run as is not enough — the variable has to be right too.
+# `runuser` does reset HOME for the target user today, but that is a property of
+# util-linux we would be silently depending on: this script runs as root from
+# install.sh (HOME=/root), and if HOME ever survived, setup-hermes-dashboard-auth
+# would look for /root/.hermes/config.yaml, find no credentials to verify, and
+# mint a fresh password — desyncing it from the one the proxy already holds.
+# Passing HOME makes that impossible rather than merely unlikely.
 if [ -f "$PROJECT_DIR/scripts/setup-shared-identity.sh" ]; then
   log "seeding shared identity"
-  runuser -u "$CLAWBOX_USER" -- bash "$PROJECT_DIR/scripts/setup-shared-identity.sh" \
+  runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    bash "$PROJECT_DIR/scripts/setup-shared-identity.sh" \
     || fail "shared-identity setup returned non-zero"
 fi
 
@@ -75,7 +85,7 @@ fi
 # proxy uses this password to sign the user in transparently.
 if [ -f "$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh" ]; then
   log "configuring dashboard password auth"
-  runuser -u "$CLAWBOX_USER" -- env CLAWBOX_ROOT="$PROJECT_DIR" \
+  runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" CLAWBOX_ROOT="$PROJECT_DIR" \
     bash "$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh" \
     || fail "dashboard auth setup returned non-zero — the dashboard will refuse to start without an auth provider"
 else
@@ -93,7 +103,8 @@ fi
 # Both paths are idempotent.
 if [ -f "$PROJECT_DIR/scripts/register-mcp.sh" ]; then
   log "registering the ClawBox MCP server with Hermes"
-  runuser -u "$CLAWBOX_USER" -- env CLAWBOX_ROOT="$PROJECT_DIR" CLAWBOX_EDITION="$EDITION" \
+  runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" CLAWBOX_ROOT="$PROJECT_DIR" \
+    CLAWBOX_EDITION="$EDITION" \
     bash "$PROJECT_DIR/scripts/register-mcp.sh" \
     || fail "MCP registration returned non-zero — the agent will have no device tools"
 else
