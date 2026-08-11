@@ -7,6 +7,7 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { useT } from "@/lib/i18n";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
@@ -215,15 +216,13 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
   const titleId = useId();
   const descriptionId = useId();
 
-  // Esc closes — standard modal a11y. Listener mounts only while
-  // the dialog is rendered (parent gates with `if (!dialog) return null`).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Esc, focus-in, the Tab cycle and focus-restore all come from the shared
+  // hook. Esc alone was not enough: this dialog interrupts the desktop
+  // unprompted, so a keyboard user who never touched it had focus still parked
+  // somewhere behind the scrim, with nothing to tell them the dialog was there
+  // and no reliable way to Tab to its dismiss button.
+  // Mounted only while the dialog is up (parent gates with `if (!dialog) return null`).
+  const panelRef = useModalDialog<HTMLDivElement>({ onClose });
 
   const glowClass = tone === "paid"
     ? "drop-shadow-[0_0_18px_rgba(217,70,239,0.6)]"
@@ -242,13 +241,16 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
   return (
     <div
       className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-      aria-describedby={descriptionId}
       onClick={onOverlayClick}
     >
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center"
+      >
         <div className="flex flex-col items-center gap-4 mb-5">
           <img
             src="/clawbox-crab.png"

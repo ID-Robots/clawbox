@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 
 // Reusable "Sign in to ClawBox" modal. Surfaced when a user tries to use a
@@ -36,24 +36,11 @@ const COPY: Record<ClawBoxLoginFeature, { title: string; body: string }> = {
 };
 
 export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }: Props) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  // Esc closes; focus trap is intentionally light (single primary button).
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    // Defer the focus to next tick so the button is mounted.
-    requestAnimationFrame(() => {
-      dialogRef.current?.querySelector<HTMLButtonElement>("[data-primary]")?.focus();
-    });
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  // Escape, focus-in, the Tab cycle and focus-restore all come from the shared
+  // hook. The trap used to be "intentionally light" — no trap at all, in
+  // practice: Tab walked straight out of the modal onto the page behind it, so
+  // a keyboard user could not reliably get back to "Open ClawBox Portal".
+  const dialogRef = useModalDialog<HTMLDivElement>({ open, onClose });
 
   if (!open) return null;
 
@@ -62,13 +49,13 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
   return (
     <div
       className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clawbox-login-title"
       onClick={onClose}
     >
       <div
         ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="clawbox-login-title"
         onClick={(e) => e.stopPropagation()}
         className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
       >
