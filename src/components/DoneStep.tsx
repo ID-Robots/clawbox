@@ -27,34 +27,62 @@ interface SectionStatusMessage {
 
 /* ── Constants ── */
 
+/* The stages a factory reset moves through, in the order the device
+   performs them. The wizard cannot observe which one is running — there is
+   a single POST and no progress channel behind it — so this list is
+   narration of the operation, never a claim that a stage has finished. */
 const RESET_STEPS = [
-  "Clearing configuration...",
-  "Removing credentials...",
-  "Wiping AI model data...",
-  "Resetting gateway...",
-  "Finalizing...",
-  "Restarting device...",
+  "Clear configuration",
+  "Remove credentials",
+  "Wipe AI model data",
+  "Reset the gateway",
+  "Erase personal files",
+  "Restart the device",
 ];
 
+/* ── Class recipes ──
+   Sizes come from the type ramp (--t-1..6). The ramp's three weights
+   (400 / 600 / 700) are Tailwind's font-normal / font-semibold / font-bold,
+   so they are written that way rather than as var(--w-*), which Tailwind's
+   `font-` prefix cannot disambiguate from a family. Every white alpha is a
+   rung of the fill ladder; every corner is a rung of the radius ladder,
+   with 8px (--r-1) dominant and 12px (--r-2) reserved for text fields. */
+
 const INPUT_CLASS =
-  "w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500";
+  "w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-5)] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] transition-[border-color,background-color] duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--coral-bright)] focus:bg-[var(--fill-3)] disabled:text-[var(--text-muted)] disabled:cursor-not-allowed";
 
-const INPUT_WITH_TOGGLE_CLASS = `${INPUT_CLASS} pr-10`;
+const INPUT_WITH_TOGGLE_CLASS = `${INPUT_CLASS} pr-12`;
 
+/* The section primary. Coral is ACTION and it is filled — the secondaries
+   on this page stay neutral so there is never a second thing competing to
+   be pressed. Scale is touch feedback only: the press, and nothing else. */
 const SAVE_BUTTON_CLASS =
-  "px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer disabled:opacity-50";
+  "flex w-full items-center justify-center gap-2 min-h-[48px] px-6 btn-gradient text-white rounded-[var(--r-1)] text-[length:var(--t-5)] font-semibold cursor-pointer transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed";
 
 const TOGGLE_BUTTON_CLASS =
-  "absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5";
+  "absolute right-1 top-1/2 -translate-y-1/2 grid place-items-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)]";
 
 const SECTION_HEADER_CLASS =
-  "flex items-center gap-2.5 w-full py-3.5 px-5 text-sm font-medium text-[var(--text-primary)] hover:text-gray-100 hover:bg-[var(--bg-surface)]/30 bg-transparent border-none cursor-pointer text-left transition-colors";
+  "flex items-center gap-3 w-full min-h-[52px] py-3 px-5 text-[length:var(--t-4)] font-semibold text-[var(--text-primary)] bg-transparent border-none cursor-pointer text-left transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:bg-[var(--fill-2)]";
 
 const SECTION_BODY_CLASS =
-  "px-5 pb-5 border-t border-[var(--border-subtle)]/30 pt-4 space-y-4";
+  "px-5 pb-5 border-t border-[var(--hair)] pt-4 space-y-4";
 
 const LABEL_CLASS =
-  "block text-xs font-semibold text-[var(--text-secondary)] mb-1.5";
+  "block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2";
+
+const HELP_CLASS =
+  "text-[length:var(--t-2)] leading-relaxed text-[var(--text-muted)]";
+
+/* One wash and one edge for the destructive hue, spent only on the factory
+   reset. Nothing routine on this page is allowed to borrow them. */
+const DANGER_CONTROL_CLASS =
+  "inline-flex items-center justify-center gap-2 min-h-[44px] px-5 rounded-[var(--r-1)] bg-red-500/10 border border-red-500/25 text-red-400 text-[length:var(--t-2)] font-semibold cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:bg-red-500/20 hover:text-red-300";
+
+/* Amber is "this will disconnect you" — a promise about what happens next,
+   which is not done, so it is never cyan. One recipe, used three times. */
+const CAUTION_CLASS =
+  "border-l-2 border-amber-400/60 pl-4 py-1 text-[length:var(--t-3)] leading-relaxed text-amber-300";
 
 const AI_PROVIDERS = [
   { id: "anthropic", name: "Anthropic Claude", hasSubscription: false, placeholder: "sk-ant-api03-...", hint: "Get your API key from console.anthropic.com", tokenUrl: "https://console.anthropic.com/settings/keys" },
@@ -76,8 +104,16 @@ const EyeClosed = (
   <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">visibility_off</span>
 );
 
+/* The one permitted spinner: a save whose duration is genuinely unknown and
+   expected to be short. It is deliberately absent from the two moments that
+   are not short — finishing setup (the gateway restarts) and joining a
+   WiFi network (the hotspot drops) — where a spinner would keep turning at
+   60fps across a connection that is already gone. */
 const ButtonSpinner = (
-  <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+  <span
+    aria-hidden="true"
+    className="inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-[var(--r-full)] animate-spin shrink-0"
+  />
 );
 
 /* ── Reusable components ── */
@@ -85,8 +121,8 @@ const ButtonSpinner = (
 function Chevron({ open }: { open: boolean }) {
   return (
     <span
-      className={`material-symbols-rounded transition-transform ${open ? "rotate-90" : ""}`}
-      style={{ fontSize: 16 }}
+      className={`material-symbols-rounded transition-transform duration-[var(--d-2)] ease-[var(--ease-standard)] text-[var(--text-muted)] ${open ? "rotate-90" : ""}`}
+      style={{ fontSize: 18 }}
       aria-hidden="true"
     >
       chevron_right
@@ -94,18 +130,21 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/* Cyan means DONE and nothing else. "Pending" is a fact, not an event, so
+   its dot is static — a pulsing dot asserts "in progress" about something
+   nobody has started. */
 function SectionBadge({ done }: { done: boolean }) {
   if (done) {
     return (
-      <span className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold text-[#00e5cc] uppercase tracking-wide">
-        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check</span>
+      <span className="ml-auto flex items-center gap-1.5 text-[length:var(--t-1)] font-semibold text-[var(--cyan-bright)] uppercase tracking-wide">
+        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">check</span>
         Done
       </span>
     );
   }
   return (
-    <span className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 uppercase tracking-wide">
-      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+    <span className="ml-auto flex items-center gap-1.5 text-[length:var(--t-1)] font-semibold text-[var(--text-muted)] uppercase tracking-wide">
+      <span aria-hidden="true" className="w-1.5 h-1.5 rounded-[var(--r-full)] bg-[var(--text-muted)]" />
       Pending
     </span>
   );
@@ -168,13 +207,19 @@ function CollapsibleSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="card-surface rounded-xl overflow-hidden">
-      <button type="button" onClick={() => onToggle(id)} className={SECTION_HEADER_CLASS}>
+    <div className="card-surface rounded-[var(--r-1)] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => onToggle(id)}
+        aria-expanded={open}
+        aria-controls={`section-${id}`}
+        className={SECTION_HEADER_CLASS}
+      >
         <Chevron open={open} />
         {title}
         <SectionBadge done={done} />
       </button>
-      {open && <div className={SECTION_BODY_CLASS}>{children}</div>}
+      {open && <div id={`section-${id}`} className={SECTION_BODY_CLASS}>{children}</div>}
     </div>
   );
 }
@@ -235,6 +280,12 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
   /* ── Confirmations ── */
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
+  /* resetStep advances on an 800ms timer, not on anything the device
+     reported, so it is deliberately no longer painted: a fabricated stage
+     claim is worse than no claim at all. resetProgress is only rendered at
+     100, which is the one value the device does cause — it is set after the
+     reset call is accepted. The timer itself is left running; removing it
+     would be a behaviour change rather than a visual one. */
   const [resetStep, setResetStep] = useState(0);
   const [resetProgress, setResetProgress] = useState(0);
 
@@ -897,61 +948,76 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
   return (
     <div className="w-full max-w-2xl mx-auto">
       {completeError && (
-        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">{completeError}</div>
+        <div className="mb-4 px-4 py-3 bg-red-500/10 border border-red-500/25 rounded-[var(--r-1)] text-[length:var(--t-2)] leading-relaxed text-red-400">{completeError}</div>
       )}
 
-      {/* Primary actions */}
-      <div className="grid grid-cols-3 gap-3 mb-6">
+      {/* Primary actions. Two routine controls, side by side and equal —
+          the factory reset is not one of them and lives at the foot of the
+          page instead. */}
+      <div className="grid gap-3 sm:grid-cols-2 mb-6">
           <button
             type="button"
             onClick={setupComplete ? () => (window.location.href = "/") : completeSetup}
             disabled={finishing}
-            className="py-3 btn-gradient text-white rounded-xl text-sm font-semibold transition transform cursor-pointer hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+            className="flex items-center justify-center gap-2 min-h-[48px] px-5 btn-gradient text-white rounded-[var(--r-1)] text-[length:var(--t-5)] font-semibold cursor-pointer transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2"/><path d="M8 12c0-2.2 1.8-4 4-4"/><path d="M16 12c0 2.2-1.8 4-4 4"/><circle cx="12" cy="12" r="1.5"/></svg>
-            {finishing ? "Finishing..." : setupComplete ? "OpenClaw" : "Finish Setup"}
+            {/* Finishing hands the device to the gateway, which restarts.
+                That wait gets no spinner: a compositor animation does not
+                know the socket is gone, so it would keep reassuring the
+                customer at the one moment it knows least. The button's own
+                label becomes the verb instead, and nothing moves. */}
+            <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">arrow_forward</span>
+            {finishing ? "Finishing setup..." : setupComplete ? "OpenClaw" : "Finish Setup"}
           </button>
           <a
             href="https://t.me/ClawBoxSupportBot"
             target="_blank"
             rel="noopener noreferrer"
-            className="py-3 bg-[#0088cc] text-white rounded-xl text-sm font-semibold hover:bg-[#006daa] transition-all cursor-pointer flex items-center justify-center gap-2 hover:scale-105 shadow-lg shadow-[rgba(0,136,204,0.25)]"
+            className="flex items-center justify-center gap-2 min-h-[48px] px-5 bg-[#0088cc] text-white rounded-[var(--r-1)] text-[length:var(--t-5)] font-semibold cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:bg-[#006daa]"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="white"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="white" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
             ClawBox Agent
           </a>
-          <button
-            type="button"
-            onClick={() => setResetConfirm(true)}
-            className="py-3 bg-red-500/10 text-red-400 rounded-xl text-sm font-semibold hover:bg-red-500/20 hover:scale-105 transition-all cursor-pointer flex items-center justify-center gap-2 border border-red-500/20"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
-            Factory Reset
-          </button>
       </div>
 
-      {/* Reset confirmation / progress popup */}
+      {/* Factory reset — the confirmation, then the erase itself.
+          Once the erase is running nothing on this dialog moves. The device
+          reports exactly one thing, once (the reset call was accepted), so
+          that single fact is the only state change the dialog draws; a
+          percentage counted off a local timer would be describing the
+          wizard's stopwatch, not the box. */}
       {resetConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="card-surface rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 px-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-dialog-title"
+            aria-busy={resetting}
+            className="card-surface rounded-[var(--r-3)] p-6 max-w-sm w-full"
+          >
             {!resetting ? (
               <>
-                <h3 className="text-lg font-bold text-gray-100 mb-2">Factory Reset?</h3>
-                <p className="text-sm text-[var(--text-secondary)] mb-5 leading-relaxed">
-                  This will erase all settings, credentials, tokens, and all personal files on the device, then restart the setup wizard from scratch.
+                <div className="flex items-center gap-3 mb-3">
+                  <span aria-hidden="true" className="grid place-items-center w-9 h-9 shrink-0 rounded-[var(--r-1)] bg-red-500/10 border border-red-500/25 text-red-400">
+                    <span className="material-symbols-rounded" style={{ fontSize: 20 }}>warning</span>
+                  </span>
+                  <h3 id="reset-dialog-title" className="text-[length:var(--t-5)] font-bold text-[var(--text-primary)]">Factory Reset?</h3>
+                </div>
+                <p className="text-[length:var(--t-3)] text-[var(--text-secondary)] mb-5 leading-relaxed">
+                  This will erase all settings, credentials, tokens, and all personal files on the device, then restart the setup wizard from scratch. It cannot be undone.
                 </p>
                 <div className="flex items-center gap-3 justify-end">
                   <button
                     type="button"
                     onClick={() => setResetConfirm(false)}
-                    className="px-5 py-2.5 bg-[var(--bg-surface)] text-[var(--text-primary)] border border-gray-600 rounded-lg text-sm font-semibold cursor-pointer hover:bg-gray-600 transition-colors"
+                    className="inline-flex items-center justify-center min-h-[44px] px-5 bg-[var(--fill-1)] text-[var(--text-primary)] border border-[var(--hair-2)] rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:bg-[var(--fill-3)]"
                   >
                     Cancel
                   </button>
                   <button
                     type="button"
                     onClick={resetSetup}
-                    className="px-5 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-red-600 transition-colors"
+                    className="inline-flex items-center justify-center min-h-[44px] px-5 bg-red-500 text-white rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:bg-red-600"
                   >
                     Factory Reset
                   </button>
@@ -959,30 +1025,36 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               </>
             ) : (
               <>
-                <h3 className="text-lg font-bold text-gray-100 mb-4">Resetting Device...</h3>
-                <div className="space-y-3 mb-5">
+                <div className="flex items-center gap-3 mb-3">
+                  <span
+                    aria-hidden="true"
+                    className={`grid place-items-center w-9 h-9 shrink-0 rounded-[var(--r-1)] border transition-colors duration-[var(--d-2)] ease-[var(--ease-truth)] ${
+                      resetProgress === 100
+                        ? "bg-[var(--cyan-wash)] border-[var(--cyan-edge)] text-[var(--cyan-bright)]"
+                        : "bg-red-500/10 border-red-500/25 text-red-400"
+                    }`}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+                      {resetProgress === 100 ? "restart_alt" : "warning"}
+                    </span>
+                  </span>
+                  <h3 id="reset-dialog-title" className="text-[length:var(--t-5)] font-bold text-[var(--text-primary)]">
+                    {resetProgress === 100 ? "Restarting device" : "Erasing device"}
+                  </h3>
+                </div>
+                <p aria-live="polite" className="text-[length:var(--t-3)] text-[var(--text-secondary)] leading-relaxed">
+                  {resetProgress === 100
+                    ? "Everything is erased. The device is restarting — this page reloads on its own once it answers again."
+                    : "The device is erasing itself and will restart when it is done. This cannot be stopped or undone, and it does not report how far along it is."}
+                </p>
+                <ul className="mt-5 space-y-2">
                   {RESET_STEPS.map((step, i) => (
-                    <div key={i} className="flex items-center gap-2.5 text-sm">
-                      {i < resetStep ? (
-                        <span className="material-symbols-rounded w-4 h-4 text-green-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">check</span>
-                      ) : i === resetStep ? (
-                        <span className="w-4 h-4 shrink-0 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <span className="w-4 h-4 shrink-0 rounded-full border-2 border-gray-600" />
-                      )}
-                      <span className={i <= resetStep ? "text-gray-200" : "text-gray-500"}>
-                        {step}
-                      </span>
-                    </div>
+                    <li key={i} className="flex items-center gap-3 text-[length:var(--t-2)] text-[var(--text-muted)]">
+                      <span aria-hidden="true" className="w-1 h-1 shrink-0 rounded-[var(--r-full)] bg-[var(--text-muted)]" />
+                      {step}
+                    </li>
                   ))}
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="h-full bg-red-500 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${resetProgress}%` }}
-                  />
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-2 text-center">{resetProgress}%</p>
+                </ul>
               </>
             )}
           </div>
@@ -994,8 +1066,8 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         {/* WiFi */}
         <CollapsibleSection id="wifi" title="WiFi" done={wifiDone || !!wifiConnectedSSID} open={openSection === "wifi"} onToggle={toggle}>
           {wifiConnectedSSID && (
-            <p className="text-xs text-[var(--text-muted)]">
-              Connected to: <span className="text-[var(--text-secondary)] font-semibold">{wifiConnectedSSID}</span>
+            <p className={HELP_CLASS}>
+              Connected to: <span className="text-[var(--text-primary)] font-semibold">{wifiConnectedSSID}</span>
             </p>
           )}
           <div>
@@ -1023,18 +1095,23 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               autoComplete="off"
             />
           </div>
-          <p className="text-[11px] text-amber-400/80 leading-relaxed">
+          {/* The consequence, stated before the button that causes it, and
+              never animated — it has to be legible in the frame where the
+              hotspot goes away. */}
+          <p className={CAUTION_CLASS}>
             <span className="font-semibold">Note:</span> Connecting to WiFi will stop the hotspot.
             {"You'll"} need to reach the device via your WiFi network at <span className="font-semibold">{localUrl}</span>.
           </p>
           {wifiStatus && <StatusMessage type={wifiStatus.type} message={wifiStatus.message} />}
+          {/* No spinner here either: joining a network takes the hotspot
+              down under the browser that is watching. The label carries the
+              state; the stillness is the honest part. */}
           <button
             type="button"
             onClick={connectWifi}
             disabled={wifiConnecting || !wifiSSID.trim()}
-            className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+            className={SAVE_BUTTON_CLASS}
           >
-            {wifiConnecting && ButtonSpinner}
             {wifiConnecting ? "Connecting..." : "Connect"}
           </button>
         </CollapsibleSection>
@@ -1042,17 +1119,17 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
         {/* AI Provider */}
         <CollapsibleSection id="provider" title="AI Provider" done={providerDone} open={openSection === "provider"} onToggle={toggle}>
           {providerDone && providerName && (
-            <p className="text-xs text-[var(--text-muted)]">
-              Currently configured: <span className="text-[var(--text-secondary)] font-semibold capitalize">{AI_PROVIDERS.find((p) => p.id === providerName)?.name || providerName}</span>
+            <p className={HELP_CLASS}>
+              Currently configured: <span className="text-[var(--text-primary)] font-semibold capitalize">{AI_PROVIDERS.find((p) => p.id === providerName)?.name || providerName}</span>
             </p>
           )}
-          <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
+          <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-[var(--r-1)] overflow-hidden">
             {AI_PROVIDERS.map((provider) => {
               const isSelected = aiProvider === provider.id;
               return (
                 <label
                   key={provider.id}
-                  className={`flex items-center gap-3 px-4 py-3 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer ${isSelected ? "bg-orange-500/5" : "hover:bg-[var(--surface-card)]"}`}
+                  className={`flex items-center gap-3 px-4 min-h-[52px] py-3 w-full text-left border-b border-[var(--hair)] last:border-b-0 cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${isSelected ? "bg-[var(--coral-wash)]" : "hover:bg-[var(--fill-3)]"}`}
                 >
                   <input
                     type="radio"
@@ -1068,10 +1145,10 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                     }}
                     className="sr-only"
                   />
-                  <span aria-hidden="true" className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${isSelected ? "border-[var(--coral-bright)]" : "border-gray-600"}`}>
-                    {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />}
+                  <span aria-hidden="true" className={`flex items-center justify-center w-5 h-5 rounded-[var(--r-full)] border-2 shrink-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${isSelected ? "border-[var(--coral-bright)]" : "border-[var(--hair-2)]"}`}>
+                    <span className={`w-2.5 h-2.5 rounded-[var(--r-full)] bg-[var(--coral-bright)] transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] ${isSelected ? "scale-100" : "scale-0"}`} />
                   </span>
-                  <span className="text-sm font-medium text-gray-200">{provider.name}</span>
+                  <span className="text-[length:var(--t-4)] font-semibold text-[var(--text-primary)]">{provider.name}</span>
                 </label>
               );
             })}
@@ -1098,7 +1175,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                 formatOllamaBytes={formatOllamaBytes}
                 radioGroupName="ollama-model-dash"
                 inputClassName={INPUT_CLASS}
-                buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+                buttonClassName={`mt-4 ${SAVE_BUTTON_CLASS}`}
                 buttonSpinner={ButtonSpinner}
               />
             </div>
@@ -1112,7 +1189,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                 selectedLlamaCppModel={selectedLlamaCppModel}
                 setSelectedLlamaCppModel={setSelectedLlamaCppModel}
                 saveLlamaCppConfig={saveLlamaCppConfig}
-                buttonClassName={`mt-2 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}
+                buttonClassName={`mt-4 ${SAVE_BUTTON_CLASS}`}
                 buttonSpinner={ButtonSpinner}
               />
             </div>
@@ -1120,7 +1197,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             <>
 
           {selectedAiProvider?.hasSubscription && (
-            <div className="flex gap-1 p-1 bg-[var(--bg-deep)] rounded-lg">
+            <div className="flex gap-1 p-1 bg-[var(--bg-deep)] rounded-[var(--r-1)]">
               {(["subscription", "token"] as const).map((mode) => (
                 <button
                   key={mode}
@@ -1129,10 +1206,10 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                     setAiAuthMode(mode);
                     resetAiFields();
                   }}
-                  className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
+                  className={`flex-1 min-h-[40px] rounded-[var(--r-1)] text-[length:var(--t-4)] font-semibold cursor-pointer border-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${
                     aiAuthMode === mode
-                      ? "bg-[var(--bg-surface)] text-gray-200"
-                      : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                      ? "bg-[var(--fill-3)] text-[var(--text-primary)]"
+                      : "bg-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                   }`}
                 >
                   {mode === "subscription" ? "Subscription" : "API Key"}
@@ -1145,24 +1222,27 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             useDeviceAuth ? (
               /* Device code flow (OpenAI) */
               <div>
-                <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
+                <p className="text-[length:var(--t-3)] text-[var(--text-secondary)] mb-3 leading-relaxed">
                   Connect your ChatGPT Plus or Pro subscription. You&apos;ll get a code to enter on OpenAI&apos;s website.
                 </p>
                 {!deviceCode ? (
                   <button type="button" onClick={startDeviceAuth} className={SAVE_BUTTON_CLASS}>Connect to GPT</button>
                 ) : (
                   <div className="space-y-3">
-                    <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
+                    <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] text-center">
                       <button
                         type="button"
                         onClick={() => { const win = window.open(deviceUrl!, "_blank"); if (win) { oauthWindowRef.current = win; } }}
-                        className="w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm"
+                        className="w-full min-h-[48px] px-4 bg-[var(--coral-bright)] hover:bg-[var(--coral-mid)] text-white font-semibold rounded-[var(--r-1)] text-[length:var(--t-5)] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                       >
                         Open authorization page
                       </button>
-                      <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
-                      <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-                        <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">{deviceCode}</span>
+                      <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
+                      {/* A machine literal: mono, at the display rung, and
+                          selectable — it is the one thing on this panel the
+                          customer has to carry to another screen. */}
+                      <div className="px-4 py-3 bg-[var(--fill-2)] rounded-[var(--r-1)] inline-flex items-center gap-2">
+                        <span className="text-[length:var(--t-6)] font-mono font-bold text-[var(--text-primary)] tracking-widest select-all">{deviceCode}</span>
                         <button
                           type="button"
                           onClick={() => {
@@ -1180,33 +1260,33 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                             } catch { /* ignore */ }
                           }}
                           id="copy-code-btn-dash"
-                          className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
+                          className="ml-1 px-2 py-1 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] hover:bg-[var(--fill-3)] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                         >
                           Copy
                         </button>
                       </div>
-                      <p className="mt-2 text-xs text-[var(--text-muted)]">Code expires in 15 minutes</p>
+                      <p className={`mt-2 ${HELP_CLASS}`}>Code expires in 15 minutes</p>
                     </div>
                     {(devicePolling || deviceSaving) && (
-                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                        <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+                      <div className="flex items-center gap-2 text-[length:var(--t-2)] text-[var(--text-secondary)]">
+                        <span aria-hidden="true" className="inline-block w-3.5 h-3.5 shrink-0 border-2 border-[var(--hair-2)] border-t-[var(--coral-bright)] rounded-[var(--r-full)] animate-spin" />
                         {deviceSaving ? "Authorized! Connecting..." : "Waiting for authorization..."}
                       </div>
                     )}
-                    <button type="button" onClick={startDeviceAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Get a new code</button>
+                    <button type="button" onClick={startDeviceAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-[length:var(--t-2)] font-semibold underline underline-offset-2 cursor-pointer p-0">Get a new code</button>
                   </div>
                 )}
               </div>
             ) : (
               /* Redirect OAuth flow (Anthropic, Google) */
               <div>
-                <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">{currentAiOAuth.description}</p>
+                <p className="text-[length:var(--t-3)] text-[var(--text-secondary)] mb-3 leading-relaxed">{currentAiOAuth.description}</p>
                 {!aiOauthStarted ? (
                   <button type="button" onClick={startAiOAuth} className={SAVE_BUTTON_CLASS}>{currentAiOAuth.button}</button>
                 ) : (
                   <div className="space-y-3">
-                    <div className="p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
-                      <p className="text-xs text-[var(--text-primary)] leading-relaxed">
+                    <div className="p-4 bg-[var(--fill-1)] border border-[var(--border-subtle)] rounded-[var(--r-1)]">
+                      <p className="text-[length:var(--t-3)] text-[var(--text-primary)] leading-relaxed">
                         {currentAiOAuth.steps.map((step, i) => (
                           <span key={i}>
                             {i > 0 && <br />}
@@ -1230,8 +1310,8 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                       />
                     </div>
                     <div className="flex items-center gap-3">
-                      <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiExchanging && ButtonSpinner}{aiExchanging ? "Connecting..." : "Connect"}</button>
-                      <button type="button" onClick={startAiOAuth} className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0">Restart authorization</button>
+                      <button type="button" onClick={exchangeAiCode} disabled={aiExchanging || !aiAuthCode.trim()} className={SAVE_BUTTON_CLASS}>{aiExchanging && ButtonSpinner}{aiExchanging ? "Connecting..." : "Connect"}</button>
+                      <button type="button" onClick={startAiOAuth} className="shrink-0 bg-transparent border-none text-[var(--coral-bright)] text-[length:var(--t-2)] font-semibold underline underline-offset-2 cursor-pointer p-0">Restart authorization</button>
                     </div>
                   </div>
                 )}
@@ -1240,9 +1320,9 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
           ) : (
             <div>
               {selectedAiProvider?.tokenUrl && (
-                <a href={selectedAiProvider.tokenUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 transition-colors">
+                <a href={selectedAiProvider.tokenUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 mb-3 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:text-[var(--text-primary)]">
                   Get API Key
-                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">open_in_new</span>
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
                 </a>
               )}
               <label htmlFor="ai-key-dash" className={LABEL_CLASS}>{selectedAiProvider?.name} API Key</label>
@@ -1255,8 +1335,8 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
                 placeholder={selectedAiProvider?.placeholder}
                 autoComplete="off"
               />
-              <p className="mt-1.5 text-xs text-[var(--text-muted)]">{selectedAiProvider?.hint}</p>
-              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-3 ${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{aiSaving && ButtonSpinner}{aiSaving ? "Connecting..." : "Connect"}</button>
+              <p className={`mt-2 ${HELP_CLASS}`}>{selectedAiProvider?.hint}</p>
+              <button type="button" onClick={saveAiProvider} disabled={aiSaving} className={`mt-4 ${SAVE_BUTTON_CLASS}`}>{aiSaving && ButtonSpinner}{aiSaving ? "Connecting..." : "Connect"}</button>
             </div>
           )}
 
@@ -1268,7 +1348,7 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
 
         {/* Security */}
         <CollapsibleSection id="security" title="Security" done={securityDone} open={openSection === "security"} onToggle={toggle}>
-          <p className="text-xs text-[var(--text-muted)]">Set system password and configure hotspot for next setup.</p>
+          <p className={HELP_CLASS}>Set system password and configure hotspot for next setup.</p>
           <div>
             <label htmlFor="sec-pw" className={LABEL_CLASS}>New Password</label>
             <PasswordInput
@@ -1293,26 +1373,26 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
               autoComplete="new-password"
             />
           </div>
-          <div className="border-t border-[var(--border-subtle)] pt-3">
+          <div className="border-t border-[var(--hair)] pt-4">
             <div className="flex items-center justify-between mb-3">
-              <label htmlFor="hs-toggle" className="text-xs font-semibold text-[var(--text-secondary)]">Hotspot</label>
+              <label htmlFor="hs-toggle" className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">Hotspot</label>
               <button
                 id="hs-toggle"
                 type="button"
                 role="switch"
                 aria-checked={hotspotEnabled}
                 onClick={() => setHotspotEnabled((v) => !v)}
-                className={`relative w-10 h-[22px] rounded-full transition-colors cursor-pointer border-none ${hotspotEnabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"}`}
+                className={`relative w-[46px] h-[26px] shrink-0 rounded-[var(--r-full)] cursor-pointer border-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${hotspotEnabled ? "bg-[var(--coral-bright)]" : "bg-[var(--fill-3)]"}`}
               >
-                <span className={`absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white transition-transform shadow-sm ${hotspotEnabled ? "translate-x-[18px]" : ""}`} />
+                <span className={`absolute top-[3px] left-[3px] w-5 h-5 rounded-[var(--r-full)] bg-white transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] ${hotspotEnabled ? "translate-x-5" : ""}`} />
               </button>
             </div>
             {!hotspotEnabled ? (
-              <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
+              <p className={`${CAUTION_CLASS} mb-4`}>
                 Hotspot will be disabled on next boot. The device will only be reachable via WiFi or Ethernet.
               </p>
             ) : (
-              <p className="text-[11px] text-amber-400/80 leading-relaxed mb-3">
+              <p className={`${CAUTION_CLASS} mb-4`}>
                 Enabling the hotspot will disconnect WiFi. The device will be reachable via the hotspot or Ethernet at <span className="font-semibold">{localUrl}</span>.
               </p>
             )}
@@ -1331,19 +1411,19 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             />
           </div>
           {secStatus && <StatusMessage type={secStatus.type} message={secStatus.message} />}
-          <button type="button" onClick={saveSecurity} disabled={secSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{secSaving && ButtonSpinner}{secSaving ? "Connecting..." : "Connect"}</button>
+          <button type="button" onClick={saveSecurity} disabled={secSaving} className={SAVE_BUTTON_CLASS}>{secSaving && ButtonSpinner}{secSaving ? "Connecting..." : "Connect"}</button>
         </CollapsibleSection>
 
         {/* Telegram */}
         <CollapsibleSection id="telegram" title="Telegram Bot" done={telegramDone} open={openSection === "telegram"} onToggle={toggle}>
-          <div className="flex gap-4 items-start">
-            <div className="shrink-0 p-1.5 bg-white rounded-lg">
+          <div className="flex gap-5 items-start">
+            <div className="shrink-0 p-1.5 bg-white rounded-[var(--r-1)]">
               <QRCodeSVG value="https://t.me/BotFather" size={80} level="M" bgColor="#ffffff" fgColor="#000000" />
             </div>
-            <ol className="ml-0 pl-4 leading-[1.7] text-xs text-[var(--text-primary)] list-decimal">
-              <li>Scan QR or search <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold">@BotFather</a></li>
-              <li>Send <code className="bg-[var(--bg-surface)] px-1 py-0.5 rounded text-[11px] text-[var(--coral-bright)]">/newbot</code></li>
-              <li>Paste the <strong>Bot Token</strong> below</li>
+            <ol className="ml-0 pl-4 leading-relaxed text-[length:var(--t-3)] text-[var(--text-secondary)] list-decimal space-y-1">
+              <li>Scan QR or search <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] font-semibold transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] hover:text-[var(--text-primary)]">@BotFather</a></li>
+              <li>Send <code className="bg-[var(--fill-2)] px-1.5 py-0.5 rounded-[var(--r-1)] text-[length:var(--t-2)] text-[var(--coral-bright)]">/newbot</code></li>
+              <li>Paste the <strong className="text-[var(--text-primary)] font-semibold">Bot Token</strong> below</li>
             </ol>
           </div>
           <div>
@@ -1359,8 +1439,32 @@ export default function DoneStep({ setupComplete = false, onComplete }: DoneStep
             />
           </div>
           {tgStatus && <StatusMessage type={tgStatus.type} message={tgStatus.message} />}
-          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={`${SAVE_BUTTON_CLASS} flex items-center gap-2`}>{tgSaving && ButtonSpinner}{tgSaving ? "Connecting..." : "Connect"}</button>
+          <button type="button" onClick={saveTelegram} disabled={tgSaving} className={SAVE_BUTTON_CLASS}>{tgSaving && ButtonSpinner}{tgSaving ? "Connecting..." : "Connect"}</button>
         </CollapsibleSection>
+      </div>
+
+      {/* The destructive action is not a tile. It sits below everything
+          routine, on its own quiet surface, and states its consequence
+          before it can be reached — the danger wash and edge are spent
+          here, on the control, and nowhere else on the page. */}
+      <div className="rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--fill-1)] p-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-[length:var(--t-4)] font-semibold text-red-400">
+            <span className="material-symbols-rounded shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+            Factory Reset
+          </h3>
+          <p className={`mt-2 ${HELP_CLASS}`}>
+            Erases every setting, credential and personal file on the device, then restarts setup from scratch. This cannot be undone.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setResetConfirm(true)}
+          className={`${DANGER_CONTROL_CLASS} shrink-0`}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">delete</span>
+          Factory Reset
+        </button>
       </div>
 
     </div>
