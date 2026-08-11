@@ -18,6 +18,7 @@ import { HOME, spawnArgv } from "../lib/guard";
 import { json, text, type Registrar, type ToolResult } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
+import { PREFERENCE_LANGUAGES, WALLPAPER_FITS } from "../../src/lib/preference-schema";
 
 // Raw bytes whose base64 still fits under the 1 MiB image cap in
 // lib/register.ts (base64 is 4/3 of the input). Anything larger is dropped
@@ -98,8 +99,9 @@ const READABLE_PREFS = [
   "hidden_installed",
 ] as const;
 
-const LANGUAGES = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"] as const;
-const WALLPAPER_FITS = ["fill", "fit", "center"] as const;
+// Shared with the HTTP write path (src/app/setup-api/preferences/route.ts) so
+// the tool and the route can never disagree about what a legal value is.
+const LANGUAGES = PREFERENCE_LANGUAGES;
 
 // Write-side allowlist: only settings a customer would actually ask the agent
 // to change. Everything matching installed_*, clawai_*, active_harness, or
