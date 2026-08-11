@@ -12,6 +12,7 @@ import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
+import { DISCORD_INVITE_URL } from "@/lib/community";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
 
@@ -713,7 +714,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
           someone unboxing their first AI appliance. */}
       <footer className="setup-footer">
         <a
-          href="https://discord.gg/FbKmnxYnpq"
+          href={DISCORD_INVITE_URL}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center justify-center gap-2 h-9 px-3 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] text-xs font-semibold hover:text-[var(--text-primary)] transition-colors"

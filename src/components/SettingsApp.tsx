@@ -27,6 +27,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { DISCORD_INVITE_URL } from "@/lib/community";
 
 /* ── Types ── */
 
@@ -3000,7 +3001,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </a>
 
             <a
-              href="https://discord.gg/FbKmnxYnpq"
+              href={DISCORD_INVITE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
