@@ -345,9 +345,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // reported bug — select Anthropic, still see a deepseek id — is structurally
   // impossible here, exactly as in the Hermes settings panel. No second,
   // client-side filter exists to drift from it.
-  const { scope: hermesScope } = useHermesModelOptions(
+  const { scope: hermesScope, loading: hermesModelsLoading } = useHermesModelOptions(
     harnessMode === 'hermes' && hermesProvider ? hermesProvider : null,
   )
+  // Whether the model pill should hold its place while the new provider's list
+  // arrives. Switching provider drops `scope` to null by design — showing the
+  // OLD provider's models would be the foreign-vendor bug this whole module
+  // exists to prevent — but unmounting the pill made the header visibly
+  // collapse to "Provider + Thinking" for a second and then reflow when the
+  // models landed. Two layout shifts where none is needed.
+  //
+  // `hadModelPill` remembers that the pill was showing a moment ago, so a
+  // provider that genuinely has one model (ClawBox AI) still never grows a
+  // pointless picker.
+  const hadModelPill = useRef(false)
+  const hermesModelCount = hermesScope?.models.length ?? 0
+  useEffect(() => {
+    if (!hermesModelsLoading) hadModelPill.current = hermesModelCount > 1
+  }, [hermesModelsLoading, hermesModelCount])
+  const showModelPill = hermesModelsLoading ? hadModelPill.current : hermesModelCount > 1
 
   // DERIVED, never effect-synced: a remembered pick the newly selected provider
   // doesn't serve is dropped on the spot, so the pill can never sit on a
@@ -1901,17 +1917,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {/* Hidden at a single option, matching the OpenClaw rule — a
                     one-entry picker is noise. That is today's ClawBox AI case:
                     its proxy serves exactly the one model of the active tier. */}
-                {(hermesScope?.models.length ?? 0) > 1 && (
+                {showModelPill && (
                   <HeaderDropdown
                     ariaLabel="Hermes model"
-                    value={hermesModel}
+                    /* While the new provider's list loads there is no model to
+                       name yet — an ellipsis holds the pill's place rather than
+                       showing the previous provider's id, which would be wrong
+                       for a beat and is the mistake worth avoiding. */
+                    disabled={hermesModelsLoading}
+                    value={hermesModelsLoading ? '' : hermesModel}
                     /* Trigger shows the model WITHOUT whatever the provider pill
                        immediately to its left already says — "claude-fable-5"
                        next to "Claude" is "fable-5". At the docked width the
                        repeated vendor was eating the part that distinguishes one
                        model from another ("claude-fable-5" → "claude-fab…").
                        The popover keeps the full id. */
-                    triggerLabel={shortModelPillLabel(hermesModel, hermesProviderPill)}
+                    triggerLabel={hermesModelsLoading ? '…' : shortModelPillLabel(hermesModel, hermesProviderPill)}
                     options={(hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id }))}
                     onChange={changeHermesModel}
                     onPointerDown={stopHeaderDrag}
