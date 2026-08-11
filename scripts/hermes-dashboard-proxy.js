@@ -99,6 +99,26 @@ const WS_HANDSHAKE_TIMEOUT_MS = envMs("HERMES_DASH_WS_TIMEOUT_MS", 15_000);
 // the upgrade handshake complete and stand its timeout down.
 const HEADER_TERMINATOR = "\r\n\r\n";
 
+// Prepare a string that came off the wire for a log line. Two rules, both about
+// the shape of the record rather than its content: one value stays one line, and
+// the record's size does not follow its input's. The same rules as
+// src/lib/log-safe.ts, restated here because this script is CommonJS and runs as
+// its own process, so it cannot import the TypeScript module.
+//
+// \p{Cc} is the Unicode "control" category: the C0 range, DEL, and C1. Replaced
+// rather than stripped, so two values differing only in control characters do
+// not collapse into the same line. U+FFFD is the conventional stand-in.
+const LOG_CONTROL_CHARACTERS = /\p{Cc}/gu;
+const LOG_FIELD_MAX_LENGTH = 200;
+function logSafe(value, maxLength = LOG_FIELD_MAX_LENGTH) {
+  const s = String(value);
+  if (s.length <= maxLength) return s.replace(LOG_CONTROL_CHARACTERS, "�");
+  // Cut first, then sanitise the head only: every character the pattern matches
+  // is one UTF-16 code unit replaced by one, so no match can straddle the cut.
+  const head = s.slice(0, maxLength).replace(LOG_CONTROL_CHARACTERS, "�");
+  return `${head}...[+${s.length - maxLength} chars]`;
+}
+
 // Rewrite the origin part of a Referer to the upstream authority, keeping path.
 function rewriteReferer(value) {
   return typeof value === "string" ? value.replace(/^https?:\/\/[^/]+/i, UPSTREAM_ORIGIN) : value;
@@ -389,7 +409,8 @@ function hermesLogin() {
         up.on("end", () => {
           const setCookies = up.headers["set-cookie"];
           if (up.statusCode !== 200 || !Array.isArray(setCookies) || setCookies.length === 0) {
-            console.error(`[hermes-dashboard-proxy] login failed: HTTP ${up.statusCode} ${Buffer.concat(chunks).toString().slice(0, 120)}`);
+            // The body is the upstream's, so bound it before logging it.
+            console.error(`[hermes-dashboard-proxy] login failed: HTTP ${up.statusCode} ${logSafe(Buffer.concat(chunks).toString(), 120)}`);
             settle(null);
             return;
           }

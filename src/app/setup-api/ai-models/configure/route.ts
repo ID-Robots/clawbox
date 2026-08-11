@@ -46,6 +46,12 @@ import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/op
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
+// The model name on this route arrives in the request body. For a local
+// provider it is the whole of `apiKey`, which nothing further constrains, and
+// it reaches the lines below both directly and inside a subprocess error that
+// quotes the command it ran. Bound every such field before logging it — see
+// src/lib/log-safe.ts.
+import { logSafe } from "@/lib/log-safe";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -378,7 +384,7 @@ async function ensureFallbackModel(
 
   if (fallbackCandidates.length > 0) {
     await setFallbackModels([fallbackCandidates[0]]);
-    console.log(`[AI Config] Configured local fallback model: ${fallbackCandidates[0]}`);
+    console.log(`[AI Config] Configured local fallback model: ${logSafe(fallbackCandidates[0])}`);
     return;
   }
 
@@ -937,7 +943,7 @@ export async function POST(request: Request) {
         config.defaultModel,
       ]);
       if (shouldPromoteLocalToPrimary) {
-        console.log(`[AI Config] Promoted local model to active primary: ${config.defaultModel}`);
+        console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
     }
     // Reserve sized to the active model's context window. Local models run on
@@ -1099,7 +1105,7 @@ export async function POST(request: Request) {
         // Non-fatal: Ollama will still work, just use more memory
         console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
       }
-      console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+      console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
       const providerDef = JSON.stringify({
@@ -1123,7 +1129,7 @@ export async function POST(request: Request) {
         "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
-      console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
+      console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
       // provider entry the chat turn silently returns usage 0/0/0.
@@ -1134,7 +1140,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set openrouter provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
@@ -1146,7 +1152,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set google provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
       // Native anthropic plugin reads a per-agent sqlite auth store that
       // ClawBox's file auth profile doesn't populate, so it fails with
@@ -1159,7 +1165,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set anthropic provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
@@ -1267,7 +1273,10 @@ export async function POST(request: Request) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable
     // message (mirrors the sanitized gateway-restart branch above).
-    console.error("[configure] Failed to configure AI model:", err instanceof Error ? err.message : err);
+    console.error(
+      "[configure] Failed to configure AI model:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
     // Classify so the message matches the cause. A local on-device model has no
     // credentials, and an edition without the openclaw binary is not something
     // the user can fix by re-checking a key — "check your credentials" is wrong
