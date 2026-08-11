@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SetupWizard from "@/components/SetupWizard";
+import { resetHarnessCache } from "@/lib/client-harness";
 
 vi.mock("@/lib/i18n", () => ({
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -75,14 +76,23 @@ function jsonResponse(data: unknown, ok = true): Response {
   } as Response;
 }
 
+/** Did the wizard call this path at least once? */
+function called(fetchMock: ReturnType<typeof vi.fn>, path: string): boolean {
+  return fetchMock.mock.calls.some(([input]) => String(input) === path);
+}
+
 describe("SetupWizard", () => {
   beforeEach(() => {
     vi.useRealTimers();
+    // The edition is cached for the lifetime of a document; without this the
+    // first test's answer would decide every later test's edition.
+    resetHarnessCache();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    resetHarnessCache();
   });
 
   it("resumes from persisted setup progress after a reload", async () => {
@@ -179,6 +189,9 @@ describe("SetupWizard", () => {
       if (url === "/setup-api/gateway/health") {
         return jsonResponse({ available: false });
       }
+      if (url === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
 
       return jsonResponse({});
     });
@@ -191,5 +204,114 @@ describe("SetupWizard", () => {
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledTimes(1);
     }, { timeout: 30_000 });
+
+    // An OpenClaw box still waits on its gateway, and never on the Hermes side.
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
+    expect(called(fetchMock, "/setup-api/hermes/models")).toBe(false);
+  }, 35_000);
+
+  it("waits on the Hermes agent, not the OpenClaw gateway, on a hermes device", async () => {
+    const onComplete = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: true,
+          password_configured: true,
+          ai_model_configured: true,
+          local_ai_configured: true,
+          telegram_configured: false,
+          setup_progress_step: 5,
+        });
+      }
+      if (url === "/setup-api/setup/progress") {
+        return jsonResponse({ success: true, step: 5 });
+      }
+      if (url === "/setup-api/setup/complete") {
+        return jsonResponse({ success: true });
+      }
+      if (url === "/setup-api/harness/active") {
+        return jsonResponse({ active: "hermes", edition: "hermes" });
+      }
+      if (url === "/setup-api/hermes/models") {
+        // `stale: false` is the models route's "the live Hermes dashboard
+        // answered" signal.
+        return jsonResponse({ stale: false, source: "dashboard", models: [] });
+      }
+
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SetupWizard onComplete={onComplete} />);
+
+    fireEvent.click(await screen.findByText("telegram-next"));
+
+    expect(await screen.findByTestId("setup-completion-overlay")).toBeInTheDocument();
+    // The copy names the agent this device actually runs...
+    await waitFor(() => {
+      expect(screen.getByText("wizard.completionHermesTitle")).toBeInTheDocument();
+    });
+    expect(screen.getByText("wizard.completionHermesSaving")).toBeInTheDocument();
+    expect(screen.getByText("wizard.completionHermesStarting")).toBeInTheDocument();
+    // ...and never the gateway, which is not installed on a Hermes box.
+    expect(screen.queryByText("openclaw.connecting")).not.toBeInTheDocument();
+    expect(screen.queryByText("ai.restartingGateway")).not.toBeInTheDocument();
+    expect(screen.queryByText("telegram.waitingGateway")).not.toBeInTheDocument();
+    expect(screen.queryByText("telegram.pleaseWait")).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    }, { timeout: 30_000 });
+
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
+    expect(called(fetchMock, "/setup-api/hermes/models")).toBe(true);
+  }, 35_000);
+
+  it("still finishes on a hermes device whose agent never reports ready", async () => {
+    const onComplete = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: true,
+          password_configured: true,
+          ai_model_configured: true,
+          local_ai_configured: true,
+          telegram_configured: false,
+          setup_progress_step: 5,
+        });
+      }
+      if (url === "/setup-api/setup/progress") {
+        return jsonResponse({ success: true, step: 5 });
+      }
+      if (url === "/setup-api/setup/complete") {
+        return jsonResponse({ success: true });
+      }
+      if (url === "/setup-api/harness/active") {
+        return jsonResponse({ active: "hermes", edition: "hermes" });
+      }
+      if (url === "/setup-api/hermes/models") {
+        // Dashboard still coming up: every source but the live one is stale.
+        return jsonResponse({ stale: true, source: "cold-start", models: [] });
+      }
+
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SetupWizard onComplete={onComplete} />);
+
+    fireEvent.click(await screen.findByText("telegram-next"));
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    }, { timeout: 30_000 });
+
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
   }, 35_000);
 });
