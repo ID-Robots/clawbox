@@ -166,6 +166,7 @@ import {
   clampReasoningForProvider,
   hermesReasoningLevelsFor,
   isHermesReasoningLevel,
+  isThinkingOnLevel,
   providerHasBinaryReasoning,
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
@@ -415,27 +416,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // backend has two states and no graded middle (see hermes-reasoning.ts). It
   // therefore borrows two levels from the shared vocabulary to stand for the
   // ends, and must not label them "Minimal"/"Max" as though the scale applied.
-  const hermesBinaryReasoning = useMemo(
-    () => providerHasBinaryReasoning(hermesProvider),
-    [hermesProvider],
-  )
+  //
+  // Plain functions, not useMemo/useCallback: all three are called inline while
+  // rendering and none is passed to a memoised child, so a hook would allocate
+  // a dependency array and a closure per render and save nothing.
+  const hermesBinaryReasoning = providerHasBinaryReasoning(hermesProvider)
   /** Full label for the open menu. */
-  const hermesReasoningLabel = useCallback(
-    (level: HermesReasoningLevel) =>
-      binaryReasoningLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level],
-    [hermesProvider],
-  )
+  const hermesReasoningLabel = (level: HermesReasoningLevel) =>
+    binaryReasoningLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level]
   /** Compact label for the closed pill, which shares a tight width budget. */
-  const hermesReasoningTriggerLabel = useCallback(
-    (level: HermesReasoningLevel) =>
-      binaryReasoningTriggerLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level],
-    [hermesProvider],
-  )
-  /** True when this level means "think" for a two-state provider. */
-  const thinkingLevelIsOn = useCallback(
-    (level: HermesReasoningLevel) => level === hermesReasoningOptions[hermesReasoningOptions.length - 1],
-    [hermesReasoningOptions],
-  )
+  const hermesReasoningTriggerLabel = (level: HermesReasoningLevel) =>
+    binaryReasoningTriggerLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level]
 
   const hermesProviderName = useCallback(
     (id: string) => hermesProviderLabel(id, hermesProviders.find(p => p.id === id)?.name),
@@ -488,9 +479,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     hermesReasoningKnownRef.current = true
     setHermesReasoning(level)
     writeHermesChatPrefs({ reasoning: level })
+    // A two-state provider has no "effort" to switch — the pill and the menu
+    // both say Thinking on/off, and the confirmation has to agree with them.
+    // Reads the ref, not the memoised label, so this stays dependency-free
+    // like the rest of the header's change handlers.
+    const thinking = binaryReasoningTriggerLabel(hermesProviderRef.current, level)
     setMessages(msgs => [...msgs, {
       role: 'system',
-      text: `Switched effort to ${HERMES_REASONING_LABELS[level]}.`,
+      text: thinking
+        ? `Switched thinking to ${thinking}.`
+        : `Switched effort to ${HERMES_REASONING_LABELS[level]}.`,
       timestamp: Date.now(),
       variant: 'success',
     }])
@@ -2034,9 +2032,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       label: hermesReasoningLabel(level),
                       /* Thinking on this model is ~25x slower on a short
                          question (measured: 0.2s vs 8.4s). A dial that hides
-                         that is a dial that surprises people. */
+                         that is a dial that surprises people.
+                         `isThinkingOnLevel` is the SAME predicate the proxy
+                         uses to set enable_thinking — deriving "is on" here
+                         instead (e.g. "the last option") would let this hint
+                         and the wire behaviour drift apart silently. */
                       hint: hermesBinaryReasoning
-                        ? (thinkingLevelIsOn(level)
+                        ? (isThinkingOnLevel(hermesProvider, level)
                           ? 'Better at reasoning. Much slower.'
                           : 'Fastest. Answers immediately.')
                         : undefined,

@@ -3,12 +3,15 @@ import {
   HERMES_REASONING_LEVELS,
   LOCAL_REASONING_LEVELS,
   binaryReasoningLabel,
+  binaryReasoningTriggerLabel,
   clampReasoningForProvider,
   hermesReasoningLevelsFor,
   isReasoningLevelAllowedFor,
+  isThinkingOnLevel,
   providerHasBinaryReasoning,
   providerHasReasoningControl,
 } from "@/lib/hermes-reasoning";
+import { thinkingEnabledForLevel } from "@/lib/local-ai-thinking";
 
 /**
  * REVERSAL — read this before "restoring" the old behaviour.
@@ -65,7 +68,21 @@ describe("the on-device model's thinking switch", () => {
   it("gives no switch label for providers with a real effort scale", () => {
     expect(binaryReasoningLabel("clawai", "max")).toBeNull();
     expect(binaryReasoningLabel("anthropic", "medium")).toBeNull();
+    expect(binaryReasoningTriggerLabel("anthropic", "medium")).toBeNull();
     expect(providerHasBinaryReasoning("anthropic")).toBe(false);
+  });
+
+  it("has a compact pill form of each label for the header's width budget", () => {
+    const [off, on] = LOCAL_REASONING_LEVELS;
+    expect(binaryReasoningTriggerLabel("clawlocal", off)).toBe("Off");
+    expect(binaryReasoningTriggerLabel("clawlocal", on)).toBe("On");
+    // Every surface that names a level — pill, menu, and the "Switched
+    // thinking to X." confirmation — must agree that this is a switch. A
+    // scale word leaking into any of them implies a Medium that cannot exist.
+    for (const level of LOCAL_REASONING_LEVELS) {
+      expect(binaryReasoningLabel("clawlocal", level)).not.toMatch(/minimal|max/i);
+      expect(binaryReasoningTriggerLabel("clawlocal", level)).not.toMatch(/minimal|max/i);
+    }
   });
 
   it("defaults to thinking OFF, matching the server's own launch default", () => {
@@ -88,6 +105,47 @@ describe("the on-device model's thinking switch", () => {
     for (const level of HERMES_REASONING_LEVELS) {
       expect(LOCAL_REASONING_LEVELS).toContain(clampReasoningForProvider("clawlocal", level));
     }
+  });
+});
+
+/**
+ * The switch's direction is decided in ONE place and read by two layers: the
+ * chat header's label and cost hint, and the proxy's `enable_thinking` boolean.
+ *
+ * They used to derive it independently — the UI positionally ("the last
+ * option"), the proxy by name (a set containing "minimal"). They agreed only
+ * because both happened to mention the same word. Reorder LOCAL_REASONING_LEVELS
+ * and the pill would read "Thinking off" while the wire said `true`: a dial that
+ * lies, silently, which is precisely the failure this whole area exists to
+ * prevent. These tests fail if the two ever drift again.
+ */
+describe("the label and the wire agree about which end is on", () => {
+  const [off, on] = LOCAL_REASONING_LEVELS;
+
+  it("maps the OFF end to no thinking, in both layers", () => {
+    expect(isThinkingOnLevel("clawlocal", off)).toBe(false);
+    expect(thinkingEnabledForLevel(off)).toBe(false);
+    expect(binaryReasoningLabel("clawlocal", off)).toBe("Thinking off");
+  });
+
+  it("maps the ON end to thinking, in both layers", () => {
+    expect(isThinkingOnLevel("clawlocal", on)).toBe(true);
+    expect(thinkingEnabledForLevel(on)).toBe(true);
+    expect(binaryReasoningLabel("clawlocal", on)).toBe("Thinking on");
+  });
+
+  it("resolves a level from the middle of the scale to thinking-on", () => {
+    // `hermes --reasoning` can send any of eight words. Anything above the off
+    // end counts as "think", so raising effort can never reduce thinking.
+    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+      expect(thinkingEnabledForLevel(level), level).toBe(true);
+    }
+    expect(thinkingEnabledForLevel("none")).toBe(false);
+  });
+
+  it("treats a value that is not a level at all as no thinking", () => {
+    expect(thinkingEnabledForLevel("banana")).toBe(false);
+    expect(thinkingEnabledForLevel("")).toBe(false);
   });
 });
 

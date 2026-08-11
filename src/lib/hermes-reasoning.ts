@@ -71,20 +71,25 @@ const UNSUPPORTED_BY_PROVIDER: Record<string, readonly HermesReasoningLevel[]> =
 };
 
 /**
- * Providers with NO reasoning control at all — a different thing from a
- * provider that rejects some levels.
+ * REVERSAL, recorded because the evidence for it was expensive.
  *
- * Empty today. `clawlocal` used to be here, correctly: llama.cpp's
- * OpenAI-compatible server ignores `reasoning_effort` entirely, so all eight
- * levels did the same nothing and the honest UI was no control at all.
+ * `clawlocal` used to be listed here as a provider with NO reasoning control,
+ * and that was correct on its own terms: llama.cpp's OpenAI-compatible server
+ * ignores `reasoning_effort` entirely, so all eight levels did the same nothing
+ * and the honest UI was no control at all. That finding STILL HOLDS —
+ * `reasoning_effort` is still inert.
  *
- * That finding still holds — `reasoning_effort` is still inert — but it was the
- * wrong question. The backend DOES take a thinking switch; it is just spelled
- * `chat_template_kwargs.enable_thinking`, and it works per request on a running
- * server. See LOCAL_REASONING_LEVELS below and src/lib/local-ai-thinking.ts,
- * which does the translation.
+ * It was simply the wrong question. The backend does take a thinking switch; it
+ * is spelled `chat_template_kwargs.enable_thinking`, and it works per request
+ * on a running server. See LOCAL_REASONING_LEVELS below, and
+ * src/lib/local-ai-thinking.ts for the translation.
+ *
+ * The "no control at all" shape therefore has no members today, and the empty
+ * container that used to express it is gone rather than left as a branch that
+ * can never be taken. A provider that genuinely has no dial can still be
+ * expressed — return an empty level list from hermesReasoningLevelsFor; the
+ * callers already treat that as "hide the control".
  */
-const NO_REASONING_CONTROL: ReadonlySet<string> = new Set<string>();
 
 /**
  * The on-device model's thinking switch, expressed in the CLI's vocabulary.
@@ -110,46 +115,89 @@ const NO_REASONING_CONTROL: ReadonlySet<string> = new Set<string>();
  */
 export const LOCAL_REASONING_LEVELS: readonly HermesReasoningLevel[] = ['minimal', 'max'];
 
+/**
+ * The level that means "don't think". Named rather than positional: every
+ * caller needs to know which END of the pair it is holding, and deriving that
+ * from a position (`levels[0]`, or the UI's `levels[levels.length - 1]`)
+ * silently inverts the moment anyone reorders the array — labels would still
+ * look right while the "much slower" hint attached to the fast option.
+ */
+const THINKING_OFF_LEVEL: HermesReasoningLevel = 'minimal';
+
+/**
+ * The on-device model's provider id. Mirrors HERMES_LOCAL_PROVIDER in
+ * hermes-local-ai.ts, which cannot be imported here: that module pulls in the
+ * Hermes CLI and the config store, and this one is bundled into the browser.
+ */
+export const HERMES_LOCAL_REASONING_PROVIDER = 'clawlocal';
+
 /** Providers whose reasoning control is a two-state thinking switch. */
 const BINARY_REASONING_CONTROL: ReadonlyMap<string, readonly HermesReasoningLevel[]> = new Map([
-  ['clawlocal', LOCAL_REASONING_LEVELS],
+  [HERMES_LOCAL_REASONING_PROVIDER, LOCAL_REASONING_LEVELS],
 ]);
 
-/**
- * The label a two-state provider shows for a level in the OPEN menu, or null
- * when this provider uses the effort scale instead.
- *
- * "Minimal"/"Max" would be actively misleading here — they are scale points
- * borrowed to carry a boolean, and a customer reading them would reasonably
- * expect a Medium to exist.
- */
-export function binaryReasoningLabel(
-  provider: string | null | undefined,
-  level: HermesReasoningLevel,
-): string | null {
-  const levels = BINARY_REASONING_CONTROL.get((provider || '').trim());
-  if (!levels) return null;
-  return level === levels[0] ? 'Thinking off' : 'Thinking on';
-}
-
-/**
- * The same value for the closed PILL, where the row's width budget is the
- * binding constraint (three labels share ~168px). The pill already carries the
- * brain glyph, so it does not need to repeat the word "Thinking" — the glyph
- * says which dial it is, and this says which way it is set.
- */
-export function binaryReasoningTriggerLabel(
-  provider: string | null | undefined,
-  level: HermesReasoningLevel,
-): string | null {
-  const levels = BINARY_REASONING_CONTROL.get((provider || '').trim());
-  if (!levels) return null;
-  return level === levels[0] ? 'Off' : 'On';
+/** The two levels of a switch-style provider, or null for an effort scale. */
+function binaryLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] | null {
+  return BINARY_REASONING_CONTROL.get((provider || '').trim()) ?? null;
 }
 
 /** True when this provider's dial is a thinking switch rather than an effort scale. */
 export function providerHasBinaryReasoning(provider: string | null | undefined): boolean {
-  return BINARY_REASONING_CONTROL.has((provider || '').trim());
+  return binaryLevelsFor(provider) !== null;
+}
+
+/**
+ * Whether this level means "think" on a two-state provider.
+ *
+ * The single definition of the switch's direction. The UI's cost hint and the
+ * proxy's boolean must not each decide this for themselves — see
+ * THINKING_OFF_LEVEL.
+ */
+export function isThinkingOnLevel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): boolean {
+  return binaryLevelsFor(provider) !== null && level !== THINKING_OFF_LEVEL;
+}
+
+/**
+ * Labels for a two-state provider, or null when it uses the effort scale.
+ *
+ * `menu` is the open dropdown; `pill` is the closed trigger, where the header's
+ * width budget binds (three labels share ~168px) and the brain glyph already
+ * says which dial it is. "Minimal"/"Max" appear in neither — they are scale
+ * points borrowed to carry a boolean, and a customer reading them would
+ * reasonably expect a Medium to exist.
+ */
+const BINARY_LABELS = {
+  menu: { off: 'Thinking off', on: 'Thinking on' },
+  pill: { off: 'Off', on: 'On' },
+} as const;
+
+function binaryLabel(
+  surface: keyof typeof BINARY_LABELS,
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  if (!providerHasBinaryReasoning(provider)) return null;
+  const labels = BINARY_LABELS[surface];
+  return isThinkingOnLevel(provider, level) ? labels.on : labels.off;
+}
+
+/** The label a two-state provider shows for a level in the OPEN menu. */
+export function binaryReasoningLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  return binaryLabel('menu', provider, level);
+}
+
+/** The same value for the closed PILL, which has far less room. */
+export function binaryReasoningTriggerLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  return binaryLabel('pill', provider, level);
 }
 
 /**
@@ -159,7 +207,6 @@ export function providerHasBinaryReasoning(provider: string | null | undefined):
  */
 export function hermesReasoningLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] {
   const id = (provider || '').trim();
-  if (NO_REASONING_CONTROL.has(id)) return [];
   const binary = BINARY_REASONING_CONTROL.get(id);
   if (binary) return binary;
   const blocked = UNSUPPORTED_BY_PROVIDER[id];

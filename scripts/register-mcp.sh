@@ -218,18 +218,28 @@ PY
 # supported surface, and the state does NOT live under agent.disabled_toolsets
 # (that key still reads [] afterwards), so hand-writing config would be a guess.
 #
-# Run ONCE, guarded by a marker, rather than on every boot: an owner who
-# deliberately re-enables the toolset should keep their choice instead of having
-# it reverted at the next restart.
-BROWSER_TOOLSET_MARKER="$PROJECT_DIR/data/.hermes-browser-toolset-retired"
-if [ ! -f "$BROWSER_TOOLSET_MARKER" ]; then
-  # Never fatal: a device with its device tools registered but this step failed
-  # is strictly better than a boot that aborted here.
-  if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
-    mkdir -p "$(dirname "$BROWSER_TOOLSET_MARKER")"
-    : > "$BROWSER_TOOLSET_MARKER"
-    log "retired the harness's built-in browser toolset; browsing goes through the ClawBox browser_* tools"
-  else
-    log "could not disable the built-in browser toolset — continuing"
-  fi
+# Reconciled on every boot, exactly like the MCP registration above, rather
+# than once behind a marker file.
+#
+# A marker was the first shape of this and it was wrong: the marker would live
+# in ClawBox's data/ while the state it stands for lives in Hermes' own store,
+# so the two can drift. Anything that resets ~/.hermes without wiping data/ —
+# reinstalling the agent on an existing device — would leave the marker set and
+# the toolset re-enabled PERMANENTLY, reproducing the 145-182s dead turns with
+# no way for the owner to notice or fix it. Converging every boot cannot get
+# stuck that way.
+#
+# It costs one CLI invocation per boot, and `production-server.js` runs this
+# script fire-and-forget, so it never delays the web server coming up. Nothing
+# in the product re-enables a toolset (no UI, no MCP tool, no script), so this
+# is not overriding a choice anyone can currently express; if that changes, the
+# intent belongs in a ClawBox preference this step can read, not in the absence
+# of a file.
+#
+# Never fatal: a device with its device tools registered but this step failed is
+# strictly better than a boot that aborted here.
+if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+  log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
+else
+  log "could not disable the built-in browser toolset — continuing"
 fi

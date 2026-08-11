@@ -8,7 +8,7 @@ import fs from "fs/promises";
 import path from "path";
 import { readConfig, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findClawboxBrowserPids, terminateClawboxBrowser } from "@/lib/browser-process";
+import { findClawboxBrowserPids, terminateClawboxBrowser } from "@/lib/process-match";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -114,24 +114,24 @@ async function cleanBrowserLocks() {
 /** Check if browser is running and CDP is accessible */
 async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean }> {
   // Identify the browser by its executable + our profile dir / CDP port, never
-  // by a regex over whole command lines — see src/lib/browser-process.ts. The
+  // by a regex over whole command lines — see src/lib/process-match.ts. The
   // harness runs each chat turn as `hermes chat -q <user's message>`, so a
   // command-line pattern is matchable from a chat message.
   const browserMatch = { profileDir: PROFILE_DIR, cdpPort: CDP_PORT };
 
-  // Check CDP endpoint first (most reliable)
+  // CDP answering is the authoritative "it is up and usable" signal; the pid
+  // is only a label for the UI. One scan serves both answers — this route is
+  // polled every 5s while the Browser panel is open, and the scan reads /proc.
+  let cdpReady = false;
   try {
     const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) {
-      const pids = await findClawboxBrowserPids(browserMatch);
-      return { running: true, pid: pids[0], cdpReady: true };
-    }
+    cdpReady = res.ok;
   } catch {}
-  // Fallback: check process
-  try {
-    const pids = await findClawboxBrowserPids(browserMatch);
-    if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
-  } catch {}
+
+  // findClawboxBrowserPids handles its own I/O failures and returns [].
+  const pids = await findClawboxBrowserPids(browserMatch);
+  if (cdpReady) return { running: true, pid: pids[0], cdpReady: true };
+  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
   return { running: false, cdpReady: false };
 }
 
@@ -337,23 +337,20 @@ export async function POST(req: Request) {
           // browser down. Log so ops can see if systemctl itself is wedged.
           console.warn("[browser] systemctl stop clawbox-browser.service failed:", err);
         }
-        try {
-          // Was `pkill -f "chrom.*--user-data-dir.*clawbox-browser"`. That
-          // matches the regex against every process's full argv, and a chat
-          // turn runs as `hermes chat -q <the user's message>` — so a message
-          // containing that pattern made this call SIGTERM the turn answering
-          // it. Select by executable + profile dir instead, which a message
-          // cannot forge. Finding nothing is the happy path here: the unit's
-          // KillMode=control-group has usually already reaped the tree.
-          const signalled = await terminateClawboxBrowser({
-            profileDir: PROFILE_DIR,
-            cdpPort: CDP_PORT,
-          });
-          if (signalled > 0) {
-            console.log(`[browser] terminated ${signalled} leftover browser process(es)`);
-          }
-        } catch (err) {
-          console.warn("[browser] terminating leftover browser processes failed:", err);
+        // Was `pkill -f "chrom.*--user-data-dir.*clawbox-browser"`. That matches
+        // the regex against every process's full argv, and a chat turn runs as
+        // `hermes chat -q <the user's message>` — so a message containing that
+        // pattern made this call SIGTERM the turn answering it. Select by
+        // executable + profile dir instead, which a message cannot forge.
+        // Finding nothing is the happy path: the unit's KillMode=control-group
+        // has usually already reaped the tree. Signal failures are swallowed by
+        // terminateClawboxBrowser, so there is nothing here to catch.
+        const signalled = await terminateClawboxBrowser({
+          profileDir: PROFILE_DIR,
+          cdpPort: CDP_PORT,
+        });
+        if (signalled > 0) {
+          console.log(`[browser] terminated ${signalled} leftover browser process(es)`);
         }
         await new Promise(r => setTimeout(r, 1000));
         await cleanBrowserLocks();

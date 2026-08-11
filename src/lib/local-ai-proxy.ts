@@ -14,17 +14,22 @@ import {
   MAX_REWRITABLE_BODY_BYTES,
 } from "@/lib/local-ai-thinking";
 
+/** True when Content-Length already says the body is too big to buffer. */
+function declaredOverCap(request: Request, maxBytes: number): boolean {
+  const declared = Number(request.headers.get("content-length") || "");
+  return Number.isFinite(declared) && declared > maxBytes;
+}
+
 /**
  * Read a request body, giving up past `maxBytes` rather than holding an
  * unbounded buffer on a device that has ~3.7 GB free with the model loaded.
- * Returns null when the cap is exceeded.
+ * Returns null when the cap is exceeded mid-stream — at which point the body
+ * has been partly consumed and can no longer be forwarded either.
+ *
+ * Callers check `declaredOverCap` first, so a body that announces its size gets
+ * streamed through untouched instead of reaching here at all.
  */
 async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
-  // Trust the declared length when there is one — it lets an oversized body be
-  // refused before a single chunk is read.
-  const declared = Number(request.headers.get("content-length") || "");
-  if (Number.isFinite(declared) && declared > maxBytes) return null;
-
   const reader = request.body?.getReader();
   if (!reader) return "";
 
@@ -33,14 +38,18 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<stri
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.length;
+    if (!value) continue;
+    total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel().catch(() => {});
       return null;
     }
     chunks.push(value);
   }
-  return Buffer.concat(chunks).toString("utf-8");
+  // A loopback POST usually arrives whole; skip the concat copy when it did.
+  // `total` is already known, so the multi-chunk path doesn't re-walk either.
+  if (chunks.length === 1) return Buffer.from(chunks[0]).toString("utf-8");
+  return Buffer.concat(chunks, total).toString("utf-8");
 }
 
 function buildUpstreamUrl(provider: LocalAiProvider, pathSegments: string[], search: string): string {
@@ -142,30 +151,29 @@ export async function proxyLocalAiRequest(
       // See src/lib/local-ai-thinking.ts for why the rewrite exists at all
       // (llama.cpp ignores `reasoning_effort`; `chat_template_kwargs` is the
       // field it actually reads).
+      // An oversized body is forwarded untouched rather than refused: a turn
+      // that runs with the server's default thinking setting beats no turn.
       const rewritable = provider === "llamacpp"
         && request.method === "POST"
-        && isChatCompletionsPath(pathSegments);
+        && isChatCompletionsPath(pathSegments)
+        && !declaredOverCap(request, MAX_REWRITABLE_BODY_BYTES);
 
-      let rewritten: string | null = null;
       if (rewritable) {
         const raw = await readBoundedBody(request, MAX_REWRITABLE_BODY_BYTES);
         if (raw === null) {
-          // Over the cap. Nothing is buffered, but the stream has been partly
-          // consumed, so it can no longer be forwarded — fail explicitly rather
-          // than silently sending a truncated request to the model.
+          // Only reachable when the body lied about (or omitted) its length and
+          // then ran past the cap. The stream is already partly consumed, so it
+          // cannot be forwarded — fail explicitly rather than send the model a
+          // truncated request.
           endLocalAiUse(provider);
           return NextResponse.json(
             { error: "Request body too large for the on-device model" },
             { status: 413 },
           );
         }
-        rewritten = applyThinkingToChatBody(raw);
-      }
-
-      if (rewritten !== null) {
-        init.body = rewritten;
-        // The body is a string now, so the upstream length differs from the
-        // one we stripped in forwardHeaders. fetch sets it from the body.
+        // A string body — fetch sets Content-Length from it, replacing the
+        // client's header that forwardHeaders stripped.
+        init.body = applyThinkingToChatBody(raw);
       } else {
         init.body = request.body;
         init.duplex = "half";

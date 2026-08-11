@@ -21,7 +21,7 @@ import {
   isBrowserExecutable,
   isClawboxBrowserArgv,
   findClawboxBrowserPids,
-} from "@/lib/browser-process";
+} from "@/lib/process-match";
 
 const PROFILE_DIR = "/home/clawbox/.config/clawbox-browser";
 const CDP_PORT = 18800;
@@ -87,6 +87,22 @@ describe("isClawboxBrowserArgv", () => {
   it("does NOT match a browser running someone else's profile", () => {
     const argv = ["/usr/bin/chromium", "--user-data-dir=/home/clawbox/.config/google-chrome"];
     expect(isClawboxBrowserArgv(argv, MATCH)).toBe(false);
+  });
+
+  it("requires the exact switch name, not a prefix of it", () => {
+    // `startsWith("--user-data-dir")` would also accept this, and the callers
+    // terminate whatever matches — so an unrelated Chromium must not qualify.
+    expect(isClawboxBrowserArgv(
+      ["/usr/bin/chromium", `--user-data-directory=${PROFILE_DIR}`],
+      MATCH,
+    )).toBe(false);
+  });
+
+  it("treats a trailing slash on the profile path as the same directory", () => {
+    expect(isClawboxBrowserArgv(
+      ["/usr/bin/chromium", `--user-data-dir=${PROFILE_DIR}/`],
+      MATCH,
+    )).toBe(true);
   });
 
   it("matches on the CDP port even without the profile dir", () => {

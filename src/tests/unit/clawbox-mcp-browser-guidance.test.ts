@@ -73,18 +73,27 @@ describe("Hermes provisioning retires the built-in browser toolset", () => {
     // NOT by hand-writing a config key: verified on-device that the state does
     // not live under agent.disabled_toolsets, so a config write would be a guess.
     expect(script).toMatch(/tools disable browser/);
-    expect(script).not.toMatch(/agent\.disabled_toolsets["']?\s+\[/);
+    expect(script).not.toMatch(/disabled_toolsets/);
   });
 
-  it("runs once, so an owner who re-enables it keeps that choice", () => {
-    expect(script).toMatch(/BROWSER_TOOLSET_MARKER/);
-    expect(script).toMatch(/if \[ ! -f "\$BROWSER_TOOLSET_MARKER" \]/);
+  /**
+   * Asserted as a PROPERTY, not as shell text. An earlier version of this test
+   * pinned the exact redirection and `; then` placement, which fails on a
+   * harmless reformat while still passing for a real regression.
+   */
+  it("reconciles every boot rather than once behind a marker", () => {
+    // A marker in ClawBox's data/ cannot see Hermes' own state, so reinstalling
+    // the agent would leave it set and the toolset on, permanently.
+    expect(script).not.toMatch(/MARKER/i);
+    // The call must not be gated on a file existing.
+    expect(script).not.toMatch(/-f[^\n]*\n[^\n]*tools disable browser/);
   });
 
-  it("never aborts the boot when the harness refuses", () => {
+  it("cannot abort the boot when the harness refuses", () => {
     // register-mcp.sh runs under `set -euo pipefail` from production-server.js
-    // at every web-server boot; a device with its tools registered but this
-    // step failed is strictly better than a boot that stopped here.
-    expect(script).toMatch(/if "\$HERMES_BIN" tools disable browser >\/dev\/null 2>&1; then/);
+    // at every web-server boot, so an unguarded non-zero exit would stop it.
+    // Being the `if` condition is what makes the failure non-fatal.
+    const line = script.split("\n").find(l => /tools disable browser/.test(l)) ?? "";
+    expect(line).toMatch(/^\s*if\b/);
   });
 });
