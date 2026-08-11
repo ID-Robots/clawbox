@@ -269,6 +269,7 @@ export default function ChromeShelf({
             {showChatButton && !isPortraitPhone && (
               <button
                 onClick={onChatClick}
+                data-testid="shelf-chat-button"
                 className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
                 title={t("shelf.chat")}
                 aria-label={t("shelf.chat")}
@@ -360,6 +361,7 @@ export default function ChromeShelf({
           {showChatButton && (
             <button
               onClick={onChatClick}
+              data-testid="shelf-chat-button"
               className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
               title={t("shelf.chat")}
               aria-label={t("shelf.chat")}

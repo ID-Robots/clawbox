@@ -116,14 +116,22 @@ test.describe("fresh-install setup wizard (UI)", () => {
     // The provider list opens on whichever provider is in play (ClawBox AI by
     // default) and keeps the rest behind its "more providers" toggle, so open
     // it before reaching for OpenAI.
-    // The list itself is waited on first: the step's testid is also on the
-    // skeleton rendered until the edition resolves, so counting the toggle
-    // before then would read zero and skip the expansion.
+    //
+    // Both async beats have to land before the toggle can be counted, and on a
+    // real device they land slower than anywhere else: the edition resolves
+    // (until then the step's testid sits on a skeleton that renders no
+    // radiogroup), and then the provider in play lands, which is what collapses
+    // the list onto one row. Counting in between reads an uncollapsed list,
+    // skips the expansion, and the list then collapses over the row we came
+    // for. The checked radio is the second beat's signal.
     const aiStep = page.getByTestId("setup-step-ai-models");
-    await expect(aiStep.getByRole("radiogroup", { name: "AI Provider" })).toBeVisible();
-    const moreProviders = aiStep.getByRole("button", { name: /more provider/i });
+    const providerGroup = aiStep.getByRole("radiogroup", { name: "AI Provider" });
+    await expect(providerGroup).toBeVisible();
+    await expect(providerGroup.locator("input[type=radio]:checked")).toHaveCount(1);
+    const moreProviders = providerGroup.getByRole("button", { name: /more provider/i });
     if (await moreProviders.count() > 0) {
       await moreProviders.first().click();
+      await expect(moreProviders).toHaveCount(0);
     }
     await page.getByText("OpenAI GPT").click();
     // OpenAI defaults to the "Subscription" tab (ChatGPT Plus / Pro OAuth).
