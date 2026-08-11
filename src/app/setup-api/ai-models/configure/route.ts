@@ -492,20 +492,55 @@ export async function POST(request: Request) {
         expires_in?: number;
         createdAt?: number;
       };
+      let rawHandoff: string;
       try {
-        handoff = JSON.parse(await fs.readFile(HANDOFF_TOKENS_PATH, "utf-8"));
+        rawHandoff = await fs.readFile(HANDOFF_TOKENS_PATH, "utf-8");
       } catch {
         return NextResponse.json(
           { error: "No pending OAuth tokens. Restart the sign-in flow." },
           { status: 400 },
         );
       }
-      // A file with no `createdAt` has no age we can check, so it cannot be
-      // shown to be inside the TTL — treat it the same as one that is past it.
+      try {
+        const parsed = JSON.parse(rawHandoff);
+        if (!parsed || typeof parsed !== "object") throw new Error("not an object");
+        handoff = parsed;
+      } catch {
+        // Content a retry cannot fix. Remove it rather than leave every later
+        // attempt to fail on the same file until something else clears it.
+        await fs.unlink(HANDOFF_TOKENS_PATH).catch(() => {});
+        return NextResponse.json(
+          { error: "No pending OAuth tokens. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      // Age the file by its own timestamp, and only when that timestamp is one
+      // we can actually compare: a missing, non-numeric, non-finite or future
+      // `createdAt` yields no age, so the file cannot be shown to be inside the
+      // TTL and is treated exactly like one past it. (A bare
+      // `Date.now() - createdAt` comparison would pass for all of them — NaN
+      // and a negative age each fail a `> TTL` test.)
+      const createdAt = handoff.createdAt;
+      const ageMs =
+        typeof createdAt === "number" && Number.isFinite(createdAt)
+          ? Date.now() - createdAt
+          : null;
+      // These routes write the file, and they write strings. A field of another
+      // shape means the file is not one of ours to use, so it goes down the
+      // same path rather than being spliced into the body for a later check to
+      // reject — which would leave it on disk for every retry to trip over.
+      // Trimmed, because the token is trimmed before it is used: a blank string
+      // is as unusable as a missing one, and would otherwise be refused further
+      // down with the file still on disk.
+      const wellFormed =
+        typeof handoff.access_token === "string" &&
+        handoff.access_token.trim().length > 0 &&
+        (handoff.provider === undefined || typeof handoff.provider === "string");
       if (
-        !handoff.access_token ||
-        !handoff.createdAt ||
-        Date.now() - handoff.createdAt > HANDOFF_TTL_MS
+        !wellFormed ||
+        ageMs === null ||
+        ageMs < 0 ||
+        ageMs > HANDOFF_TTL_MS
       ) {
         // Stale/invalid credential material — consume it so it can't linger.
         await fs.unlink(HANDOFF_TOKENS_PATH).catch(() => {});

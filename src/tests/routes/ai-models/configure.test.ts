@@ -1112,6 +1112,66 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toContain("expired");
   });
 
+  it("rejects and removes a handoff file whose contents cannot be parsed", async () => {
+    // A retry cannot fix this file, so leaving it would make every later
+    // attempt fail on the same content.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? "{not json"
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
+  // Written as raw documents rather than through JSON.stringify: it serialises
+  // NaN and Infinity as `null`, which would quietly turn the non-finite case
+  // into the missing-createdAt case already covered below. `1e999` parses to
+  // Infinity, which is what the route's Number.isFinite check is there for.
+  const handoffDoc = (fields: string) =>
+    `{"provider":"openai","access_token":"access.token.jwt","id_token":"id.token.jwt",${fields}}`;
+
+  it.each([
+    ["a non-numeric createdAt", handoffDoc(`"createdAt":"not-a-timestamp"`)],
+    ["a non-finite createdAt", handoffDoc(`"createdAt":1e999`)],
+    ["a createdAt in the future", handoffDoc(`"createdAt":${Date.now() + 60 * 60 * 1000}`)],
+    // A field of the wrong shape means the file is not one this device wrote.
+    ["a non-string access_token", `{"provider":"openai","access_token":{},"createdAt":${Date.now()}}`],
+    ["a non-string provider", `{"provider":{},"access_token":"a.b.c","createdAt":${Date.now()}}`],
+    // Trims to nothing where it is used, so it is as unusable as a missing one.
+    ["a blank access_token", `{"provider":"openai","access_token":"   ","createdAt":${Date.now()}}`],
+  ])("rejects and removes a handoff file with %s", async (_label, doc) => {
+    // None of these yields something the route can use, and a bare
+    // `now - createdAt > TTL` truthiness test passes for every one of them.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? doc
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
   it("rejects and removes a handoff file that carries no createdAt", async () => {
     // Without a timestamp the file's age is unknown, so it cannot be shown to
     // be inside the TTL — it is refused like an expired one, and removed rather

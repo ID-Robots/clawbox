@@ -6,7 +6,6 @@ import { DATA_DIR } from "@/lib/config-store";
 import {
   HANDOFF_TOKENS_PATH,
   HANDOFF_TTL_MS,
-  clearHandoffTokens,
   sweepStaleHandoffTokens,
 } from "@/lib/oauth-handoff";
 import {
@@ -21,19 +20,17 @@ export const dynamic = "force-dynamic";
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
 
 /**
- * Drop both halves of a sign-in the provider ended without completing: the
- * in-flight state, and any handoff tokens an earlier attempt left behind.
+ * Drop the in-flight state of a sign-in the provider ended without completing.
  *
- * Used on the provider-failure branches only. The expiry branch in POST drops
- * the state alone, because a device-code state can be expired while the handoff
- * file holds fresh tokens from the *other* (authorization-code) flow; those are
- * left for the age sweep to judge on their own timestamp.
+ * Deliberately does NOT touch the handoff file. Tokens are only ever written
+ * after this route has removed the state, so no branch that reaches here has
+ * written any — whatever handoff exists at this moment belongs to some other
+ * flow, quite possibly a finished authorization-code one still waiting for
+ * /configure. Clearing it here would end that sign-in too. Handoff material is
+ * cleared where a flow starts, and swept by age in POST below.
  */
 async function discardFlow(): Promise<void> {
-  await Promise.all([
-    fs.unlink(STATE_PATH).catch(() => {}),
-    clearHandoffTokens(),
-  ]);
+  await fs.unlink(STATE_PATH).catch(() => {});
 }
 
 interface DeviceTokens {
