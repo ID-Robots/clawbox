@@ -172,14 +172,7 @@ import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { fetchHarness } from '@/lib/client-harness'
-
-// Hermes model ids are `vendor/model` slugs; the header's provider pill already
-// names the vendor, so the model pill drops it. Only the LAST segment is kept,
-// which is also correct for the bare ids ClawBox AI serves.
-function shortHermesModelLabel(id: string): string {
-  const slash = id.lastIndexOf('/')
-  return slash >= 0 ? id.slice(slash + 1) : id
-}
+import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -210,7 +203,14 @@ function extractText(msg: unknown): string {
   return ''
 }
 
-const DEFAULT_SIZE = { w: 400, h: 500 }
+// 420, not the old 400, because of the header. The three selector pills spend
+// ~120px on their own padding, chevrons and gaps, so a 400px panel left ~154px
+// for the three LABELS — and the widest shipped default pairing, "Claude" +
+// "Sonnet 4.6" + "Medium", needs 158 even after every redundant word has been
+// squeezed out of it (see src/lib/chat-header-pills.ts). 20px is the whole
+// remaining gap; measured in the device's own Chromium, every provider/model
+// default in the catalog renders un-truncated at 420 and several did not at 400.
+const DEFAULT_SIZE = { w: 420, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 // Floor for the chat window width. Below this the header selector pills would
 // squeeze past a readable size, so the resize handles (floating + docked panel)
@@ -395,6 +395,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const hermesProviderName = useCallback(
     (id: string) => hermesProviderLabel(id, hermesProviders.find(p => p.id === id)?.name),
     [hermesProviders],
+  )
+
+  // Text of the header's provider pill. Also feeds the model pill, which drops
+  // whatever this already says (see shortModelPillLabel).
+  const hermesProviderPill = useMemo(
+    () => hermesProviderPillLabel(
+      hermesProvider,
+      hermesProviders.find(p => p.id === hermesProvider)?.name,
+    ),
+    [hermesProvider, hermesProviders],
   )
 
   const changeHermesProvider = useCallback((id: string) => {
@@ -1869,19 +1879,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <div className="chat-header-pills">
           {harnessMode === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
-            // below — provider → model (scoped to it) → thinking effort — so
-            // all three still fit one row at the 340px docked minimum (see
-            // .chat-header-pills in globals.css, which truncates with "…").
+            // below — provider → model (scoped to it) → thinking effort. The
+            // row is 262px at the 400px docked default, of which ~142px is
+            // label text, so every pill label is de-duplicated against its
+            // neighbour (see src/lib/chat-header-pills.ts) to fit un-truncated.
+            // Below ~386px they still truncate with "…" rather than wrap (see
+            // .chat-header-pills in globals.css); the popovers keep full text.
             // Falls back to a plain label until the catalogue loads.
             hermesProviders.length > 0 ? (
               <>
                 <HeaderDropdown
                   ariaLabel="Chat provider"
                   value={hermesProvider}
-                  triggerLabel={hermesProviderPillLabel(
-                    hermesProvider,
-                    hermesProviders.find(p => p.id === hermesProvider)?.name,
-                  )}
+                  triggerLabel={hermesProviderPill}
                   options={hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) }))}
                   onChange={changeHermesProvider}
                   onPointerDown={stopHeaderDrag}
@@ -1895,13 +1905,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   <HeaderDropdown
                     ariaLabel="Hermes model"
                     value={hermesModel}
-                    /* Trigger shows the model WITHOUT its vendor prefix — the
-                       provider pill immediately to its left already names the
-                       vendor, and at 140px "anthropic/claude-op…" truncates away
-                       exactly the part that distinguishes one model from another.
-                       The popover keeps the full id. Matches the OpenClaw pill,
-                       which shows the short model label. */
-                    triggerLabel={shortHermesModelLabel(hermesModel)}
+                    /* Trigger shows the model WITHOUT whatever the provider pill
+                       immediately to its left already says — "claude-fable-5"
+                       next to "Claude" is "fable-5". At the docked width the
+                       repeated vendor was eating the part that distinguishes one
+                       model from another ("claude-fable-5" → "claude-fab…").
+                       The popover keeps the full id. */
+                    triggerLabel={shortModelPillLabel(hermesModel, hermesProviderPill)}
                     options={(hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id }))}
                     onChange={changeHermesModel}
                     onPointerDown={stopHeaderDrag}
@@ -1921,7 +1931,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   <HeaderDropdown
                     ariaLabel="Reasoning effort"
                     value={hermesEffectiveReasoning}
-                    triggerLabel={`Thinking: ${HERMES_REASONING_LABELS[hermesEffectiveReasoning]}`}
+                    /* Brain glyph instead of a "Thinking: " word prefix — see
+                       REASONING_PILL_ICON. The word cost 55px of a 142px row
+                       and truncated the level away; the glyph costs ~11px. */
+                    triggerLabel={HERMES_REASONING_LABELS[hermesEffectiveReasoning]}
+                    triggerIcon={REASONING_PILL_ICON}
                     options={hermesReasoningOptions.map(level => ({
                       id: level,
                       label: HERMES_REASONING_LABELS[level],
@@ -2008,10 +2022,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
                   ...catalog.models,
                 ]
+            // Same de-duplication as the Hermes branch: the provider pill to
+            // the left already says "Claude", so this pill shows "Sonnet 4.6",
+            // not "Claude Sonnet 4.6". The popover keeps the full label.
+            const activeModelLabel = modelOptions.find(o => o.id === activeModelId)?.label
+              ?? activeModelId
             return (
               <HeaderDropdown
                 ariaLabel={`${activeOption.label} model`}
                 value={activeModelId}
+                triggerLabel={shortModelPillLabel(
+                  activeModelLabel,
+                  getProviderPillText(activeOption),
+                )}
                 options={modelOptions.map(option => ({
                   id: option.id,
                   label: option.label,
@@ -2056,7 +2079,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
-              triggerLabel={`Thinking: ${THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}`}
+              /* Brain glyph instead of a "Thinking: " word prefix — see
+                 REASONING_PILL_ICON. */
+              triggerLabel={THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}
+              triggerIcon={REASONING_PILL_ICON}
               triggerMaxWidth={120}
               popoverWidth={180}
             />
