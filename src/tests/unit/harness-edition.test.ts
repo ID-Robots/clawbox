@@ -16,6 +16,10 @@ vi.mock("@/lib/edition-license", () => ({
   verifyDualLicense: () => licenseValid,
 }));
 
+/** The one message the lock is allowed to fail with. Asserting it keeps an
+ *  unrelated throw — a mock wired wrong, say — from passing for a lock. */
+const LOCKED = "Harness switching is disabled on this edition";
+
 async function loadHarness(edition?: string) {
   vi.resetModules();
   if (edition === undefined) delete process.env.CLAWBOX_EDITION;
@@ -40,7 +44,8 @@ describe("harness edition lock", () => {
     expect(h.lockedHarness()).toBe("openclaw");
     mockGet.mockResolvedValue("hermes"); // stale config ignored on a locked device
     expect(await h.getActiveHarness()).toBe("openclaw");
-    await expect(h.setActiveHarness("hermes")).rejects.toThrow();
+    await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
+    expect(mockSet).not.toHaveBeenCalled();
   });
 
   it("locks to hermes on the hermes edition", async () => {
@@ -49,7 +54,8 @@ describe("harness edition lock", () => {
     expect(h.lockedHarness()).toBe("hermes");
     mockGet.mockResolvedValue("openclaw");
     expect(await h.getActiveHarness()).toBe("hermes");
-    await expect(h.setActiveHarness("openclaw")).rejects.toThrow();
+    await expect(h.setActiveHarness("openclaw")).rejects.toThrow(LOCKED);
+    expect(mockSet).not.toHaveBeenCalled();
   });
 
   it("dual WITHOUT a valid license degrades to locked single (default harness)", async () => {
@@ -57,7 +63,21 @@ describe("harness edition lock", () => {
     const h = await loadHarness("dual");
     expect(h.isSingleHarnessEdition()).toBe(true);
     expect(h.lockedHarness()).toBe("openclaw");
-    await expect(h.setActiveHarness("hermes")).rejects.toThrow();
+    await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("stays locked on dual when the licence verdict is unavailable", async () => {
+    // verifyDualLicense() answers false for everything it cannot confirm — a
+    // missing licence, a bad signature, an unreadable expiry. The gate must not
+    // read any of those as permission; the store is the thing being protected,
+    // so assert it was never touched.
+    licenseValid = false;
+    const h = await loadHarness("dual");
+    expect(h.isDualUnlocked()).toBe(false);
+    expect(h.isSingleHarnessEdition()).toBe(true);
+    await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
+    expect(mockSet).not.toHaveBeenCalled();
   });
 
   it("dual WITH a valid license unlocks the switcher", async () => {
