@@ -21,6 +21,10 @@ import fs from "fs";
 export type EditionName = "openclaw" | "hermes" | "dual";
 
 // Overridable for tests only; production always reads the root-owned path.
+// Redirecting it is not an edition-lock bypass: no request data flows into it,
+// and "dual" additionally has to clear verifyDualLicense() against a key constant
+// that is deliberately not env-overridable (see edition-license.ts) — so a
+// redirected path can change the edition LABEL, never unlock the premium switcher.
 const EDITION_FILE = process.env.CLAWBOX_EDITION_FILE || "/etc/clawbox/edition.env";
 
 let cache: { mtimeMs: number; edition: EditionName } | null = null;

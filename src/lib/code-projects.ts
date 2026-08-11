@@ -409,6 +409,10 @@ export async function searchFiles(
     // No global flag: only test() is used, and the 'g' flag makes test()
     // stateful (persisting lastIndex), which silently skips alternating matches.
     const flags = opts.caseSensitive ? "" : "i";
+    // Flagged by CodeQL js/regex-injection: the pattern is a search FILTER, not
+    // a guard. It decides no path, permission or sanitisation outcome — only
+    // which lines of this device's own project files come back to the caller
+    // that asked. /setup-api/code sits behind the session / MCP-bearer gate.
     let re: RegExp;
     try {
       re = new RegExp(pattern, flags);
