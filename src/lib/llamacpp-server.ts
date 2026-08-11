@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import path from "path";
-import { DATA_DIR } from "./config-store";
+import { DATA_DIR, getAll } from "./config-store";
 import {
   getDefaultLlamaCppFile,
   getDefaultLlamaCppModel,
@@ -9,7 +9,7 @@ import {
   getLlamaCppBaseUrl,
   getLlamaCppServerContextSize,
 } from "./llamacpp";
-import { inferConfiguredLocalModel, type OpenClawConfig } from "./openclaw-config";
+import { inferConfiguredLocalModel, readConfig, type OpenClawConfig } from "./openclaw-config";
 
 const LLAMACPP_RUNTIME_DIR = path.join(DATA_DIR, "llamacpp");
 const LLAMACPP_PID_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.pid");
@@ -43,6 +43,44 @@ export interface LlamaCppProvisioningStatus {
   binaryAvailable: boolean;
   modelAvailable: boolean;
   installed: boolean;
+}
+
+/**
+ * The alias recorded in ClawBox's own config store when the customer enabled
+ * the local model, or null when they didn't.
+ *
+ * This is the edition-independent record. The OpenClaw config below can only
+ * answer the question on editions that ship OpenClaw; on the others it is
+ * silent, which is what used to make the local model unstartable.
+ */
+export function getLocalAiConfigStoreAlias(state: Record<string, unknown>): string | null {
+  if (state["local_ai_configured"] !== true) return null;
+  if (state["local_ai_provider"] !== "llamacpp") return null;
+  const stored = state["local_ai_model"];
+  // Stored fully-qualified ("llamacpp/gemma4-e2b-it-q4_0"); callers want the
+  // bare alias. An empty or malformed value falls back to the default rather
+  // than launching with a blank --alias.
+  const bare = typeof stored === "string" ? stored.replace(/^llamacpp\//, "").trim() : "";
+  return bare || getDefaultLlamaCppModel();
+}
+
+/**
+ * Which llama.cpp model this device is configured to run, across every
+ * edition — OpenClaw's agent config first (unchanged, so the OpenClaw/dual
+ * SKUs keep their existing behaviour), then ClawBox's own config store.
+ *
+ * Both the on-demand wake path and the launcher resolve through here, so they
+ * cannot disagree about which model to start. They previously did: the wake
+ * path fell back to the *default* alias on editions where the OpenClaw config
+ * is silent, so a device configured with a non-default local model woke the
+ * wrong one.
+ */
+export async function resolveConfiguredLlamaCppAlias(): Promise<string | null> {
+  const [config, state] = await Promise.all([
+    readConfig().catch(() => ({} as OpenClawConfig)),
+    getAll().catch(() => ({} as Record<string, unknown>)),
+  ]);
+  return getConfiguredLlamaCppModelAlias(config) ?? getLocalAiConfigStoreAlias(state);
 }
 
 export function getConfiguredLlamaCppModelAlias(config: OpenClawConfig): string | null {

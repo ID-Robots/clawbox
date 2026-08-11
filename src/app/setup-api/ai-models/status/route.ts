@@ -15,6 +15,10 @@ const PROVIDER_LABELS: Record<string, string> = {
   openrouter: "OpenRouter",
   ollama: "Ollama Local",
   llamacpp: "llama.cpp Local",
+  // Hermes' id for the on-device model. Without an entry here the raw
+  // "clawlocal" leaked into the UI as a provider name. Matches the wording in
+  // lib/hermes-providers.ts so the same model isn't called two things.
+  clawlocal: "Gemma 4 (on-device)",
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";

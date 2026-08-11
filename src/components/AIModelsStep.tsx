@@ -45,6 +45,15 @@ interface AIModelsStepProps {
   defaultProviderId?: string;
   currentProviderId?: string | null;
   currentModel?: string | null;
+  /**
+   * Whether the local model is the harness's ACTIVE selection, as opposed to
+   * merely installed. `currentProviderId` only ever reported the latter, so the
+   * llama.cpp panel showed an "already configured" pill — and hid its own
+   * switch button — on devices that were not actually using the model.
+   * Undefined keeps the old provider-id-derived behaviour for callers that
+   * don't know the difference (the setup wizard).
+   */
+  localAiIsActive?: boolean;
   openClawAIOfferRequest?: number;
   requestedProviderId?: string | null;
   providerSelectionRequest?: number;
@@ -400,6 +409,7 @@ export default function AIModelsStep({
   defaultProviderId,
   currentProviderId = null,
   currentModel = null,
+  localAiIsActive,
   openClawAIOfferRequest = 0,
   requestedProviderId = null,
   providerSelectionRequest = 0,
@@ -1820,7 +1830,7 @@ export default function AIModelsStep({
             <LlamaCppModelPanel
               llamaCppRunning={llamaCppRunning}
               llamaCppInstalled={llamaCppInstalled}
-              llamaCppIsActive={normalizedCurrentProvider === "llamacpp"}
+              llamaCppIsActive={localAiIsActive ?? normalizedCurrentProvider === "llamacpp"}
               llamaCppSaving={llamaCppSaving}
               llamaCppProgress={llamaCppProgress}
               selectedLlamaCppModel={selectedLlamaCppModel}

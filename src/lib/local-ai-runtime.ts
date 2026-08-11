@@ -3,11 +3,11 @@ import { promisify } from "util";
 import { startLlamaCppServer, stopLlamaCppServer } from "@/instrumentation-node";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import {
-  getConfiguredLlamaCppModelAlias,
   getLlamaCppLaunchSpec,
+  getLlamaCppProvisioningStatus,
   queryLlamaCppModels,
+  resolveConfiguredLlamaCppAlias,
 } from "@/lib/llamacpp-server";
-import { readConfig } from "@/lib/openclaw-config";
 
 const execFile = promisify(execFileCb);
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
@@ -15,6 +15,14 @@ const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
 const DEFAULT_LOCAL_AI_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OLLAMA_STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 1_000;
+// Waking a model that is already on disk is a different operation from
+// provisioning one that isn't. `spec.startupTimeoutMs` (20 min) is a *download*
+// budget — sized for pulling a multi-GB GGUF over a slow link. Applying it to a
+// wake meant a runtime that failed to start held the request open for 20
+// minutes instead of erroring. Cold load of Gemma 4 E2B Q4_0 measured ~18 s on
+// Jetson Orin, so 180 s is ~10x headroom and still fails inside any sane
+// client timeout.
+const DEFAULT_LLAMACPP_WAKE_TIMEOUT_MS = 180_000;
 
 export type LocalAiProvider = "llamacpp" | "ollama";
 
@@ -74,8 +82,11 @@ export function getLocalAiIdleTimeoutMs(): number {
 }
 
 async function getConfiguredLlamaCppAlias(): Promise<string> {
-  const config = await readConfig();
-  return getConfiguredLlamaCppModelAlias(config) || getDefaultLlamaCppModel();
+  // Resolves across every edition — see resolveConfiguredLlamaCppAlias. Reading
+  // the OpenClaw config alone meant that on editions where it is silent this
+  // always fell through to the default alias, so a device configured with a
+  // non-default local model woke the wrong one.
+  return (await resolveConfiguredLlamaCppAlias()) || getDefaultLlamaCppModel();
 }
 
 async function isOllamaReachable(): Promise<boolean> {
@@ -90,19 +101,39 @@ async function isOllamaReachable(): Promise<boolean> {
   }
 }
 
+export function getLlamaCppWakeTimeoutMs(): number {
+  const raw = Number(process.env.LLAMACPP_WAKE_TIMEOUT_MS || DEFAULT_LLAMACPP_WAKE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_LLAMACPP_WAKE_TIMEOUT_MS;
+}
+
 async function waitForLlamaCppReady(alias: string): Promise<void> {
   const spec = getLlamaCppLaunchSpec(alias);
-  const deadline = Date.now() + spec.startupTimeoutMs;
+  // Resolved lazily, only once the first poll misses. `ensureLocalAiReady` runs
+  // on every proxied inference request, and when the runtime is already warm
+  // the first poll returns immediately — so deciding the budget up front spent
+  // two filesystem stats per request to compute a number nothing would read.
+  let budgetMs: number | null = null;
+  let deadline = Infinity;
 
   while (Date.now() < deadline) {
     const models = await queryLlamaCppModels(spec.baseUrl);
     if (models.includes(alias) || models.length > 0) {
       return;
     }
+    if (budgetMs === null) {
+      // Model already on disk → this is a wake, not a download. Only when the
+      // GGUF is missing does start-llamacpp.sh fetch it, and only then is the
+      // long provisioning budget the right one.
+      const provisioning = await getLlamaCppProvisioningStatus(alias).catch(() => null);
+      budgetMs = provisioning?.modelAvailable ? getLlamaCppWakeTimeoutMs() : spec.startupTimeoutMs;
+      deadline = Date.now() + budgetMs;
+    }
     await sleep(POLL_INTERVAL_MS);
   }
 
-  throw new Error(`Timed out waiting for llama.cpp (${alias}) to become ready`);
+  throw new Error(
+    `Timed out after ${Math.round((budgetMs ?? 0) / 1000)}s waiting for llama.cpp (${alias}) to become ready`,
+  );
 }
 
 async function waitForOllamaReady(): Promise<void> {
@@ -190,7 +221,18 @@ export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<voi
   const startPromise = (async () => {
     if (provider === "llamacpp") {
       const alias = await getConfiguredLlamaCppAlias();
-      await startLlamaCppServer();
+      // Pass the alias explicitly: reaching this function means a caller asked
+      // for the local runtime, so the launcher must not re-derive whether it is
+      // "configured" from a config file that belongs to another harness.
+      const status = await startLlamaCppServer(alias);
+      if (status === "skipped-disabled") {
+        throw new Error("Local AI is turned off on this device. Enable Gemma 4 in Settings to use it.");
+      }
+      if (status === "skipped-not-configured") {
+        // Defensive: with an explicit alias the launcher should never report
+        // this. Failing here beats polling for a server nobody started.
+        throw new Error(`llama.cpp did not start for ${alias} (no local model configured)`);
+      }
       await waitForLlamaCppReady(alias);
       return;
     }
@@ -203,6 +245,8 @@ export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<voi
   try {
     await startPromise;
   } finally {
+    // Clear on BOTH paths. A failed attempt that stayed parked here made every
+    // later request join a doomed wait, so the failure outlived its cause.
     if (state.startPromise === startPromise) {
       state.startPromise = null;
     }
