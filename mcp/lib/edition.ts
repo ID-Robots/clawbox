@@ -20,6 +20,10 @@ const HARNESS_TIMEOUT_MS = 3_000;
 
 // Same path src/lib/edition-source.ts reads; re-stated (not exported from there)
 // only to tell "the lock is absent" apart from "the lock is unreadable".
+// Not an edition-lock bypass — see the note on the same constant in
+// src/lib/edition-source.ts. What it can influence HERE is the tool set, and the
+// env supplying it is the one that launches this server, so anyone able to set it
+// already has the clawbox shell that the smaller set withholds.
 const EDITION_FILE = process.env.CLAWBOX_EDITION_FILE || "/etc/clawbox/edition.env";
 
 /**
