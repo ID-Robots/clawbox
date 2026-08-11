@@ -77,6 +77,29 @@ sudo CLAWBOX_EDITION=hermes bash install.sh
 Valid values are `openclaw`, `hermes` and `dual`. An unrecognised value prints a
 warning and installs as `openclaw`.
 
+That variable chooses the edition on a **first** install. On a device that has
+already been installed, the installer compares it against the recorded edition
+and stops if they differ, before it changes anything:
+
+```text
+ERROR: this device is already installed as the 'hermes' edition.
+
+         Recorded edition:  hermes   (/etc/clawbox/edition.env)
+         Requested edition: openclaw
+```
+
+Re-running the installer with the edition the device already is — or with no
+`CLAWBOX_EDITION` at all, which reads the recorded value — is the normal
+re-install and update path and is unaffected. `dual` counts as its own edition
+here, so moving to or from it is a change like any other.
+
+The installer does not migrate an edition. It has no step that removes the
+harness the device would be leaving, and each harness keeps its AI provider
+sign-in in its own configuration file, so signing in does not carry across. A
+device installed over the top of another edition ends up running two agents with
+no usable model — which is why the transition is refused rather than half
+performed. Changing a device's edition is a reflash.
+
 ## Which edition am I on?
 
 Over SSH or in the Terminal app:
