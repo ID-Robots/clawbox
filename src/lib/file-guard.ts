@@ -58,7 +58,15 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // this directory even in principle: an atomic write stages `<name>.tmp.<hex>`
 // beside its target, so some of what lands here is named at runtime. A
 // hand-maintained list also only describes the code as it was when the list was
-// last edited.
+// last edited — the one this replaced had fallen behind the OAuth flow files,
+// the login and credentials-change state, the tunnel state and cloudflared/.
+//
+// The name-shaped rules above cannot stand in for it either. Each matches the
+// names it was written for, and this directory is full of names just outside
+// them: it holds `network.env`, `hotspot.env`, `ap-runtime.env` and
+// `hostname.env`, which END in `.env`, while the dotenv rule in mcp/lib/guard.ts
+// matches names that BEGIN with it. Neither rule is wrong; they describe
+// different things. Only the directory describes the directory.
 //
 // DATA_DIR *itself* is deliberately not protected. The Files API filters a
 // directory listing entry by entry, so keeping the directory openable is what
