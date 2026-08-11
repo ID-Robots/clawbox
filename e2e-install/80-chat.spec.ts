@@ -142,6 +142,23 @@ test.describe("chat round trip", () => {
 
     await page.goto("/");
 
+    // Configuring a provider above flips the account tier, which makes the
+    // tier-upgrade dialog open over the desktop on first load. It is a real
+    // modal — `aria-modal="true"`, and the page behind it is `inert`, so the
+    // chat panel is genuinely unreachable until it is dismissed, for a screen
+    // reader and for this test alike. Dismiss it the way a user would rather
+    // than querying around it; it is absent on reruns (the "seen" tier is
+    // persisted), hence the tolerant wait.
+    const celebration = page.getByRole("dialog").filter({ hasText: /plan/i });
+    const celebrationShown = await celebration
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (celebrationShown) {
+      await celebration.getByRole("button").first().click();
+      await expect(celebration).toBeHidden({ timeout: 10_000 });
+    }
+
     // Before the gateway WS connects, the textbox shows
     // "Waiting for the Claw to wake up…" and is disabled. Once the gateway
     // acknowledges the session, the placeholder flips to "Type a message..."
