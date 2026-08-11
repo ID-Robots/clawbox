@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import type { StepStatus, UpdateState } from "@/lib/updater";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import type { StepStatus, StepState, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import ReconnectingOverlay from "./ReconnectingOverlay";
@@ -10,34 +10,179 @@ interface UpdateStepProps {
   onNext: () => void;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Surfaces, in the ladders. Font sizes ride in `style` because `text-[…]`
+   is ambiguous between colour and size; everything else is Tailwind so the
+   hover states stay declarative.
+
+   There is no danger rung in the ladders, so failures keep the product's
+   shipped red-500 / red-400.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const T_H1 = { fontSize: "var(--t-6)", lineHeight: 1.15 } as const;
+const T_LEDE = { fontSize: "var(--t-4)", lineHeight: 1.6 } as const;
+const T_BTN = { fontSize: "var(--t-5)", fontWeight: "var(--w-label)" as const } as const;
+const T_QUIET = { fontSize: "var(--t-2)", fontWeight: "var(--w-label)" as const } as const;
+
+const BTN_PRIMARY =
+  "w-full sm:w-auto inline-flex items-center justify-center gap-[var(--s-2)] min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] btn-gradient text-white cursor-pointer";
+/* Secondaries are neutral. Coral is reserved for the one filled action, so
+   an escape hatch out of the update no longer wears the same colour as the
+   update itself. */
+const BTN_QUIET =
+  "inline-flex items-center justify-center min-h-[40px] px-[var(--s-3)] rounded-[var(--r-1)] bg-transparent border-none cursor-pointer text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)]";
+const BTN_GHOST =
+  "w-full sm:w-auto inline-flex items-center justify-center min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] bg-[var(--fill-1)] border border-[var(--border-subtle)] cursor-pointer text-[var(--text-secondary)] hover:bg-[var(--fill-3)] hover:text-[var(--text-primary)]";
+
+function Card({ children }: { children: ReactNode }) {
+  return (
+    <div className="w-full max-w-[520px]" data-testid="setup-step-update">
+      <div className="card-surface rounded-[var(--r-3)] p-[var(--s-5)] sm:p-[var(--s-7)]">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function stepTextClass(status: StepStatus): string {
   switch (status) {
-    case "running": return "text-[var(--coral-bright)] font-medium";
-    case "completed": return "text-[var(--text-primary)]";
+    // Cyan means DONE on every box; the step in flight is simply the one
+    // written in full ink.
+    case "running": return "text-[var(--text-primary)]";
+    case "completed": return "text-[var(--cyan-bright)]";
     case "failed": return "text-red-400";
     default: return "text-[var(--text-muted)]";
   }
 }
 
+/**
+ * One 18px disc per step, four states, none of them moving.
+ *
+ * The running step used to carry a spinner, which is a claim about the
+ * machine that a 4-minute JetPack install cannot back: it turns at the same
+ * rate whether the device is working or dead. The cadence of this screen is
+ * carried by the meter — twelve real completion events — and its liveness by
+ * a dot that steps once per answered poll.
+ */
 function StepIcon({ status }: { status: StepStatus }) {
-  if (status === "running") {
-    return <div className="spinner !w-5 !h-5 !border-2" />;
-  }
   if (status === "completed") {
     return (
-      <div className="w-5 h-5 rounded-full bg-[#00e5cc] flex items-center justify-center text-white text-xs font-bold">
-        &#10003;
-      </div>
+      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--cyan-bright)]">
+        <span className="material-symbols-rounded text-[#06202a]" aria-hidden="true" style={{ fontSize: 12 }}>
+          check
+        </span>
+      </span>
     );
   }
   if (status === "failed") {
     return (
-      <div className="w-5 h-5 rounded-full bg-red-500 flex items-center justify-center text-white text-xs font-bold">
-        &#10005;
-      </div>
+      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-red-500">
+        <span className="material-symbols-rounded text-white" aria-hidden="true" style={{ fontSize: 12 }}>
+          close
+        </span>
+      </span>
     );
   }
-  return <div className="w-5 h-5 rounded-full bg-gray-600" />;
+  if (status === "running") {
+    return (
+      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--coral-tint)] border border-[var(--coral-bright)]">
+        <span className="block w-1.5 h-1.5 rounded-[var(--r-full)] bg-[var(--coral-bright)]" />
+      </span>
+    );
+  }
+  return (
+    <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--fill-2)]">
+      <span className="block w-[5px] h-[5px] rounded-[var(--r-full)] bg-[var(--text-muted)]" />
+    </span>
+  );
+}
+
+/**
+ * The meter: one segment per real step, not one bar creeping.
+ *
+ * The update has a fixed number of discrete completion events and no
+ * intermediate signal between them, so a smooth fill would have to invent
+ * the motion in the gaps. Each segment flips colour the instant its step
+ * reports done, at --ease-truth (linear) — an easing curve here would
+ * fabricate a velocity profile the box never reported. Between segments
+ * nothing moves, which is the truth: nothing has been reported.
+ */
+function Meter({ steps, done, label }: { steps: StepState[]; done: boolean; label: string }) {
+  const completed = steps.filter((s) => s.status === "completed").length;
+  return (
+    <div
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={steps.length}
+      aria-valuenow={completed}
+    >
+      <div className="flex gap-[var(--s-0)]" aria-hidden="true">
+        {steps.map((s) => (
+          <span
+            key={s.id}
+            className={`flex-1 h-1 rounded-[var(--r-full)] ${
+              done
+                ? "bg-[var(--cyan-bright)]"
+                : s.status === "completed"
+                  ? "bg-[var(--coral-bright)]"
+                  : s.status === "failed"
+                    ? "bg-red-500"
+                    : "bg-[var(--fill-2)]"
+            }`}
+            style={{ transition: "background-color var(--d-2) var(--ease-truth)" }}
+          />
+        ))}
+      </div>
+      {/* A count, not an estimate: the box reports which steps finished and
+          nothing about how long the rest will take, so nothing here pretends
+          to know. Tabular figures so the number does not jitter. */}
+      <p
+        className="mt-[var(--s-2)] font-mono tabular-nums text-[var(--text-muted)]"
+        style={{ fontSize: "var(--t-2)" }}
+      >
+        {completed} / {steps.length}
+      </p>
+    </div>
+  );
+}
+
+function VersionRow({
+  name,
+  current,
+  target,
+  settled,
+}: {
+  name: string;
+  current: string;
+  target?: string | null;
+  settled: boolean;
+}) {
+  return (
+    <div className="flex items-baseline gap-[var(--s-3)] py-[var(--s-1)]">
+      <span className="w-24 shrink-0 text-[var(--text-muted)]" style={{ fontSize: "var(--t-2)" }}>
+        {name}
+      </span>
+      <span
+        className={`font-mono ${settled ? "text-[var(--cyan-bright)]" : "text-[var(--text-muted)]"}`}
+        style={{ fontSize: "var(--t-4)" }}
+      >
+        {current}
+      </span>
+      {target && (
+        <>
+          <span aria-hidden="true" className="text-[var(--text-muted)]">&rarr;</span>
+          {/* The target is a version you do NOT have yet, so it is not cyan. */}
+          <span
+            className="font-mono text-[var(--text-primary)]"
+            style={{ fontSize: "var(--t-4)", fontWeight: "var(--w-label)" }}
+          >
+            {target}
+          </span>
+        </>
+      )}
+    </div>
+  );
 }
 
 function compareVersions(a: string, b: string): number {
@@ -183,6 +328,23 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     };
   }, []);
 
+  // The liveness tick, and the honest replacement for a spinner. Each answered
+  // poll hands back a fresh state object, so this flips exactly once per round
+  // trip the box actually completed — and the instant the box goes quiet it
+  // stops, which is precisely the fact a spinner hides. Opacity only, so it
+  // carries through reduced motion intact.
+  //
+  // Derived during render rather than in an effect (React's documented
+  // adjust-state-when-input-changes pattern): an effect here would commit a
+  // second render pass every two seconds, and this observes the poll — it must
+  // never be able to drive it.
+  const [beat, setBeat] = useState(false);
+  const [beatSeen, setBeatSeen] = useState<UpdateState | null>(state);
+  if (beatSeen !== state) {
+    setBeatSeen(state);
+    setBeat((b) => !b);
+  }
+
   const isIdle = !state || state.phase === "idle";
   const clawboxNeedsUpdate = !!versions && (versions.clawbox.updateAvailable ?? !!versions.clawbox.target);
   const openclawNeedsUpdate = !!versions && (versions.openclaw.updateAvailable ?? !!versions.openclaw.target);
@@ -213,44 +375,40 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   if (loading) {
     return (
-      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-5 sm:p-8">
-          <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
-            <div className="spinner" /> {t("update.checkingUpdates")}
-          </div>
+      <Card>
+        <div
+          className="flex items-center justify-center gap-[var(--s-3)] p-[var(--s-6)] text-[var(--text-secondary)]"
+          style={{ fontSize: "var(--t-4)" }}
+        >
+          <div className="spinner" /> {t("update.checkingUpdates")}
         </div>
-      </div>
+      </Card>
     );
   }
 
   if (fetchError) {
     return (
-      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-5 sm:p-8">
-          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
-            {t("update.title")}
-          </h1>
-          <p className="text-red-400 text-sm mb-5">
-            {t("update.failedToCheck")}
-          </p>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setStatusReloadCount((c) => c + 1)}
-              className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-            >
-              {t("retry")}
-            </button>
-            <button
-              type="button"
-              onClick={onNext}
-              className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-            >
-              {t("update.skipUpdates")}
-            </button>
-          </div>
+      <Card>
+        <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>
+          {t("update.title")}
+        </h1>
+        <p className="text-red-400 mb-[var(--s-6)]" style={T_LEDE}>
+          {t("update.failedToCheck")}
+        </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)]">
+          <button
+            type="button"
+            onClick={() => setStatusReloadCount((c) => c + 1)}
+            className={BTN_PRIMARY}
+            style={T_BTN}
+          >
+            {t("retry")}
+          </button>
+          <button type="button" onClick={onNext} className={BTN_QUIET} style={T_QUIET}>
+            {t("update.skipUpdates")}
+          </button>
         </div>
-      </div>
+      </Card>
     );
   }
 
@@ -263,193 +421,196 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
   if (isIdle && !starting) {
     return (
-      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-5 sm:p-8">
-          <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
-            {isUpToDate ? (
-              <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-                {t("update.upToDate")}
-              </span>
-            ) : t("update.title")}
-          </h1>
-          <p className="text-[var(--text-secondary)] mb-4 leading-relaxed">
-            {isUpToDate
-              ? t("update.latestVersion")
-              : t("update.updateDescription")}
-          </p>
-          {versions && (
-            <div className="mb-6 space-y-1.5 text-sm">
-              <div className="flex items-center gap-2">
-                <span className="text-[var(--text-muted)] w-20">ClawBox</span>
-                <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{cleanVersion(versions.clawbox.current)}</span>
-                {versions.clawbox.target && (
-                  <>
-                    <span className="text-[var(--text-muted)]">&rarr;</span>
-                    <span className="text-green-400 font-semibold">{cleanVersion(versions.clawbox.target)}</span>
-                  </>
-                )}
-              </div>
-              {versions.openclaw.current && (
-                <div className="flex items-center gap-2">
-                  <span className="text-[var(--text-muted)] w-20">OpenClaw</span>
-                  <span className={isUpToDate ? "text-green-400" : "text-[var(--text-muted)]"}>{cleanVersion(versions.openclaw.current)}</span>
-                  {versions.openclaw.target && (
-                    <>
-                      <span className="text-[var(--text-muted)]">&rarr;</span>
-                      <span className="text-green-400 font-semibold">{cleanVersion(versions.openclaw.target)}</span>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            {isUpToDate ? (
-              <button
-                type="button"
-                onClick={onNext}
-                className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-              >
-                {t("continue")}
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={triggerUpdate}
-                  className="w-full sm:w-auto px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-                >
-                  {t("update.startUpdate")}
-                </button>
-                {isDowngrade && (
-                  <button
-                    type="button"
-                    onClick={onNext}
-                    className="w-full sm:w-auto px-6 py-3 bg-transparent border border-[var(--border-subtle)] text-[var(--text-secondary)] rounded-lg font-semibold text-sm hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-                  >
-                    {t("skip")}
-                  </button>
-                )}
-              </>
+      <Card>
+        <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>
+          {/* Cyan is DONE. The green gradient it replaces was a fourth hue
+              carrying no information the word did not already carry. */}
+          {isUpToDate ? (
+            <span className="text-[var(--cyan-bright)]">{t("update.upToDate")}</span>
+          ) : t("update.title")}
+        </h1>
+        <p className="text-[var(--text-secondary)] mb-[var(--s-6)]" style={T_LEDE}>
+          {isUpToDate
+            ? t("update.latestVersion")
+            : t("update.updateDescription")}
+        </p>
+        {versions && (
+          <div className="mb-[var(--s-6)]">
+            <VersionRow
+              name="ClawBox"
+              current={cleanVersion(versions.clawbox.current) ?? versions.clawbox.current}
+              target={versions.clawbox.target ? cleanVersion(versions.clawbox.target) : null}
+              settled={!!isUpToDate}
+            />
+            {versions.openclaw.current && (
+              <VersionRow
+                name="OpenClaw"
+                current={cleanVersion(versions.openclaw.current) ?? versions.openclaw.current}
+                target={versions.openclaw.target ? cleanVersion(versions.openclaw.target) : null}
+                settled={!!isUpToDate}
+              />
             )}
           </div>
+        )}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)]">
+          {isUpToDate ? (
+            <button type="button" onClick={onNext} className={BTN_PRIMARY} style={T_BTN}>
+              {t("continue")}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={triggerUpdate}
+                className={BTN_PRIMARY}
+                style={T_BTN}
+              >
+                {t("update.startUpdate")}
+              </button>
+              {isDowngrade && (
+                <button type="button" onClick={onNext} className={BTN_GHOST} style={T_BTN}>
+                  {t("skip")}
+                </button>
+              )}
+            </>
+          )}
         </div>
-      </div>
+      </Card>
     );
   }
 
   // Loading / waiting for first poll after triggering
   if (!state || (isIdle && starting)) {
     return (
-      <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-        <div className="card-surface rounded-2xl p-5 sm:p-8">
-          <div className="flex items-center justify-center gap-2.5 p-6 text-[var(--text-secondary)] text-sm">
-            <div className="spinner" /> {t("update.preparingUpdate")}
-          </div>
+      <Card>
+        <div
+          className="flex items-center justify-center gap-[var(--s-3)] p-[var(--s-6)] text-[var(--text-secondary)]"
+          style={{ fontSize: "var(--t-4)" }}
+        >
+          <div className="spinner" /> {t("update.preparingUpdate")}
         </div>
-      </div>
+      </Card>
     );
   }
 
+  const showLedger = !(isFailed && state.error) && state.steps.length > 0;
+
   return (
-    <div className="w-full max-w-[520px]" data-testid="setup-step-update">
-      <div className="card-surface rounded-2xl p-5 sm:p-8">
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
-          {isDone ? (
-            <span className="bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-              {t("update.updateComplete")}
-            </span>
-          ) : (
-            t("update.title")
-          )}
-        </h1>
-        <p className="text-[var(--text-secondary)] mb-6 leading-relaxed">
-          {isDone
-            ? t("update.allUpdatesApplied")
-            : isFailed
-              ? t("update.updateError")
-              : t("update.updatingDescription")}
-        </p>
-
-        {/* Internet error (no steps shown) */}
-        {isFailed && state.error && (
-          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">
-            {state.error}
-          </div>
+    <Card>
+      <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>
+        {isDone ? (
+          <span className="text-[var(--cyan-bright)]">{t("update.updateComplete")}</span>
+        ) : (
+          t("update.title")
         )}
+      </h1>
+      <p className="text-[var(--text-secondary)] mb-[var(--s-6)]" style={T_LEDE}>
+        {isDone
+          ? t("update.allUpdatesApplied")
+          : isFailed
+            ? t("update.updateError")
+            : t("update.updatingDescription")}
+      </p>
 
-        {/* Step list (hide when internet error with no steps run) */}
-        {!(isFailed && state.error) && (
-          <div className="my-5 space-y-1">
+      {/* Internet error (no steps shown) */}
+      {isFailed && state.error && (
+        <div
+          className="mb-[var(--s-4)] p-[var(--s-3)] bg-red-500/10 border border-red-500/20 rounded-[var(--r-1)] text-red-400"
+          style={{ fontSize: "var(--t-4)", lineHeight: 1.55 }}
+        >
+          {state.error}
+        </div>
+      )}
+
+      {showLedger && (
+        <>
+          <Meter steps={state.steps} done={!!isDone} label={t("update.title")} />
+
+          {/* What is happening right now, said once. The list below marks the
+              same step, but a customer watching a twelve-minute install should
+              not have to find it in twelve rows. */}
+          {runningStep && (
+            <div className="flex items-center gap-[var(--s-3)] mt-[var(--s-4)] p-[var(--s-4)] rounded-[var(--r-1)] bg-[var(--coral-wash)] border border-[var(--border-accent)]">
+              <span
+                aria-hidden="true"
+                className="block shrink-0 w-1.5 h-1.5 rounded-[var(--r-full)] bg-[var(--coral-bright)]"
+                style={{
+                  opacity: beat ? 1 : 0.35,
+                  transition: "opacity var(--d-3) var(--ease-standard)",
+                }}
+              />
+              <span
+                className="min-w-0 text-[var(--text-primary)]"
+                style={{ fontSize: "var(--t-5)", fontWeight: "var(--w-label)", lineHeight: 1.35 }}
+              >
+                {runningStep.label}
+              </span>
+            </div>
+          )}
+
+          <ul className="list-none mt-[var(--s-5)] mb-[var(--s-5)]">
             {state.steps.map((step) => (
-              <div
+              <li
                 key={step.id}
-                className="flex items-center gap-3 py-2 px-3 rounded-lg"
+                className="flex items-center gap-[var(--s-2)] py-[var(--s-2)]"
               >
                 <StepIcon status={step.status} />
-                <span className={`flex-1 text-sm ${stepTextClass(step.status)}`}>
+                <span
+                  className={`flex-1 min-w-0 ${stepTextClass(step.status)}`}
+                  style={{
+                    fontSize: "var(--t-4)",
+                    fontWeight: step.status === "running" ? "var(--w-label)" : undefined,
+                    transition: "color var(--d-2) var(--ease-standard)",
+                  }}
+                >
                   {step.label}
                 </span>
-              </div>
+              </li>
             ))}
-          </div>
-        )}
+          </ul>
+        </>
+      )}
 
-        {/* Current step indicator */}
-        {runningStep && (
-          <div className="flex items-center gap-2.5 py-3 text-[var(--coral-bright)] text-sm">
-            <div className="spinner !w-4 !h-4 !border-2" />
-            {runningStep.label}...
-          </div>
-        )}
+      {/* Failed step errors */}
+      {(isDone || isFailed) && !state.error &&
+        state.steps
+          .filter((s) => s.status === "failed")
+          .map((s) => (
+            <div
+              key={s.id}
+              className="mt-[var(--s-2)] p-[var(--s-3)] bg-red-500/10 border border-red-500/20 rounded-[var(--r-1)] text-red-400"
+              style={{ fontSize: "var(--t-2)", lineHeight: 1.55 }}
+            >
+              <span style={{ fontWeight: "var(--w-label)" }}>{s.label}:</span>{" "}
+              {s.error || "Unknown error"}
+            </div>
+          ))}
 
-        {/* Failed step errors */}
-        {(isDone || isFailed) && !state.error &&
-          state.steps
-            .filter((s) => s.status === "failed")
-            .map((s) => (
-              <div
-                key={s.id}
-                className="mt-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400"
-              >
-                <span className="font-semibold">{s.label}:</span>{" "}
-                {s.error || "Unknown error"}
-              </div>
-            ))}
-
-        {/* Action buttons */}
-        {!isRunning && (
-          <div className="flex items-center gap-3 mt-5">
-            {isDone && (
+      {/* Action buttons */}
+      {!isRunning && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)] mt-[var(--s-6)]">
+          {isDone && (
+            <button type="button" onClick={onNext} className={BTN_PRIMARY} style={T_BTN}>
+              {t("continue")}
+            </button>
+          )}
+          {isFailed && (
+            <>
               <button
                 type="button"
-                onClick={onNext}
-                className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+                onClick={triggerUpdate}
+                className={BTN_PRIMARY}
+                style={T_BTN}
               >
-                {t("continue")}
+                {t("retry")}
               </button>
-            )}
-            {isFailed && (
-              <>
-                <button
-                  type="button"
-                  onClick={triggerUpdate}
-                  className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
-                >
-                  {t("retry")}
-                </button>
-                <button
-                  type="button"
-                  onClick={onNext}
-                  className="bg-transparent border-none text-[var(--coral-bright)] text-sm underline cursor-pointer p-1"
-                >
-                  {t("update.skipUpdates")}
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
+              <button type="button" onClick={onNext} className={BTN_QUIET} style={T_QUIET}>
+                {t("update.skipUpdates")}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
