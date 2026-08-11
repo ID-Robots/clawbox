@@ -124,3 +124,34 @@ describe("install.sh pins llama.cpp instead of tracking master", () => {
     expect(block).not.toMatch(/clone --depth 1 https:\/\/github\.com\/ggml-org\/llama\.cpp/);
   });
 });
+
+describe("install.sh does not run a prebuilt of unknown provenance", () => {
+  const src = fs.readFileSync(INSTALL_SH, "utf8");
+
+  it("refuses http rather than downgrading to it", () => {
+    // The binary is executed as root by the --version probe, so on a factory
+    // bench pointed at a build host, plain http would make the network the
+    // authority on what runs on every device flashed.
+    const fn = src.slice(src.indexOf("install_prebuilt_llamacpp() {"));
+    expect(fn).toMatch(/must be served over https/i);
+    expect(fn).toMatch(/--proto '=https'/);
+  });
+
+  it("checks a supplied digest BEFORE unpacking or executing anything", () => {
+    const fn = src.slice(src.indexOf("install_prebuilt_llamacpp() {"));
+    const digestAt = fn.indexOf("LLAMACPP_PREBUILT_SHA256");
+    const untarAt = fn.indexOf("tar --force-local -xzf");
+    const execAt = fn.indexOf("--version >/dev/null");
+    expect(digestAt).toBeGreaterThan(-1);
+    // Ordering is the whole point: a digest checked after execution proves
+    // nothing about what already ran.
+    expect(digestAt).toBeLessThan(untarAt);
+    expect(digestAt).toBeLessThan(execAt);
+  });
+
+  it("rejects on a digest mismatch instead of warning and continuing", () => {
+    const fn = src.slice(src.indexOf("install_prebuilt_llamacpp() {"));
+    expect(fn).toMatch(/digest does not match[^
+]*ignoring it/i);
+  });
+});

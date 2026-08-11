@@ -2040,9 +2040,15 @@ step_ollama_install() {
 # Unpacking build/bin reproduces exactly what a source build leaves behind,
 # minus the ~19 minutes.
 #
-# Returns 0 only when a validated build is in place. Every rejection returns
-# non-zero so the caller compiles instead: the ways a prebuilt goes wrong are
-# silent at install time and loud on a customer's device.
+# Returns 0 only when the build has passed every check below; every rejection
+# returns non-zero so the caller compiles instead. The ways a prebuilt goes
+# wrong are silent at install time and loud on a customer's device.
+#
+# Be precise about what is established here. The checks are FITNESS checks —
+# right architecture, right backend, starts on this device. They say nothing
+# about whether the archive is the one we meant to ship. Provenance is a
+# separate question, answered by the transport (https, or a local file the
+# operator placed) and by LLAMACPP_PREBUILT_SHA256 when one is supplied.
 install_prebuilt_llamacpp() {
   local src="$1" want_cuda="$2" llama_dir="$3"
   local tmp; tmp="$(mktemp -d)" || return 1
@@ -2051,9 +2057,16 @@ install_prebuilt_llamacpp() {
   local archive="$tmp/prebuilt.tar.gz"
 
   case "$src" in
-    http://*|https://*)
+    http://*)
+      # Refused rather than downgraded. The intended use is a factory bench
+      # fetching from a build host, and a binary this function will run as root
+      # must not be whatever the network hands over.
+      echo "  Prebuilt must be served over https (got http) — ignoring it."
+      return 1
+      ;;
+    https://*)
       echo "  Fetching prebuilt llama.cpp from $src"
-      curl -fsSL --max-time 600 -o "$archive" "$src" \
+      curl -fsSL --proto '=https' --max-time 600 -o "$archive" "$src" \
         || { echo "  Prebuilt download failed."; return 1; }
       ;;
     *)
@@ -2061,6 +2074,31 @@ install_prebuilt_llamacpp() {
       archive="$src"
       ;;
   esac
+
+  # Provenance, before anything from the archive is unpacked or run.
+  #
+  # Everything below this point establishes that the build FITS this device —
+  # right architecture, right backend, starts here. None of it says the archive
+  # is the one we meant to ship, and the `--version` probe further down executes
+  # it as root. So when a digest is supplied it is checked first, and a mismatch
+  # ends the attempt.
+  #
+  # Optional, because the common case is a file copied over SSH by the same
+  # operator running the install, where the channel is already the guarantee.
+  # Set LLAMACPP_PREBUILT_SHA256 when the archive arrives any other way.
+  if [ -n "${LLAMACPP_PREBUILT_SHA256:-}" ]; then
+    local actual
+    actual="$(sha256sum "$archive" 2>/dev/null | cut -d' ' -f1)"
+    if [ -z "$actual" ]; then
+      echo "  Could not hash the prebuilt — ignoring it."
+      return 1
+    fi
+    if [ "$actual" != "$LLAMACPP_PREBUILT_SHA256" ]; then
+      echo "  Prebuilt digest does not match LLAMACPP_PREBUILT_SHA256 — ignoring it."
+      return 1
+    fi
+    echo "  Prebuilt digest matches."
+  fi
 
   mkdir -p "$tmp/x"
   # --force-local: tar reads "host:path" as a remote source, so any archive path
