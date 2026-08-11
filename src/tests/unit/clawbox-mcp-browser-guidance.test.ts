@@ -69,31 +69,40 @@ describe("Hermes provisioning retires the built-in browser toolset", () => {
     "utf8",
   );
 
+  /**
+   * These assert PROPERTIES of the command, not its exact shell text. An
+   * earlier version pinned the redirection order and `; then` placement, which
+   * breaks on a harmless reformat while still passing for a real regression.
+   *
+   * The script explains itself in prose that mentions the same identifiers, so
+   * every check below looks at the executable line — comments excluded.
+   */
+  const commandLines = script
+    .split("\n")
+    .filter(line => !/^\s*#/.test(line));
+
+  /** The line that actually runs the disable, not one of the ones about it. */
+  const disableLine = commandLines.find(line => /tools disable browser/.test(line)) ?? "";
+
   it("disables the toolset through the supported CLI", () => {
+    expect(disableLine).not.toBe("");
     // NOT by hand-writing a config key: verified on-device that the state does
     // not live under agent.disabled_toolsets, so a config write would be a guess.
-    expect(script).toMatch(/tools disable browser/);
-    expect(script).not.toMatch(/disabled_toolsets/);
+    expect(commandLines.join("\n")).not.toMatch(/config\s+set[^\n]*disabled_toolsets/);
   });
 
-  /**
-   * Asserted as a PROPERTY, not as shell text. An earlier version of this test
-   * pinned the exact redirection and `; then` placement, which fails on a
-   * harmless reformat while still passing for a real regression.
-   */
   it("reconciles every boot rather than once behind a marker", () => {
-    // A marker in ClawBox's data/ cannot see Hermes' own state, so reinstalling
-    // the agent would leave it set and the toolset on, permanently.
-    expect(script).not.toMatch(/MARKER/i);
-    // The call must not be gated on a file existing.
-    expect(script).not.toMatch(/-f[^\n]*\n[^\n]*tools disable browser/);
+    // A marker in ClawBox's data/ cannot see Hermes' own store, so anything
+    // that reset ~/.hermes would leave it set and the toolset on, permanently.
+    expect(commandLines.join("\n")).not.toMatch(/^\s*[A-Za-z_]*MARKER[A-Za-z_]*=/m);
+    // ...and the call is not gated on a file existing.
+    expect(disableLine).not.toMatch(/-f\b/);
   });
 
   it("cannot abort the boot when the harness refuses", () => {
     // register-mcp.sh runs under `set -euo pipefail` from production-server.js
     // at every web-server boot, so an unguarded non-zero exit would stop it.
     // Being the `if` condition is what makes the failure non-fatal.
-    const line = script.split("\n").find(l => /tools disable browser/.test(l)) ?? "";
-    expect(line).toMatch(/^\s*if\b/);
+    expect(disableLine).toMatch(/^\s*if\b/);
   });
 });

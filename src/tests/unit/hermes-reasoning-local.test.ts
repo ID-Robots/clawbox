@@ -106,6 +106,13 @@ describe("the on-device model's thinking switch", () => {
       expect(LOCAL_REASONING_LEVELS).toContain(clampReasoningForProvider("clawlocal", level));
     }
   });
+
+  it("clamps a level BELOW the switch down to off, never up to on", () => {
+    // `none` sits under both ends, so the walk-down finds no candidate. Landing
+    // on the far end would turn "no reasoning at all" into the slowest setting.
+    expect(clampReasoningForProvider("clawlocal", "none")).toBe(LOCAL_REASONING_LEVELS[0]);
+    expect(isThinkingOnLevel("clawlocal", clampReasoningForProvider("clawlocal", "none"))).toBe(false);
+  });
 });
 
 /**

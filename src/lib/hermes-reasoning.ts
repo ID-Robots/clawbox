@@ -245,5 +245,10 @@ export function clampReasoningForProvider(
     const candidate = HERMES_REASONING_LEVELS[i];
     if (allowed.includes(candidate)) return candidate;
   }
-  return allowed[allowed.length - 1] ?? HERMES_REASONING_DEFAULT;
+  // Nothing at or below the requested level is allowed, so the walk found no
+  // candidate — only reachable when the request sat BELOW everything on offer.
+  // Land on the lowest allowed level, keeping the same "never silently raise
+  // effort" rule as the walk itself: asking for `none` on a two-state provider
+  // must give thinking OFF, not the far end of the switch.
+  return allowed[0] ?? HERMES_REASONING_DEFAULT;
 }
