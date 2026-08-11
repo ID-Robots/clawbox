@@ -805,37 +805,23 @@ export async function restartGateway(): Promise<void> {
   }
 }
 
-/** Send SIGUSR1 to the gateway so it restarts and picks up newly-installed skills. */
-export async function reloadGateway(): Promise<void> {
-  // Same story as restartGateway: no gateway on Hermes, so the PID lookup would
-  // just fall through both branches and log a warning on every skill install.
-  if (gatewayIsAbsent()) return;
-  try {
-    // The gateway process renames its argv to just "openclaw", so the old
-    // `pgrep -f "openclaw-gateway"` matched nothing and SIGUSR1 was never sent —
-    // installing a skill left the gateway untouched and the chat's reload
-    // overlay hung forever. Resolve the PID deterministically from systemd,
-    // falling back to an exact process-name match for dev / non-systemd runs.
-    let pid = 0;
-    try {
-      const { stdout } = await exec("systemctl", ["show", "clawbox-gateway.service", "-p", "MainPID", "--value"], { timeout: 5_000 });
-      pid = parseInt(stdout.trim(), 10);
-    } catch { /* not under systemd — fall through to pgrep */ }
-    if (!Number.isFinite(pid) || pid <= 0) {
-      const { stdout } = await exec("pgrep", ["-x", "openclaw"], { timeout: 5_000 });
-      pid = parseInt(stdout.trim().split("\n")[0], 10);
-    }
-    if (Number.isFinite(pid) && pid > 0) {
-      process.kill(pid, "SIGUSR1");
-    }
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ESRCH") {
-      console.warn("[openclaw-config] reloadGateway failed:", err instanceof Error ? err.message : err);
-    }
-  }
-}
-
+/*
+ * There is deliberately no reloadGateway() here.
+ *
+ * Installing a skill needs no gateway bounce at all. OpenClaw watches its skill
+ * roots itself — `skills.load.watch` defaults to true, and `<workspace>/skills`
+ * (where `openclaw skills install` writes, and where getSkillsDir() points) is
+ * one of the roots it watches. A write there bumps the skills snapshot version,
+ * and the next agent turn rebuilds the snapshot from disk. The gateway's own
+ * `skills.status` handler re-reads the workspace on every call, so the App Store
+ * and the CLI see a new skill immediately without any signal being sent.
+ *
+ * The previous implementation sent SIGUSR1 to the gateway's MainPID. To OpenClaw
+ * that signal does not mean "reload" — it means "restart", and under a detected
+ * supervisor (systemd sets INVOCATION_ID/JOURNAL_STREAM, so always here) OpenClaw
+ * services it by exiting 0 and handing off to the supervisor. Every skill install
+ * therefore stopped the gateway and left it to systemd to bring back.
+ */
 /** Find the openclaw binary — checks common locations including nvm, caches result. */
 let _openclawBinCache: string | null = null;
 export function findOpenclawBin(): string {

@@ -64,9 +64,11 @@ describe("restartGateway across editions", () => {
     await expect(restartGateway()).resolves.toBeUndefined();
   });
 
-  it("reloadGateway is a no-op on Hermes too", async () => {
-    const { reloadGateway } = await load("hermes");
-    await expect(reloadGateway()).resolves.toBeUndefined();
-    expect(execFileMock).not.toHaveBeenCalled();
+  it("exposes no reloadGateway at all — skill installs bounce nothing", async () => {
+    // The module used to ship a reloadGateway() that signalled the gateway on
+    // every skill install. OpenClaw reads that signal as "restart", so the
+    // whole entry point is gone rather than merely neutered on Hermes.
+    const mod = await load("hermes");
+    expect("reloadGateway" in mod).toBe(false);
   });
 });

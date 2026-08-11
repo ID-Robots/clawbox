@@ -7,7 +7,6 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  reloadGateway: vi.fn().mockResolvedValue(undefined),
   getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
 }));
 
@@ -17,8 +16,7 @@ describe("/setup-api/apps/uninstall", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { reloadGateway, getSkillsDir } = await import("@/lib/openclaw-config");
-    vi.mocked(reloadGateway).mockResolvedValue(undefined);
+    const { getSkillsDir } = await import("@/lib/openclaw-config");
     vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);

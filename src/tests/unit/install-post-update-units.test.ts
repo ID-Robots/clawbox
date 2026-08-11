@@ -76,15 +76,38 @@ describe("gateway restart breaker", () => {
     return accepted;
   }
 
-  it("uses failure-only restarts and an explicit window covering the worst-case burst", () => {
-    expect(GATEWAY_UNIT).toMatch(/^Restart=on-failure$/m);
+  // The failure cycle that motivated the 3600s window (issue #284): a rejected
+  // startup that takes about twelve seconds to fail, which slipped straight
+  // through systemd's inherited 10-second limiter window.
+  const SLOW_FAILURE_SEC = 12;
+
+  it("restarts on a clean exit, because that is how OpenClaw asks to be restarted", () => {
+    // OpenClaw services a restart request by exiting 0 and handing off to its
+    // supervisor. Under Restart=on-failure that exit was final, so every skill
+    // install took the gateway down permanently. Restart=always is what
+    // OpenClaw's own `openclaw daemon` systemd template writes.
+    expect(GATEWAY_UNIT).toMatch(/^Restart=always$/m);
+    // ...but not into a loop when the gateway reports its config is unusable,
+    // and not marked failed when it is stopped with SIGTERM.
+    expect(GATEWAY_UNIT).toMatch(/^RestartPreventExitStatus=78$/m);
+    expect(GATEWAY_UNIT).toMatch(/^SuccessExitStatus=0 143$/m);
+  });
+
+  it("leaves headroom for deliberate restarts without losing the window", () => {
     expect(intervalSec).toBe(3_600);
-    expect(burst).toBe(5);
-    expect(intervalSec).toBeGreaterThan(burst * (timeoutSec + restartSec));
+    // Restart=always means operator-driven restarts (model changes, updates)
+    // now count against the limiter too, so five is no longer enough headroom
+    // for an hour of setting up a box. The window must still contain a full
+    // burst of the slow-failure cycle, or the limiter could never trip.
+    expect(burst).toBeGreaterThanOrEqual(10);
+    expect(intervalSec).toBeGreaterThan(burst * (SLOW_FAILURE_SEC + restartSec));
+    // The start timeout is a ceiling for a slow cold boot, not a failure cycle:
+    // the risky pre-start step is time-boxed inside the script.
+    expect(timeoutSec).toBeGreaterThan(SLOW_FAILURE_SEC);
   });
 
   it("breaks a permanent failure whose 12-second cycles defeated the old 10-second window", () => {
-    expect(acceptedStarts(12, burst + 2)).toHaveLength(burst);
+    expect(acceptedStarts(SLOW_FAILURE_SEC, burst + 2)).toHaveLength(burst);
   });
 
   it("allows a transient first failure to recover on the next start", () => {
