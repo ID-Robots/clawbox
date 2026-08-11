@@ -20,7 +20,7 @@ interface LlamaCppModelPanelProps {
   llamaCppProgress?: string | null;
   selectedLlamaCppModel: string;
   setSelectedLlamaCppModel: (model: string) => void;
-  saveLlamaCppConfig: (model: string) => void;
+  saveLlamaCppConfig: (model: string, options?: { activate?: boolean }) => void;
   buttonClassName?: string;
   buttonSpinner?: ReactNode;
 }
@@ -63,7 +63,7 @@ export default function LlamaCppModelPanel({
 
   let buttonLabel: string;
   if (llamaCppSaving) {
-    buttonLabel = "Enabling Gemma 4...";
+    buttonLabel = canSwitchToGemma ? "Switching to Gemma 4..." : "Enabling Gemma 4...";
   } else if (canSwitchToGemma) {
     buttonLabel = "Switch to Gemma 4";
   } else {
@@ -101,7 +101,11 @@ export default function LlamaCppModelPanel({
       ) : (
         <button
           type="button"
-          onClick={() => saveLlamaCppConfig(selectedLlamaCppModel)}
+          // When the model is already installed, this button's job is to make
+          // it the active one — so say so to the server. Without the flag it
+          // re-ran the enable flow and left the harness pointed elsewhere,
+          // i.e. a "Switch to Gemma 4" button that did not switch.
+          onClick={() => saveLlamaCppConfig(selectedLlamaCppModel, { activate: canSwitchToGemma })}
           disabled={!!llamaCppSaving}
           className={buttonClassName}
         >

@@ -458,6 +458,15 @@ export async function POST(request: Request) {
       clawaiTier?: string;
       model?: string;
       oauthHandoff?: boolean;
+      /**
+       * Explicit "make this the model that answers", as distinct from "install
+       * it and keep it available". Enabling a local model deliberately does NOT
+       * take over from the provider the customer chose, so the Settings panel's
+       * "Switch to Gemma 4" button had no way to actually switch — it ran the
+       * same enable flow and silently left the harness where it was. This flag
+       * is that missing intent; omitted, the promote policy is unchanged.
+       */
+      activate?: boolean;
     };
     try {
       body = await request.json();
@@ -607,7 +616,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
+    // A fresh device promotes its first local model automatically; an existing
+    // device only promotes when the user explicitly asked to switch to it.
+    const shouldPromoteLocalToPrimary =
+      isLocalScope && (!configStore.ai_model_configured || body.activate === true);
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
     // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
@@ -963,7 +975,19 @@ export async function POST(request: Request) {
       // quietly take the device off the provider the customer chose.
       if ((ocProvider === "llamacpp" || ocProvider === "ollama") && (await getActiveHarness()) === "hermes") {
         try {
-          await applyLocalAiToHermes({ provider: ocProvider, model: config.defaultModel });
+          await applyLocalAiToHermes({
+            provider: ocProvider,
+            // Hermes wants the bare model id, not the `llamacpp/…` qualified
+            // form — matching the openclaw-absent branch above.
+            model: config.defaultModel.replace(/^(?:llamacpp|ollama)\//, ""),
+            // This branch runs on the `dual` SKU, where OpenClaw exists but
+            // Hermes is the harness actually answering. Without carrying the
+            // promotion through, "Switch to Gemma 4" moved OpenClaw's primary
+            // and left Hermes pointed at its old provider — the same
+            // configured-but-not-active split this change exists to remove,
+            // reproduced on the one SKU that has both.
+            makeDefault: shouldPromoteLocalToPrimary,
+          });
         } catch (err) {
           // Non-fatal: the local model is configured and running either way.
           console.error("[ai-models/configure] Hermes local provider registration failed:", err);

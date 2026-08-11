@@ -168,6 +168,34 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expectNoOpenclawSpawn();
   });
 
+  // A device that already has a cloud provider must NOT be hijacked by merely
+  // enabling a local fallback — but it must still be switchable on request.
+  // Conflating the two is what left the box "configured for Gemma" while every
+  // message went to ClawBox AI, with no working way to change it.
+  it("leaves the chosen provider in place when a configured device just enables Gemma", async () => {
+    const cs = await import("@/lib/config-store");
+    vi.mocked(cs.getAll).mockResolvedValue({ ai_model_configured: true });
+
+    const res = await POST(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+    expect(res.status).toBe(200);
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ makeDefault: false }),
+    );
+  });
+
+  it("promotes Gemma to the active model when the user explicitly asked to switch", async () => {
+    const cs = await import("@/lib/config-store");
+    vi.mocked(cs.getAll).mockResolvedValue({ ai_model_configured: true });
+
+    const res = await POST(jsonRequest({ provider: "llamacpp", scope: "local", activate: true }));
+
+    expect(res.status).toBe(200);
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ makeDefault: true }),
+    );
+  });
+
   it("configures an API-key cloud provider (Anthropic) through Hermes, not openclaw", async () => {
     const res = await POST(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test", authMode: "token" }));
     const body = await res.json();

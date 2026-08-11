@@ -13,7 +13,7 @@ let terminalChild: ChildProcess | null = null
 let terminalStopping = false
 let llamaCppChild: ChildProcess | null = null
 let llamaCppStopping = false
-let llamaCppStartPromise: Promise<void> | null = null
+let llamaCppStartPromise: Promise<LlamaCppStartStatus> | null = null
 let cleanupRegistered = false
 
 function cleanupChildren() {
@@ -115,18 +115,42 @@ export function startTerminalServer() {
   }
 }
 
-export async function startLlamaCppServer() {
+/**
+ * What a {@link startLlamaCppServer} call actually did.
+ *
+ * The `skipped-*` outcomes exist because a silent no-op here used to be
+ * indistinguishable from a successful start: the caller went straight on to
+ * poll for a server that was never going to appear, and only found out 20
+ * minutes later. Callers that *asked* for the runtime (the on-demand proxy)
+ * treat any `skipped-*` as an immediate, explainable failure.
+ */
+export type LlamaCppStartStatus =
+  | 'started'
+  | 'skipped-disabled'
+  | 'skipped-not-configured'
+
+/**
+ * Start llama.cpp, or report why it wasn't started.
+ *
+ * `alias` is the caller's explicit "I want this model, now" — used by the
+ * on-demand proxy. A request that arrived through the llama.cpp proxy is
+ * itself the authorization to start, so it does not get re-litigated against
+ * OpenClaw's config file (see bootLlamaCppServer for why that check cannot
+ * work on every SKU). Called with no alias — the boot-time auto-start — the
+ * model is derived from configuration instead.
+ */
+export async function startLlamaCppServer(alias?: string): Promise<LlamaCppStartStatus> {
   llamaCppStopping = false
   registerCleanupHandlers()
   if (llamaCppStartPromise) return await llamaCppStartPromise
 
-  llamaCppStartPromise = bootLlamaCppServer().finally(() => {
+  llamaCppStartPromise = bootLlamaCppServer(alias).finally(() => {
     llamaCppStartPromise = null
   })
   return await llamaCppStartPromise
 }
 
-async function bootLlamaCppServer() {
+async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStartStatus> {
   const [{ getAll }, { readConfig }, llamaCpp] = await Promise.all([
     import('./lib/config-store'),
     import('./lib/openclaw-config'),
@@ -139,27 +163,32 @@ async function bootLlamaCppServer() {
     const primaryModel = config.agents?.defaults?.model?.primary?.trim()
     if (!primaryModel || !primaryModel.startsWith('llamacpp/')) {
       console.log('[instrumentation] llama.cpp auto-start skipped (Local AI explicitly disabled)')
-      return
+      return 'skipped-disabled'
     }
   }
 
-  const alias = llamaCpp.getConfiguredLlamaCppModelAlias(config)
+  // An explicit alias is the caller saying "start this one" — honour it.
+  // Otherwise resolve it the same way the wake path does, so the two can never
+  // disagree about which model this device is supposed to run.
+  const alias = requestedAlias?.trim()
+    || llamaCpp.getConfiguredLlamaCppModelAlias(config)
+    || llamaCpp.getLocalAiConfigStoreAlias(state)
   if (!alias) {
     console.log('[instrumentation] llama.cpp auto-start skipped (no llama.cpp primary or local fallback configured)')
-    return
+    return 'skipped-not-configured'
   }
 
   const spec = llamaCpp.getLlamaCppLaunchSpec(alias)
   const runningModels = await llamaCpp.queryLlamaCppModels(spec.baseUrl)
   if (runningModels.includes(alias)) {
     console.log(`[instrumentation] llama.cpp already running for ${alias}`)
-    return
+    return 'started'
   }
 
   const existingPid = await llamaCpp.readLlamaCppPid(spec.pidPath)
   if (existingPid && llamaCpp.isLlamaCppPidRunning(existingPid)) {
     console.log(`[instrumentation] llama.cpp already starting for ${alias} (pid=${existingPid})`)
-    return
+    return 'started'
   }
   if (existingPid) {
     await llamaCpp.clearLlamaCppPid(spec.pidPath)
@@ -213,7 +242,10 @@ async function bootLlamaCppServer() {
 
         console.log(`[instrumentation] llama.cpp exited (code=${code}), retrying in 5s...`)
         setTimeout(() => {
-          void startLlamaCppServer().catch((err) => {
+          // Restart the SAME alias. Re-deriving it would send the crash-restart
+          // back through the configuration gate, which on a Hermes device is a
+          // different question from "what was just running".
+          void startLlamaCppServer(alias).catch((err) => {
             console.error('[instrumentation] Failed to restart llama.cpp:', err instanceof Error ? err.message : err)
           })
         }, 5000)
@@ -222,6 +254,8 @@ async function bootLlamaCppServer() {
       }
     })()
   })
+
+  return 'started'
 }
 
 export async function stopLlamaCppServer() {
