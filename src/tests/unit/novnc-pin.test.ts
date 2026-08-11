@@ -39,33 +39,41 @@ function readJson(...segments: string[]): Record<string, unknown> {
   return JSON.parse(readFileSync(path.join(REPO_ROOT, ...segments), "utf8"));
 }
 
-// Application sources only. src/tests is skipped deliberately: this very file
-// names both specifiers in its comments, and vnc-app.test.tsx names one in a
-// vi.mock call, so scanning the tests would let the suite satisfy its own
-// "still deep-imports" guard after the real imports were gone.
-const TESTS_DIR = path.join(REPO_ROOT, "src", "tests");
+const SRC_DIR = path.join(REPO_ROOT, "src");
 
-function sourceFiles(dir: string): string[] {
-  if (dir === TESTS_DIR) return [];
-  const found: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) found.push(...sourceFiles(full));
-    else if (/\.tsx?$/.test(entry.name)) found.push(full);
-  }
-  return found;
+// Files that actually import the package, which means: application code only.
+//
+//   - src/tests is skipped because this file names both specifiers in its own
+//     comments and vnc-app.test.tsx names one in a vi.mock call.
+//   - .d.ts is skipped because a `declare module` is a type shim describing an
+//     import made elsewhere, not an import itself. Counting it would let the
+//     guard below stay green off novnc.d.ts alone after the real importers had
+//     gone — the exact case that guard exists to catch.
+//
+// What is left is the code whose resolution actually has to work: vnc-keys.ts
+// and VNCApp.tsx.
+function importingSources(): string[] {
+  return readdirSync(SRC_DIR, { recursive: true, encoding: "utf8" })
+    .filter(
+      (entry) =>
+        /\.tsx?$/.test(entry) &&
+        !entry.endsWith(".d.ts") &&
+        entry.split(path.sep)[0] !== "tests",
+    )
+    .map((entry) => path.join(SRC_DIR, entry));
 }
 
 // Discover the specifiers rather than hard-coding them, so a newly added deep
 // import is covered by these tests the day it lands instead of the day it breaks.
-// Only quoted specifiers count — a module-specifier position in an import, an
-// import(), or a `declare module` — so prose mentioning a path cannot stand in
-// for code importing it.
+// Only quoted occurrences count, so prose naming a path cannot stand in for code
+// importing one.
+const SPECIFIER_PATTERN = /["'](@novnc\/novnc\/[\w./-]+)["']/g;
+
 const SUBPATH_SPECIFIERS = [
   ...new Set(
-    sourceFiles(path.join(REPO_ROOT, "src")).flatMap((file) => [
-      ...readFileSync(file, "utf8").matchAll(/["'](@novnc\/novnc\/[\w./-]+)["']/g),
-    ].map((match) => match[1])),
+    importingSources().flatMap((file) =>
+      Array.from(readFileSync(file, "utf8").matchAll(SPECIFIER_PATTERN), (match) => match[1]),
+    ),
   ),
 ].sort();
 
@@ -73,15 +81,16 @@ describe("@novnc/novnc pin", () => {
   it("pins an exact version in package.json", () => {
     const dependencies = readJson("package.json").dependencies as Record<string, string>;
 
-    // A range here is the whole bug: bun.lock would still say 1.6.0 until the
-    // next resolve, and then quietly move to a version that cannot be imported.
     expect(dependencies[PACKAGE]).toBe(PINNED_VERSION);
   });
 
-  it("records the same exact version in bun.lock", () => {
-    const declared = readFileSync(path.join(REPO_ROOT, "bun.lock"), "utf8");
+  it("resolves to the pinned version in bun.lock", () => {
+    const lockfile = readFileSync(path.join(REPO_ROOT, "bun.lock"), "utf8");
 
-    expect(declared).toContain(`"${PACKAGE}": "${PINNED_VERSION}"`);
+    // The RESOLUTION entry, not the `workspaces` block at the top — that block
+    // is only bun's echo of package.json's range, so asserting it would just
+    // restate the test above. This line is what `--frozen-lockfile` installs.
+    expect(lockfile).toContain(`"${PACKAGE}": ["${PACKAGE}@${PINNED_VERSION}"`);
   });
 
   it("has the pinned version installed", () => {

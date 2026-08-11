@@ -68,11 +68,15 @@ export default defineConfig({
       // glob matching no files, and the gate never ran. It type-checked, because
       // the glob form accepts exactly that object shape.
       //
-      // The intended targets are statements 80 / branches 75 / functions 80 /
-      // lines 80. Measured coverage is 64.14 / 53.48 / 62.00 / 66.23, so the
-      // values below are deliberately set just under the measured numbers: a
-      // floor that stops coverage regressing, not the target. Raise them as
-      // coverage climbs — that is the only way they reach the targets above.
+      // The standard for this project is statements 80 / branches 75 /
+      // functions 80 / lines 80. That is the goal and it has not been reached.
+      //
+      // The numbers below are NOT the standard — they are a ratchet stop, set
+      // just under coverage as measured on CI (2026-08-11: 64.64 / 53.70 /
+      // 62.27 / 66.77) so that coverage cannot regress while the gate is being
+      // brought back into use. Setting them straight to 80 would fail every PR
+      // on day one, and the gate would be switched off again. Raise them as
+      // coverage climbs; that is the only route to the standard above.
       thresholds: {
         statements: 63,
         branches: 52,
