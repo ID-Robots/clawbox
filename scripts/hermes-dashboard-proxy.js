@@ -52,6 +52,53 @@ const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
 const UPSTREAM_ORIGIN = `http://${UPSTREAM_AUTHORITY}`;
 const DASH_USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";
 
+// ---------------------------------------------------------------------------
+// Timeouts
+// ---------------------------------------------------------------------------
+//
+// Without these, an upstream that accepts the connection and then goes quiet
+// (the dashboard mid-restart, a wedged worker) held the browser's request open
+// forever. On a Jetson serving a handful of connections that is how the tab
+// ends up spinning with nothing to click and no error to report.
+//
+// Each timeout is armed only for the phase where silence means "stuck":
+//
+//   HEADERS — from send to COMPLETE response headers. Cleared as soon as the
+//     response starts, because the dashboard legitimately streams (long-lived
+//     event streams would be cut mid-flight by an idle timer).
+//   LOGIN   — the SSO broker's own POST /auth/password-login. Short: it is on
+//     the critical path of a user's first request.
+//   WS      — TCP connect plus the 101 handshake, stood down once the upstream
+//     has sent a complete header block. A live WebSocket is idle most of the
+//     time, so an idle timeout past the handshake would drop working links.
+//
+// The first two are ABSOLUTE deadlines rather than socket timeouts. A socket
+// timer measures inactivity, so an upstream that trickles a byte at a time
+// resets it forever and the request hangs anyway. The WS one is a socket timer
+// on purpose: it must stop applying entirely once the connection is live.
+//
+// A timed-out request must still PRODUCE A RESPONSE. Tearing the upstream
+// socket down and trusting the existing error handler to notice is not enough:
+// `destroy()` is specified to emit 'close', an 'error' only follows in some
+// shapes, and on the WebSocket path the client just sees the TCP connection
+// vanish (a bare 1006, no status). Silence is the very symptom these timeouts
+// exist to remove, so every timeout path below writes its own status FIRST and
+// tears the socket down after.
+//
+// Note the LOGIN timer is an absolute deadline rather than a socket timeout —
+// `setTimeout` on a socket measures inactivity, which an upstream that dribbles
+// bytes can reset forever. See hermesLogin().
+function envMs(name, fallback) {
+  const raw = Number.parseInt(process.env[name], 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+const UPSTREAM_HEADERS_TIMEOUT_MS = envMs("HERMES_DASH_UPSTREAM_TIMEOUT_MS", 30_000);
+const LOGIN_TIMEOUT_MS = envMs("HERMES_DASH_LOGIN_TIMEOUT_MS", 10_000);
+const WS_HANDSHAKE_TIMEOUT_MS = envMs("HERMES_DASH_WS_TIMEOUT_MS", 15_000);
+// End of an HTTP header block — what the WS path waits for before it will call
+// the upgrade handshake complete and stand its timeout down.
+const HEADER_TERMINATOR = "\r\n\r\n";
+
 // Rewrite the origin part of a Referer to the upstream authority, keeping path.
 function rewriteReferer(value) {
   return typeof value === "string" ? value.replace(/^https?:\/\/[^/]+/i, UPSTREAM_ORIGIN) : value;
@@ -312,6 +359,18 @@ function hermesLogin() {
   if (!pw) return Promise.resolve(null);
   const body = JSON.stringify({ provider: "basic", username: DASH_USERNAME, password: pw, next: "/" });
   return new Promise((resolve) => {
+    // EVERY request needing SSO awaits this one promise (see ensureHermesCookies),
+    // so it must settle exactly once and it must always settle. `settle` gives
+    // both: later callers are ignored, and the deadline below guarantees one.
+    let settled = false;
+    let deadline = null;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      resolve(value);
+    };
+
     const reqUp = http.request(
       {
         host: UPSTREAM_HOST,
@@ -331,7 +390,7 @@ function hermesLogin() {
           const setCookies = up.headers["set-cookie"];
           if (up.statusCode !== 200 || !Array.isArray(setCookies) || setCookies.length === 0) {
             console.error(`[hermes-dashboard-proxy] login failed: HTTP ${up.statusCode} ${Buffer.concat(chunks).toString().slice(0, 120)}`);
-            resolve(null);
+            settle(null);
             return;
           }
           // Build a Cookie header from each Set-Cookie's leading name=value.
@@ -339,13 +398,29 @@ function hermesLogin() {
             .map((sc) => String(sc).split(";", 1)[0])
             .filter(Boolean)
             .join("; ");
-          resolve({ cookieHeader, setCookies });
+          settle({ cookieHeader, setCookies });
         });
       },
     );
+    // An ABSOLUTE deadline, not a socket timeout. `setTimeout` on a request
+    // measures INACTIVITY, so a dashboard that dribbles a byte just often
+    // enough — a half-written response, a stuck chunked body — resets it
+    // forever and never fires. The promise would then stay pending, and with
+    // it every SSO request in the process. This bounds total login duration
+    // regardless of how the upstream misbehaves; resolving null feeds the
+    // existing failure path (cooldown, then retry).
+    if (LOGIN_TIMEOUT_MS > 0) {
+      deadline = setTimeout(() => {
+        console.error(`[hermes-dashboard-proxy] login timed out after ${LOGIN_TIMEOUT_MS}ms`);
+        reqUp.destroy();
+        settle(null);
+      }, LOGIN_TIMEOUT_MS);
+      // Never hold the process open for a login that is only a retry away.
+      deadline.unref?.();
+    }
     reqUp.on("error", (e) => {
       console.error(`[hermes-dashboard-proxy] login error: ${e.message}`);
-      resolve(null);
+      settle(null);
     });
     reqUp.end(body);
   });
@@ -438,6 +513,9 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
   const upstream = http.request(
     { host: UPSTREAM_HOST, port: UPSTREAM_PORT, method: req.method, path: req.url, headers },
     (up) => {
+      // Headers are in — the upstream is alive. The deadline is cleared by the
+      // 'response' listener below; from here a slow body is legitimate (event
+      // stream, slow download) and nothing may cut it.
       // The Hermes session was rejected (TTL elapsed, or the dashboard restarted
       // and rotated its signing secret) — re-broker once and replay.
       //
@@ -467,16 +545,55 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
       pipeResponse(res, up, injected);
     },
   );
-  upstream.on("error", () => {
-    // The socket can also error AFTER the response was fully piped and ended
-    // (aborted keep-alive, dashboard restart mid-stream). Writing then is a
-    // write-after-end, which Node raises as an 'error' event on the
-    // ServerResponse — unhandled, that is an uncaught exception, and this
-    // proxy is a single process, so it would take the whole service down.
+  // Answer the client with `status` unless the response is already under way.
+  //
+  // The socket can also error AFTER the response was fully piped and ended
+  // (aborted keep-alive, dashboard restart mid-stream). Writing then is a
+  // write-after-end, which Node raises as an 'error' event on the
+  // ServerResponse — unhandled, that is an uncaught exception, and this
+  // proxy is a single process, so it would take the whole service down.
+  //
+  // Also why the timeout and the error path can both fire for one request
+  // without doubling up: whichever lands first writes, the other returns here.
+  const failRequest = (status, message) => {
     if (res.writableEnded || res.destroyed) return;
-    if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" });
-    res.end("Hermes dashboard is not reachable.");
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    res.writeHead(status, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+    res.end(message);
+  };
+
+  // An ABSOLUTE deadline for "response headers complete", not a socket timeout.
+  // A socket timer measures INACTIVITY, so an upstream trickling one header
+  // byte at a time — or a stuck chunked header block — resets it forever: the
+  // response callback never runs, the timer never fires, and the browser waits
+  // with nothing to show. Same trap as the login path; bounded the same way.
+  // Cleared once headers land, so a legitimately slow BODY is never cut.
+  let headerDeadline = null;
+  const clearHeaderDeadline = () => {
+    if (headerDeadline) {
+      clearTimeout(headerDeadline);
+      headerDeadline = null;
+    }
+  };
+  if (UPSTREAM_HEADERS_TIMEOUT_MS > 0) {
+    headerDeadline = setTimeout(() => {
+      // Respond FIRST, then tear down — see the Timeouts section at the top of
+      // this file. 504 also says "the dashboard went quiet" rather than the 502
+      // an incidental socket error would report.
+      failRequest(504, "Hermes dashboard did not respond in time.");
+      upstream.destroy();
+    }, UPSTREAM_HEADERS_TIMEOUT_MS);
+    headerDeadline.unref?.();
+  }
+  upstream.on("response", clearHeaderDeadline);
+  upstream.on("error", () => {
+    clearHeaderDeadline();
+    failRequest(502, "Hermes dashboard is not reachable.");
   });
+  upstream.on("close", clearHeaderDeadline);
   // Sink for any late stream error on the client connection, same reasoning.
   res.on("error", () => {});
 
@@ -513,7 +630,7 @@ function pipeResponse(res, up, injected, extraSetCookies) {
   up.pipe(res);
 }
 
-const server = http.createServer((req, res) => {
+function handleRequest(req, res) {
   // Cross-origin / rebind check FIRST: everything below rewrites Host and
   // Origin to the upstream authority, which would otherwise disarm the
   // dashboard's own guard.
@@ -603,13 +720,13 @@ const server = http.createServer((req, res) => {
     });
     req.on("error", () => { try { res.destroy(); } catch {} });
   });
-});
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket upgrades — same gate, inject SSO cookies, raw splice upstream.
 // ---------------------------------------------------------------------------
 
-server.on("upgrade", (req, clientSocket, head) => {
+function handleUpgrade(req, clientSocket, head) {
   // Same guard as the HTTP path — the upgrade handler below rewrites Host and
   // Origin to the upstream authority, so the dashboard's WS Origin check can't
   // protect us. A same-origin SPA upgrade sends Origin == this proxy's
@@ -626,6 +743,18 @@ server.on("upgrade", (req, clientSocket, head) => {
     return;
   }
   const proceed = (injected) => {
+    // Armed for TCP connect + the 101 handshake only. A dashboard that accepts
+    // the socket and never completes the upgrade would otherwise leave the
+    // browser's WebSocket pending indefinitely with no close frame; the client
+    // gets an explicit 504 instead. Disarmed once the upstream's response
+    // HEADERS are complete, because an established WebSocket is idle by design
+    // and an idle timer past that point would drop healthy connections.
+    //
+    // Completion means the full header block, terminator included — NOT merely
+    // "some byte arrived". A partial status line followed by silence is exactly
+    // the wedged-upstream case this timeout exists for, and disarming on the
+    // first byte would hand that case straight back to the hang.
+    let handshakeComplete = false;
     const upstream = net.connect(UPSTREAM_PORT, UPSTREAM_HOST, () => {
       const headerLines = [`${req.method} ${req.url} HTTP/1.1`];
       let cookieWritten = false;
@@ -653,8 +782,44 @@ server.on("upgrade", (req, clientSocket, head) => {
       if (head && head.length) upstream.write(head);
       clientSocket.pipe(upstream);
       upstream.pipe(clientSocket);
+      // Watch the upstream's bytes only until its response headers end, then
+      // DETACH. This listener merely observes — pipe() above still delivers
+      // every chunk to the client — but pipe has already registered a 'data'
+      // handler, so leaving a second one attached would keep `_events.data` an
+      // array for the life of the socket, and emit() clones that array on
+      // every inbound chunk. Removing it restores the single-listener fast
+      // path for the long-lived WebSocket that follows.
+      //
+      // Attached AFTER pipe() so the pipe is already consuming; both listeners
+      // are registered in this same synchronous block, so no byte is lost.
+      let sniffed = "";
+      const onUpstreamData = (chunk) => {
+        // latin1 keeps one byte per char, so the CRLF scan and the carry-over
+        // slice below cannot be broken by a multi-byte sequence.
+        const text = sniffed + chunk.toString("latin1");
+        if (text.includes(HEADER_TERMINATOR)) {
+          handshakeComplete = true;
+          sniffed = "";
+          upstream.setTimeout(0);
+          upstream.off("data", onUpstreamData);
+          return;
+        }
+        // Carry the tail so a terminator split across two chunks still matches.
+        sniffed = text.slice(-(HEADER_TERMINATOR.length - 1));
+      };
+      upstream.on("data", onUpstreamData);
     });
     const kill = () => { try { upstream.destroy(); } catch {} try { clientSocket.destroy(); } catch {} };
+    if (WS_HANDSHAKE_TIMEOUT_MS > 0) {
+      upstream.setTimeout(WS_HANDSHAKE_TIMEOUT_MS, () => {
+        if (handshakeComplete) return; // established WebSocket: idle is normal
+        // `kill` on its own drops the connection with nothing written, so the
+        // browser reports a bare 1006 and cannot tell a wedged dashboard from a
+        // network blip. Write the status before tearing down.
+        try { clientSocket.write(`HTTP/1.1 504 Gateway Timeout\r\nConnection: close${HEADER_TERMINATOR}`); } catch {}
+        kill();
+      });
+    }
     upstream.on("error", kill);
     clientSocket.on("error", kill);
   };
@@ -664,8 +829,31 @@ server.on("upgrade", (req, clientSocket, head) => {
   } else {
     ensureHermesCookies(false).then((injected) => proceed(injected));
   }
-});
+}
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[hermes-dashboard-proxy] :${PORT} -> ${UPSTREAM_AUTHORITY} (clawbox_session gated, Hermes SSO)`);
-});
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+//
+// The server is BUILT here but only LISTENS under the main-module guard below.
+// Calling listen() at import time meant nothing could load this file to check
+// its behaviour without also binding :8090 — so the gate, the SSO broker and
+// the timeouts above shipped to devices with no test covering any of them.
+
+// ONE server per process. The Hermes session cache, the login cooldown and the
+// upstream address are all module-scope, so two servers built here would share
+// them — build a second only to assert something about a server that never
+// listens, never to run two side by side.
+function createProxyServer() {
+  const srv = http.createServer(handleRequest);
+  srv.on("upgrade", handleUpgrade);
+  return srv;
+}
+
+if (require.main === module) {
+  createProxyServer().listen(PORT, "0.0.0.0", () => {
+    console.log(`[hermes-dashboard-proxy] :${PORT} -> ${UPSTREAM_AUTHORITY} (clawbox_session gated, Hermes SSO)`);
+  });
+}
+
+module.exports = { createProxyServer, handleRequest, handleUpgrade };

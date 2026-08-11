@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
@@ -580,6 +581,10 @@ export default function SystemUpdateApp() {
 // Shared confirmation dialog. Focuses Cancel on open (so a stray Enter can't
 // confirm a destructive action), closes on Escape, and traps Tab focus within
 // the dialog — the keyboard-nav behavior CLAUDE.md requires of modals.
+//
+// That behaviour now comes from useModalDialog rather than a second copy of it
+// here, which also gets this dialog the two things the local copy lacked:
+// focus returns to the trigger on close, and the page behind goes inert.
 function ConfirmModal({
   titleId,
   title,
@@ -597,46 +602,19 @@ function ConfirmModal({
   onCancel: () => void;
   children: ReactNode;
 }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    cancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusables || focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  // Cancel is first in DOM order, so the shared trap lands there on open.
+  const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={onCancel}
     >
       <div
         ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -651,7 +629,6 @@ function ConfirmModal({
         </div>
         <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
           <button
-            ref={cancelRef}
             type="button"
             onClick={onCancel}
             className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
