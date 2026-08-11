@@ -3,7 +3,7 @@ import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
-import { findOpenclawBin, restartGateway } from "./openclaw-config";
+import { findOpenclawBin, restartGateway, openclawIsAbsent } from "./openclaw-config";
 import { isPortOpen } from "./port-probe";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
@@ -309,6 +309,8 @@ async function waitForGateway(timeoutMs: number): Promise<boolean> {
 }
 
 async function runOpenclawDoctorFix(): Promise<void> {
+  // No openclaw binary on the Hermes edition — nothing to doctor.
+  if (openclawIsAbsent()) return;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: 90_000,
@@ -626,10 +628,15 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
-    execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
-      .then(({ stdout }) => stdout.trim() || null)
-      // Fallback: read version from the installed package.json
-      .catch(() => readPkgVersion(OPENCLAW_PKG)),
+    // The Hermes edition ships no openclaw binary, so skip the spawn and read
+    // the version from the installed package.json (absent there too → null,
+    // which is correct: there is no OpenClaw version to report on Hermes).
+    openclawIsAbsent()
+      ? readPkgVersion(OPENCLAW_PKG)
+      : execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
+          .then(({ stdout }) => stdout.trim() || null)
+          // Fallback: read version from the installed package.json
+          .catch(() => readPkgVersion(OPENCLAW_PKG)),
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.

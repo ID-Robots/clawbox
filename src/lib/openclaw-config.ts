@@ -9,6 +9,32 @@ import { readEdition } from "@/lib/edition-source";
 const exec = promisify(execFile);
 
 /**
+ * Thrown when the OpenClaw CLI is asked to run on an edition that does not ship
+ * it. The Hermes SKU has no `openclaw` binary at all (see `openclawIsAbsent`),
+ * so a spawn would fail deep inside a request with a raw `spawn openclaw
+ * ENOENT` — a confusing, un-actionable error. Callers that have a Hermes-native
+ * equivalent should route to it *before* reaching the CLI; this typed error is
+ * the backstop for the paths that don't, so they can fail cleanly and honestly
+ * instead of blaming the user's credentials.
+ */
+export class OpenclawUnavailableError extends Error {
+  constructor(message = "The OpenClaw CLI is not available on this edition.") {
+    super(message);
+    this.name = "OpenclawUnavailableError";
+  }
+}
+
+/**
+ * True when this device ships no `openclaw` binary — i.e. the Hermes edition.
+ * openclaw is present on the `openclaw` and `dual` SKUs; only `hermes` removes
+ * it. Keyed on the edition (a root-owned env read) rather than a filesystem
+ * probe so it is synchronous and cannot be spoofed by a user-writable path.
+ */
+export function openclawIsAbsent(): boolean {
+  return readEdition() === "hermes";
+}
+
+/**
  * Options for {@link runOpenclawConfigSet}.
  */
 export interface OpenclawConfigSetOptions {
@@ -107,6 +133,13 @@ interface SpawnOpenclawOptions {
  * it carries the ConfigMutationConflictError signature used for retry.
  */
 function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
+  // Chokepoint guard: on an edition with no openclaw binary, refuse with a
+  // typed error rather than spawn the bare `"openclaw"` fallback (findOpenclawBin
+  // returns that string when no real path resolves) and surface a raw ENOENT
+  // from inside a request. Every config-set / pairing call funnels through here.
+  if (openclawIsAbsent()) {
+    return Promise.reject(new OpenclawUnavailableError());
+  }
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false } = options;
   const timeoutMs = options.timeoutMs ?? 30_000;
