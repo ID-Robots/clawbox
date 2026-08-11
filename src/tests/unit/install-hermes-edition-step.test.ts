@@ -31,16 +31,11 @@ function extractShellFunction(name: string): string {
   return INSTALL_SH.slice(start, end);
 }
 
-const DISPATCH_STEPS = INSTALL_SH.slice(
-  INSTALL_SH.indexOf("DISPATCH_STEPS=("),
-  INSTALL_SH.indexOf(")", INSTALL_SH.indexOf("DISPATCH_STEPS=(")),
-);
+// `hermes_edition` being in DISPATCH_STEPS is already pinned by
+// install-edition-lock.test.ts ("edition steps are dispatchable by the
+// updater") — not repeated here.
 
 describe("hermes_edition is the updater's own step", () => {
-  it("is dispatchable, so the updater can run it as a root step", () => {
-    expect(DISPATCH_STEPS).toContain("hermes_edition");
-  });
-
   it("the updater lists it", () => {
     expect(UPDATER_TS).toContain('id: "hermes_edition"');
   });
@@ -74,18 +69,33 @@ describe("provisioning stays safe to re-run on every update", () => {
     }
   });
 
-  it("verifies stored credentials before minting new ones", () => {
-    const auth = readFileSync(
-      path.join(REPO, "scripts/setup-hermes-dashboard-auth.sh"),
-      "utf-8",
+  // The "already-provisioned box is not re-minted on every update" property is
+  // tested behaviourally, by running the script twice, in
+  // hermes-dashboard-auth-yaml.test.ts — which owns that script.
+});
+
+/**
+ * src/lib/edition-source.ts's `hasHermesHarness()` states that it mirrors
+ * install.sh's `has_hermes_harness()`. The updater uses it to decide whether to
+ * dispatch `hermes_edition`, and the step itself re-checks the shell version —
+ * so if the two ever disagree, a device either skips its own provisioning or
+ * runs a step that immediately returns. Nothing else pins them together.
+ */
+describe("the TS and shell harness predicates agree", () => {
+  it("both treat hermes and dual as the Hermes-harness editions", () => {
+    expect(INSTALL_SH).toContain(
+      'has_hermes_harness() { [ "$CLAWBOX_EDITION" = "hermes" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }',
     );
-    // The early exit must come before any generation, or a box that already
-    // works would get a fresh password on every single update.
-    const guard = auth.indexOf("if creds_are_consistent; then");
-    const mint = auth.indexOf("secrets.token_urlsafe(24)");
-    expect(guard).toBeGreaterThan(-1);
-    expect(mint).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(mint);
-    expect(auth.slice(guard, mint)).toContain("exit 0");
+    const ts = readFileSync(path.join(REPO, "src/lib/edition-source.ts"), "utf-8");
+    const body = ts.slice(ts.indexOf("export function hasHermesHarness()"));
+    expect(body).toContain('edition === "hermes" || edition === "dual"');
+  });
+
+  it("the provisioning step guards on the shell predicate too", () => {
+    // Belt and braces: the updater filters the step out, and dispatching it
+    // manually on an openclaw box still does nothing.
+    expect(extractShellFunction("step_hermes_edition")).toContain(
+      "has_hermes_harness || return 0",
+    );
   });
 });

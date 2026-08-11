@@ -136,14 +136,11 @@ describe("updater", () => {
     process.env.GATEWAY_HEALTH_WAIT_MS = "1";
     process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
     process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
-    // Pin the SKU. The step list is edition-dependent now, and these tests are
-    // routinely run ON A DEVICE — where /etc/clawbox/edition.env exists and is
-    // authoritative. Without this, the suite's result would depend on which box
-    // it happened to run on: on a Hermes device the OpenClaw and gateway steps
-    // are (correctly) filtered out, and every expectation below that looks for
-    // `gateway_verify` would fail for reasons that have nothing to do with the
-    // code under test. The nonexistent file forces the documented env fallback.
-    process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
+    // Pin the SKU: the step list is edition-dependent, so without this the
+    // expectations below that look for `gateway_verify` would fail on a Hermes
+    // box, where it is (correctly) filtered out. Only the edition VALUE is set
+    // here — vitest.config.ts already points CLAWBOX_EDITION_FILE at a path
+    // that cannot exist, which is what makes process.env authoritative.
     process.env.CLAWBOX_EDITION = "openclaw";
 
     mockGet.mockResolvedValue(undefined);
@@ -172,7 +169,9 @@ describe("updater", () => {
     delete process.env.GATEWAY_HEALTH_WAIT_MS;
     delete process.env.GATEWAY_RECOVERY_WAIT_MS;
     delete process.env.GATEWAY_WAIT_INTERVAL_MS;
-    delete process.env.CLAWBOX_EDITION_FILE;
+    // NOT CLAWBOX_EDITION_FILE — that is a suite-wide guarantee from
+    // vitest.config.ts, and deleting it here would leave later files in this
+    // worker reading the real /etc/clawbox/edition.env.
     delete process.env.CLAWBOX_EDITION;
   });
 
@@ -686,36 +685,24 @@ describe("updater", () => {
    * that something was.
    */
   describe("edition-aware step list", () => {
-    const OPENCLAW_ONLY = ["openclaw_install", "openclaw_patch"];
-    const GATEWAY_ONLY = ["gateway_setup", "gateway_verify"];
-
-    async function stepIdsFor(edition: string): Promise<string[]> {
+    /** Same shape as loadHarness() in harness-edition.test.ts. */
+    async function loadUpdater(edition?: string) {
       vi.resetModules();
-      process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
-      process.env.CLAWBOX_EDITION = edition;
+      if (edition === undefined) delete process.env.CLAWBOX_EDITION;
+      else process.env.CLAWBOX_EDITION = edition;
       const fresh = await import("@/lib/updater");
       fresh.resetUpdateState();
-      return fresh.getUpdateState().steps.map((s) => s.id);
+      return fresh;
     }
 
-    it("drops the OpenClaw and gateway steps on hermes", async () => {
-      const ids = await stepIdsFor("hermes");
+    const stepIdsFor = async (edition?: string): Promise<string[]> =>
+      (await loadUpdater(edition)).getUpdateState().steps.map((s) => s.id);
 
-      for (const id of [...OPENCLAW_ONLY, ...GATEWAY_ONLY]) {
-        expect(ids, `${id} cannot apply on hermes`).not.toContain(id);
-      }
-    });
-
-    it("runs edition provisioning on hermes", async () => {
-      const ids = await stepIdsFor("hermes");
-
-      expect(ids).toContain("hermes_edition");
-      // After post_update: step_systemd_services has to have refreshed the unit
-      // files on disk before the provisioning step reinstalls and restarts them.
-      expect(ids.indexOf("hermes_edition")).toBeGreaterThan(ids.indexOf("post_update"));
-    });
-
-    it("still runs the shared steps on hermes", async () => {
+    it("drops the OpenClaw and gateway steps on hermes, and provisions the edition", async () => {
+      // The exact list, so this fails loudly on any drift: openclaw_install,
+      // openclaw_patch, gateway_setup and gateway_verify are all absent, and
+      // hermes_edition lands AFTER post_update — step_systemd_services has to
+      // refresh the unit files before the provisioning step restarts them.
       const ids = await stepIdsFor("hermes");
 
       expect(ids).toEqual([
@@ -754,29 +741,26 @@ describe("updater", () => {
     it("runs everything on dual — it has both harnesses", async () => {
       const ids = await stepIdsFor("dual");
 
-      for (const id of [...OPENCLAW_ONLY, ...GATEWAY_ONLY, "hermes_edition"]) {
+      for (const id of [
+        "openclaw_install",
+        "openclaw_patch",
+        "gateway_setup",
+        "gateway_verify",
+        "hermes_edition",
+      ]) {
         expect(ids, `${id} applies on dual`).toContain(id);
       }
     });
 
     it("defaults to the openclaw list when no edition is recorded", async () => {
-      vi.resetModules();
-      process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
-      delete process.env.CLAWBOX_EDITION;
-      const fresh = await import("@/lib/updater");
-      fresh.resetUpdateState();
-      const ids = fresh.getUpdateState().steps.map((s) => s.id);
+      const ids = await stepIdsFor();
 
       expect(ids).toContain("gateway_verify");
       expect(ids).not.toContain("hermes_edition");
     });
 
     it("refuses the OpenClaw-only update on hermes instead of failing on the gateway", async () => {
-      vi.resetModules();
-      process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
-      process.env.CLAWBOX_EDITION = "hermes";
-      const fresh = await import("@/lib/updater");
-      fresh.resetUpdateState();
+      const fresh = await loadUpdater("hermes");
 
       const result = fresh.startOpenclawUpdate();
 
@@ -787,11 +771,7 @@ describe("updater", () => {
     });
 
     it("still allows the OpenClaw-only update on dual", async () => {
-      vi.resetModules();
-      process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
-      process.env.CLAWBOX_EDITION = "dual";
-      const fresh = await import("@/lib/updater");
-      fresh.resetUpdateState();
+      const fresh = await loadUpdater("dual");
 
       expect(fresh.startOpenclawUpdate().started).toBe(true);
       fresh.resetUpdateState();
@@ -800,21 +780,8 @@ describe("updater", () => {
     it("completes a hermes update and records it as completed", async () => {
       // The gateway is closed on this SKU — the old list could not get here.
       mockIsPortOpen.mockResolvedValue(false);
-      setupExecFileMock({
-        ping: { stdout: "", stderr: "" },
-        systemctl: { stdout: "", stderr: "" },
-      });
+      const fresh = await loadUpdater("hermes");
 
-      vi.resetModules();
-      process.env.CLAWBOX_EDITION_FILE = "/nonexistent/edition.env";
-      process.env.CLAWBOX_EDITION = "hermes";
-      mockGet.mockResolvedValue(undefined);
-      mockSet.mockResolvedValue();
-      mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
-      const fresh = await import("@/lib/updater");
-
-      fresh.resetUpdateState();
       // Resume past `restart` so the test doesn't have to drive the rebuild
       // hand-off, which never returns by design.
       mockGet.mockResolvedValue("previous-build-id");

@@ -1702,20 +1702,11 @@ step_post_update() {
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
-  # NOTE: Hermes re-provisioning is deliberately NOT called from here any more.
-  #
-  # It used to run as `step_hermes_edition || echo "Warning: … (non-fatal)"`,
-  # which meant a device that failed to provision the entire edition — no
-  # dashboard auth provider, no proxy, no MCP registration — still finished the
-  # update green, with the failure buried in a journal nobody reads.
-  #
-  # The in-app updater now dispatches `hermes_edition` as its own step, right
-  # after this one, so the work is visible while it happens and a failure is
-  # reported as a failure. Ordering is unchanged: it still lands after
-  # step_systemd_services has refreshed the unit files it reads.
-  #
-  # Fresh installs are unaffected — they call step_hermes_edition directly near
-  # the end of the full-install path, not through here.
+  # Hermes re-provisioning is deliberately NOT called here. The in-app updater
+  # dispatches `hermes_edition` as its own step immediately after this one, so a
+  # failure is reported instead of swallowed by `|| echo "(non-fatal)"`.
+  # Ordering is unchanged (still after step_systemd_services). Fresh installs
+  # call step_hermes_edition directly and are unaffected.
   # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
   # the edition straight off /etc/clawbox/edition.env on demand
   # (src/lib/edition-source.ts stats the file per call and caches by mtime), so

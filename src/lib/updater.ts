@@ -56,17 +56,11 @@ interface UpdateStepDef {
    * Whether this step applies to the device it is about to run on. Absent
    * means "always applies".
    *
-   * Editions differ in which harnesses they ship, so some steps have nothing
-   * to do on some SKUs. Expressing that as a predicate on the step — rather
-   * than an `if (edition === …)` inside each body — keeps the decision in one
-   * readable place and, crucially, lets the runner DROP the step from the list
-   * entirely. A dropped step never renders, so a Hermes owner is not shown
-   * OpenClaw work being "completed" on a box that has no OpenClaw.
-   *
-   * Each step names the helper matching its own reason for being skipped
-   * (binary absent vs gateway absent) rather than one blanket edition check:
-   * the two happen to coincide on today's SKUs, and a step that lies about why
-   * it was skipped is how they would silently diverge later.
+   * install.sh's step bodies already no-op per edition, but they cannot answer
+   * this question: by the time bash runs, the UI line exists and the step's
+   * timeout is already ticking. A predicate here lets the runner DROP the step
+   * from the list entirely, so a Hermes owner is never shown OpenClaw work
+   * being "completed" on a box that has no OpenClaw.
    */
   applies?: () => boolean;
 }
@@ -454,10 +448,8 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Updating OpenClaw",
     timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,
-    // No `openclaw` binary on this SKU to install. install.sh's counterpart
-    // already early-returns here, so the step reported "completed" — several
-    // minutes of budget and a line of UI spent announcing work that could not
-    // happen. Present on openclaw and dual.
+    // Keyed on the binary, not the edition: there is nothing to install where
+    // no `openclaw` ships. (Hermes today; the two predicates can diverge.)
     applies: () => !openclawIsAbsent(),
   },
   {
@@ -465,7 +457,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Patching OpenClaw gateway",
     timeoutMs: 30_000,
     requiresRoot: true,
-    // Nothing installed to patch. Same early-return as above.
     applies: () => !openclawIsAbsent(),
   },
   {
@@ -473,8 +464,8 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Configuring gateway service",
     timeoutMs: 30_000,
     requiresRoot: true,
-    // clawbox-gateway.service is deliberately removed and MASKED on this SKU
-    // (step_edition_gateway_state), so there is no unit to configure.
+    // Keyed on the unit, not the binary: clawbox-gateway.service is removed
+    // and masked by step_edition_gateway_state, so there is none to configure.
     applies: () => !gatewayIsAbsent(),
   },
   {
@@ -508,20 +499,16 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
   {
     // Re-provision the Hermes side: dashboard + proxy units, dashboard auth,
-    // shared identity, MCP registration, gateway removal. Runs AFTER
-    // post_update so step_systemd_services has already refreshed the unit
-    // files this reads, and after the rebuild so it is the NEW install.sh.
+    // shared identity, MCP registration, gateway removal.
     //
-    // This work already happened — inside step_post_update, wrapped in
-    // `|| echo "Warning: … (non-fatal)"`. That made a total failure to
-    // provision the edition invisible: the update went green while the
-    // dashboard the customer actually uses could be unconfigured. It is the
-    // same work, hoisted to where it can be seen and can fail honestly.
+    // Ordering is load-bearing: AFTER post_update, so step_systemd_services has
+    // already refreshed the unit files this reinstalls and restarts, and after
+    // the rebuild, so it is the NEW install.sh being dispatched.
     id: "hermes_edition",
     label: "Provisioning Hermes edition",
     timeoutMs: 300_000,
     requiresRoot: true,
-    applies: hasHermesHarness,
+    applies: () => hasHermesHarness(),
   },
   {
     id: "gateway_verify",
@@ -538,20 +525,18 @@ const UPDATE_STEPS: UpdateStepDef[] = [
 ];
 
 /**
- * The steps that apply to THIS device, in order.
- *
  * Evaluated per run, never memoized: the edition is read from a root-owned
  * file that post_update itself can re-bake (step_edition_lock migrates a
  * pre-3.x box onto /etc/clawbox/edition.env), so a list frozen at module load
  * could describe the wrong SKU.
  *
- * The SAME array must feed both `state.steps` and the runner — `runUpdate`
- * addresses `state.steps[i]` by position, so two independently-filtered lists
- * would silently label every step after the first omission with its
- * neighbour's name.
+ * Callers must resolve this ONCE and feed the same array to both `state.steps`
+ * and the runner — `runUpdate` addresses `state.steps[i]` by position, so two
+ * independently-filtered lists would silently label every step after the first
+ * omission with its neighbour's name.
  */
-function applicableSteps(steps: UpdateStepDef[]): UpdateStepDef[] {
-  return steps.filter((step) => !step.applies || step.applies());
+function applicableSteps(): UpdateStepDef[] {
+  return UPDATE_STEPS.filter((step) => !step.applies || step.applies());
 }
 
 /**
@@ -798,7 +783,7 @@ function createStepStates(steps: UpdateStepDef[]): StepState[] {
   return steps.map((s) => ({ id: s.id, label: s.label, status: "pending" as const }));
 }
 
-function createInitialState(steps: UpdateStepDef[] = applicableSteps(UPDATE_STEPS)): UpdateState {
+function createInitialState(steps: UpdateStepDef[]): UpdateState {
   return {
     phase: "idle",
     steps: createStepStates(steps),
@@ -806,7 +791,7 @@ function createInitialState(steps: UpdateStepDef[] = applicableSteps(UPDATE_STEP
   };
 }
 
-let state: UpdateState = createInitialState();
+let state: UpdateState = createInitialState(applicableSteps());
 let running = false;
 
 export function getUpdateState(): UpdateState {
@@ -814,7 +799,7 @@ export function getUpdateState(): UpdateState {
 }
 
 export function resetUpdateState(): void {
-  state = createInitialState();
+  state = createInitialState(applicableSteps());
   running = false;
 }
 
@@ -857,7 +842,7 @@ export async function checkContinuation(): Promise<boolean> {
   // Resolve the list ONCE and reuse it for the state, the resume index and the
   // runner. The edition is stable across the reboot (post_update re-bakes the
   // same value), so this matches the list the pre-restart half ran.
-  const steps = applicableSteps(UPDATE_STEPS);
+  const steps = applicableSteps();
   const restartIndex = steps.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
 
@@ -906,7 +891,7 @@ export function startUpdate(): { started: boolean; error?: string } {
   }
 
   running = true;
-  const steps = applicableSteps(UPDATE_STEPS);
+  const steps = applicableSteps();
   state = createInitialState(steps);
   state.phase = "running";
   state.currentStepIndex = 0;
