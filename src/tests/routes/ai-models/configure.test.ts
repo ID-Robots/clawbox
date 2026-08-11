@@ -1133,21 +1133,26 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
+  // Written as raw documents rather than through JSON.stringify: it serialises
+  // NaN and Infinity as `null`, which would quietly turn the non-finite case
+  // into the missing-createdAt case already covered below. `1e999` parses to
+  // Infinity, which is what the route's Number.isFinite check is there for.
+  const handoffDoc = (fields: string) =>
+    `{"provider":"openai","access_token":"access.token.jwt","id_token":"id.token.jwt",${fields}}`;
+
   it.each([
-    ["a non-numeric createdAt", "not-a-timestamp"],
-    ["a NaN createdAt", Number.NaN],
-    ["a createdAt in the future", Date.now() + 60 * 60 * 1000],
-  ])("rejects and removes a handoff file with %s", async (_label, createdAt) => {
-    // None of these yields an age that can be compared against the TTL, and a
-    // bare `now - createdAt > TTL` test passes for all three.
+    ["a non-numeric createdAt", handoffDoc(`"createdAt":"not-a-timestamp"`)],
+    ["a non-finite createdAt", handoffDoc(`"createdAt":1e999`)],
+    ["a createdAt in the future", handoffDoc(`"createdAt":${Date.now() + 60 * 60 * 1000}`)],
+    // A field of the wrong shape means the file is not one this device wrote.
+    ["a non-string access_token", `{"provider":"openai","access_token":{},"createdAt":${Date.now()}}`],
+    ["a non-string provider", `{"provider":{},"access_token":"a.b.c","createdAt":${Date.now()}}`],
+  ])("rejects and removes a handoff file with %s", async (_label, doc) => {
+    // None of these yields something the route can use, and a bare
+    // `now - createdAt > TTL` truthiness test passes for every one of them.
     mockFs.readFile.mockImplementation(async (file) =>
       String(file).endsWith("oauth-device-tokens.json")
-        ? JSON.stringify({
-            provider: "openai",
-            access_token: "access.token.jwt",
-            id_token: "id.token.jwt",
-            createdAt,
-          })
+        ? doc
         : JSON.stringify({ version: 1, profiles: {} }),
     );
 

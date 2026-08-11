@@ -515,18 +515,26 @@ export async function POST(request: Request) {
         );
       }
       // Age the file by its own timestamp, and only when that timestamp is one
-      // we can actually compare: a missing, non-numeric or future `createdAt`
-      // yields no age, so the file cannot be shown to be inside the TTL and is
-      // treated exactly like one past it. (A bare `Date.now() - createdAt`
-      // comparison would pass for both — NaN and a negative age each fail a
-      // `> TTL` test.)
+      // we can actually compare: a missing, non-numeric, non-finite or future
+      // `createdAt` yields no age, so the file cannot be shown to be inside the
+      // TTL and is treated exactly like one past it. (A bare
+      // `Date.now() - createdAt` comparison would pass for all of them — NaN
+      // and a negative age each fail a `> TTL` test.)
       const createdAt = handoff.createdAt;
       const ageMs =
         typeof createdAt === "number" && Number.isFinite(createdAt)
           ? Date.now() - createdAt
           : null;
+      // These routes write the file, and they write strings. A field of another
+      // shape means the file is not one of ours to use, so it goes down the
+      // same path rather than being spliced into the body for a later check to
+      // reject — which would leave it on disk for every retry to trip over.
+      const wellFormed =
+        typeof handoff.access_token === "string" &&
+        handoff.access_token.length > 0 &&
+        (handoff.provider === undefined || typeof handoff.provider === "string");
       if (
-        !handoff.access_token ||
+        !wellFormed ||
         ageMs === null ||
         ageMs < 0 ||
         ageMs > HANDOFF_TTL_MS
