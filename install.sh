@@ -1497,6 +1497,11 @@ step_directories_permissions() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
+  # on | off | auto. Written explicitly so the trade-off is visible and
+  # editable on the device rather than buried in a launch script: "off" is
+  # ~5x faster on this hardware, "on" is the only way this model gets
+  # weekday arithmetic right. Restart clawbox-llamacpp after changing it.
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_REASONING" "off"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
