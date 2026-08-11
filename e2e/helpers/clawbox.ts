@@ -1123,6 +1123,54 @@ export function wizardStepAfterWifi(page: Page) {
     .first();
 }
 
+/**
+ * Fill the credentials step the way a customer does.
+ *
+ * The hotspot password and its confirmation sit behind a disclosure on the
+ * hotspot's own card (CredentialsStep.tsx) — the row states the requirement,
+ * a tap opens the fields. Both are still mandatory: the primary action stays
+ * unavailable until they are supplied and matching, which is what every caller
+ * of this helper goes on to exercise.
+ */
+export async function fillCredentialsStep(page: Page) {
+  await page.locator("#cred-password").fill("clawbox-pass");
+  await page.locator("#cred-confirm").fill("clawbox-pass");
+  await page.getByRole("button", { name: /Hotspot Password/i }).click();
+  await page.locator("#hotspot-password").fill("hotspot-pass");
+  await page.locator("#hotspot-confirm").fill("hotspot-pass");
+}
+
+/**
+ * Choose an AI provider from the wizard's provider list.
+ *
+ * The list shows the provider currently in play and keeps the rest behind its
+ * "Show more providers" toggle (AIModelsStep.tsx), so anything other than the
+ * default needs the list opened first. Picking closes it again on the chosen
+ * row, so this is also how a test hops from one provider to the next.
+ */
+export async function pickAiProvider(page: Page, name: string) {
+  const step = page.getByTestId("setup-step-ai-models");
+  await expandAiProviderList(page);
+  await step.getByText(name, { exact: true }).first().click();
+}
+
+/**
+ * Open the provider list if anything is still hidden behind its toggle.
+ *
+ * Waits for the list itself first: the step's testid is also on the neutral
+ * skeleton AIModelsStep renders until the device edition resolves, and a
+ * point-in-time count of the toggle would read zero through that frame and
+ * silently skip the expansion.
+ */
+export async function expandAiProviderList(page: Page) {
+  const step = page.getByTestId("setup-step-ai-models");
+  await expect(step.getByRole("radiogroup", { name: "AI Provider" })).toBeVisible();
+  const moreToggle = step.getByRole("button", { name: /more provider/i });
+  if (await moreToggle.count() > 0) {
+    await moreToggle.first().click();
+  }
+}
+
 export async function completeSetupWizard(page: Page) {
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
   // Ethernet-first happy path: a wired uplink lets the wizard advance in-page.
@@ -1142,14 +1190,11 @@ export async function completeSetupWizard(page: Page) {
   }
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
-  await page.locator("#cred-password").fill("clawbox-pass");
-  await page.locator("#cred-confirm").fill("clawbox-pass");
-  await page.locator("#hotspot-password").fill("hotspot-pass");
-  await page.locator("#hotspot-confirm").fill("hotspot-pass");
+  await fillCredentialsStep(page);
   await page.getByRole("button", { name: /^Connect$/ }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
-  await page.getByText("OpenAI GPT").click();
+  await pickAiProvider(page, "OpenAI GPT");
   await page.locator("#ai-api-key").fill("sk-test-openai-key");
   await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 

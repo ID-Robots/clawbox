@@ -248,8 +248,6 @@ function ConfiguringOverlay({
   );
 }
 
-const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic", "llamacpp"]);
-
 const PROVIDERS: Provider[] = [
   {
     id: "llamacpp",
@@ -946,6 +944,10 @@ export default function AIModelsStep({
 
   const selectProvider = useCallback((id: string) => {
     userSelectedProviderRef.current = true;
+    // The list was expanded to make this choice; the choice is made, so it
+    // closes on the chosen row rather than leaving the catalogue open above
+    // the controls the customer now has to reach.
+    setShowMoreProviders(false);
     syncProviderSelection(id);
   }, [syncProviderSelection]);
 
@@ -1599,11 +1601,25 @@ export default function AIModelsStep({
   }, [configuringState?.completed, handleConfiguringDone]);
 
   const baseProviders = providerIdSet ? allowedProviders : PROVIDERS;
-  const collapseSecondary = baseProviders.some((provider) => PRIMARY_PROVIDER_IDS.has(provider.id));
-  const displayedProviders = collapseSecondary
-    ? baseProviders.filter((provider) => PRIMARY_PROVIDER_IDS.has(provider.id) || showMoreProviders || selectedProvider === provider.id)
+  // The list opens on the provider that is actually in play and keeps the rest
+  // one tap behind the same toggle that used to reveal only the secondary
+  // ones. Four rows plus that toggle is ~350px of catalogue standing on top of
+  // a card whose whole job is one button, and the customer taking the default
+  // — ClawBox AI, already selected — was being asked to scroll past the
+  // alternatives to reach it. Nothing is removed: the toggle is always there
+  // while anything is hidden, and choosing from the expanded list closes it
+  // again (see selectProvider) so browsing the options never leaves the action
+  // stranded below the fold.
+  //
+  // The `selectedInList` guard matters for the frame between a provider set
+  // changing and the effect that re-points `selectedProvider` at it: filtering
+  // on a selection that isn't there yet would render an empty list.
+  const selectedInList = baseProviders.some((provider) => provider.id === selectedProvider);
+  const providerListCollapsed = !showMoreProviders && selectedInList && baseProviders.length > 1;
+  const displayedProviders = providerListCollapsed
+    ? baseProviders.filter((provider) => provider.id === selectedProvider)
     : baseProviders;
-  const shouldShowMoreProviders = collapseSecondary && !showMoreProviders && baseProviders.some((provider) => !PRIMARY_PROVIDER_IDS.has(provider.id));
+  const shouldShowMoreProviders = providerListCollapsed;
   const resolvedTitle = title ?? t("ai.title");
   const resolvedDescription = description ?? t("ai.description");
   const embeddedConnectLabel = t("settings.connect");

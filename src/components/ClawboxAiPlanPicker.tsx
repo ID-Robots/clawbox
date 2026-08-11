@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 import {
   CLAWAI_TIER_INFO,
@@ -8,10 +9,11 @@ import {
 } from "@/lib/clawbox-ai-tiers";
 
 // The ClawBox AI tier selector + plan card, shared by the OpenClaw wizard and
-// the Hermes provider panel. Moved verbatim out of AIModelsStep; it returns a
-// Fragment (no wrapper element) so the OpenClaw panel's DOM is node-for-node
-// what it was, and the Hermes panel gains the same pricing/feature card instead
-// of a bare "Use ClawBox AI" button.
+// the Hermes provider panel — one component, so the two can never drift. It
+// opens as a one-line summary of the plan and its price and returns the tiers,
+// the pitch and the feature list as a Fragment (no wrapper element) once
+// opened, so the expanded DOM is node-for-node what both panels rendered
+// before the disclosure landed.
 
 interface ClawboxAiPlanPickerProps {
   tier: ClawaiTier;
@@ -26,9 +28,46 @@ export default function ClawboxAiPlanPicker({
   disabled,
 }: ClawboxAiPlanPickerProps) {
   const info = CLAWAI_TIER_INFO[tier];
+  // Presentational only — no state the connect flow reads is gated on it.
+  // A plan is always selected (the picker has no empty value and nothing
+  // validates it), so this can never be the hidden reason an action is
+  // unavailable. What it must never hide is the price: the summary states the
+  // plan and what it costs, so a paid default is on screen before anyone
+  // presses Connect, and one tap opens the tiers and what each includes.
+  const [open, setOpen] = useState(false);
+  // "/month" is a suffix, "free forever" is a phrase — the two join the price
+  // differently, and a free plan should not read "€0".
+  const priceLabel =
+    info.priceEuro === 0 ? info.pricePeriod : `€${info.priceEuro}${info.pricePeriod}`;
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        disabled={disabled}
+        aria-expanded={false}
+        aria-controls="clawai-plan-panel"
+        className="flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--fill-1)] border border-[var(--hair-2)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--fill-2)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <span className="flex min-w-0 flex-col">
+          <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
+            Plan
+          </span>
+          <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+            {info.planName} · {priceLabel}
+          </span>
+        </span>
+        <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
+          Change
+        </span>
+      </button>
+    );
+  }
+
   return (
     <>
-      <p className="text-xs leading-relaxed text-orange-200/90">
+      <p id="clawai-plan-panel" className="text-xs leading-relaxed text-orange-200/90">
         Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
       </p>
       <div className="mt-4 flex items-center justify-between gap-3">

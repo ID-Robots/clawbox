@@ -113,6 +113,18 @@ test.describe("fresh-install setup wizard (UI)", () => {
     // to flip ai_model_configured for the wizard to advance. The ClawBox
     // AI tile opens an owner-portal modal rather than accepting a raw
     // token, so it's not usable for fully-automated wizard flow.
+    // The provider list opens on whichever provider is in play (ClawBox AI by
+    // default) and keeps the rest behind its "more providers" toggle, so open
+    // it before reaching for OpenAI.
+    // The list itself is waited on first: the step's testid is also on the
+    // skeleton rendered until the edition resolves, so counting the toggle
+    // before then would read zero and skip the expansion.
+    const aiStep = page.getByTestId("setup-step-ai-models");
+    await expect(aiStep.getByRole("radiogroup", { name: "AI Provider" })).toBeVisible();
+    const moreProviders = aiStep.getByRole("button", { name: /more provider/i });
+    if (await moreProviders.count() > 0) {
+      await moreProviders.first().click();
+    }
     await page.getByText("OpenAI GPT").click();
     // OpenAI defaults to the "Subscription" tab (ChatGPT Plus / Pro OAuth).
     // We need the "API Key" tab for the plain-token path.

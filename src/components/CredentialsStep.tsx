@@ -96,6 +96,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   // what the customer must supply and keeps what they may rename one tap away.
   const [nameOpen, setNameOpen] = useState(false);
   const [hotspotNameOpen, setHotspotNameOpen] = useState(false);
+  // The hotspot secret is the one disclosure here with no working default
+  // behind it, so the row that opens it states the outstanding requirement
+  // rather than merely hinting there is a field.
+  const [hotspotSecretOpen, setHotspotSecretOpen] = useState(false);
   const [status, setStatus] = useState<{
     type: "success" | "error";
     message: string;
@@ -338,6 +342,24 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const nameVisible = nameOpen || (touched && !hostnameValid);
   const hotspotNameVisible =
     hotspotEnabled && (hotspotNameOpen || (touched && !hotspotName.trim()));
+
+  // The hotspot password and its confirmation are the only fields on this
+  // screen that a disclosure could turn into a silent blocker: unlike the two
+  // names, nothing is read back from the device to stand in for them, and the
+  // primary action is unavailable until both are supplied. So the row that
+  // opens them is never merely a chevron — while they are missing it carries
+  // the requirement itself ("Minimum 8 characters", the same words the field's
+  // own placeholder uses), in amber, directly above the button it is holding.
+  // And once validation has actually rejected them the panel is open with its
+  // red borders whatever the customer last chose, exactly as the device name
+  // above behaves.
+  const hotspotSecretMissing = !hotspotPassword || !confirmHotspotPassword;
+  const hotspotSecretInvalid =
+    hotspotSecretMissing ||
+    hotspotPassword.length < 8 ||
+    hotspotPassword !== confirmHotspotPassword;
+  const hotspotSecretVisible =
+    hotspotEnabled && (hotspotSecretOpen || (touched && hotspotSecretInvalid));
 
   // The same expression the button has always been disabled by, split in two
   // so the button can paint the two reasons differently: "not yet" (something
@@ -593,15 +615,75 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               />
             </div>
           )}
-        </div>
 
-        {hotspotEnabled && (
-          <>
-            <div className="mt-[var(--s-4)]">
-              <FieldLabel htmlFor="hotspot-password">{t("credentials.hotspotPassword")}</FieldLabel>
+          {/* The hotspot's password belongs to the hotspot, so it lives on the
+              hotspot's own surface rather than floating below the card. The
+              row stays put when the panel opens: a disclosure trigger that
+              unmounts itself drops keyboard focus on the floor. */}
+          {hotspotEnabled && (
+            <button
+              type="button"
+              onClick={() => setHotspotSecretOpen((v) => !v)}
+              aria-expanded={hotspotSecretVisible}
+              aria-controls="hotspot-secret-panel"
+              className={`flex w-full items-center gap-[var(--s-3)] min-h-[var(--h-control)] px-[var(--s-4)] py-[var(--s-2)] text-left bg-transparent border-t border-[var(--hair)] cursor-pointer hover:bg-[var(--fill-2)] ${
+                hotspotSecretVisible ? "" : "rounded-b-[var(--r-1)]"
+              }`}
+              style={{ transition: "background-color var(--d-2) var(--ease-standard)" }}
+            >
+              {/* Also the open panel's heading — the field below it is not
+                  labelled twice, it borrows this one through aria-labelledby. */}
+              <span
+                id="hotspot-secret-label"
+                className="flex-1 min-w-0 text-[var(--text-secondary)]"
+                style={T_LABEL}
+              >
+                {t("credentials.hotspotPassword")}
+              </span>
+              {/* Closed, the row answers "what is behind this?" — and while the
+                  answer is "nothing yet", it states the rule the field will be
+                  judged by rather than a decorative asterisk, so the reason the
+                  primary action below is unavailable is never off screen. Open,
+                  the field speaks for itself. */}
+              {hotspotSecretVisible ? null : hotspotSecretMissing ? (
+                <span
+                  className="shrink-0 px-[var(--s-2)] py-[var(--s-0)] rounded-[var(--r-1)] border border-[var(--amber-edge)] bg-[var(--amber-wash)] text-[var(--amber-ink)]"
+                  style={{
+                    fontSize: "var(--t-1)",
+                    fontWeight: "var(--w-label)",
+                    lineHeight: "var(--lh-tight)",
+                  }}
+                >
+                  {t("credentials.minChars")}
+                </span>
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="shrink-0 text-[var(--text-muted)]"
+                  style={{ fontSize: "var(--t-4)", fontFamily: "var(--f-mono)" }}
+                >
+                  ••••••••
+                </span>
+              )}
+              <span
+                aria-hidden="true"
+                className="material-symbols-rounded shrink-0 text-[var(--text-muted)]"
+                style={{ fontSize: 18 }}
+              >
+                {hotspotSecretVisible ? "expand_less" : "edit"}
+              </span>
+            </button>
+          )}
+
+          {hotspotSecretVisible && (
+            <div
+              id="hotspot-secret-panel"
+              className="border-t border-[var(--hair)] px-[var(--s-4)] pt-[var(--s-3)] pb-[var(--s-4)]"
+            >
               <div className="relative">
                 <input
                   id="hotspot-password"
+                  aria-labelledby="hotspot-secret-label"
                   type={showHotspotPassword ? "text" : "password"}
                   value={hotspotPassword}
                   onChange={(e) => setHotspotPassword(e.target.value)}
@@ -621,37 +703,37 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   {showHotspotPassword ? EyeClosed : EyeOpen}
                 </button>
               </div>
-            </div>
 
-            <div className="mt-[var(--s-4)]">
-              <FieldLabel htmlFor="hotspot-confirm">
-                {t("credentials.confirmHotspotPassword")}
-              </FieldLabel>
-              <div className="relative">
-                <input
-                  id="hotspot-confirm"
-                  type={showConfirmHotspot ? "text" : "password"}
-                  value={confirmHotspotPassword}
-                  onChange={(e) => setConfirmHotspotPassword(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") save();
-                  }}
-                  placeholder={t("credentials.reenterHotspot")}
-                  className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
-                  style={{ ...T_FIELD, ...FIELD_MOTION }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowConfirmHotspot((v) => !v)}
-                  aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
-                  className={REVEAL}
-                >
-                  {showConfirmHotspot ? EyeClosed : EyeOpen}
-                </button>
+              <div className="mt-[var(--s-3)]">
+                <FieldLabel htmlFor="hotspot-confirm">
+                  {t("credentials.confirmHotspotPassword")}
+                </FieldLabel>
+                <div className="relative">
+                  <input
+                    id="hotspot-confirm"
+                    type={showConfirmHotspot ? "text" : "password"}
+                    value={confirmHotspotPassword}
+                    onChange={(e) => setConfirmHotspotPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") save();
+                    }}
+                    placeholder={t("credentials.reenterHotspot")}
+                    className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
+                    style={{ ...T_FIELD, ...FIELD_MOTION }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmHotspot((v) => !v)}
+                    aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
+                    className={REVEAL}
+                  >
+                    {showConfirmHotspot ? EyeClosed : EyeOpen}
+                  </button>
+                </div>
               </div>
             </div>
-          </>
-        )}
+          )}
+        </div>
 
         {status && (
           <StatusMessage type={status.type} message={status.message} />
