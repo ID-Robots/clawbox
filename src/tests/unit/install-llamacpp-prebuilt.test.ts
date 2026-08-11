@@ -151,7 +151,6 @@ describe("install.sh does not run a prebuilt of unknown provenance", () => {
 
   it("rejects on a digest mismatch instead of warning and continuing", () => {
     const fn = src.slice(src.indexOf("install_prebuilt_llamacpp() {"));
-    expect(fn).toMatch(/digest does not match[^
-]*ignoring it/i);
+    expect(fn).toMatch(/digest does not match.*ignoring it/i);
   });
 });
