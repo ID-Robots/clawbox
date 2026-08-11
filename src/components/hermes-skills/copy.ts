@@ -78,6 +78,9 @@ export const COPY = {
   installedStale: 'Couldn’t refresh this list — showing the last known state.',
   buildingCatalog:
     'Building the skill catalogue — the first browse on a new device takes about a minute.',
+  // The store re-asks on a timer while the index builds, so say so: the earlier
+  // wording left people closing and reopening the window to make skills appear.
+  buildingCatalogAuto: 'Skills will appear here as soon as it is ready — you can leave this open.',
   // Keyed off when THIS device last downloaded the catalogue. The publisher's
   // own build date never moves on a refetch, so it can't say anything here.
   catalogStale: (when: string) => `Catalogue last downloaded ${when}.`,

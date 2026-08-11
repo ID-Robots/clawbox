@@ -497,7 +497,11 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const browsing = tab === 'browse';
   const q = catalog.query.trim();
   const rangeFrom = catalog.results.length ? 1 : 0;
-  const showFirstRun = browsing && catalog.loading && (catalog.slow || catalog.catalog?.origin === 'warming');
+  // Two ways to earn the first-run panel: the device says it is still building
+  // the index (`preparing` — true even though the request has COMPLETED, which
+  // is the whole point), or a request is genuinely taking long enough that a
+  // bare spinner stops being an explanation.
+  const showFirstRun = browsing && (catalog.preparing || (catalog.loading && catalog.slow));
   // Dated by the DOWNLOAD, not the publisher's build stamp — the latter never
   // moves on a refetch, so it said "21 days ago" about a fresh catalogue.
   const staleWhen = catalog.catalog?.stale ? relativeDate(catalog.catalog.fetchedAt) : undefined;
@@ -671,6 +675,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
             {showFirstRun && (
               <Alert tone="info" icon="hourglass_top">
                 {COPY.buildingCatalog}
+                <span className="mt-1 block text-[var(--text-secondary)]">{COPY.buildingCatalogAuto}</span>
                 <span className="mt-2 block h-1 w-full rounded-full bg-[var(--surface-card)] overflow-hidden">
                   <span className="block h-full w-1/3 bg-[var(--coral-bright)] animate-pulse" />
                 </span>
@@ -691,7 +696,9 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                 action={<PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>}
               />
             )}
-            {!catalog.error && !catalog.loading && catalog.results.length === 0 && (
+            {/* "Nothing here" is a claim about the catalogue, so it may only be
+                made once the device HAS one — never while it is still building. */}
+            {!catalog.error && !catalog.loading && !catalog.preparing && catalog.results.length === 0 && (
               <EmptyState
                 icon="search_off"
                 title={q ? COPY.emptySearch(q) : COPY.emptySource(sourceLabel(catalog.source))}
