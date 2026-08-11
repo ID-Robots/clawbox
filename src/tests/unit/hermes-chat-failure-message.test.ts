@@ -14,7 +14,7 @@ import { __test } from "@/app/setup-api/hermes/chat/route";
  * the extractor fell through to the generic string and the one line that told
  * the customer what went wrong was discarded.
  */
-const { hermesFailureMessage } = __test;
+const { hermesFailureMessage, hermesExitMessage, HERMES_INTERRUPTED_EXIT_CODE } = __test;
 
 describe("the message shown for a failed Hermes turn", () => {
   it("uses stdout when stderr holds only the session banner", () => {
@@ -72,5 +72,72 @@ describe("the message shown for a failed Hermes turn", () => {
 
   it("bounds the message so a runaway line cannot fill a chat bubble", () => {
     expect(hermesFailureMessage("error: " + "x".repeat(5000), "").length).toBeLessThanOrEqual(400);
+  });
+});
+
+/**
+ * An interrupted turn used to surface as "hermes exited with code 130".
+ *
+ * Captured on-device by sending each of SIGTERM, SIGHUP and SIGINT to a live
+ * `hermes chat -q` turn. All three produced identical observable state:
+ *   EXIT:   130          (numeric — an explicit sys.exit, not signal death)
+ *   STDOUT: (0 bytes)
+ *   STDERR: "\nsession_id: 20260811_182550_b9de16\n"  (36 bytes)
+ *
+ * So 130 carries no information about WHICH signal arrived, and both streams
+ * are empty once the banner is stripped. The message must therefore name the
+ * situation generically rather than attribute a cause it cannot know.
+ */
+describe("the message shown for an interrupted Hermes turn", () => {
+  // The exact bytes observed on the device, for all three signals.
+  const INTERRUPTED_STDERR = "\nsession_id: 20260811_182550_b9de16\n";
+
+  it("no longer surfaces the bare exit code", () => {
+    const msg = hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR);
+    expect(msg).not.toMatch(/exited with code/);
+    expect(msg).not.toMatch(/130/);
+  });
+
+  it("says the turn was interrupted and that the message can be re-sent", () => {
+    const msg = hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR);
+    expect(msg).toMatch(/interrupted/i);
+    expect(msg).toMatch(/send it again/i);
+  });
+
+  it("does not blame the user, since the signal's origin is unknowable", () => {
+    const msg = hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR);
+    // A user-initiated Stop aborts the request and returns 499; it never
+    // reaches this path. Claiming "you cancelled" here would be a guess.
+    expect(msg).not.toMatch(/cancell?ed/i);
+    expect(msg).not.toMatch(/\byou stopped\b/i);
+  });
+
+  it("never leaks the session banner", () => {
+    expect(hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR))
+      .not.toMatch(/session_id/i);
+  });
+
+  it("still prefers a real cause when the process managed to report one", () => {
+    // 130 with actual output means the turn said something before going down;
+    // that beats the generic interruption text.
+    const msg = hermesExitMessage(
+      HERMES_INTERRUPTED_EXIT_CODE,
+      "",
+      "session_id: 20260811_000000_aaaaaa\nHTTP 401: invalid api key",
+    );
+    expect(msg).toBe("HTTP 401: invalid api key");
+  });
+
+  it("leaves every other non-zero exit reporting its code", () => {
+    expect(hermesExitMessage(1, "", "session_id: 20260811_000000_aaaaaa"))
+      .toBe("hermes exited with code 1");
+    expect(hermesExitMessage(2, "", "")).toBe("hermes exited with code 2");
+  });
+
+  it("keeps the interruption distinct from the timeout path", () => {
+    // The timeout rejects with its own "Hermes timed out" before close fires,
+    // so the two must not collapse into one message.
+    expect(hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR))
+      .not.toMatch(/timed out/i);
   });
 });
