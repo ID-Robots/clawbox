@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { isAllowedPath, filterAllowedPaths, assertPathAllowed } from "../../../mcp/lib/guard";
+import path from "path";
+import { isAllowedPath, filterAllowedPaths, assertPathAllowed, SECRET_NAME_RE } from "../../../mcp/lib/guard";
 
 // The MCP's file tools (read_file, write_file, edit_file, list_directory, glob,
 // grep, notebook_edit) all funnel through isAllowedPath. These tests pin the
@@ -12,11 +13,19 @@ import { isAllowedPath, filterAllowedPaths, assertPathAllowed } from "../../../m
 //      clawbox-setup.service loads last, so it is both a read and a write
 //      concern.
 //
-// Paths are written as literal POSIX strings rather than built with path.join,
-// so the expectations are identical on a developer's machine and on the device.
+// Credential-store paths are written as literal POSIX strings rather than built
+// with path.join, so the expectations are identical on a developer's machine and
+// on the device — those rules are regexes over the string. The data-dir paths
+// further down are the exception and say why.
 
 const HERMES = "/home/clawbox/.hermes";
 const OPENCLAW = "/home/clawbox/.openclaw";
+const CLAWKEEP = "/home/clawbox/.clawkeep";
+// Built the way config-store builds DATA_DIR (path.join off the default root,
+// which is what applies when CLAWBOX_ROOT is unset) so these expectations hold
+// on a developer's machine as well as on the device. The credential-store paths
+// above stay literal — those are matched by regex, not by path arithmetic.
+const DATA = path.join("/home/clawbox/clawbox", "data");
 
 describe("mcp path guard — credential directories", () => {
   it("blocks the ~/.hermes directory itself", () => {
@@ -49,9 +58,19 @@ describe("mcp path guard — credential directories", () => {
     expect(isAllowedPath(p)).toBe(false);
   });
 
+  it.each([
+    CLAWKEEP,
+    `${CLAWKEEP}/token`,
+    `${CLAWKEEP}/passphrase`,
+    `${CLAWKEEP}/config.toml`,
+  ])("blocks the backup tool's store %s", (p) => {
+    expect(isAllowedPath(p)).toBe(false);
+  });
+
   it("does not block a directory that merely starts with the same letters", () => {
     expect(isAllowedPath("/home/clawbox/.hermesx/notes.md")).toBe(true);
     expect(isAllowedPath("/home/clawbox/hermes/notes.md")).toBe(true);
+    expect(isAllowedPath("/home/clawbox/.clawkeep-notes.txt")).toBe(true);
   });
 
   it("blocks a path that reaches a credential directory through a parent segment", () => {
@@ -78,6 +97,52 @@ describe("mcp path guard — dotenv files", () => {
   });
 });
 
+// isAllowedPath delegates the data-dir rule to file-guard, whose own suite owns
+// the full inventory. These cases pin that the delegation is in place and that
+// the tools inherit both halves of the rule — not the inventory again.
+describe("mcp path guard — the ClawBox data directory", () => {
+  it.each([
+    path.join(DATA, "config.json"),
+    path.join(DATA, ".session-secret"),
+    path.join(DATA, "cloudflared", "cert.pem"),
+    // Named at runtime by an atomic write, and a name that does not exist yet:
+    // the rule is containment, so neither needs to be listed anywhere.
+    path.join(DATA, "oauth-device-tokens.json.tmp.deadbeef"),
+    path.join(DATA, "some-future-store.json"),
+  ])("blocks the server-state file %s", (p) => {
+    expect(isAllowedPath(p)).toBe(false);
+  });
+
+  it("leaves the data directory itself reachable", () => {
+    expect(isAllowedPath(DATA)).toBe(true);
+  });
+
+  it.each([
+    path.join(DATA, "webapps", "demo", "index.html"),
+    path.join(DATA, "code-projects", "my-app", "app.js"),
+  ])("keeps the public subtree entry %s usable", (p) => {
+    expect(isAllowedPath(p)).toBe(true);
+  });
+});
+
+describe("mcp path guard — credential names in a shell string", () => {
+  it.each([
+    "cat ~/.clawkeep/token",
+    "tar czf /tmp/x.tgz $HOME/.clawkeep",
+    "cat ~/.ssh/id_rsa",
+  ])("recognises %s", (cmd) => {
+    expect(SECRET_NAME_RE.test(cmd)).toBe(true);
+  });
+
+  it.each([
+    "echo clawkeep is a backup tool",
+    "cat ~/.clawkeep-notes.txt",
+    "ls ~/clawkeep",
+  ])("does not fire on %s", (cmd) => {
+    expect(SECRET_NAME_RE.test(cmd)).toBe(false);
+  });
+});
+
 describe("mcp path guard — device and kernel paths", () => {
   it.each([
     "/proc/self/environ",
@@ -94,7 +159,6 @@ describe("mcp path guard — ordinary project paths stay usable", () => {
   it.each([
     "/home/clawbox/clawbox/package.json",
     "/home/clawbox/clawbox/src/app/page.tsx",
-    "/home/clawbox/clawbox/data/webapps/demo/index.html",
     "/home/clawbox/Documents/notes.md",
     "/var/log/syslog",
     "/tmp/scratch.txt",
