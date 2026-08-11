@@ -24,6 +24,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { getEdition } from "@/lib/harness";
 
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
@@ -122,6 +123,12 @@ export interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
+  /** False on an edition that ships no OpenClaw to back up (Hermes). ClawKeep
+   *  archives the OpenClaw agent via the openclaw CLI, which that edition does
+   *  not have — so the feature genuinely cannot run there, and the UI must say
+   *  so honestly rather than print an `npm install -g openclaw` remedy that
+   *  contradicts the SKU. */
+  supportedOnEdition: boolean;
   /** True while a restore is mid-flight (download → verify → swap). */
   restoring: boolean;
   /** Schedule for unattended backups. `enabled=false` disarms the in-process scheduler. */
@@ -643,6 +650,9 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     uploadStartedAtMs: stateRaw.upload_started_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
+    // ClawKeep backs up the OpenClaw agent; the Hermes SKU ships no openclaw, so
+    // the feature has nothing to archive there and is not supported.
+    supportedOnEdition: getEdition() !== "hermes",
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
