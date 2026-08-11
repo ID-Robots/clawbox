@@ -330,6 +330,11 @@ function ChromeDesktopInner() {
   // the fetch failed), which is exactly the surface that must not be reachable.
   // A few retries first — this is a same-origin call to our own server, so if
   // it keeps failing the desktop has bigger problems than two missing icons.
+  // True once a wallpaper has been settled — either restored from the
+  // device's saved preference or defaulted from the harness. Whichever of
+  // those two requests answers first wins, and the other must not
+  // overwrite it.
+  const wallpaperChosen = useRef(false);
   const [activeHarness, setActiveHarness] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -337,7 +342,18 @@ function ChromeDesktopInner() {
       try {
         const d = await fetchHarness({ force: attempt > 0 });
         if (!alive) return;
-        if (d?.active) { setActiveHarness(d.active); return; }
+        if (d?.active) {
+          setActiveHarness(d.active);
+          // A Hermes device that has never picked a wallpaper opens on the
+          // Hermes art. Guarded on wallpaperChosen because the preferences
+          // request and this one race, and a saved choice must survive
+          // whichever order they land in.
+          if (d.active === "hermes" && !wallpaperChosen.current) {
+            wallpaperChosen.current = true;
+            setWallpaperId("hermes");
+          }
+          return;
+        }
         throw new Error("no harness");
       } catch {
         if (!alive || attempt >= 2) return; // stay unresolved = stay closed
@@ -408,8 +424,12 @@ function ChromeDesktopInner() {
   // ─── Wallpapers ───
   const wallpapers = [
     { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
+    { id: "hermes", name: "Hermes", gradient: "", stars: false, nebula: false, image: "/hermes-wallpaper.jpeg" },
     { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
   ] as const;
+  // Both wallpapers stay available on every device — this only decides which
+  // one a device that has never chosen starts on. A Hermes box opens on the
+  // Hermes art; OpenClaw is untouched.
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
   type WpFit = "fill" | "fit" | "center";
@@ -427,8 +447,14 @@ function ChromeDesktopInner() {
       .then(r => r.json())
       .then((data: Record<string, unknown>) => {
         prefsLoaded.current = true;
-        // Wallpaper
-        if (data.wp_id) setWallpaperId(String(data.wp_id));
+        // Wallpaper. A saved choice always wins; wallpaperChosen records that
+        // one exists, so the harness default below can't overwrite it later —
+        // the two answers arrive from different requests and either can land
+        // first.
+        if (data.wp_id) {
+          setWallpaperId(String(data.wp_id));
+          wallpaperChosen.current = true;
+        }
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
         if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
