@@ -6,7 +6,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
-import { useHermesModelOptions } from "@/hooks/useHermesModelOptions";
+import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -99,13 +99,18 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<Status>(null);
 
-  // Tell an already-open chat popup that this device's provider/model/tier
-  // changed, so its header re-seeds instead of naming the previous provider
-  // (and blocking legal turns) until the whole page is reloaded. Mirrors the
+  // Tell every already-open view — the chat popup's provider picker, and this
+  // panel's own scoped model list — that the device's providers/model/tier
+  // changed, so they re-read instead of naming the previous provider (and
+  // blocking legal turns) until the whole page is reloaded. Mirrors the
   // OpenClaw side's "clawbox:chat-model-state-changed".
+  //
+  // Emit it from EVERY path that leaves the device configured differently, not
+  // just the Save button: a provider connected through the ClawBox AI device
+  // login or through Hermes' own OAuth is exactly the case where the user
+  // expects to switch straight to it in chat.
   const notifyChatHeader = useCallback(() => {
-    if (typeof window === "undefined") return;
-    window.dispatchEvent(new Event("clawbox:hermes-model-state-changed"));
+    notifyHermesModelState();
   }, []);
 
   const pickProvider = useCallback((id: string) => {
@@ -236,10 +241,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       oauthTabOpenedRef.current = false;
       void loadOauth();
       refreshModels();
+      // The credential that just appeared can flip a provider from
+      // `authenticated: false` to true, which is what decides whether the chat
+      // offers it at all — so the chat has to re-read too, not just this panel.
+      notifyChatHeader();
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [loadOauth, refreshModels]);
+  }, [loadOauth, refreshModels, notifyChatHeader]);
 
   const changeUiTier = useCallback((tier: ClawaiTier) => {
     setUiTier(tier);
@@ -262,6 +271,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     onComplete: () => {
       void reloadClawai();
       setSelectedProvider(CLAWAI_PROVIDER);
+      // The device-code handoff configures the provider server-side, so this is
+      // a successful configure like any other — the chat picker has to hear it.
+      notifyChatHeader();
       setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
     },
     onError: (msg) => setClawaiStatus({ kind: "err", msg }),

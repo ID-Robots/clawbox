@@ -152,7 +152,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
   HERMES_AUTO_PROVIDER,
   hermesProviderLabel,
@@ -1594,17 +1594,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Re-seed when the settings panel changes the device's provider/model/tier or
   // adds a credential. Without this the header keeps naming the OLD provider
-  // for the rest of the session — and `hermesDevice` is the sole basis for the
+  // for the rest of the session — and a provider the user just connected never
+  // reaches the picker at all. `hermesDevice` is also the sole basis for the
   // "safe to send --provider without -m" decision, so a stale copy either
   // blocks a legal turn or lets the route answer 409.
+  //
+  // This is the plain unscoped GET, which is what makes the invalidation cheap:
+  // the per-provider model lists are NOT re-enumerated here, they stay with the
+  // scoped hook above.
   useEffect(() => {
     if (harnessMode !== 'hermes') return
     const controller = new AbortController()
     const onChanged = () => { void seedHermesHeader(controller.signal) }
-    window.addEventListener('clawbox:hermes-model-state-changed', onChanged)
+    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
     return () => {
       controller.abort()
-      window.removeEventListener('clawbox:hermes-model-state-changed', onChanged)
+      window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
     }
   }, [harnessMode, seedHermesHeader])
 
