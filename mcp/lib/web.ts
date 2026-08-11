@@ -89,12 +89,72 @@ export function hostMatchesDomain(host: string, domain: string): boolean {
   return host === domain || host.endsWith(`.${domain}`);
 }
 
+// Named entities we decode to a real character. Everything else that looks like
+// a named entity becomes a space (see decodeEntities).
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+/**
+ * Decode HTML entities in ONE pass.
+ *
+ * A chain of `.replace()` calls cannot do this correctly: whichever entity is
+ * decoded first re-exposes its output to every later pattern, so `&amp;lt;`
+ * (a literal "&lt;" on the page) came out as "<". One pass over the input, with
+ * each match resolved from a table, has no such ordering to get wrong.
+ */
+function decodeEntities(text: string): string {
+  return text.replace(
+    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]*));/g,
+    (_m: string, dec?: string, hex?: string, name?: string) => {
+      const code = dec ? parseInt(dec, 10) : hex ? parseInt(hex, 16) : NaN;
+      if (Number.isFinite(code)) {
+        // Reject out-of-range and surrogate code points rather than throwing.
+        if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return " ";
+        return String.fromCodePoint(code);
+      }
+      return NAMED_ENTITIES[(name || "").toLowerCase()] ?? " ";
+    },
+  );
+}
+
+/**
+ * Strip tags until the result stops changing.
+ *
+ * A single pass is not enough: removing the inner tag of `<<div>script>` leaves
+ * `<script>`, i.e. one pass can CREATE a tag it already walked past. Iterating
+ * to a fixed point is the only version of this that terminates with no tags
+ * left, and each pass strictly shortens the string so the loop is bounded.
+ */
+export function stripTagsToFixedPoint(text: string): string {
+  let prev: string;
+  let out = text;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]+>/g, "");
+  } while (out !== prev);
+  return out;
+}
+
 /** Crude but dependency-free HTML → readable text. */
 export function htmlToText(html: string): string {
   let text = html;
-  text = text.replace(/<script[\s\S]*?<\/script>/gi, "");
-  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
-  text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+  // `\s*` before the closing ">" because `</script >` is a valid end tag that a
+  // bare `</script>` pattern walks straight past, leaving the whole script body
+  // in the text handed to the model. `\b` keeps `<scriptish>` from matching.
+  text = text.replace(/<script\b[\s\S]*?<\/script\s*>/gi, "");
+  text = text.replace(/<style\b[\s\S]*?<\/style\s*>/gi, "");
+  text = text.replace(/<noscript\b[\s\S]*?<\/noscript\s*>/gi, "");
+  // An UNCLOSED script/style (truncated page, or deliberately so) never matches
+  // the pairs above; drop from the opening tag to the end rather than letting
+  // the body through as prose.
+  text = text.replace(/<script\b[\s\S]*$/gi, "");
+  text = text.replace(/<style\b[\s\S]*$/gi, "");
   text = text.replace(/<\/(p|div|h[1-6]|li|tr|blockquote|pre|section|article|header|footer|nav|main)>/gi, "\n");
   text = text.replace(/<br\s*\/?>/gi, "\n");
   text = text.replace(/<hr\s*\/?>/gi, "\n---\n");
@@ -107,16 +167,8 @@ export function htmlToText(html: string): string {
   text = text.replace(/<code>([\s\S]*?)<\/code>/gi, "`$1`");
   text = text.replace(/<pre>([\s\S]*?)<\/pre>/gi, "\n```\n$1\n```\n");
   text = text.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, "- $1\n");
-  text = text.replace(/<[^>]+>/g, "");
-  text = text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_m: string, n: string) => String.fromCharCode(parseInt(n, 10)))
-    .replace(/&[a-zA-Z]+;/g, " ");
+  text = stripTagsToFixedPoint(text);
+  text = decodeEntities(text);
   text = text.replace(/[ \t]+/g, " ");
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();

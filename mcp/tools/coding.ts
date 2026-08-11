@@ -33,7 +33,7 @@ import {
   spawnArgv,
 } from "../lib/guard";
 import { getJob, inspectCommand, runShell, startJob, stopJob } from "../lib/jobs";
-import { hostMatchesDomain, htmlToText, safeFetch } from "../lib/web";
+import { hostMatchesDomain, htmlToText, safeFetch, stripTagsToFixedPoint } from "../lib/web";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zMaybeEmptyText, zOptText, zText } from "../lib/schema";
 
@@ -903,11 +903,14 @@ export function registerCodingTools(reg: Registrar): void {
       const snippetRe = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
       let m: RegExpExecArray | null;
       while ((m = linkRe.exec(html)) !== null) {
-        links.push({ url: m[1].replace(/&amp;/g, "&"), title: m[2].replace(/<[^>]+>/g, "").trim() });
+        // Titles and snippets come straight off a third party's page, so strip
+        // to a fixed point (a single pass can leave a tag behind) rather than
+        // once — same helper htmlToText uses.
+        links.push({ url: m[1].replace(/&amp;/g, "&"), title: stripTagsToFixedPoint(m[2]).trim() });
       }
       const snippets: string[] = [];
       while ((m = snippetRe.exec(html)) !== null) {
-        snippets.push(m[1].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").trim());
+        snippets.push(stripTagsToFixedPoint(m[1]).replace(/&amp;/g, "&").trim());
       }
       const results: { title: string; url: string; snippet: string }[] = [];
       for (let i = 0; i < links.length && results.length < max_results; i++) {
