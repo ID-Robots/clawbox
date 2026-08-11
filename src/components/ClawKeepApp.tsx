@@ -29,6 +29,8 @@ interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
+  /** False on an edition with no OpenClaw to back up (Hermes). */
+  supportedOnEdition?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
   /** True when the device has a stored backup-encryption passphrase. The
@@ -492,6 +494,22 @@ export default function ClawKeepApp() {
           >
             {t("clawkeep.retry")}
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ClawKeep archives the OpenClaw agent through the openclaw CLI. On an edition
+  // that ships no OpenClaw (Hermes) the feature genuinely cannot run, so say so
+  // honestly and stop here — rather than dropping to the setup card that told
+  // the user to `npm install -g openclaw`, which would contradict this SKU.
+  if (status.supportedOnEdition === false) {
+    return (
+      <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
+        <div className="min-h-full w-full flex items-center justify-center p-6">
+          <div className="w-full max-w-2xl">
+            <EditionUnavailableCard />
+          </div>
         </div>
       </div>
     );
@@ -1444,6 +1462,23 @@ function DashboardCard({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function EditionUnavailableCard() {
+  const { t } = useT();
+  return (
+    <div className={`${CARD} space-y-2`}>
+      <div className="flex items-center gap-2">
+        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
+          cloud_off
+        </span>
+        <h2 className="font-semibold text-[var(--text-primary)]">{t("clawkeep.edition.unsupportedTitle")}</h2>
+      </div>
+      <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+        {t("clawkeep.edition.unsupportedBody")}
+      </p>
     </div>
   );
 }

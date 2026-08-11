@@ -15,9 +15,13 @@ import {
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
+  openclawIsAbsent,
+  OpenclawUnavailableError,
 } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
-import { applyLocalAiToHermes } from "@/lib/hermes-local-ai";
+import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
+import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
+import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
   getDefaultLlamaCppModel,
   getLlamaCppContextWindow,
@@ -436,6 +440,11 @@ async function writeOpenAICompatProvider(opts: {
 }
 
 export async function POST(request: Request) {
+  // Hoisted so the catch can classify the failure without re-parsing the body —
+  // a local-model or wrong-edition failure must not be reported as a credential
+  // problem (there is no credential to check).
+  let requestProvider: string | undefined;
+  let requestScope: ConfigureScope = "primary";
   try {
     let body: {
       provider?: string;
@@ -505,6 +514,8 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    requestProvider = provider;
+    requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
@@ -678,6 +689,73 @@ export async function POST(request: Request) {
           );
         }
         config.defaultModel = `${targetProvider}/${requestedModel}`;
+      }
+    }
+
+    // ── Hermes edition: no openclaw binary exists here ──────────────────────
+    // Everything below configures OpenClaw — it writes ~/.openclaw, runs
+    // `openclaw config set …`, and restarts the gateway. On the Hermes SKU there
+    // is no openclaw binary, so the API-key path used to fail with `spawn
+    // openclaw ENOENT` and then blame the user's credentials, while the local
+    // (Gemma) switch failed the same way. Route to Hermes' own config store
+    // instead — the same one the OAuth/token path already writes.
+    if (openclawIsAbsent()) {
+      try {
+        if (isLocalScope && (isLlamaCpp || isOllama)) {
+          // On-device model (Gemma via llama.cpp, or Ollama): persist the same
+          // config-store keys the OpenClaw path would, then register it with
+          // Hermes as an available provider (activating it only on a fresh
+          // device, matching shouldPromoteLocalToPrimary). No gateway restart.
+          await setMany({
+            local_ai_configured: true,
+            local_ai_provider: ocProvider,
+            local_ai_model: config.defaultModel,
+            local_ai_configured_at: new Date().toISOString(),
+          });
+          await applyLocalAiToHermes({
+            provider: ocProvider as "llamacpp" | "ollama",
+            // Hermes wants the bare model id, not the `llamacpp/…` qualified form.
+            model: config.defaultModel.replace(/^(?:llamacpp|ollama)\//, ""),
+            makeDefault: shouldPromoteLocalToPrimary,
+          });
+          return NextResponse.json({ success: true });
+        }
+        if (isClawAI) {
+          await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          return NextResponse.json({ success: true });
+        }
+        if (authMode !== "subscription" && normalizedApiKey) {
+          // Cloud API-key providers Hermes supports (anthropic, google→gemini,
+          // openrouter). The credential lands in Hermes' own store and the
+          // provider is activated through Hermes' catalog.
+          const result = await applyCloudProviderKeyToHermes({
+            openclawProvider: provider,
+            apiKey: normalizedApiKey,
+          });
+          if (result.activated) {
+            return NextResponse.json({ success: true });
+          }
+          return NextResponse.json(
+            { error: "Key saved. Open the Hermes provider panel to pick a model for it." },
+            { status: 409 },
+          );
+        }
+        // OAuth / subscription providers (and OpenAI, which is OAuth-only on
+        // Hermes) sign in through the Hermes provider panel, not this route.
+        return NextResponse.json(
+          { error: "This provider is set up through the Hermes provider panel on this edition." },
+          { status: 400 },
+        );
+      } catch (err) {
+        if (
+          err instanceof HermesCloudApplyError
+          || err instanceof HermesLocalApplyError
+          || err instanceof ClawaiApplyError
+        ) {
+          // Author-controlled, non-credential message — safe to echo.
+          return NextResponse.json({ error: err.message }, { status: 502 });
+        }
+        throw err; // unexpected — fall to the outer catch, which classifies it
       }
     }
 
@@ -1128,9 +1206,20 @@ export async function POST(request: Request) {
     // paths. Log it server-side for diagnosis and return a generic, actionable
     // message (mirrors the sanitized gateway-restart branch above).
     console.error("[configure] Failed to configure AI model:", err instanceof Error ? err.message : err);
-    return NextResponse.json(
-      { error: "Failed to configure AI model. Please check your credentials and try again." },
-      { status: 500 }
-    );
+    // Classify so the message matches the cause. A local on-device model has no
+    // credentials, and an edition without the openclaw binary is not something
+    // the user can fix by re-checking a key — "check your credentials" is wrong
+    // and un-actionable for both.
+    const isLocalRequest =
+      requestScope === "local" || requestProvider === "ollama" || requestProvider === "llamacpp";
+    let message: string;
+    if (err instanceof OpenclawUnavailableError) {
+      message = "This action isn't available on this edition.";
+    } else if (isLocalRequest) {
+      message = "Couldn't set up the on-device model. Please try again.";
+    } else {
+      message = "Failed to configure AI model. Please check your credentials and try again.";
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

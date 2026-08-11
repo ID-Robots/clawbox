@@ -101,6 +101,33 @@ describe("openclaw-config", () => {
     vi.clearAllMocks();
   });
 
+  describe("edition guard (openclawIsAbsent / spawn chokepoint)", () => {
+    const savedEdition = process.env.CLAWBOX_EDITION;
+    afterEach(() => {
+      if (savedEdition === undefined) delete process.env.CLAWBOX_EDITION;
+      else process.env.CLAWBOX_EDITION = savedEdition;
+    });
+
+    it("reports the openclaw binary as absent on the hermes edition", () => {
+      process.env.CLAWBOX_EDITION = "hermes";
+      expect(openclawConfig.openclawIsAbsent()).toBe(true);
+    });
+
+    it("reports the openclaw binary as present on the openclaw and dual editions", () => {
+      process.env.CLAWBOX_EDITION = "openclaw";
+      expect(openclawConfig.openclawIsAbsent()).toBe(false);
+      process.env.CLAWBOX_EDITION = "dual";
+      expect(openclawConfig.openclawIsAbsent()).toBe(false);
+    });
+
+    it("refuses `openclaw config set` with a typed error on hermes instead of spawning", async () => {
+      process.env.CLAWBOX_EDITION = "hermes";
+      await expect(
+        openclawConfig.runOpenclawConfigSet(["model.provider", "clawai"]),
+      ).rejects.toBeInstanceOf(openclawConfig.OpenclawUnavailableError);
+    });
+  });
+
   describe("ensureCompactionReserveFloor", () => {
     it("writes the default reserve floor when compaction config is missing", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);

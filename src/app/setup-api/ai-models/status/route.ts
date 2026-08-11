@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { getActiveHarness } from "@/lib/harness";
+import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
+// Config-store key holding the ClawBox AI portal token on a Hermes device.
+// `applyClawaiToHermes` writes it here; the OpenClaw path reads the same token
+// from `models.providers.deepseek.apiKey` in openclaw.json instead.
+const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 
 // Portal endpoint that maps a `claw_*` token to its current subscription
 // state. Authoritative source for the device's tier badge — local config
@@ -216,119 +222,185 @@ function normalizeProvider(provider: string | null): string | null {
   return normalized;
 }
 
-export async function GET() {
-  try {
-    const config = await readConfig();
+/**
+ * The provider/model/ClawBox-AI facts the status response is built from,
+ * resolved from whichever agent config the active harness actually uses.
+ */
+interface ResolvedAiState {
+  /** Active chat provider in wire form (pre-normalization), or null. */
+  provider: string | null;
+  /** Auth mode of the active profile, when the config records one. */
+  mode: string | null;
+  /** Primary/default model id, or null. */
+  model: string | null;
+  /** True when a ClawBox AI profile is configured (independent of active provider). */
+  hasClawaiProfile: boolean;
+  /** The paired `claw_*` portal token, or null when none/not a portal token. */
+  clawaiToken: string | null;
+}
 
-    const profiles = config.auth?.profiles ?? {};
-    const model = config.agents?.defaults?.model?.primary ?? null;
+/**
+ * OpenClaw path: read `~/.openclaw/openclaw.json`. The active profile is matched
+ * against the primary model so a ClawBox AI fallback profile alongside the
+ * user's chosen provider isn't reported as the active one.
+ */
+async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
+  const config = await readConfig();
 
-    // Match the active profile against the primary model so legacy/fallback
-    // profiles (e.g. ClawBox AI added as a fallback alongside the user's
-    // chosen provider) don't get reported as the active one.
-    const profileKeys = Object.keys(profiles);
-    // Normalize both sides through normalizeProvider so the deepseek/clawai
-    // alias collapses correctly. Without this, a primary model of
-    // `clawai/deepseek-v4-pro` (canonical) would never match a profile
-    // recorded under the wire-format `deepseek` provider, and we'd silently
-    // fall back to profileKeys[0].
-    const primaryProviderHint = normalizeProvider(model ? model.split("/")[0] : null);
-    let activeKey: string | undefined;
-    if (primaryProviderHint) {
-      activeKey = profileKeys.find((key) => {
-        const entry = profiles[key];
-        const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
-        return entryProvider === primaryProviderHint;
-      });
-    }
-    activeKey ??= profileKeys[0];
+  const profiles = config.auth?.profiles ?? {};
+  const model = config.agents?.defaults?.model?.primary ?? null;
 
-    let provider: string | null = null;
-    let mode: string | null = null;
-    if (activeKey) {
-      const entry = profiles[activeKey];
-      provider = entry?.provider ?? activeKey.split(":")[0];
-      mode = entry?.mode ?? null;
-    }
-    const normalizedProvider = normalizeProvider(provider);
-
-    // ClawBox AI account entitlement is independent of which provider is
-    // currently driving the chat. A Max subscriber chatting via OpenAI
-    // still has the paid plan that unlocks ClawKeep + Remote Desktop —
-    // resolving the tier off the active profile alone (the old
-    // behaviour) falsely blocks them.
-    //
-    // Walk every profile for any clawai/deepseek entry, look up the
-    // stored claw_ token's tier on the portal, and surface that as
-    // `clawaiAccountTier`. The badge-facing `clawaiTier` field stays
-    // tied to the active chat provider so the chat-header badge keeps
-    // its current behaviour (no badge when chatting via OpenAI).
-    const localTier = normalizeClawboxAiTier(
-      await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
-    );
-    const clawaiTokenCandidate = config.models?.providers?.deepseek?.apiKey;
-    const clawaiToken = typeof clawaiTokenCandidate === "string" && clawaiTokenCandidate.startsWith("claw_")
-      ? clawaiTokenCandidate
-      : null;
-    const hasClawaiProfile = profileKeys.some((key) => {
+  const profileKeys = Object.keys(profiles);
+  // Normalize both sides through normalizeProvider so the deepseek/clawai
+  // alias collapses correctly. Without this, a primary model of
+  // `clawai/deepseek-v4-pro` (canonical) would never match a profile
+  // recorded under the wire-format `deepseek` provider, and we'd silently
+  // fall back to profileKeys[0].
+  const primaryProviderHint = normalizeProvider(model ? model.split("/")[0] : null);
+  let activeKey: string | undefined;
+  if (primaryProviderHint) {
+    activeKey = profileKeys.find((key) => {
       const entry = profiles[key];
       const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
-      return entryProvider === "clawai";
+      return entryProvider === primaryProviderHint;
     });
+  }
+  activeKey ??= profileKeys[0];
 
-    let clawaiAccountTier: ClawboxAiTier | null = null;
-    let accountTierSource: "portal" | "picker" = "picker";
-    if (hasClawaiProfile) {
-      clawaiAccountTier = localTier;
-      // Ask the portal whenever a clawai token is paired, regardless
-      // of whether we have a local tier yet. This is what makes
-      // Free → Paid upgrades visible without forcing a re-login.
-      // mapPortalTier now gates non-null returns on a paid plan, so
-      // a bogus deviceTier stamp can no longer promote a Free user.
-      if (clawaiToken) {
-        const lookup = await fetchPortalTier(clawaiToken);
-        if (lookup.source === "portal") {
-          clawaiAccountTier = lookup.tier;
-          accountTierSource = "portal";
-          // Persist the portal-confirmed tier so the portal-unreachable
-          // fallback reflects the last *confirmed* tier, not a stale
-          // configure-time value (which flapped a Free badge to Pro and
-          // re-fired the celebration). Write only on change to avoid churn.
-          if (lookup.tier !== localTier) {
-            await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
-          }
+  let provider: string | null = null;
+  let mode: string | null = null;
+  if (activeKey) {
+    const entry = profiles[activeKey];
+    provider = entry?.provider ?? activeKey.split(":")[0];
+    mode = entry?.mode ?? null;
+  }
+
+  const clawaiTokenCandidate = config.models?.providers?.deepseek?.apiKey;
+  const clawaiToken = typeof clawaiTokenCandidate === "string" && clawaiTokenCandidate.startsWith("claw_")
+    ? clawaiTokenCandidate
+    : null;
+  const hasClawaiProfile = profileKeys.some((key) => {
+    const entry = profiles[key];
+    const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
+    return entryProvider === "clawai";
+  });
+
+  return { provider, mode, model, hasClawaiProfile, clawaiToken };
+}
+
+/**
+ * Hermes path: there is no OpenClaw config on a Hermes device, so resolve the
+ * same facts from Hermes' own config (`~/.hermes/config.yaml`, read through the
+ * mtime-memoised CLI helper) plus the config-store token. `applyClawaiToHermes`
+ * writes `providers.clawai.*` when ClawBox AI is set up and points
+ * `model.provider` at it, so those are the authoritative signals here — the
+ * same ones `/setup-api/hermes/clawai` reads. Without this, the OpenClaw-only
+ * read left `clawaiConfigured` false on a signed-in Hermes box and the Remote
+ * Control panel kept prompting the user to sign in.
+ */
+async function resolveHermesAiState(): Promise<ResolvedAiState> {
+  const cfg = await hermesConfigGetMany([
+    "model.provider",
+    "model.default",
+    "providers.clawai.base_url",
+  ]);
+  const provider = cfg["model.provider"] || null;
+  const model = cfg["model.default"] || null;
+  // The provider block persists even when the user later switches the active
+  // provider to something else, so its presence — not the active provider — is
+  // what "a ClawBox AI account is configured" means.
+  const hasClawaiProfile = Boolean(cfg["providers.clawai.base_url"]);
+
+  const tokenRaw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY).catch(() => null);
+  const clawaiToken = typeof tokenRaw === "string" && tokenRaw.startsWith("claw_") ? tokenRaw : null;
+
+  // Hermes has no per-profile "mode" concept the way OpenClaw's auth.profiles
+  // does, so leave it null (the OpenClaw path filled it from the profile).
+  return { provider, mode: null, model, hasClawaiProfile, clawaiToken };
+}
+
+/**
+ * Build the status response from resolved AI state. Shared by both harness
+ * paths so the ClawBox AI tier/portal-reconcile logic can never drift between
+ * them.
+ */
+async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse> {
+  const normalizedProvider = normalizeProvider(state.provider);
+
+  // ClawBox AI account entitlement is independent of which provider is
+  // currently driving the chat. A Max subscriber chatting via OpenAI
+  // still has the paid plan that unlocks ClawKeep + Remote Desktop —
+  // resolving the tier off the active profile alone (the old
+  // behaviour) falsely blocks them.
+  const localTier = normalizeClawboxAiTier(
+    await getConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY).catch(() => null),
+  );
+
+  let clawaiAccountTier: ClawboxAiTier | null = null;
+  let accountTierSource: "portal" | "picker" = "picker";
+  if (state.hasClawaiProfile) {
+    clawaiAccountTier = localTier;
+    // Ask the portal whenever a clawai token is paired, regardless
+    // of whether we have a local tier yet. This is what makes
+    // Free → Paid upgrades visible without forcing a re-login.
+    // mapPortalTier now gates non-null returns on a paid plan, so
+    // a bogus deviceTier stamp can no longer promote a Free user.
+    if (state.clawaiToken) {
+      const lookup = await fetchPortalTier(state.clawaiToken);
+      if (lookup.source === "portal") {
+        clawaiAccountTier = lookup.tier;
+        accountTierSource = "portal";
+        // Persist the portal-confirmed tier so the portal-unreachable
+        // fallback reflects the last *confirmed* tier, not a stale
+        // configure-time value (which flapped a Free badge to Pro and
+        // re-fired the celebration). Write only on change to avoid churn.
+        if (lookup.tier !== localTier) {
+          await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
       }
     }
+  }
 
-    // The badge-facing tier mirrors the account tier *only* when
-    // ClawBox AI is the active chat provider. Switching to OpenAI in
-    // the chat dropdown should hide the chat-header tier badge — the
-    // user isn't currently chatting with ClawBox AI — without
-    // demoting their account-level entitlement.
-    const clawaiTier = normalizedProvider === "clawai" ? clawaiAccountTier : null;
-    const tierSource = normalizedProvider === "clawai" ? accountTierSource : "picker";
+  // The badge-facing tier mirrors the account tier *only* when
+  // ClawBox AI is the active chat provider. Switching to OpenAI in
+  // the chat dropdown should hide the chat-header tier badge — the
+  // user isn't currently chatting with ClawBox AI — without
+  // demoting their account-level entitlement.
+  const clawaiTier = normalizedProvider === "clawai" ? clawaiAccountTier : null;
+  const tierSource = normalizedProvider === "clawai" ? accountTierSource : "picker";
 
-    return NextResponse.json({
-      connected: !!normalizedProvider,
-      provider: normalizedProvider,
-      providerLabel: normalizedProvider ? (PROVIDER_LABELS[normalizedProvider] ?? normalizedProvider) : null,
-      mode,
-      model,
-      clawaiTier,
-      clawaiAccountTier,
-      // Whether *any* clawai profile is configured. Distinguishes
-      // "no ClawBox AI account at all" (false) from "Free user with
-      // a paired clawai token" (true, clawaiAccountTier=null) — the
-      // hook needs this to gate ClawKeep / Remote Desktop sign-in
-      // prompts independently of paid-tier checks.
-      clawaiConfigured: hasClawaiProfile,
-      tierSource,
-    }, {
-      headers: {
-        "Cache-Control": "no-store",
-      },
-    });
+  return NextResponse.json({
+    connected: !!normalizedProvider,
+    provider: normalizedProvider,
+    providerLabel: normalizedProvider ? (PROVIDER_LABELS[normalizedProvider] ?? normalizedProvider) : null,
+    mode: state.mode,
+    model: state.model,
+    clawaiTier,
+    clawaiAccountTier,
+    // Whether *any* clawai profile is configured. Distinguishes
+    // "no ClawBox AI account at all" (false) from "Free user with
+    // a paired clawai token" (true, clawaiAccountTier=null) — the
+    // hook needs this to gate ClawKeep / Remote Desktop sign-in
+    // prompts independently of paid-tier checks.
+    clawaiConfigured: state.hasClawaiProfile,
+    tierSource,
+  }, {
+    headers: {
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+export async function GET() {
+  try {
+    // Resolve from whichever config the active harness actually uses. A Hermes
+    // device has no OpenClaw config at all, so reading only openclaw.json there
+    // reported "no ClawBox AI" for a signed-in box.
+    const harness = await getActiveHarness();
+    const state = harness === "hermes"
+      ? await resolveHermesAiState()
+      : await resolveOpenclawAiState();
+    return await buildStatusResponse(state);
   } catch {
     return NextResponse.json(
       { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker" },
