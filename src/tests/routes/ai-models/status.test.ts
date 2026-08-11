@@ -9,12 +9,24 @@ vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
 }));
 
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: vi.fn(),
+}));
+
+vi.mock("@/lib/hermes-config-cache", () => ({
+  hermesConfigGetMany: vi.fn(),
+}));
+
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
+import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 
 const mockReadConfig = vi.mocked(readConfig);
 const mockGetConfigValue = vi.mocked(getConfigValue);
 const mockSetConfigValue = vi.mocked(setConfigValue);
+const mockGetActiveHarness = vi.mocked(getActiveHarness);
+const mockHermesConfigGetMany = vi.mocked(hermesConfigGetMany);
 
 describe("/setup-api/ai-models/status", () => {
   let GET: () => Promise<Response>;
@@ -26,6 +38,10 @@ describe("/setup-api/ai-models/status", () => {
     vi.clearAllMocks();
     mockGetConfigValue.mockResolvedValue(null);
     mockSetConfigValue.mockResolvedValue(undefined);
+    // Default to the OpenClaw harness so the existing suite exercises the
+    // openclaw.json path unchanged; the Hermes suite overrides this.
+    mockGetActiveHarness.mockResolvedValue("openclaw");
+    mockHermesConfigGetMany.mockResolvedValue({});
     fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const mod = await import("@/app/setup-api/ai-models/status/route");
@@ -485,6 +501,87 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiAccountTier).toBe("pro");
       expect(body.clawaiConfigured).toBe(true);
       expect(body.tierSource).toBe("portal");
+    });
+  });
+
+  describe("hermes edition", () => {
+    beforeEach(() => {
+      // Active harness is Hermes: there is no openclaw.json, so the route must
+      // resolve ClawBox AI from the Hermes config instead.
+      mockGetActiveHarness.mockResolvedValue("hermes");
+    });
+
+    it("reports clawaiConfigured=true for a signed-in Hermes box (the Remote Control banner fix)", async () => {
+      mockHermesConfigGetMany.mockResolvedValue({
+        "model.provider": "clawai",
+        "model.default": "deepseek-v4-flash",
+        "providers.clawai.base_url": "https://clawbox.com/api/ai",
+      });
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_token" ? "claw_hermes123" : key === "clawai_tier" ? "flash" : null,
+      );
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.provider).toBe("clawai");
+      expect(body.providerLabel).toBe("ClawBox AI");
+      expect(body.connected).toBe(true);
+      expect(body.clawaiConfigured).toBe(true);
+      // The OpenClaw config must NOT be read on a Hermes box.
+      expect(mockReadConfig).not.toHaveBeenCalled();
+      // The portal was consulted with the token stored in the Hermes config-store.
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining("/api/clawbox-ai/device-info"),
+        expect.objectContaining({ headers: { Authorization: "Bearer claw_hermes123" } }),
+      );
+    });
+
+    it("reports clawaiConfigured=false when the Hermes config has no ClawBox AI provider block", async () => {
+      mockHermesConfigGetMany.mockResolvedValue({
+        "model.provider": "openrouter",
+        "model.default": "openrouter/anthropic/claude-haiku-4.5",
+        "providers.clawai.base_url": "",
+      });
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.provider).toBe("openrouter");
+      expect(body.clawaiConfigured).toBe(false);
+      expect(body.clawaiTier).toBeNull();
+      expect(mockReadConfig).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("keeps the account tier available when ClawBox AI is configured but not the active provider", async () => {
+      // ClawBox AI provider block present, but the user switched the active
+      // provider to the on-device model — loggedIn must stay true.
+      mockHermesConfigGetMany.mockResolvedValue({
+        "model.provider": "clawlocal",
+        "model.default": "gemma4-e2b-it-q4_0",
+        "providers.clawai.base_url": "https://clawbox.com/api/ai",
+      });
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_token" ? "claw_hermes456" : key === "clawai_tier" ? "pro" : null,
+      );
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiConfigured).toBe(true);
+      // Active provider isn't clawai, so the header badge tier is blank...
+      expect(body.clawaiTier).toBeNull();
+      // ...but the account tier is still resolved for ClawKeep / Remote Control.
+      expect(body.clawaiAccountTier).toBe("pro");
     });
   });
 
