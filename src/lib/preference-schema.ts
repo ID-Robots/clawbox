@@ -35,10 +35,17 @@
 // On read the rules are applied PER ENTRY. Several preferences hold a
 // collection — installed-app metadata, an icon grid, a list of open windows —
 // where each member is independent of the others. A member that does not pass
-// costs only itself; the rest of the collection is still served. Anything that
-// writes straight to the config store rather than through
-// POST /setup-api/preferences applies the same rules with
-// `sanitizePreferenceWrites`, so every door agrees on what may be stored.
+// costs only itself; the rest of the collection is still served.
+//
+// The doors do not all answer a bad value the same way, on purpose:
+//
+//   - The user door (POST /setup-api/preferences) REJECTS the request, so a
+//     caller that sent an impossible value learns that.
+//   - The machine doors — app install/uninstall, the webapp registry — write
+//     on someone else's behalf and have no one to report a 400 to. They COERCE
+//     the label fields they control (`boundPreferenceText`) and DROP entries
+//     that still do not pass (`setPreferences` in src/lib/preference-store.ts),
+//     so a stray character in an app-store listing cannot fail an install.
 
 export const PREFERENCE_LANGUAGES = [
   "en",
@@ -78,21 +85,13 @@ const CONTROL_CHARACTERS_GLOBAL = new RegExp(CONTROL_CHARACTERS.source, "g");
 /** How a preference is spelled in the config store. */
 export const PREFERENCE_KEY_PREFIX = "pref:";
 
-const CLOSED_DOMAINS: Record<string, readonly string[]> = {
-  ui_language: PREFERENCE_LANGUAGES,
-  wp_fit: WALLPAPER_FITS,
-};
-
-/**
- * The domain for a key, if it has one. Own properties only: the table is a
- * plain object literal, so a name such as `constructor` would otherwise resolve
- * to an inherited value that is not a list of legal strings.
- */
-function closedDomainFor(key: string): readonly string[] | undefined {
-  return Object.prototype.hasOwnProperty.call(CLOSED_DOMAINS, key)
-    ? CLOSED_DOMAINS[key]
-    : undefined;
-}
+// A Map rather than an object literal: lookup is by own entry only, so a key
+// named after something on Object.prototype (`constructor`, `toString`) reads
+// as "no domain" instead of resolving to a value that is not a list.
+const CLOSED_DOMAINS = new Map<string, readonly string[]>([
+  ["ui_language", PREFERENCE_LANGUAGES],
+  ["wp_fit", WALLPAPER_FITS],
+]);
 
 export function isPreferenceLanguage(value: unknown): value is PreferenceLanguage {
   return typeof value === "string" && (PREFERENCE_LANGUAGES as readonly string[]).includes(value);
@@ -144,7 +143,7 @@ function checkShape(value: unknown, depth: number): string | null {
  * cannot be stored) and on read (so junk stored earlier is not served).
  */
 export function validatePreference(key: string, value: unknown): PreferenceCheck {
-  const domain = closedDomainFor(key);
+  const domain = CLOSED_DOMAINS.get(key);
   if (domain) {
     if (typeof value === "string" && domain.includes(value)) return { ok: true };
     return { ok: false, reason: `${key} must be one of: ${domain.join(", ")}` };
@@ -173,7 +172,9 @@ export function validatePreference(key: string, value: unknown): PreferenceCheck
  * reaches them at when it walks the value whole — so they are checked at that
  * same depth here and the two agree on what passes.
  */
-function keepPassingMembers(value: unknown): unknown | undefined {
+function keepPassingMembers(
+  value: unknown,
+): Record<string, unknown> | unknown[] | undefined {
   if (Array.isArray(value)) {
     return value.filter((item) => checkShape(item, 1) === null);
   }
@@ -210,11 +211,20 @@ export type PreferenceOutcome = { ok: true; value: unknown } | { ok: false };
  */
 export function sanitizePreferenceValue(key: string, value: unknown): PreferenceOutcome {
   if (validatePreference(key, value).ok) return { ok: true, value };
-  if (closedDomainFor(key)) return { ok: false };
 
   const pruned = keepPassingMembers(value);
   if (pruned === undefined) return { ok: false };
+  // A prune that dropped nothing cannot change the verdict, so don't pay for a
+  // second walk to reach the answer the first one already gave. This is the
+  // case where the value failed on a whole-value cap rather than on a member.
+  if (memberCount(pruned) === memberCount(value)) return { ok: false };
   return validatePreference(key, pruned).ok ? { ok: true, value: pruned } : { ok: false };
+}
+
+/** How many members a collection holds. */
+function memberCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  return Object.keys(value as Record<string, unknown>).length;
 }
 
 /**
@@ -248,10 +258,14 @@ export function sanitizePreferenceWrites(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [storeKey, value] of Object.entries(updates)) {
-    const key = storeKey.startsWith(PREFERENCE_KEY_PREFIX)
-      ? storeKey.slice(PREFERENCE_KEY_PREFIX.length)
-      : storeKey;
-    const kept = sanitizePreferenceValue(key, value);
+    // Only `pref:*` keys are preferences. The config store holds other things
+    // in the same namespace — tokens, setup flags, updater state — and the
+    // rules below would be wrong for those, so they pass through untouched.
+    if (!storeKey.startsWith(PREFERENCE_KEY_PREFIX)) {
+      out[storeKey] = value;
+      continue;
+    }
+    const kept = sanitizePreferenceValue(storeKey.slice(PREFERENCE_KEY_PREFIX.length), value);
     if (kept.ok) out[storeKey] = kept.value;
   }
   return out;

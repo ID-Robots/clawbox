@@ -38,7 +38,7 @@ const REQUEST_TIMEOUT_MS = 8_000;
 // the dashboard means the request did not reach the API, which is what the
 // callers below already treat as "not signed in". Same rule and same reason as
 // mcp/lib/api.ts.
-const REDIRECT_POLICY = "manual" as const;
+const REDIRECT_POLICY = "manual";
 
 async function readPassword(): Promise<string> {
   try {

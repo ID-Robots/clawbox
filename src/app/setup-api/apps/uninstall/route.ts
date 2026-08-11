@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
+import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { setPreferences } from "@/lib/preference-store";
 import { getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
@@ -48,9 +49,10 @@ export async function POST(req: Request) {
         delete metaMap[appId];
         updates["pref:installed_meta"] = metaMap;
       }
-      if (Object.keys(updates).length > 0) {
-        await configSetMany(updates);
-      }
+      // setPreferences applies the preference rules — this does not go through
+      // POST /setup-api/preferences, and removing one entry writes the rest of
+      // the collection back out with it.
+      await setPreferences(updates);
     } catch (err) {
       console.warn("[uninstall] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
     }

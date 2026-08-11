@@ -4,10 +4,11 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
+import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
 import { getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
-import { boundPreferenceText, sanitizePreferenceWrites } from "@/lib/preference-schema";
+import { boundPreferenceText } from "@/lib/preference-schema";
+import { setPreferences } from "@/lib/preference-store";
 
 const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
@@ -171,14 +172,10 @@ async function syncInstalledPreferences(appId: string): Promise<string | undefin
     if (!alreadyListed) {
       nextUpdates["pref:installed_apps"] = [...list, appId];
     }
-    // This writes to the config store directly rather than through
-    // POST /setup-api/preferences, so the preference rules are applied here.
-    // The check covers the entries carried over from the read above as well as
-    // the one being added. See src/lib/preference-schema.ts.
-    const checkedUpdates = sanitizePreferenceWrites(nextUpdates);
-    if (Object.keys(checkedUpdates).length > 0) {
-      await configSetMany(checkedUpdates);
-    }
+    // setPreferences applies the preference rules — this does not go through
+    // POST /setup-api/preferences, and the update carries over every entry read
+    // above alongside the one being added.
+    await setPreferences(nextUpdates);
     return undefined;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

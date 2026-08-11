@@ -109,13 +109,14 @@ const HEADER_TERMINATOR = "\r\n\r\n";
 // rather than stripped, so two values differing only in control characters do
 // not collapse into the same line. U+FFFD is the conventional stand-in.
 const LOG_CONTROL_CHARACTERS = /\p{Cc}/gu;
-const LOG_FIELD_MAX_LENGTH = 200;
-function logSafe(value, maxLength = LOG_FIELD_MAX_LENGTH) {
-  const s = String(value);
-  if (s.length <= maxLength) return s.replace(LOG_CONTROL_CHARACTERS, "�");
+// U+FFFD REPLACEMENT CHARACTER, written by code point rather than as a literal
+// so the glyph does not read as mojibake in an editor — as in log-safe.ts.
+const LOG_REPLACEMENT = String.fromCharCode(0xfffd);
+function logSafe(s, maxLength) {
+  if (s.length <= maxLength) return s.replace(LOG_CONTROL_CHARACTERS, LOG_REPLACEMENT);
   // Cut first, then sanitise the head only: every character the pattern matches
   // is one UTF-16 code unit replaced by one, so no match can straddle the cut.
-  const head = s.slice(0, maxLength).replace(LOG_CONTROL_CHARACTERS, "�");
+  const head = s.slice(0, maxLength).replace(LOG_CONTROL_CHARACTERS, LOG_REPLACEMENT);
   return `${head}...[+${s.length - maxLength} chars]`;
 }
 
