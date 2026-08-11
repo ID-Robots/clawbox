@@ -42,8 +42,10 @@ Paths guarded by `CLAWBOX_TEST_MODE=1` because they need real hardware:
 
 VNC (`x11vnc` + `Xvfb` + `websockify`) **is** installed in test mode — it
 runs fine in a `--privileged` container and is needed for browser automation
-tests. Point a VNC/noVNC client at `localhost:6080` while tests run to watch
-the container's virtual desktop.
+tests. websockify binds loopback inside the container (same as a real
+device), so port 6080 is not published and cannot be reached from the host.
+To watch the container's virtual desktop while tests run, go in on the
+published web port: log in, then open the Remote Desktop app.
 
 Everything else runs for real: apt packages, git clone, bun install, next
 build, OpenClaw npm install + patches, systemd service install, polkit, the
