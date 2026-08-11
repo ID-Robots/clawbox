@@ -62,13 +62,22 @@ export default defineConfig({
         "src/app/setup-api/browser/route.ts",
         "src/app/setup-api/browser/manage/**",
       ],
+      // Vitest reads the four metrics at the TOP level of `thresholds`. Any
+      // other key here is treated as a glob selecting files to threshold, so
+      // the previous `global: { ... }` nesting (Jest's shape) silently became a
+      // glob matching no files, and the gate never ran. It type-checked, because
+      // the glob form accepts exactly that object shape.
+      //
+      // The intended targets are statements 80 / branches 75 / functions 80 /
+      // lines 80. Measured coverage is 64.14 / 53.48 / 62.00 / 66.23, so the
+      // values below are deliberately set just under the measured numbers: a
+      // floor that stops coverage regressing, not the target. Raise them as
+      // coverage climbs — that is the only way they reach the targets above.
       thresholds: {
-        global: {
-          statements: 80,
-          branches: 75,
-          functions: 80,
-          lines: 80,
-        },
+        statements: 63,
+        branches: 52,
+        functions: 61,
+        lines: 65,
       },
     },
   },
