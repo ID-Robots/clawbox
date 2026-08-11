@@ -64,11 +64,42 @@ describe("focusableWithin", () => {
     expect(focusableWithin(host).map((el) => el.id)).toEqual(["ok"]);
   });
 
-  it("skips anything inside an inert or hidden subtree", () => {
+  it("skips any negative tabindex, not just -1", () => {
+    const host = mount(`
+      <div id="ok" tabindex="0">ok</div>
+      <div id="minusOne" tabindex="-1">no</div>
+      <div id="minusTwo" tabindex="-2">no</div>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["ok"]);
+  });
+
+  it("treats a control disabled by an ancestor fieldset as unreachable", () => {
+    const host = mount(`
+      <button id="ok">ok</button>
+      <fieldset disabled><button id="inFieldset">no</button></fieldset>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["ok"]);
+  });
+
+  it("counts every editable contenteditable mode, and only skips an explicit false", () => {
+    const host = mount(`
+      <div id="empty" contenteditable="">yes</div>
+      <div id="true" contenteditable="true">yes</div>
+      <div id="plaintext" contenteditable="plaintext-only">yes</div>
+      <div id="off" contenteditable="false">no</div>
+    `);
+
+    expect(focusableWithin(host).map((el) => el.id)).toEqual(["empty", "true", "plaintext"]);
+  });
+
+  it("skips anything inside an inert, hidden, or aria-hidden subtree", () => {
     const host = mount(`
       <button id="ok">ok</button>
       <div inert><button id="inInert">no</button></div>
       <div hidden><button id="inHidden">no</button></div>
+      <div aria-hidden="true"><button id="inAriaHidden">no</button></div>
     `);
 
     expect(focusableWithin(host).map((el) => el.id)).toEqual(["ok"]);

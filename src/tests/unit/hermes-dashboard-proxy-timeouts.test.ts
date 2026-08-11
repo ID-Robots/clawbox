@@ -247,6 +247,28 @@ describe("hermes dashboard proxy — upstream timeouts", () => {
     );
   });
 
+  it("answers 504 when the upstream trickles headers forever without finishing them", async () => {
+    // A socket timeout measures INACTIVITY, so this upstream — one header byte
+    // every 60ms, header block never terminated — would reset it indefinitely
+    // and the request would hang with no status. The deadline is absolute, so
+    // it fires regardless of the dribble.
+    const trickler = net.createServer((socket) => {
+      heldSockets.push(socket);
+      socket.write("HTTP/1.1 200 OK\r\n");
+      const tick = setInterval(() => socket.write("X-Padding: 1\r\n"), 60);
+      socket.on("close", () => clearInterval(tick));
+      socket.on("error", () => clearInterval(tick));
+    });
+    adHocServers.push(trickler);
+    const tricklerPort = await listen(trickler);
+
+    await startProxy({ HERMES_PORT: String(tricklerPort) });
+    const res = await get(proxyPort, "/drip", TIMEOUT_MS * 20);
+
+    expect(res.status).toBe(504);
+    expect(res.body).toContain("did not respond in time");
+  });
+
   it("still proxies a responsive upstream — the timeout does not fire on healthy traffic", async () => {
     await startProxy({ HERMES_PORT: String(upstreamPort) });
 

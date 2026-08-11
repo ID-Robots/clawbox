@@ -63,14 +63,19 @@ const DASH_USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";
 //
 // Each timeout is armed only for the phase where silence means "stuck":
 //
-//   HEADERS — from send to the first response byte. Disarmed as soon as the
+//   HEADERS — from send to COMPLETE response headers. Cleared as soon as the
 //     response starts, because the dashboard legitimately streams (long-lived
 //     event streams would be cut mid-flight by an idle timer).
 //   LOGIN   — the SSO broker's own POST /auth/password-login. Short: it is on
 //     the critical path of a user's first request.
-//   WS      — TCP connect plus the 101 handshake, disarmed once the upstream
-//     sends its first byte. A live WebSocket is idle most of the time, so an
-//     idle timeout past the handshake would drop working connections.
+//   WS      — TCP connect plus the 101 handshake, stood down once the upstream
+//     has sent a complete header block. A live WebSocket is idle most of the
+//     time, so an idle timeout past the handshake would drop working links.
+//
+// The first two are ABSOLUTE deadlines rather than socket timeouts. A socket
+// timer measures inactivity, so an upstream that trickles a byte at a time
+// resets it forever and the request hangs anyway. The WS one is a socket timer
+// on purpose: it must stop applying entirely once the connection is live.
 //
 // A timed-out request must still PRODUCE A RESPONSE. Tearing the upstream
 // socket down and trusting the existing error handler to notice is not enough:
@@ -508,10 +513,9 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
   const upstream = http.request(
     { host: UPSTREAM_HOST, port: UPSTREAM_PORT, method: req.method, path: req.url, headers },
     (up) => {
-      // Headers are in — the upstream is alive. Disarm before piping: the
-      // response body may legitimately trickle (event stream, slow download),
-      // and an idle timer would sever it mid-transfer.
-      upstream.setTimeout(0);
+      // Headers are in — the upstream is alive. The deadline is cleared by the
+      // 'response' listener below; from here a slow body is legitimate (event
+      // stream, slow download) and nothing may cut it.
       // The Hermes session was rejected (TTL elapsed, or the dashboard restarted
       // and rotated its signing secret) — re-broker once and replay.
       //
@@ -561,16 +565,35 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
     res.end(message);
   };
 
+  // An ABSOLUTE deadline for "response headers complete", not a socket timeout.
+  // A socket timer measures INACTIVITY, so an upstream trickling one header
+  // byte at a time — or a stuck chunked header block — resets it forever: the
+  // response callback never runs, the timer never fires, and the browser waits
+  // with nothing to show. Same trap as the login path; bounded the same way.
+  // Cleared once headers land, so a legitimately slow BODY is never cut.
+  let headerDeadline = null;
+  const clearHeaderDeadline = () => {
+    if (headerDeadline) {
+      clearTimeout(headerDeadline);
+      headerDeadline = null;
+    }
+  };
   if (UPSTREAM_HEADERS_TIMEOUT_MS > 0) {
-    upstream.setTimeout(UPSTREAM_HEADERS_TIMEOUT_MS, () => {
+    headerDeadline = setTimeout(() => {
       // Respond FIRST, then tear down — see the Timeouts section at the top of
       // this file. 504 also says "the dashboard went quiet" rather than the 502
       // an incidental socket error would report.
       failRequest(504, "Hermes dashboard did not respond in time.");
       upstream.destroy();
-    });
+    }, UPSTREAM_HEADERS_TIMEOUT_MS);
+    headerDeadline.unref?.();
   }
-  upstream.on("error", () => failRequest(502, "Hermes dashboard is not reachable."));
+  upstream.on("response", clearHeaderDeadline);
+  upstream.on("error", () => {
+    clearHeaderDeadline();
+    failRequest(502, "Hermes dashboard is not reachable.");
+  });
+  upstream.on("close", clearHeaderDeadline);
   // Sink for any late stream error on the client connection, same reasoning.
   res.on("error", () => {});
 

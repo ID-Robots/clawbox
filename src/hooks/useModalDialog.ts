@@ -37,8 +37,12 @@ const FOCUSABLE_SELECTOR = [
   "select",
   "textarea",
   "iframe",
-  "[contenteditable='true']",
-  "[tabindex]:not([tabindex='-1'])",
+  // Broad on purpose — the effective state is decided in the filter, not here.
+  // `[contenteditable='true']` alone missed the equally-editable `""` and
+  // `"plaintext-only"`, and `[tabindex]:not([tabindex='-1'])` still matched
+  // `tabindex="-2"`, which is not focusable either.
+  "[contenteditable]",
+  "[tabindex]",
 ].join(",");
 
 /**
@@ -50,10 +54,22 @@ const FOCUSABLE_SELECTOR = [
  */
 export function focusableWithin(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
-    if (el.hasAttribute("disabled") || el.getAttribute("aria-hidden") === "true") return false;
-    // `closest` covers the element itself, and `hidden` reflects to the
-    // attribute, so this one test catches both self and ancestor.
-    if (el.closest("[hidden], [inert]") !== null) return false;
+    // `:disabled` also catches a control disabled by an ancestor <fieldset>,
+    // which the attribute check alone misses.
+    if (el.hasAttribute("disabled") || el.matches(":disabled")) return false;
+    // Any negative tabindex is out of the tab order, not just -1.
+    if (el.hasAttribute("tabindex") && el.tabIndex < 0) return false;
+    // `contenteditable` is editable at "", "true" and "plaintext-only"; only an
+    // explicit "false" opts out. Read from the attribute rather than
+    // `isContentEditable`, which jsdom does not implement.
+    if (el.hasAttribute("contenteditable")) {
+      const mode = (el.getAttribute("contenteditable") || "").toLowerCase();
+      if (mode === "false") return false;
+    }
+    // `closest` covers the element itself, so one test catches both an element
+    // that is hidden/inert/aria-hidden and one nested inside such a subtree —
+    // focus must never land on content excluded from the accessibility tree.
+    if (el.closest('[hidden], [inert], [aria-hidden="true"]') !== null) return false;
     // Capability check, not an environment check: `checkVisibility` is CSSOM-View
     // and needs a layout engine. `visibilityProperty` adds `visibility: hidden`
     // to the default display/content-visibility tests; opacity is deliberately
