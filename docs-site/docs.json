@@ -39,6 +39,15 @@
             ]
           },
           {
+            "group": "Editions",
+            "pages": [
+              "editions/overview",
+              "editions/hermes",
+              "editions/hermes-providers",
+              "editions/hermes-skills"
+            ]
+          },
+          {
             "group": "Hardware",
             "pages": [
               "hardware/clawbox-connect",
