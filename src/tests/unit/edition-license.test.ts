@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,25 +17,32 @@ import { verifyDualLicense } from "@/lib/edition-license";
  * these hold that shape from coming back.
  *
  * Each case signs a licence with a key of its own and offers the matching
- * public key through every environment name the module has ever read, plus the
- * shapes that made the old expression fall through to a blank key.
+ * public key through `CLAWBOX_LICENSE_PUBKEY` — the name the old expression
+ * read — plus the shapes that made it fall through to a blank key.
  */
 
-const ENV_KEYS = [
-  "CLAWBOX_LICENSE_PUBKEY",
-  "CLAWBOX_DUAL_LICENSE_PUBKEY",
-  "CLAWBOX_LICENSE_PUBLIC_KEY",
-];
-const TOUCHED = [...ENV_KEYS, "CLAWBOX_DUAL_LICENSE", "CLAWBOX_ROOT", "CLAWBOX_DEVICE_ID"];
+const PUBKEY_ENV = "CLAWBOX_LICENSE_PUBKEY";
+const TOUCHED = [PUBKEY_ENV, "CLAWBOX_DUAL_LICENSE", "CLAWBOX_ROOT", "CLAWBOX_DEVICE_ID"];
 
 const saved = new Map<string, string | undefined>();
 for (const name of TOUCHED) saved.set(name, process.env[name]);
+
+const tempRoots: string[] = [];
+function tempRoot(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-licence-"));
+  tempRoots.push(dir);
+  return dir;
+}
 
 afterEach(() => {
   for (const [name, value] of saved) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+});
+
+afterAll(() => {
+  for (const dir of tempRoots) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /** A licence in the module's format, signed by a freshly minted keypair. */
@@ -57,48 +64,58 @@ describe("verifyDualLicense", () => {
   it("does not accept a licence signed by a key named in the environment", () => {
     const { licence, publicKeyPem } = perpetualDualLicence();
     process.env.CLAWBOX_DUAL_LICENSE = licence;
-    for (const name of ENV_KEYS) process.env[name] = publicKeyPem;
+    process.env[PUBKEY_ENV] = publicKeyPem;
 
     expect(verifyDualLicense()).toBe(false);
   });
 
-  it("does not accept a licence when the environment offers a blank key", () => {
-    // The shapes that used to win a `||` and then reduce to an empty string,
-    // which read as "nothing to verify against".
+  // The shapes that used to win a `||` and then reduce to an empty string,
+  // which read as "nothing to verify against".
+  it.each([
+    ["a single space", " "],
+    ["a tab", "\t"],
+    ["a newline", "\n"],
+    ["mixed whitespace", "   \r\n  "],
+    ["an empty string", ""],
+  ])("does not accept a licence when the environment offers %s as the key", (_label, blank) => {
     const { licence } = perpetualDualLicence();
     process.env.CLAWBOX_DUAL_LICENSE = licence;
+    process.env[PUBKEY_ENV] = blank;
 
-    for (const blank of [" ", "\t", "\n", "   \r\n  ", ""]) {
-      for (const name of ENV_KEYS) process.env[name] = blank;
-      expect(verifyDualLicense()).toBe(false);
-    }
+    expect(verifyDualLicense()).toBe(false);
   });
 
   it("does not accept a licence read from disk and signed by an environment key", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-licence-"));
+    const root = tempRoot();
     fs.mkdirSync(path.join(root, "data"), { recursive: true });
     const { licence, publicKeyPem } = perpetualDualLicence();
     fs.writeFileSync(path.join(root, "data", "dual-license.txt"), licence);
 
     delete process.env.CLAWBOX_DUAL_LICENSE;
     process.env.CLAWBOX_ROOT = root;
-    for (const name of ENV_KEYS) process.env[name] = publicKeyPem;
+    process.env[PUBKEY_ENV] = publicKeyPem;
 
     expect(verifyDualLicense()).toBe(false);
   });
 
   it("answers false when there is no licence at all", () => {
     delete process.env.CLAWBOX_DUAL_LICENSE;
-    process.env.CLAWBOX_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-licence-"));
+    process.env.CLAWBOX_ROOT = tempRoot();
 
     expect(verifyDualLicense()).toBe(false);
   });
 
-  it("answers false for a licence that is not in the expected format", () => {
-    process.env.CLAWBOX_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-licence-"));
-    for (const bad of ["", ".", "no-dot", ".leading", "trailing.", "a.b"]) {
-      process.env.CLAWBOX_DUAL_LICENSE = bad;
-      expect(verifyDualLicense()).toBe(false);
-    }
+  it.each([
+    ["an empty string", ""],
+    ["a bare separator", "."],
+    ["no separator", "no-dot"],
+    ["nothing before the separator", ".leading"],
+    ["nothing after the separator", "trailing."],
+    ["two parts that are not a signed payload", "a.b"],
+  ])("answers false for a licence that is %s", (_label, bad) => {
+    process.env.CLAWBOX_ROOT = tempRoot();
+    process.env.CLAWBOX_DUAL_LICENSE = bad;
+
+    expect(verifyDualLicense()).toBe(false);
   });
 });

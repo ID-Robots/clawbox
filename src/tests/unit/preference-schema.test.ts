@@ -138,11 +138,12 @@ describe("preference-schema", () => {
     };
 
     it("keeps other entries when one is malformed", () => {
-      const kept = sanitizePreferenceValue("installed_meta", installedMeta);
-      expect(kept.ok).toBe(true);
-      expect(kept.ok && kept.value).toEqual({
-        notes: { name: "Notes", color: "#f97316", iconUrl: "" },
-        radio: { name: "Radio", color: "#22d3ee", iconUrl: "" },
+      expect(sanitizePreferenceValue("installed_meta", installedMeta)).toEqual({
+        ok: true,
+        value: {
+          notes: { name: "Notes", color: "#f97316", iconUrl: "" },
+          radio: { name: "Radio", color: "#22d3ee", iconUrl: "" },
+        },
       });
     });
 
@@ -153,13 +154,16 @@ describe("preference-schema", () => {
     });
 
     it("keeps the good members of a list", () => {
-      const kept = sanitizePreferenceValue("installed_apps", ["notes", `ti${CONTROL}mer`, "radio"]);
-      expect(kept.ok && kept.value).toEqual(["notes", "radio"]);
+      expect(
+        sanitizePreferenceValue("installed_apps", ["notes", `ti${CONTROL}mer`, "radio"]),
+      ).toEqual({ ok: true, value: ["notes", "radio"] });
     });
 
     it("keeps a whole value that already passes", () => {
       const value = { notes: { name: "Notes" } };
       const kept = sanitizePreferenceValue("installed_meta", value);
+      expect(kept).toMatchObject({ ok: true });
+      // The same object, not a rebuilt copy.
       expect(kept.ok && kept.value).toBe(value);
     });
 
@@ -185,6 +189,16 @@ describe("preference-schema", () => {
       expect(sanitizePreferenceWrites({ "pref:ui_language": "bg" })).toEqual({
         "pref:ui_language": "bg",
       });
+    });
+
+    it("leaves keys outside the preference namespace alone", () => {
+      // The config store holds tokens and setup flags under the same roof, and
+      // the preference rules would be wrong for those.
+      const out = sanitizePreferenceWrites({
+        clawai_token: `tok${CONTROL}en`,
+        ai_model_configured: true,
+      });
+      expect(out).toEqual({ clawai_token: `tok${CONTROL}en`, ai_model_configured: true });
     });
   });
 
