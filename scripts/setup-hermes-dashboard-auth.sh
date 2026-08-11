@@ -145,7 +145,7 @@ fi
 # path could only ever be run once. Written via a temp file + rename so a crash
 # mid-write can't truncate the customer's config.
 CFG="$HERMES_CONFIG" USERNAME="$USERNAME" HASH="$HASH" SECRET="$SECRET" PW_PATH="$PWFILE" python3 - <<'PY' || { log "ERROR: failed to write the dashboard block to $HERMES_CONFIG" >&2; exit 1; }
-import os, re, sys
+import json, os, re, sys
 
 cfg_path = os.environ["CFG"]
 with open(cfg_path, "r", encoding="utf-8") as fh:
@@ -169,7 +169,12 @@ block = "\n".join([
     "# never drift apart. Hand edits will be overwritten.",
     "dashboard:",
     "  basic_auth:",
-    "    username: %s" % os.environ["USERNAME"],
+    # Quoted like the two lines below it. HERMES_DASH_USERNAME is operator-set,
+    # and a bare scalar holding ':', '#' or a leading '-' either changes what
+    # the line means or stops being YAML at all — at which point Hermes has no
+    # auth provider to load and the dashboard cannot come up. json.dumps emits
+    # a double-quoted scalar YAML reads back verbatim for any input.
+    "    username: %s" % json.dumps(os.environ["USERNAME"]),
     '    password_hash: "%s"' % os.environ["HASH"],
     '    secret: "%s"' % os.environ["SECRET"],
     "    session_ttl_seconds: 604800",
