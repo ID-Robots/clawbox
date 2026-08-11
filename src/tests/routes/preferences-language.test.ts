@@ -137,7 +137,7 @@ describe("/setup-api/preferences — language", () => {
 
   describe("an already-stored invalid locale is not served", () => {
     it("omits it from a keyed read", async () => {
-      mockGet.mockResolvedValue(STORED_JUNK_LOCALE as never);
+      mockGetAll.mockResolvedValue({ "pref:ui_language": STORED_JUNK_LOCALE });
       const res = await GET(new Request("http://localhost/setup-api/preferences?keys=ui_language"));
       const body = await res.json();
       expect(body).not.toHaveProperty("ui_language");
@@ -156,7 +156,7 @@ describe("/setup-api/preferences — language", () => {
     });
 
     it("serves a valid stored locale unchanged", async () => {
-      mockGet.mockResolvedValue("bg" as never);
+      mockGetAll.mockResolvedValue({ "pref:ui_language": "bg" });
       const res = await GET(new Request("http://localhost/setup-api/preferences?keys=ui_language"));
       expect(await res.json()).toEqual({ ui_language: "bg" });
     });
