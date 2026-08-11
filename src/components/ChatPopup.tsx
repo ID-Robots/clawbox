@@ -161,9 +161,12 @@ import {
 import {
   HERMES_REASONING_DEFAULT,
   HERMES_REASONING_LABELS,
+  binaryReasoningLabel,
+  binaryReasoningTriggerLabel,
   clampReasoningForProvider,
   hermesReasoningLevelsFor,
   isHermesReasoningLevel,
+  providerHasBinaryReasoning,
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
@@ -407,6 +410,32 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   )
   useEffect(() => { hermesReasoningRef.current = hermesEffectiveReasoning }, [hermesEffectiveReasoning])
   useEffect(() => { hermesDeviceRef.current = hermesDevice }, [hermesDevice])
+
+  // The on-device model's dial is a thinking SWITCH, not an effort scale — its
+  // backend has two states and no graded middle (see hermes-reasoning.ts). It
+  // therefore borrows two levels from the shared vocabulary to stand for the
+  // ends, and must not label them "Minimal"/"Max" as though the scale applied.
+  const hermesBinaryReasoning = useMemo(
+    () => providerHasBinaryReasoning(hermesProvider),
+    [hermesProvider],
+  )
+  /** Full label for the open menu. */
+  const hermesReasoningLabel = useCallback(
+    (level: HermesReasoningLevel) =>
+      binaryReasoningLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level],
+    [hermesProvider],
+  )
+  /** Compact label for the closed pill, which shares a tight width budget. */
+  const hermesReasoningTriggerLabel = useCallback(
+    (level: HermesReasoningLevel) =>
+      binaryReasoningTriggerLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level],
+    [hermesProvider],
+  )
+  /** True when this level means "think" for a two-state provider. */
+  const thinkingLevelIsOn = useCallback(
+    (level: HermesReasoningLevel) => level === hermesReasoningOptions[hermesReasoningOptions.length - 1],
+    [hermesReasoningOptions],
+  )
 
   const hermesProviderName = useCallback(
     (id: string) => hermesProviderLabel(id, hermesProviders.find(p => p.id === id)?.name),
@@ -1981,27 +2010,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 )}
                 {/* `hermes --reasoning` takes the same eight levels for every
                     provider, but the CLI accepting a level is not the same as
-                    the backend doing anything with it. The on-device model's
-                    server ignores unknown JSON keys, so all eight settings
-                    were identical there — a dial wired to nothing. Providers
-                    with no dial report an empty level list, and get no pill. */}
+                    the backend doing anything with it — so the level list is
+                    per-provider and a provider with nothing to offer gets no
+                    pill at all.
+
+                    The on-device model is the two-state case: its backend
+                    ignores `reasoning_effort` (which is why this pill used to
+                    be hidden for it) but does honour a thinking switch per
+                    request, with no graded middle to expose. So it shows two
+                    options, not eight, and the labels say what they do rather
+                    than borrowing the effort scale's vocabulary. */}
                 {hermesReasoningOptions.length > 0 && (
                   <HeaderDropdown
-                    ariaLabel="Reasoning effort"
+                    ariaLabel={hermesBinaryReasoning ? 'Thinking' : 'Reasoning effort'}
                     value={hermesEffectiveReasoning}
                     /* Brain glyph instead of a "Thinking: " word prefix — see
                        REASONING_PILL_ICON. The word cost 55px of a 142px row
                        and truncated the level away; the glyph costs ~11px. */
-                    triggerLabel={HERMES_REASONING_LABELS[hermesEffectiveReasoning]}
+                    triggerLabel={hermesReasoningTriggerLabel(hermesEffectiveReasoning)}
                     triggerIcon={REASONING_PILL_ICON}
                     options={hermesReasoningOptions.map(level => ({
                       id: level,
-                      label: HERMES_REASONING_LABELS[level],
+                      label: hermesReasoningLabel(level),
+                      /* Thinking on this model is ~25x slower on a short
+                         question (measured: 0.2s vs 8.4s). A dial that hides
+                         that is a dial that surprises people. */
+                      hint: hermesBinaryReasoning
+                        ? (thinkingLevelIsOn(level)
+                          ? 'Better at reasoning. Much slower.'
+                          : 'Fastest. Answers immediately.')
+                        : undefined,
                     }))}
                     onChange={changeHermesReasoning}
                     onPointerDown={stopHeaderDrag}
                     triggerMaxWidth={120}
-                    popoverWidth={180}
+                    popoverWidth={hermesBinaryReasoning ? 230 : 180}
                   />
                 )}
               </>

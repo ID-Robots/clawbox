@@ -8,6 +8,40 @@ import {
   getOllamaBaseUrl,
   type LocalAiProvider,
 } from "@/lib/local-ai-runtime";
+import {
+  applyThinkingToChatBody,
+  isChatCompletionsPath,
+  MAX_REWRITABLE_BODY_BYTES,
+} from "@/lib/local-ai-thinking";
+
+/**
+ * Read a request body, giving up past `maxBytes` rather than holding an
+ * unbounded buffer on a device that has ~3.7 GB free with the model loaded.
+ * Returns null when the cap is exceeded.
+ */
+async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
+  // Trust the declared length when there is one — it lets an oversized body be
+  // refused before a single chunk is read.
+  const declared = Number(request.headers.get("content-length") || "");
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
 
 function buildUpstreamUrl(provider: LocalAiProvider, pathSegments: string[], search: string): string {
   const baseUrl = provider === "llamacpp" ? getLlamaCppBaseUrl() : getOllamaBaseUrl();
@@ -103,8 +137,39 @@ export async function proxyLocalAiRequest(
     };
 
     if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
-      init.body = request.body;
-      init.duplex = "half";
+      // Chat completions are the only path with a chat template to influence,
+      // so they are the only one we buffer — everything else keeps streaming.
+      // See src/lib/local-ai-thinking.ts for why the rewrite exists at all
+      // (llama.cpp ignores `reasoning_effort`; `chat_template_kwargs` is the
+      // field it actually reads).
+      const rewritable = provider === "llamacpp"
+        && request.method === "POST"
+        && isChatCompletionsPath(pathSegments);
+
+      let rewritten: string | null = null;
+      if (rewritable) {
+        const raw = await readBoundedBody(request, MAX_REWRITABLE_BODY_BYTES);
+        if (raw === null) {
+          // Over the cap. Nothing is buffered, but the stream has been partly
+          // consumed, so it can no longer be forwarded — fail explicitly rather
+          // than silently sending a truncated request to the model.
+          endLocalAiUse(provider);
+          return NextResponse.json(
+            { error: "Request body too large for the on-device model" },
+            { status: 413 },
+          );
+        }
+        rewritten = applyThinkingToChatBody(raw);
+      }
+
+      if (rewritten !== null) {
+        init.body = rewritten;
+        // The body is a string now, so the upstream length differs from the
+        // one we stripped in forwardHeaders. fetch sets it from the body.
+      } else {
+        init.body = request.body;
+        init.duplex = "half";
+      }
     }
 
     const upstreamResponse = await fetch(buildUpstreamUrl(provider, pathSegments, search), init);

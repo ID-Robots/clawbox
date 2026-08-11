@@ -12,7 +12,9 @@ import {
   isSafeHermesModelId,
 } from "@/lib/hermes-providers";
 import {
+  clampReasoningForProvider,
   hermesReasoningLevelsFor,
+  providerHasBinaryReasoning,
   providerHasReasoningControl,
   isHermesReasoningLevel,
   isReasoningLevelAllowedFor,
@@ -359,12 +361,24 @@ export async function POST(request: Request) {
     // unknown". Refuse here with something actionable rather than spending the
     // turn to have the proxy refuse it.
     //
-    // A provider with NO dial at all is a different case and must not 400: the
-    // on-device model's backend ignores reasoning_effort entirely, so the level
-    // is meaningless rather than wrong. Failing the turn over a parameter that
-    // could not have changed anything would be gratuitous — drop it and answer.
+    // A provider with NO dial at all is a different case and must not 400: a
+    // backend that never reads the field makes the level meaningless rather
+    // than wrong. Failing the turn over a parameter that could not have changed
+    // anything would be gratuitous — drop it and answer.
+    //
+    // A TWO-STATE provider (the on-device model: thinking on or off, nothing in
+    // between) is a third case. Its two levels stand for the ends of a switch,
+    // so a level from the middle of the scale is still answerable — the proxy
+    // maps every level onto the boolean. A client holding a stale preference
+    // must not get a failed turn for it; clamp to the nearest end instead.
     if (rawReasoning && !providerHasReasoningControl(effectiveProvider)) {
       rawReasoning = "";
+    } else if (
+      rawReasoning
+      && isHermesReasoningLevel(rawReasoning)
+      && providerHasBinaryReasoning(effectiveProvider)
+    ) {
+      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning);
     } else if (
       rawReasoning
       && isHermesReasoningLevel(rawReasoning)

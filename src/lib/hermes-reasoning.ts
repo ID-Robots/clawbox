@@ -74,22 +74,83 @@ const UNSUPPORTED_BY_PROVIDER: Record<string, readonly HermesReasoningLevel[]> =
  * Providers with NO reasoning control at all — a different thing from a
  * provider that rejects some levels.
  *
- * VERIFIED on-device against the on-device model (gemma4-e2b-it-q4_0 on
- * llama.cpp, through our local-ai proxy). All eight levels returned 0,
- * including `ultra`, which ClawBox AI rejects outright — accepting everything
- * is the signature of a backend that never reads the field. Confirmed by
- * posting `reasoning_effort: "banana"` and then an entirely invented field
- * name: both answered HTTP 200 with a response byte-identical to sending no
- * field at all. llama.cpp's OpenAI-compatible server ignores unknown JSON keys.
+ * Empty today. `clawlocal` used to be here, correctly: llama.cpp's
+ * OpenAI-compatible server ignores `reasoning_effort` entirely, so all eight
+ * levels did the same nothing and the honest UI was no control at all.
  *
- * So the picker was offering eight settings that all did the same nothing —
- * worse than a rejection, which at least tells the customer. An empty list
- * means "hide the control", not "no levels allowed".
- *
- * Note this is about the EFFORT DIAL, not about thinking: the model does emit
- * `reasoning_content`. There is simply no knob to turn.
+ * That finding still holds — `reasoning_effort` is still inert — but it was the
+ * wrong question. The backend DOES take a thinking switch; it is just spelled
+ * `chat_template_kwargs.enable_thinking`, and it works per request on a running
+ * server. See LOCAL_REASONING_LEVELS below and src/lib/local-ai-thinking.ts,
+ * which does the translation.
  */
-const NO_REASONING_CONTROL: ReadonlySet<string> = new Set(['clawlocal']);
+const NO_REASONING_CONTROL: ReadonlySet<string> = new Set<string>();
+
+/**
+ * The on-device model's thinking switch, expressed in the CLI's vocabulary.
+ *
+ * TWO states, not eight, and not a graded Low/Medium/High — because two is
+ * what the backend actually has. VERIFIED against the shipped llama-server
+ * (version 1 (db7d8b2)) with the server running `--reasoning off`:
+ *
+ *   chat_template_kwargs.enable_thinking=false →   0 reasoning chars,   4 tok,  207 ms
+ *   chat_template_kwargs.enable_thinking=true  → 703 reasoning chars, 253 tok, 8416 ms
+ *
+ * Both directions work without restarting llama-server. The graded middle does
+ * not exist: `--reasoning-budget` is a launch flag and is NOT honoured per
+ * request (budget 64 → 371 reasoning chars, budget 0 → 518 — noise, not
+ * enforcement). Offering Low/Medium/High would put back exactly the failure
+ * this list was created to remove: settings that all do the same thing.
+ *
+ * `minimal` and `max` are chosen from HERMES_REASONING_LEVELS as the two ends
+ * so the value reaching `hermes --reasoning` stays inside the CLI's own
+ * vocabulary; the proxy maps them onto the boolean. `none` is deliberately not
+ * the off value — it reads as "no reasoning at all" in other providers'
+ * pickers, and this switch controls thinking, not the answer.
+ */
+export const LOCAL_REASONING_LEVELS: readonly HermesReasoningLevel[] = ['minimal', 'max'];
+
+/** Providers whose reasoning control is a two-state thinking switch. */
+const BINARY_REASONING_CONTROL: ReadonlyMap<string, readonly HermesReasoningLevel[]> = new Map([
+  ['clawlocal', LOCAL_REASONING_LEVELS],
+]);
+
+/**
+ * The label a two-state provider shows for a level in the OPEN menu, or null
+ * when this provider uses the effort scale instead.
+ *
+ * "Minimal"/"Max" would be actively misleading here — they are scale points
+ * borrowed to carry a boolean, and a customer reading them would reasonably
+ * expect a Medium to exist.
+ */
+export function binaryReasoningLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  const levels = BINARY_REASONING_CONTROL.get((provider || '').trim());
+  if (!levels) return null;
+  return level === levels[0] ? 'Thinking off' : 'Thinking on';
+}
+
+/**
+ * The same value for the closed PILL, where the row's width budget is the
+ * binding constraint (three labels share ~168px). The pill already carries the
+ * brain glyph, so it does not need to repeat the word "Thinking" — the glyph
+ * says which dial it is, and this says which way it is set.
+ */
+export function binaryReasoningTriggerLabel(
+  provider: string | null | undefined,
+  level: HermesReasoningLevel,
+): string | null {
+  const levels = BINARY_REASONING_CONTROL.get((provider || '').trim());
+  if (!levels) return null;
+  return level === levels[0] ? 'Off' : 'On';
+}
+
+/** True when this provider's dial is a thinking switch rather than an effort scale. */
+export function providerHasBinaryReasoning(provider: string | null | undefined): boolean {
+  return BINARY_REASONING_CONTROL.has((provider || '').trim());
+}
 
 /**
  * The levels this provider will actually accept. Unknown provider → all.
@@ -99,6 +160,8 @@ const NO_REASONING_CONTROL: ReadonlySet<string> = new Set(['clawlocal']);
 export function hermesReasoningLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] {
   const id = (provider || '').trim();
   if (NO_REASONING_CONTROL.has(id)) return [];
+  const binary = BINARY_REASONING_CONTROL.get(id);
+  if (binary) return binary;
   const blocked = UNSUPPORTED_BY_PROVIDER[id];
   if (!blocked || blocked.length === 0) return HERMES_REASONING_LEVELS;
   return HERMES_REASONING_LEVELS.filter((level) => !blocked.includes(level));
