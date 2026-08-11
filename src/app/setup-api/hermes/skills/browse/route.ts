@@ -118,8 +118,15 @@ export async function GET(request: Request) {
   }
 
   // ── No index: answer from the CLI once, and kick a build for next time ──
-  const warming = isWarming();
+  // Kick the build FIRST, then report. Asking `isWarming()` beforehand meant the
+  // very first browse on a fresh device — the request that starts the build —
+  // described itself as a plain CLI answer, so the UI had nothing to distinguish
+  // "still preparing" from "genuinely nothing here" and showed the
+  // empty-catalogue copy over a catalogue that was seconds from existing.
+  // Still false when the post-failure cooldown declines to start another build,
+  // and then "no index, not building" is the honest answer.
   warmIndex();
+  const warming = isWarming();
   try {
     // A catalog-only source (skills.sh spelling, claude-marketplace, unknown)
     // has no `--source` flag — drop the filter rather than send hermes a value
