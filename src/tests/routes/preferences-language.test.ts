@@ -31,7 +31,6 @@ vi.mock("fs/promises", () => ({
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 
-const mockGet = vi.mocked(config.get);
 const mockGetAll = vi.mocked(config.getAll);
 const mockSetMany = vi.mocked(config.setMany);
 const mockActiveHarness = vi.mocked(getActiveHarness);
@@ -69,7 +68,6 @@ describe("/setup-api/preferences — language", () => {
     process.env.HOME = "/home/clawbox";
     delete process.env.HERMES_HOME;
     mockGetAll.mockResolvedValue({});
-    mockGet.mockResolvedValue(undefined as never);
     mockSetMany.mockResolvedValue(undefined);
     mockActiveHarness.mockResolvedValue("openclaw");
     const fsMod = (await import("fs/promises")).default;

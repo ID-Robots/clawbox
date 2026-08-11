@@ -17,7 +17,6 @@ vi.mock("fs/promises", () => ({
 
 import * as config from "@/lib/config-store";
 
-const mockGet = vi.mocked(config.get);
 const mockGetAll = vi.mocked(config.getAll);
 const mockSetMany = vi.mocked(config.setMany);
 
@@ -29,7 +28,6 @@ describe("/setup-api/preferences", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockGetAll.mockResolvedValue({});
-    mockGet.mockResolvedValue(undefined as never);
     mockSetMany.mockResolvedValue(undefined);
     const fsMod = (await import("fs/promises")).default;
     vi.mocked(fsMod.mkdir).mockResolvedValue(undefined as never);

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { sanitizePreferences, validatePreference } from "@/lib/preference-schema";
+import { PREFERENCE_KEY_PREFIX, sanitizePreferences, validatePreference } from "@/lib/preference-schema";
 import { personaFilesFor, writeLanguagePersona } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
 
@@ -14,10 +14,14 @@ function isAllowed(key: string) {
   return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
 }
 
-// Most keys one read may name. Every caller in the app asks for a single key
-// (see SettingsApp, i18n, mascot-client); the whole set is fetched with `all=1`
-// instead. Bound it so the size of a response follows the store rather than the
-// request.
+// Most keys one read may name, so the work and the response a request can ask
+// for do not follow the length of its query string.
+//
+// The largest caller is the `preferences_get` MCP tool, which sends its whole
+// readable-prefs allowlist in one request — 9 keys today (READABLE_PREFS in
+// mcp/tools/system.ts). The in-app callers ask for one (SettingsApp, i18n,
+// mascot-client) or use `all=1`. Headroom is deliberate: if that allowlist ever
+// grows past this cap the tool starts getting a 400, so raise this with it.
 const MAX_KEYS_PER_READ = 32;
 
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
@@ -40,8 +44,8 @@ export async function GET(req: Request) {
     // sanitizePreferences, which is where these objects end up.
     const result: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(allConfig)) {
-      if (key.startsWith("pref:")) {
-        result[key.slice(5)] = value;
+      if (key.startsWith(PREFERENCE_KEY_PREFIX)) {
+        result[key.slice(PREFERENCE_KEY_PREFIX.length)] = value;
       }
     }
     return NextResponse.json(sanitizePreferences(result));
@@ -51,20 +55,23 @@ export async function GET(req: Request) {
   if (!keysParam) {
     return NextResponse.json({ error: "keys or all param required" }, { status: 400 });
   }
-  const keys = keysParam.split(",").filter(isAllowed);
-  if (keys.length > MAX_KEYS_PER_READ) {
+  // Counted before the allowlist filter, so the bound is on what the request
+  // names rather than on what survives it.
+  const named = keysParam.split(",");
+  if (named.length > MAX_KEYS_PER_READ) {
     return NextResponse.json(
       { error: `at most ${MAX_KEYS_PER_READ} keys per request` },
       { status: 400 },
     );
   }
+  const keys = named.filter(isAllowed);
   // One read of the store rather than one per key: config.get() re-reads and
   // re-parses the whole file synchronously on every call, so the work of a
   // request would otherwise follow the length of its `keys` parameter.
   const allConfig = await config.getAll();
   const result: Record<string, unknown> = Object.create(null);
   for (const key of keys) {
-    result[key] = allConfig[`pref:${key}`];
+    result[key] = allConfig[`${PREFERENCE_KEY_PREFIX}${key}`];
   }
   return NextResponse.json(sanitizePreferences(result));
 }
@@ -88,7 +95,7 @@ export async function POST(req: Request) {
         console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
-      entries[`pref:${key}`] = value;
+      entries[`${PREFERENCE_KEY_PREFIX}${key}`] = value;
     }
     if (Object.keys(entries).length > 0) {
       await config.setMany(entries);
