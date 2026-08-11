@@ -105,6 +105,7 @@ Full documentation lives at **[docs.clawbox.com](https://docs.clawbox.com)**:
 | | |
 |---|---|
 | [Quickstart](https://docs.clawbox.com/quickstart) · [First Boot](https://docs.clawbox.com/setup/first-boot) | Unbox → power → talk, and the setup wizard |
+| [Editions](https://docs.clawbox.com/editions/overview) | OpenClaw, Hermes and Dual — what each is and what changes with it |
 | [Technical Reference](https://docs.clawbox.com/technical/quick-reference) | Quick Reference (one page), then architecture, networking, filesystem, auth, AI providers, updates |
 | [Troubleshooting](https://docs.clawbox.com/support/troubleshooting) · [Recovery](https://docs.clawbox.com/support/recovery) | Symptom-first diagnostic ladders and ordered recovery options |
 | [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface) | The full device-tool catalog and the `clawbox` CLI |
@@ -150,6 +151,42 @@ password) and navigate to:
 From the UI: open the **System Update** app. Over SSH: `sudo clawbox update`.
 Updates are release-tag based and never touch your data — details in
 [Updating ClawBox](https://docs.clawbox.com/support/updating).
+
+---
+
+## 🎛️ Editions
+
+An install is one of three **editions**, chosen when the device is produced and
+fixed for the life of that install:
+
+| Edition | Agent | Capability store | Notes |
+|---|---|---|---|
+| `openclaw` | OpenClaw gateway | App Store | The default — what every ClawBox was before editions existed |
+| `hermes` | Hermes Agent (Nous Research) | Hermes Skills | The OpenClaw gateway is not installed; its unit is masked and the `openclaw` CLI is absent |
+| `dual` | Both, switchable at runtime | Both | Premium — the switcher requires a licence issued by ID Robots |
+
+Select it when you run the installer:
+
+```bash
+sudo CLAWBOX_EDITION=hermes bash install.sh
+```
+
+`install.sh` records the value in the root-owned `/etc/clawbox/edition.env`.
+That file is the authority: the web server resolves the edition from it per
+request, the installer re-reads it on every update, and the MCP server reads it
+once at startup. It is not a user setting and updates preserve it. On a device,
+`clawbox edition` prints it.
+
+**What changes on the `hermes` edition:** the App Store and OpenClaw Control UI
+apps are hidden, the **Skills** app takes their place, gateway web paths
+(`/api/*`, `/chat`) return 404 and port `18789` is closed, AI providers are
+configured through Hermes instead of the gateway, and `clawbox update` is
+refused in favour of **Settings → System Update**. The MCP tool set differs too
+— `app_search`/`app_install`, the coding family and coordinate browser control
+are OpenClaw-only; `skill_*` and `ai_*` are Hermes-only. See
+[`mcp/README.md`](mcp/README.md) for the authoritative tool matrix.
+
+Full documentation: **[docs.clawbox.com/editions/overview](https://docs.clawbox.com/editions/overview)**.
 
 ---
 
