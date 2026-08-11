@@ -46,10 +46,37 @@ fi
 # carry, so a lock reading `CLAWBOX_EDITION="Hermes"` compares equal to `hermes`.
 _norm() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d "[:space:]\"'"; }
 
-RECORDED_EDITION=""
-if [ -f "$EDITION_FILE" ]; then
-  RECORDED_EDITION="$(_norm "$(sed -n 's/^[[:space:]]*CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' "$EDITION_FILE" 2>/dev/null | tail -n 1)")"
+# An unrecognised RECORDED value describes an openclaw device everywhere else
+# (install.sh's _normalise_edition applies exactly this rule), so map it the same
+# way. Treating it as *absent* instead would be the dangerous reading: it would
+# clear the refusal and let a typo'd lock be provisioned straight over.
+_norm_recorded() {
+  local v
+  v="$(_norm "${1:-}")"
+  case "$v" in
+    openclaw|hermes|dual|"") printf '%s' "$v" ;;
+    *) printf 'openclaw' ;;
+  esac
+}
+
+# Read `CLAWBOX_EDITION=x` from an EnvironmentFile or `Environment=CLAWBOX_EDITION=x`
+# from a systemd drop-in — same two shapes install.sh's _read_edition_from_file
+# accepts.
+_read_edition_file() {
+  [ -f "$1" ] || return 0
+  sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\(Environment=\)\{0,1\}"\{0,1\}CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' \
+    "$1" 2>/dev/null | tail -n 1
+}
+
+# Root-owned records, in authority order. The legacy drop-in matters: on a device
+# provisioned before /etc/clawbox/edition.env existed it is the ONLY durable
+# record, so reading just the new file would leave that whole part of the fleet
+# able to bypass the refusal below.
+_recorded_raw="$(_read_edition_file "$EDITION_FILE")"
+if [ -z "$_recorded_raw" ]; then
+  _recorded_raw="$(_read_edition_file "$EDITION_DROPIN")"
 fi
+RECORDED_EDITION="$(_norm_recorded "$_recorded_raw")"
 REQUESTED_EDITION="$(_norm "${CLAWBOX_EDITION:-}")"
 
 # This script is the OTHER writer of the edition lock (§4 below rewrites both

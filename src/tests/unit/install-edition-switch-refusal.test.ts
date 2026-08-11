@@ -231,6 +231,27 @@ d("the paths that must stay unaffected", () => {
     expect(r.stdout).toContain("RESOLVED=hermes");
   });
 
+  it("normalises whitespace the same way on both sides of the comparison", () => {
+    // The recorded value is whitespace-stripped by _normalise_edition. If the
+    // resolution rule did not strip it too, a padded CLAWBOX_EDITION resolved to
+    // openclaw (unrecognised → warn → openclaw) while the lock still read
+    // hermes — a refusal on a device nobody was trying to change, reporting a
+    // requested edition the operator never typed.
+    writeLock("hermes");
+    const r = runRefusal({ CLAWBOX_EDITION: "  hermes  " });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("RESOLVED=hermes");
+    expect(r.stderr).toBe("");
+  });
+
+  it("still refuses a padded value that IS a different edition", () => {
+    // Whitespace tolerance must not blunt the check itself.
+    writeLock("hermes");
+    const r = runRefusal({ CLAWBOX_EDITION: " openclaw " });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/Requested edition:\s+openclaw/);
+  });
+
   it("does not refuse over an unrecognised recorded value", () => {
     // An unrecognised edition resolves to openclaw everywhere else, so a typo'd
     // lock describes an openclaw box. Refusing here would brick its updates.
@@ -521,6 +542,7 @@ function runHermesEditionStep0(env: Record<string, string> = {}): {
   const script = [
     "set -euo pipefail",
     `EDITION_FILE=${JSON.stringify(lockPath)}`,
+    `EDITION_DROPIN=${JSON.stringify(dropinPath)}`,
     'log() { echo "[hermes-edition] $*"; }',
     HERMES_EDITION_STEP_0,
     'printf "EDITION=%s\\n" "$EDITION"',
@@ -551,6 +573,30 @@ d("scripts/setup-hermes-edition.sh refuses the same transition", () => {
     const r = runHermesEditionStep0({ CLAWBOX_EDITION: "openclaw" });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("already installed as the 'hermes' edition");
+  });
+
+  it("refuses on the legacy drop-in too", () => {
+    // Reading only /etc/clawbox/edition.env left every device provisioned before
+    // that file existed able to walk straight past the refusal — the drop-in is
+    // their only durable record.
+    writeLegacyDropin("hermes");
+    const r = runHermesEditionStep0({ CLAWBOX_EDITION: "dual" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("already installed as the 'hermes' edition");
+  });
+
+  it("treats an unrecognised recorded value as openclaw, not as absent", () => {
+    // Matching install.sh's rule. Reading it as "absent" would clear the
+    // refusal and let a typo'd lock be provisioned straight over.
+    writeLock("openclw");
+    const refused = runHermesEditionStep0({ CLAWBOX_EDITION: "hermes" });
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain("already installed as the 'openclaw' edition");
+
+    // ...and with no request it is simply an openclaw box: nothing to do.
+    const bare = runHermesEditionStep0();
+    expect(bare.status).toBe(0);
+    expect(bare.stdout).toContain("nothing to do");
   });
 
   it("permits the switch with the same escape hatch", () => {

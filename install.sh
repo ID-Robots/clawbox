@@ -141,7 +141,14 @@ fi
 # Lower-case to match the TypeScript side (src/lib/edition-source.ts), which has
 # always normalised case — otherwise "Hermes" in edition.txt silently installs
 # an OpenClaw box.
-CLAWBOX_EDITION="$(printf '%s' "$CLAWBOX_EDITION_RAW" | tr '[:upper:]' '[:lower:]')"
+#
+# Whitespace is stripped for the same reason, and so that this rule is IDENTICAL
+# to _normalise_edition above. When only one of the two stripped whitespace, a
+# padded `CLAWBOX_EDITION=" hermes "` resolved to openclaw (unrecognised → warn →
+# openclaw) while the lock still read hermes, and the refusal below fired on a
+# device nobody was trying to change — reporting "Requested edition: openclaw"
+# at an operator who had typed hermes.
+CLAWBOX_EDITION="$(printf '%s' "$CLAWBOX_EDITION_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 case "$CLAWBOX_EDITION" in
   openclaw|hermes|dual) ;;
   "") CLAWBOX_EDITION="openclaw" ;;
