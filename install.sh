@@ -1702,14 +1702,20 @@ step_post_update() {
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
-  # Re-provision the Hermes side (dashboard auth, units, shared identity) on the
-  # editions that run it. Without this an update could deliver a new proxy /
-  # dashboard unit but never restart or re-configure them, and a Hermes box
-  # whose auth provider had drifted stayed broken until a full reinstall.
-  # Runs after step_systemd_services so the unit files on disk are current.
-  if has_hermes_harness; then
-    step_hermes_edition || echo "  Warning: hermes_edition step failed (non-fatal)"
-  fi
+  # NOTE: Hermes re-provisioning is deliberately NOT called from here any more.
+  #
+  # It used to run as `step_hermes_edition || echo "Warning: … (non-fatal)"`,
+  # which meant a device that failed to provision the entire edition — no
+  # dashboard auth provider, no proxy, no MCP registration — still finished the
+  # update green, with the failure buried in a journal nobody reads.
+  #
+  # The in-app updater now dispatches `hermes_edition` as its own step, right
+  # after this one, so the work is visible while it happens and a failure is
+  # reported as a failure. Ordering is unchanged: it still lands after
+  # step_systemd_services has refreshed the unit files it reads.
+  #
+  # Fresh installs are unaffected — they call step_hermes_edition directly near
+  # the end of the full-install path, not through here.
   # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
   # the edition straight off /etc/clawbox/edition.env on demand
   # (src/lib/edition-source.ts stats the file per call and caches by mtime), so

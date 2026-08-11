@@ -3,7 +3,13 @@ import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
-import { findOpenclawBin, restartGateway, openclawIsAbsent } from "./openclaw-config";
+import {
+  findOpenclawBin,
+  restartGateway,
+  openclawIsAbsent,
+  gatewayIsAbsent,
+} from "./openclaw-config";
+import { hasHermesHarness } from "./edition-source";
 import { isPortOpen } from "./port-probe";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
@@ -46,6 +52,23 @@ interface UpdateStepDef {
    * the unit finish in the background. Genuine unit failures still fail.
    */
   advisoryOnOverrun?: boolean;
+  /**
+   * Whether this step applies to the device it is about to run on. Absent
+   * means "always applies".
+   *
+   * Editions differ in which harnesses they ship, so some steps have nothing
+   * to do on some SKUs. Expressing that as a predicate on the step — rather
+   * than an `if (edition === …)` inside each body — keeps the decision in one
+   * readable place and, crucially, lets the runner DROP the step from the list
+   * entirely. A dropped step never renders, so a Hermes owner is not shown
+   * OpenClaw work being "completed" on a box that has no OpenClaw.
+   *
+   * Each step names the helper matching its own reason for being skipped
+   * (binary absent vs gateway absent) rather than one blanket edition check:
+   * the two happen to coincide on today's SKUs, and a step that lies about why
+   * it was skipped is how they would silently diverge later.
+   */
+  applies?: () => boolean;
 }
 
 /** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
@@ -431,18 +454,28 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Updating OpenClaw",
     timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,
+    // No `openclaw` binary on this SKU to install. install.sh's counterpart
+    // already early-returns here, so the step reported "completed" — several
+    // minutes of budget and a line of UI spent announcing work that could not
+    // happen. Present on openclaw and dual.
+    applies: () => !openclawIsAbsent(),
   },
   {
     id: "openclaw_patch",
     label: "Patching OpenClaw gateway",
     timeoutMs: 30_000,
     requiresRoot: true,
+    // Nothing installed to patch. Same early-return as above.
+    applies: () => !openclawIsAbsent(),
   },
   {
     id: "gateway_setup",
     label: "Configuring gateway service",
     timeoutMs: 30_000,
     requiresRoot: true,
+    // clawbox-gateway.service is deliberately removed and MASKED on this SKU
+    // (step_edition_gateway_state), so there is no unit to configure.
+    applies: () => !gatewayIsAbsent(),
   },
   {
     id: RESTART_STEP_ID,
@@ -474,13 +507,52 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     advisoryOnOverrun: true,
   },
   {
+    // Re-provision the Hermes side: dashboard + proxy units, dashboard auth,
+    // shared identity, MCP registration, gateway removal. Runs AFTER
+    // post_update so step_systemd_services has already refreshed the unit
+    // files this reads, and after the rebuild so it is the NEW install.sh.
+    //
+    // This work already happened — inside step_post_update, wrapped in
+    // `|| echo "Warning: … (non-fatal)"`. That made a total failure to
+    // provision the edition invisible: the update went green while the
+    // dashboard the customer actually uses could be unconfigured. It is the
+    // same work, hoisted to where it can be seen and can fail honestly.
+    id: "hermes_edition",
+    label: "Provisioning Hermes edition",
+    timeoutMs: 300_000,
+    requiresRoot: true,
+    applies: hasHermesHarness,
+  },
+  {
     id: "gateway_verify",
     label: "Verifying gateway health",
     timeoutMs: 90_000,
     customRun: () => ensureGatewayHealthy(),
     failFast: true,
+    // The gateway is absent by design on this SKU — port 18789 is closed and
+    // the unit is masked — so this step could only ever throw. It also
+    // directly contradicted the step before it: post_update's smoke test
+    // fails the install if anything IS listening on 18789.
+    applies: () => !gatewayIsAbsent(),
   },
 ];
+
+/**
+ * The steps that apply to THIS device, in order.
+ *
+ * Evaluated per run, never memoized: the edition is read from a root-owned
+ * file that post_update itself can re-bake (step_edition_lock migrates a
+ * pre-3.x box onto /etc/clawbox/edition.env), so a list frozen at module load
+ * could describe the wrong SKU.
+ *
+ * The SAME array must feed both `state.steps` and the runner — `runUpdate`
+ * addresses `state.steps[i]` by position, so two independently-filtered lists
+ * would silently label every step after the first omission with its
+ * neighbour's name.
+ */
+function applicableSteps(steps: UpdateStepDef[]): UpdateStepDef[] {
+  return steps.filter((step) => !step.applies || step.applies());
+}
 
 /**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
@@ -726,10 +798,10 @@ function createStepStates(steps: UpdateStepDef[]): StepState[] {
   return steps.map((s) => ({ id: s.id, label: s.label, status: "pending" as const }));
 }
 
-function createInitialState(): UpdateState {
+function createInitialState(steps: UpdateStepDef[] = applicableSteps(UPDATE_STEPS)): UpdateState {
   return {
     phase: "idle",
-    steps: createStepStates(UPDATE_STEPS),
+    steps: createStepStates(steps),
     currentStepIndex: -1,
   };
 }
@@ -782,7 +854,11 @@ export async function checkContinuation(): Promise<boolean> {
 
   await set("update_needs_continuation", undefined);
 
-  const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
+  // Resolve the list ONCE and reuse it for the state, the resume index and the
+  // runner. The edition is stable across the reboot (post_update re-bakes the
+  // same value), so this matches the list the pre-restart half ran.
+  const steps = applicableSteps(UPDATE_STEPS);
+  const restartIndex = steps.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
 
   // The flag only proves the rebuild unit was STARTED, not that it rebuilt
@@ -801,7 +877,7 @@ export async function checkContinuation(): Promise<boolean> {
     const message = unitFailed
       ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
       : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
-    state = createInitialState();
+    state = createInitialState(steps);
     state.phase = "failed";
     for (let i = 0; i < restartIndex; i++) {
       state.steps[i].status = "completed";
@@ -813,14 +889,14 @@ export async function checkContinuation(): Promise<boolean> {
   }
 
   running = true;
-  state = createInitialState();
+  state = createInitialState(steps);
   state.phase = "running";
   for (let i = 0; i <= restartIndex; i++) {
     state.steps[i].status = "completed";
   }
   state.currentStepIndex = startFrom;
 
-  launchUpdate(UPDATE_STEPS, startFrom, { markCompleted: true });
+  launchUpdate(steps, startFrom, { markCompleted: true });
   return true;
 }
 
@@ -830,11 +906,12 @@ export function startUpdate(): { started: boolean; error?: string } {
   }
 
   running = true;
-  state = createInitialState();
+  const steps = applicableSteps(UPDATE_STEPS);
+  state = createInitialState(steps);
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  launchUpdate(UPDATE_STEPS, 0, { markCompleted: true });
+  launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }
 
@@ -865,6 +942,14 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (running) {
     return { started: false, error: "Update already in progress" };
+  }
+  // Every step in this list is OpenClaw's, so there is no filtered version of
+  // it worth running — the whole flow is inapplicable. Refuse honestly instead
+  // of no-opping the two install steps and then failing on a gateway this SKU
+  // does not have. The UI never offers this on Hermes (getVersionInfo reports
+  // no OpenClaw update), but the endpoint is reachable regardless.
+  if (openclawIsAbsent()) {
+    return { started: false, error: "This edition does not ship OpenClaw." };
   }
 
   running = true;
