@@ -25,31 +25,44 @@ import { useEffect, useRef, type RefObject } from "react";
 // on the backdrop the accessible dialog would be the whole viewport, and its
 // accessible name would swallow every bit of text behind the scrim.
 
+// Candidate types only — `disabled`, `hidden` and `inert` are all filtered
+// below rather than encoded here, so the rule for "can this take focus" lives
+// in exactly one place. (The selector form would also miss a `[tabindex]`
+// element carrying `disabled`.)
 const FOCUSABLE_SELECTOR = [
   "a[href]",
   "area[href]",
-  "button:not([disabled])",
-  "input:not([disabled]):not([type='hidden'])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
+  "button",
+  "input:not([type='hidden'])",
+  "select",
+  "textarea",
   "iframe",
   "[contenteditable='true']",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-/** Focusable descendants, in DOM order, skipping anything hidden or inert. */
-function focusableWithin(container: HTMLElement): HTMLElement[] {
+/**
+ * Focusable descendants, in DOM order, skipping anything hidden or inert.
+ *
+ * Exported for its own unit tests: the visibility branch below cannot be
+ * reached through the React components, because the engine that implements
+ * `checkVisibility` is the one the component tests do not run in.
+ */
+export function focusableWithin(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
     if (el.hasAttribute("disabled") || el.getAttribute("aria-hidden") === "true") return false;
-    if (el.hidden || el.closest("[hidden], [inert]") !== null) return false;
-    // Layout-aware check where the engine offers one. `visibilityProperty`
-    // adds `visibility: hidden` to the default display/content-visibility
-    // checks; opacity is deliberately NOT included, since a 0-opacity control
-    // is still focusable and still reachable by a screen reader.
+    // `closest` covers the element itself, and `hidden` reflects to the
+    // attribute, so this one test catches both self and ancestor.
+    if (el.closest("[hidden], [inert]") !== null) return false;
+    // Capability check, not an environment check: `checkVisibility` is CSSOM-View
+    // and needs a layout engine. `visibilityProperty` adds `visibility: hidden`
+    // to the default display/content-visibility tests; opacity is deliberately
+    // excluded, since a 0-opacity control is still focusable and still reachable
+    // by a screen reader.
     //
-    // jsdom has no layout and does not implement checkVisibility, so under test
-    // every control counts — which is what we want: a layout heuristic there
-    // would filter the whole dialog away and silently make the trap untestable.
+    // Consequence worth knowing: jsdom does not implement it, so this filter is
+    // inert under the component tests and every control there counts. That is
+    // why it has direct unit tests with a stubbed implementation.
     if (typeof el.checkVisibility === "function" && !el.checkVisibility({ visibilityProperty: true })) {
       return false;
     }
@@ -65,8 +78,9 @@ function focusableWithin(container: HTMLElement): HTMLElement[] {
  * the React tree (not through a portal), so the page behind them is a sibling
  * several levels down, not a sibling of the app root.
  *
- * Returns an undo function. Previous attribute values are captured per element
- * so nesting one dialog inside another restores correctly on the way out.
+ * Returns an undo function. Each element's prior attribute values are captured
+ * and put back, rather than blindly removed, so a dialog opened over another
+ * dialog does not strip the outer one's marking when it closes.
  */
 function hideOutside(panel: HTMLElement): () => void {
   const touched: { el: Element; inert: string | null; ariaHidden: string | null }[] = [];
@@ -88,9 +102,9 @@ function hideOutside(panel: HTMLElement): () => void {
     node = node.parentElement;
   }
   return () => {
-    // Reverse order so a nested dialog's undo runs before the outer one's.
-    for (let i = touched.length - 1; i >= 0; i--) {
-      const { el, inert, ariaHidden } = touched[i];
+    // Order is irrelevant: each level's siblings are disjoint from the next
+    // level's (which are their ancestors), so no element appears twice.
+    for (const { el, inert, ariaHidden } of touched) {
       if (inert === null) el.removeAttribute("inert");
       else el.setAttribute("inert", inert);
       if (ariaHidden === null) el.removeAttribute("aria-hidden");
@@ -99,8 +113,26 @@ function hideOutside(panel: HTMLElement): () => void {
   };
 }
 
+// Open dialogs, oldest first. Only the last entry reacts to keys.
+//
+// Dialogs on this desktop DO stack: TierUpgradeCelebration mounts from the
+// page shell independently of any window, and the sign-in modal can open over
+// ClawKeep or Remote Control. Each open dialog adds its own capture listener
+// to `document`, and stopPropagation() does not stop the OTHER listeners
+// already registered on that same node — so without this, one Escape closed
+// every open dialog at once, and the older dialog's Tab handler yanked focus
+// out of the newer panel it was supposed to be trapped in.
+const openPanels: HTMLElement[] = [];
+
 export interface ModalDialogOptions {
-  /** Whether the dialog is currently rendered. Defaults to true. */
+  /**
+   * Whether the dialog is currently rendered. Defaults to true.
+   *
+   * This is the normal contract, not a workaround: a modal that stays mounted
+   * and self-gates (`if (!open) return null`) is the dominant React shape, and
+   * two of this hook's callers are written that way. Callers that mount and
+   * unmount the dialog outright can leave it alone.
+   */
   open?: boolean;
   /** Called on Escape. Also used as the "dismiss" action for the trap. */
   onClose: () => void;
@@ -130,9 +162,21 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
   useEffect(() => {
     if (!open) return;
     const panel = panelRef.current;
-    if (!panel) return;
+    if (!panel) {
+      // Silence here would mean a dialog with no trap and no signal — the worst
+      // failure mode for a11y infrastructure. Callers must render the panel in
+      // the same commit that flips `open`; one that gates its panel behind an
+      // inner loading state has to keep `open` false until the panel exists.
+      if (process.env.NODE_ENV !== "production") {
+        console.error(
+          "useModalDialog: `open` is true but the panel ref is not attached — no focus trap is active.",
+        );
+      }
+      return;
+    }
 
     const restoreTarget = document.activeElement as HTMLElement | null;
+    openPanels.push(panel);
 
     // Move focus in. If the dialog has no focusable control (a progress-only
     // overlay), focus the panel itself so the trap still has an anchor and the
@@ -148,6 +192,9 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
     const undoHide = hideOutside(panel);
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Only the topmost dialog reacts. A dialog underneath is already `inert`
+      // (the newer one marked it), so acting on keys would be wrong twice over.
+      if (openPanels[openPanels.length - 1] !== panel) return;
       if (e.key === "Escape") {
         // Stop here: the window/app behind must not also act on this Escape.
         e.preventDefault();
@@ -190,6 +237,8 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
+      const at = openPanels.lastIndexOf(panel);
+      if (at !== -1) openPanels.splice(at, 1);
       undoHide();
       // Restore focus to whatever opened the dialog. `isConnected` guards the
       // case where the trigger itself was removed by the action just taken.

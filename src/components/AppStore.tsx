@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
@@ -310,10 +310,13 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   }, []);
 
   const dismissConfirmInstall = useCallback(() => setConfirmInstall(null), []);
-  // Focus containment for the install confirmation below. The hook has to be
-  // called unconditionally (rules of hooks) even though the dialog is
-  // conditionally rendered, hence the `open` flag rather than mounting the
-  // dialog as its own component.
+  // Generated, not hardcoded: dialogs on this desktop can stack, and two
+  // elements sharing an id would point aria-labelledby at whichever the
+  // browser found first.
+  const confirmTitleId = useId();
+  // Focus containment for the install confirmation below. `open` is the hook's
+  // normal contract for a dialog whose panel is rendered conditionally from a
+  // component that stays mounted — not a workaround for anything here.
   const confirmPanelRef = useModalDialog<HTMLDivElement>({
     open: confirmInstall !== null,
     onClose: dismissConfirmInstall,
@@ -453,13 +456,13 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       onClick={dismissConfirmInstall}>
       <div
         ref={confirmPanelRef}
-        role="dialog" aria-modal="true" aria-labelledby="confirm-install-title"
+        role="dialog" aria-modal="true" aria-labelledby={confirmTitleId}
         className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
             <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }} aria-hidden="true">download</span>
           </div>
-          <h3 id="confirm-install-title" className="text-lg font-semibold">{t("store.confirmTitle", { name: confirmInstall.name })}</h3>
+          <h3 id={confirmTitleId} className="text-lg font-semibold">{t("store.confirmTitle", { name: confirmInstall.name })}</h3>
         </div>
         <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
           <div className="flex gap-2">

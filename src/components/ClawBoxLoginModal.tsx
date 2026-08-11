@@ -76,7 +76,6 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
         </div>
         <div className="flex flex-col gap-2">
           <a
-            data-primary
             href={PORTAL_LOGIN_URL}
             target="_blank"
             rel="noopener noreferrer"

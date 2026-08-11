@@ -156,17 +156,31 @@ export default function TierUpgradeCelebration() {
 
   const contentKey: ContentKey = dialog.kind === "upgrade" ? dialog.tier : "free";
   const content = CONTENT[contentKey];
+  // No `autoFocus` in either branch: useModalDialog focuses the first focusable
+  // control in DOM order, and React applies autoFocus during commit — before
+  // effects — so the hook would win and leave the attribute lying about who
+  // gets focus. DOM order is therefore the only knob, and it is used below.
   const primary = dialog.kind === "upgrade" ? (
     <button
       type="button"
       onClick={onClose}
-      autoFocus
       className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer w-full"
     >
       {t("tierCelebration.upgradeCta")}
     </button>
   ) : (
-    <div className="flex flex-col gap-2">
+    // Dismiss FIRST in DOM order so the trap opens on it rather than on a link
+    // that leaves the device for the billing portal in a new tab.
+    // `flex-col-reverse` renders the first child last, so the paid CTA still
+    // sits on top visually — the layout is unchanged, only the focus order.
+    <div className="flex flex-col-reverse gap-2">
+      <button
+        type="button"
+        onClick={onClose}
+        className="px-4 py-2 rounded-xl text-sm text-white/60 hover:text-white/85 hover:bg-white/[0.04] cursor-pointer"
+      >
+        {t("tierCelebration.freeCta")}
+      </button>
       <a
         href={PORTAL_DASHBOARD_URL}
         target="_blank"
@@ -177,14 +191,6 @@ export default function TierUpgradeCelebration() {
         <span className="material-symbols-rounded" style={{ fontSize: 18 }}>open_in_new</span>
         {t("tierCelebration.resubscribe")}
       </a>
-      <button
-        type="button"
-        onClick={onClose}
-        autoFocus
-        className="px-4 py-2 rounded-xl text-sm text-white/60 hover:text-white/85 hover:bg-white/[0.04] cursor-pointer"
-      >
-        {t("tierCelebration.freeCta")}
-      </button>
     </div>
   );
 

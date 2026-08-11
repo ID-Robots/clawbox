@@ -74,7 +74,7 @@ afterEach(() => {
 
 /** Open the confirmation from the store list and return its panel. */
 async function openInstallConfirmation() {
-  render(<AppStore installedAppIds={[]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+  const view = render(<AppStore installedAppIds={[]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
 
   const installButton = await screen.findByRole("button", { name: "store.install" });
   // Focus the trigger the way a keyboard user would have, so the restore
@@ -85,7 +85,7 @@ async function openInstallConfirmation() {
   fireEvent.click(installButton);
 
   const panel = await screen.findByRole("dialog");
-  return { panel, installButton };
+  return { panel, installButton, unmount: view.unmount };
 }
 
 /** Every control the user can reach inside the dialog, in DOM order. */
@@ -136,8 +136,10 @@ describe("app store install confirmation — keyboard access", () => {
   it("pulls focus back in if it lands on the page behind the dialog", async () => {
     const { panel } = await openInstallConfirmation();
 
-    // The exact failure the trap exists to prevent: focus sitting on a store
-    // control behind the scrim while the dialog is open.
+    // Focus parked on a store control behind the scrim. A real browser would
+    // refuse this — the store is `inert` while the dialog is open — but jsdom
+    // does not implement `inert`, which makes it a convenient way to drive the
+    // recovery branch: whatever put focus out there, Tab must bring it back.
     const search = screen.getByPlaceholderText("store.searchApps");
     expect(panel.contains(search)).toBe(false);
     search.focus();
@@ -162,9 +164,14 @@ describe("app store install confirmation — keyboard access", () => {
     const { panel } = await openInstallConfirmation();
 
     expect(panel).toHaveAttribute("aria-modal", "true");
-    // The backdrop covers the viewport; had it carried the role, the accessible
-    // dialog would be the whole page and its name would absorb the store behind.
-    expect(panel.className).not.toContain("fixed inset-0");
+    // Asserted structurally rather than on class text: the role must sit on a
+    // CHILD of the full-screen backdrop. Had the backdrop carried it, the
+    // accessible dialog would be the whole page and its name would absorb the
+    // store behind it.
+    const backdrop = panel.parentElement as HTMLElement;
+    expect(backdrop).not.toHaveAttribute("role", "dialog");
+    expect(backdrop.contains(panel)).toBe(true);
+    expect(panel).not.toBe(backdrop);
     const title = document.getElementById(panel.getAttribute("aria-labelledby") as string);
     expect(title).toHaveTextContent("store.confirmTitle");
   });
@@ -185,6 +192,29 @@ describe("app store install confirmation — keyboard access", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     for (const el of hiddenBehind) {
+      expect(el).not.toHaveAttribute("inert");
+      expect(el).not.toHaveAttribute("aria-hidden");
+    }
+  });
+
+  it("restores the page behind it when the dialog is torn down while still open", async () => {
+    // Closing is the easy path. The dangerous one is the whole tree going away
+    // with the dialog still up — a window closed, a route swapped, the app
+    // remounted. If the restore only ran on close, `inert` + `aria-hidden`
+    // would outlive the dialog and quietly make background content
+    // unreachable to assistive tech and to any role-based query.
+    const { panel, unmount } = await openInstallConfirmation();
+
+    const store = screen.getByTestId("app-store");
+    const hiddenBehind = Array.from(store.children).filter((el) => !el.contains(panel));
+    expect(hiddenBehind.length).toBeGreaterThan(0);
+    expect(hiddenBehind[0]).toHaveAttribute("aria-hidden", "true");
+    // Hold the nodes across the unmount so they can be inspected afterwards.
+    const detached = [...hiddenBehind];
+
+    unmount();
+
+    for (const el of detached) {
       expect(el).not.toHaveAttribute("inert");
       expect(el).not.toHaveAttribute("aria-hidden");
     }

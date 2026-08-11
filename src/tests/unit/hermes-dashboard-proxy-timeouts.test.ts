@@ -1,9 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
-import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import { createSessionCookie } from "@/lib/auth";
 
 /**
  * scripts/hermes-dashboard-proxy.js — upstream timeouts.
@@ -30,31 +30,28 @@ const SCRIPT = path.resolve(process.cwd(), "scripts/hermes-dashboard-proxy.js");
 const TIMEOUT_MS = 300;
 const SESSION_SECRET = "test-session-secret-for-proxy-timeouts";
 
-/** A `clawbox_session` the proxy's HMAC gate accepts (same scheme as auth.ts). */
+/**
+ * A `clawbox_session` the proxy's HMAC gate accepts.
+ *
+ * Minted with the PRODUCTION helper, not a copy of its format. The proxy is a
+ * standalone script and re-implements the verification side in plain JS, so it
+ * cannot import `auth.ts` — this test is the only thing holding the two in
+ * step. A hand-rolled cookie here would keep passing against a payload shape
+ * `auth.ts` had already moved on from, which is precisely the drift the test
+ * exists to catch.
+ *
+ * `hermes_session_at` puts the request on the pass-through path so the test
+ * exercises forwarding, not the SSO broker.
+ */
 function sessionCookie(): string {
-  const payload = Buffer.from(
-    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, gen: 0 }),
-  )
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
-  // `hermes_session_at` puts the request on the pass-through path so the test
-  // exercises forwarding, not the SSO broker.
-  return `clawbox_session=${payload}.${sig}; hermes_session_at=stub`;
+  return `clawbox_session=${createSessionCookie(3600, SESSION_SECRET)}; hermes_session_at=stub`;
 }
 
-interface Started {
-  server: http.Server;
-  port: number;
-}
-
-function listen(server: http.Server | net.Server): Promise<Started> {
+/** Bind on an ephemeral port and resolve with the one it got. */
+function listen(server: http.Server | net.Server): Promise<number> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
-      const addr = server.address() as net.AddressInfo;
-      resolve({ server: server as http.Server, port: addr.port });
+      resolve((server.address() as net.AddressInfo).port);
     });
   });
 }
@@ -62,6 +59,12 @@ function listen(server: http.Server | net.Server): Promise<Started> {
 function close(server?: http.Server | net.Server): Promise<void> {
   return new Promise((resolve) => {
     if (!server) return resolve();
+    // `close()` only stops NEW connections and waits for existing ones to end.
+    // These tests deliberately leave half-finished sockets around (a stalled
+    // upgrade, a held-open request), so waiting for them is waiting forever.
+    // http.Server can drop them itself; a plain net.Server cannot, which is why
+    // those stubs track their sockets and destroy them in afterAll.
+    if ("closeAllConnections" in server) server.closeAllConnections();
     server.close(() => resolve());
   });
 }
@@ -112,6 +115,9 @@ const heldSockets: net.Socket[] = [];
 let muteTcp: net.Server;
 let muteTcpPort: number;
 
+/** Stub upstreams a single test spun up; torn down with the rest in afterAll. */
+const adHocServers: net.Server[] = [];
+
 let proxy: http.Server;
 let proxyPort: number;
 
@@ -126,16 +132,17 @@ beforeAll(async () => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("dashboard ok");
   });
-  ({ port: upstreamPort } = await listen(upstream));
+  upstreamPort = await listen(upstream);
 
   muteTcp = net.createServer((socket) => {
     heldSockets.push(socket);
   });
-  const muted = await listen(muteTcp);
-  muteTcpPort = muted.port;
+  muteTcpPort = await listen(muteTcp);
 });
 
 afterAll(async () => {
+  // Sockets first: these servers are deliberately holding half-finished
+  // connections, and `close()` on a net.Server waits for every one of them.
   for (const s of heldSockets) {
     try {
       s.destroy();
@@ -143,13 +150,33 @@ afterAll(async () => {
       /* already gone */
     }
   }
-  await close(upstream);
-  await close(muteTcp);
+  await Promise.all([close(upstream), close(muteTcp), ...adHocServers.map(close)]);
+});
+
+// Every env key startProxy() may write. Snapshotted so the suite cannot leak
+// a proxy-shaped environment into whatever else shares this worker.
+const ENV_KEYS = [
+  "SESSION_SECRET",
+  "ALLOWED_HOSTS",
+  "CLAWBOX_ROOT",
+  "HERMES_DASH_HOST",
+  "HERMES_PORT",
+  "HERMES_DASH_UPSTREAM_TIMEOUT_MS",
+  "HERMES_DASH_WS_TIMEOUT_MS",
+  "HERMES_DASH_LOGIN_TIMEOUT_MS",
+] as const;
+const envBefore = new Map<string, string | undefined>();
+
+beforeAll(() => {
+  for (const key of ENV_KEYS) envBefore.set(key, process.env[key]);
 });
 
 afterEach(async () => {
   await close(proxy);
-  delete require_.cache[require_.resolve(SCRIPT)];
+  for (const [key, value] of envBefore) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 /**
@@ -168,10 +195,12 @@ async function startProxy(env: Record<string, string>) {
     HERMES_DASH_LOGIN_TIMEOUT_MS: String(TIMEOUT_MS),
     ...env,
   });
+  // The proxy snapshots env at module load, so every start needs a fresh one.
+  // This is also what clears the module's Hermes session cache between tests.
   delete require_.cache[require_.resolve(SCRIPT)];
   const mod = require_(SCRIPT);
   proxy = mod.createProxyServer();
-  ({ port: proxyPort } = await listen(proxy));
+  proxyPort = await listen(proxy);
   return mod;
 }
 
@@ -182,10 +211,9 @@ describe("hermes dashboard proxy — module shape", () => {
     const mod = await startProxy({ HERMES_PORT: String(upstreamPort) });
 
     expect(typeof mod.createProxyServer).toBe("function");
-    expect(typeof mod.handleRequest).toBe("function");
-    expect(typeof mod.handleUpgrade).toBe("function");
-    // A second server can be built and thrown away: importing the module has no
-    // side effect on any port.
+    // The regression this guards: the script used to call listen() at import
+    // time, so merely loading it bound :8090. A server built here must be inert
+    // until something asks it to listen.
     const spare = mod.createProxyServer();
     expect(spare.listening).toBe(false);
     spare.close();
@@ -231,7 +259,7 @@ describe("hermes dashboard proxy — upstream timeouts", () => {
   it("answers 502 when the upstream is not listening at all", async () => {
     // Bind and immediately release a port so we know nothing is on it.
     const scratch = net.createServer();
-    const { port: deadPort } = await listen(scratch);
+    const deadPort = await listen(scratch);
     await close(scratch);
 
     await startProxy({ HERMES_PORT: String(deadPort) });
@@ -242,41 +270,64 @@ describe("hermes dashboard proxy — upstream timeouts", () => {
     expect(res.body).toContain("not reachable");
   });
 
-  it("closes a WebSocket upgrade with 504 when the upstream never completes the handshake", async () => {
+  it("closes a WebSocket upgrade with 504 when the upstream never speaks at all", async () => {
     await startProxy({ HERMES_PORT: String(muteTcpPort) });
 
-    const raw = await new Promise<{ text: string; elapsedMs: number }>((resolve, reject) => {
-      const startedAt = Date.now();
-      const socket = net.connect(proxyPort, "127.0.0.1", () => {
-        socket.write(
-          [
-            "GET /ws HTTP/1.1",
-            `Host: 127.0.0.1:${proxyPort}`,
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            "Sec-WebSocket-Version: 13",
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
-            `Origin: http://127.0.0.1:${proxyPort}`,
-            `Cookie: ${sessionCookie()}`,
-            "",
-            "",
-          ].join("\r\n"),
-        );
-      });
-      let text = "";
-      socket.on("data", (c) => {
-        text += c.toString();
-      });
-      socket.on("close", () => resolve({ text, elapsedMs: Date.now() - startedAt }));
-      socket.on("error", reject);
-      socket.setTimeout(TIMEOUT_MS * 20, () => {
-        socket.destroy();
-        reject(new Error("upgrade hung — proxy never answered or closed"));
-      });
-    });
+    const raw = await attemptUpgrade();
 
     // The browser must be told; a silent close is a 1006 with no explanation.
     expect(raw.text).toContain("504");
     expect(raw.elapsedMs).toBeLessThan(TIMEOUT_MS * 10);
   });
+
+  it("closes a WebSocket upgrade with 504 when the upstream stalls MID-HEADER", async () => {
+    // The subtle case: bytes arrive, so anything that stood the timer down on
+    // "first byte seen" would disarm here and hand the client a permanent hang.
+    // The upgrade is only complete once the header terminator lands.
+    const partial = net.createServer((socket) => {
+      heldSockets.push(socket);
+      socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websoc");
+    });
+    adHocServers.push(partial);
+    const partialPort = await listen(partial);
+
+    await startProxy({ HERMES_PORT: String(partialPort) });
+    const raw = await attemptUpgrade();
+
+    expect(raw.text).toContain("504");
+    expect(raw.elapsedMs).toBeLessThan(TIMEOUT_MS * 10);
+  });
 });
+
+/** Drive a raw WebSocket upgrade through the proxy and collect what comes back. */
+function attemptUpgrade() {
+  return new Promise<{ text: string; elapsedMs: number }>((resolve, reject) => {
+    const startedAt = Date.now();
+    const socket = net.connect(proxyPort, "127.0.0.1", () => {
+      socket.write(
+        [
+          "GET /ws HTTP/1.1",
+          `Host: 127.0.0.1:${proxyPort}`,
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          "Sec-WebSocket-Version: 13",
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+          `Origin: http://127.0.0.1:${proxyPort}`,
+          `Cookie: ${sessionCookie()}`,
+          "",
+          "",
+        ].join("\r\n"),
+      );
+    });
+    let text = "";
+    socket.on("data", (c) => {
+      text += c.toString();
+    });
+    socket.on("close", () => resolve({ text, elapsedMs: Date.now() - startedAt }));
+    socket.on("error", reject);
+    socket.setTimeout(TIMEOUT_MS * 20, () => {
+      socket.destroy();
+      reject(new Error("upgrade hung — proxy never answered or closed"));
+    });
+  });
+}
