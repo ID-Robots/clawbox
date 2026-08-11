@@ -35,6 +35,10 @@ vi.mock("@/hooks/useHermesModelOptions", () => ({
     loading: false,
     refresh: refreshModels,
   }),
+  // The factory replaces the whole module, so every export the panel imports
+  // has to be listed here — a missing one is `undefined` at the call site and
+  // throws inside the save path, which reads as "the wizard never advanced".
+  notifyHermesModelState: vi.fn(),
 }));
 
 /** The panel's backing routes, with a configurable outcome for the save POST. */
