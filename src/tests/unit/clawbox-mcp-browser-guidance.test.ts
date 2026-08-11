@@ -46,4 +46,45 @@ describe("clawbox MCP browser guidance", () => {
     expect(source).toContain('name: "Browser Setup"');
     expect(source).toMatch(/integration (?:settings )?panel, not the (?:real )?browsing window/i);
   });
+
+  /**
+   * The desktop app was not the only wrong door. The HARNESS ships its own
+   * browser tool, and an agent asked to "open the browser on the docs page"
+   * reached for that one — which on this device drives a browser the user
+   * cannot see, and whose engine is not installed. Measured: 145-182s per turn,
+   * ending in "install --with-deps" advice, with the working tools alongside.
+   */
+  it("steers agents off the harness's own built-in browser tool", () => {
+    expect(source).toMatch(/built-in browser tool[^\n]*harness|harness[^\n]*built-in browser tool/i);
+  });
+});
+
+/**
+ * Steering is advisory — a model under pressure will still try a tool it
+ * remembers. Provisioning therefore retires the built-in toolset outright.
+ */
+describe("Hermes provisioning retires the built-in browser toolset", () => {
+  const script = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "register-mcp.sh"),
+    "utf8",
+  );
+
+  it("disables the toolset through the supported CLI", () => {
+    // NOT by hand-writing a config key: verified on-device that the state does
+    // not live under agent.disabled_toolsets, so a config write would be a guess.
+    expect(script).toMatch(/tools disable browser/);
+    expect(script).not.toMatch(/agent\.disabled_toolsets["']?\s+\[/);
+  });
+
+  it("runs once, so an owner who re-enables it keeps that choice", () => {
+    expect(script).toMatch(/BROWSER_TOOLSET_MARKER/);
+    expect(script).toMatch(/if \[ ! -f "\$BROWSER_TOOLSET_MARKER" \]/);
+  });
+
+  it("never aborts the boot when the harness refuses", () => {
+    // register-mcp.sh runs under `set -euo pipefail` from production-server.js
+    // at every web-server boot; a device with its tools registered but this
+    // step failed is strictly better than a boot that stopped here.
+    expect(script).toMatch(/if "\$HERMES_BIN" tools disable browser >\/dev\/null 2>&1; then/);
+  });
 });

@@ -193,3 +193,43 @@ except Exception:
     raise
 print("[register-mcp] registered the ClawBox MCP server with Hermes")
 PY
+
+# ── 4. Retire the harness's own browser toolset. ────────────────────────────
+# Hermes ships a built-in `browser` toolset, and on a ClawBox it is the wrong
+# tool twice over:
+#
+#   1. It drives its OWN browser, not the Chromium on the device's desktop. The
+#      customer asks the agent to open a page, watches the screen, and nothing
+#      happens there — the page opened somewhere they cannot see. Our
+#      browser_open/browser_navigate drive the real window.
+#   2. Its engine (agent-browser) is not provisioned on this image, so an agent
+#      that reaches for it spends minutes on timeouts and "install --with-deps"
+#      advice before giving up. Observed on a Hermes device: 145-182s per turn,
+#      ending in failure, with the working MCP tools sitting right next to it.
+#
+# Point 1 is why we do not simply install the engine: that would convert a
+# visible failure into a silent one, which is worse.
+#
+# VERIFIED on-device that this is precise rather than blunt: after
+# `hermes tools disable browser`, `hermes tools list` reports the built-in
+# toolset disabled while the clawbox MCP server still reports "all tools
+# enabled", and browser_open/navigate/screenshot/close are still registered.
+# Deliberately NOT written as a config key: `hermes tools disable` is the
+# supported surface, and the state does NOT live under agent.disabled_toolsets
+# (that key still reads [] afterwards), so hand-writing config would be a guess.
+#
+# Run ONCE, guarded by a marker, rather than on every boot: an owner who
+# deliberately re-enables the toolset should keep their choice instead of having
+# it reverted at the next restart.
+BROWSER_TOOLSET_MARKER="$PROJECT_DIR/data/.hermes-browser-toolset-retired"
+if [ ! -f "$BROWSER_TOOLSET_MARKER" ]; then
+  # Never fatal: a device with its device tools registered but this step failed
+  # is strictly better than a boot that aborted here.
+  if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$BROWSER_TOOLSET_MARKER")"
+    : > "$BROWSER_TOOLSET_MARKER"
+    log "retired the harness's built-in browser toolset; browsing goes through the ClawBox browser_* tools"
+  else
+    log "could not disable the built-in browser toolset — continuing"
+  fi
+fi
