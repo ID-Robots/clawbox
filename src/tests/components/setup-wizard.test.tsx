@@ -312,6 +312,10 @@ describe("SetupWizard", () => {
       expect(onComplete).toHaveBeenCalledTimes(1);
     }, { timeout: 30_000 });
 
+    // Both halves matter. The negative alone would also hold if the wizard
+    // polled NOTHING — a different bug with the same symptom — so assert that
+    // it did reach for the Hermes readiness signal and simply never got it.
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
+    expect(called(fetchMock, "/setup-api/hermes/models")).toBe(true);
   }, 35_000);
 });

@@ -236,6 +236,11 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Waiting for gateway",
     "telegram.readyToChat": "Ready to chat",
     "telegram.botReady": "Telegram bot is ready",
+    // Hermes edition: the OpenClaw gateway is absent, and what the configure
+    // step actually starts is Hermes' own messaging gateway.
+    "telegram.hermesStartingService": "Starting the messaging service",
+    "telegram.hermesWaitingService": "Waiting for the messaging service",
+    "telegram.hermesPleaseWait": "Please wait while the messaging service starts",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connecting to the Internet",
@@ -662,6 +667,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Изчакване на gateway",
     "telegram.readyToChat": "Готово за чат",
     "telegram.botReady": "Telegram ботът е готов",
+    "telegram.hermesStartingService": "Стартиране на услугата за съобщения",
+    "telegram.hermesWaitingService": "Изчакване на услугата за съобщения",
+    "telegram.hermesPleaseWait": "Моля, изчакайте, докато услугата за съобщения стартира",
 
     // === SetupWizard ===
     "wizard.help1Title": "Свързване с интернет",
@@ -1085,6 +1093,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Warte auf Gateway",
     "telegram.readyToChat": "Bereit zum Chatten",
     "telegram.botReady": "Telegram-Bot ist bereit",
+    "telegram.hermesStartingService": "Nachrichtendienst wird gestartet",
+    "telegram.hermesWaitingService": "Warte auf den Nachrichtendienst",
+    "telegram.hermesPleaseWait": "Bitte warten Sie, während der Nachrichtendienst startet",
 
     // === SetupWizard ===
     "wizard.help1Title": "Internetverbindung herstellen",
@@ -1508,6 +1519,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Esperando al gateway",
     "telegram.readyToChat": "Listo para chatear",
     "telegram.botReady": "El bot de Telegram está listo",
+    "telegram.hermesStartingService": "Iniciando el servicio de mensajería",
+    "telegram.hermesWaitingService": "Esperando al servicio de mensajería",
+    "telegram.hermesPleaseWait": "Espera mientras se inicia el servicio de mensajería",
 
     // === SetupWizard ===
     "wizard.help1Title": "Conexión a Internet",
@@ -1931,6 +1945,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "En attente du gateway",
     "telegram.readyToChat": "Prêt à discuter",
     "telegram.botReady": "Le bot Telegram est prêt",
+    "telegram.hermesStartingService": "Démarrage du service de messagerie",
+    "telegram.hermesWaitingService": "En attente du service de messagerie",
+    "telegram.hermesPleaseWait": "Veuillez patienter pendant le démarrage du service de messagerie",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connexion à Internet",
@@ -2354,6 +2371,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "In attesa del gateway",
     "telegram.readyToChat": "Pronto per chattare",
     "telegram.botReady": "Il bot Telegram è pronto",
+    "telegram.hermesStartingService": "Avvio del servizio di messaggistica",
+    "telegram.hermesWaitingService": "In attesa del servizio di messaggistica",
+    "telegram.hermesPleaseWait": "Attendi mentre il servizio di messaggistica si avvia",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connessione a Internet",
@@ -2777,6 +2797,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "ゲートウェイを待機中",
     "telegram.readyToChat": "チャット準備完了",
     "telegram.botReady": "Telegramボットの準備ができました",
+    "telegram.hermesStartingService": "メッセージングサービスを起動中",
+    "telegram.hermesWaitingService": "メッセージングサービスを待機中",
+    "telegram.hermesPleaseWait": "メッセージングサービスの起動をお待ちください",
 
     // === SetupWizard ===
     "wizard.help1Title": "インターネット接続",
@@ -3200,6 +3223,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Wachten op gateway",
     "telegram.readyToChat": "Klaar om te chatten",
     "telegram.botReady": "Telegram-bot is klaar",
+    "telegram.hermesStartingService": "Berichtenservice starten",
+    "telegram.hermesWaitingService": "Wachten op de berichtenservice",
+    "telegram.hermesPleaseWait": "Even geduld terwijl de berichtenservice start",
 
     // === SetupWizard ===
     "wizard.help1Title": "Verbinding maken met internet",
@@ -3623,6 +3649,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Väntar på gateway",
     "telegram.readyToChat": "Redo att chatta",
     "telegram.botReady": "Telegram-boten är redo",
+    "telegram.hermesStartingService": "Startar meddelandetjänsten",
+    "telegram.hermesWaitingService": "Väntar på meddelandetjänsten",
+    "telegram.hermesPleaseWait": "Vänta medan meddelandetjänsten startar",
 
     // === SetupWizard ===
     "wizard.help1Title": "Anslut till internet",
@@ -4046,6 +4075,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "等待网关就绪",
     "telegram.readyToChat": "准备就绪",
     "telegram.botReady": "Telegram 机器人已就绪",
+    "telegram.hermesStartingService": "正在启动消息服务",
+    "telegram.hermesWaitingService": "正在等待消息服务",
+    "telegram.hermesPleaseWait": "请稍候，消息服务正在启动",
 
     // === SetupWizard ===
     "wizard.help1Title": "连接互联网",

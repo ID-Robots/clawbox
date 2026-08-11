@@ -13,21 +13,9 @@ import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
 import { DISCORD_INVITE_URL } from "@/lib/community";
-import { cachedEdition, fetchHarness } from "@/lib/client-harness";
+import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
-
-/**
- * The device edition, for edition-aware completion copy and readiness.
- *
- * Served from the shared client cache (src/lib/client-harness.ts), which the
- * AI-models step has already warmed by the time setup completes — so this is a
- * free read in practice, and at worst one round-trip per document. A device
- * that cannot answer is treated as OpenClaw, the native product edition.
- */
-async function resolveEdition(): Promise<string> {
-  return cachedEdition() ?? (await fetchHarness())?.edition ?? "openclaw";
-}
 
 async function extractErrorMessage(res: Response, fallback: string) {
   const data = await res.json().catch(() => ({}));
