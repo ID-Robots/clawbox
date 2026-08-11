@@ -68,6 +68,11 @@ vi.mock("@/lib/openclaw-config", () => ({
   // based on the active provider. Tests don't care about the side effect; just
   // make the import resolve.
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
+  // Edition guard: these tests exercise the OpenClaw path, so openclaw is
+  // present. The Hermes branch (openclawIsAbsent → true) is covered separately
+  // in configure-hermes.test.ts.
+  openclawIsAbsent: vi.fn().mockReturnValue(false),
+  OpenclawUnavailableError: class OpenclawUnavailableError extends Error {},
 }));
 
 // llamacpp / local-ai-runtime have pure getters, but local-ai-runtime
