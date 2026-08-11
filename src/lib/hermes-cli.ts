@@ -117,8 +117,22 @@ export function runHermesCli(
       finish(() => resolve({ code, stdout: out.trim(), stderr: err.trim() }));
     });
 
-    if (opts.input !== undefined) {
-      child.stdin?.end(opts.input);
+    if (opts.input !== undefined && child.stdin) {
+      // A child that exits before it has drained stdin makes the write fail on
+      // the pipe. A stream error with no listener is not caught by the promise
+      // — it surfaces at the process level and takes the whole web server down
+      // — so route it through `finish` like every other failure path.
+      //
+      // Deferred by one turn on purpose. Not every child reads its input (a
+      // `skill uninstall` that has nothing to confirm just exits), and there
+      // the write failing says nothing about whether the command worked. Giving
+      // an already-queued `close` the chance to settle first keeps those calls
+      // reporting the child's real result; `finish` makes whichever lands first
+      // the only one that counts.
+      child.stdin.on("error", (e) => {
+        setImmediate(() => finish(() => reject(e)));
+      });
+      child.stdin.end(opts.input);
     }
   });
 }
