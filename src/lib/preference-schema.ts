@@ -147,7 +147,10 @@ export function validatePreference(key: string, value: unknown): PreferenceCheck
  * claiming a value the store does not hold.
  */
 export function sanitizePreferences(entries: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  // Null-prototype accumulator: `key` comes from the caller's entries, so the
+  // assignment below should always define an own property. This is the object
+  // that actually reaches the response, so the rule has to hold here.
+  const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) continue;
     if (validatePreference(key, value).ok) out[key] = value;
