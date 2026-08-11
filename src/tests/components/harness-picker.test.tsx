@@ -61,4 +61,17 @@ describe("HarnessPicker locked badge", () => {
     await waitFor(() => expect(screen.getByText("OpenClaw")).toBeTruthy());
     expect(screen.queryByTestId("harness-locked-dot")).toBeNull();
   });
+
+  // The status route's body is unvalidated JSON, and the list can be absent.
+  // The picker sits in Settings → System, so a render throw here is not local:
+  // it tears down the whole desktop tree and every panel goes blank. Fall back
+  // to the bare id instead.
+  it("still renders when the status response carries no harness list", async () => {
+    mockStatus({ active: "hermes", locked: true });
+    render(<HarnessPicker />);
+
+    const dot = await screen.findByTestId("harness-locked-dot");
+    expect(dot.className).toContain("bg-white/25");
+    expect(screen.getByText("hermes")).toBeTruthy();
+  });
 });

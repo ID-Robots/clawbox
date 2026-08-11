@@ -9,7 +9,9 @@ interface HarnessEntry {
 }
 interface HarnessStatus {
   active: string;
-  harnesses: HarnessEntry[];
+  /** Optional on purpose: this is unvalidated JSON off the status route, and a
+      response that omits the list must render an empty picker, not throw. */
+  harnesses?: HarnessEntry[];
   /** Single-harness edition (or dual without a premium license) → no switcher. */
   locked?: boolean;
   edition?: string;
@@ -64,7 +66,7 @@ export default function HarnessPicker() {
     [switching, status],
   );
 
-  const activeEntry = status?.harnesses.find((h) => h.id === status.active);
+  const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
