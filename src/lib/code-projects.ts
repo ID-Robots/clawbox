@@ -76,6 +76,29 @@ export function validateProjectId(id: string): boolean {
   return APP_ID_RE.test(id);
 }
 
+/** Longest project name the desktop label and the starter templates carry. */
+export const MAX_PROJECT_NAME_LENGTH = 60;
+
+/**
+ * The name a project may be created with, or a ValidationError.
+ *
+ * Checked here rather than at each caller because initProject writes the
+ * directory and project.json before the name reaches the templates: a name the
+ * templates cannot render has to be refused while nothing has been created yet,
+ * so a rejected request leaves no project behind for the next attempt to
+ * collide with. The MCP door declares the same limit (`zText(60)` in
+ * mcp/tools/desktop.ts); this is where it is enforced.
+ */
+export function validateProjectName(name: unknown): string {
+  if (typeof name !== "string") throw new ValidationError("Project name must be a string");
+  const trimmed = name.trim();
+  if (!trimmed) throw new ValidationError("Project name required");
+  if (trimmed.length > MAX_PROJECT_NAME_LENGTH) {
+    throw new ValidationError(`Project name must be at most ${MAX_PROJECT_NAME_LENGTH} characters`);
+  }
+  return trimmed;
+}
+
 /** Resolve a file path inside a project directory, preventing traversal. */
 function safePath(projectId: string, filePath: string): string {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
@@ -119,6 +142,8 @@ export async function initProject(
   opts?: { color?: string; description?: string; template?: "blank" | "app" }
 ): Promise<ProjectMeta> {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
+  // Before anything is created on disk — see validateProjectName.
+  const projectName = validateProjectName(name);
 
   const dir = projectDir(projectId);
   const exists = await fs.stat(dir).catch(() => null);
@@ -129,7 +154,7 @@ export async function initProject(
   const now = new Date().toISOString();
   const meta: ProjectMeta = {
     projectId,
-    name,
+    name: projectName,
     color: opts?.color || "#f97316",
     description: opts?.description || "",
     created: now,
@@ -147,14 +172,14 @@ export async function initProject(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(name)}</title>
+  <title>${escapeHtml(projectName)}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
   </style>
 </head>
 <body>
-  <h1>${escapeHtml(name)}</h1>
+  <h1>${escapeHtml(projectName)}</h1>
 </body>
 </html>`,
       "utf-8"
@@ -168,7 +193,7 @@ export async function initProject(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(name)}</title>
+  <title>${escapeHtml(projectName)}</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -207,8 +232,8 @@ h1 {
     // template-literal metacharacters (` $ \) and newlines untouched, so a name
     // like "`;fetch('/setup-api/...')`" would break out of the literal and run
     // as code when the built app loads on the ClawBox origin (stored XSS).
-    const commentName = name.replace(/[\r\n]+/g, " ");
-    const innerName = jsTemplateEscape(escapeHtml(name));
+    const commentName = projectName.replace(/[\r\n]+/g, " ");
+    const innerName = jsTemplateEscape(escapeHtml(projectName));
     await fs.writeFile(
       path.join(dir, "app.js"),
       `// ${commentName} — ClawBox Web App

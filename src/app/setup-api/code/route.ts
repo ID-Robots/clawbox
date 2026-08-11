@@ -52,6 +52,9 @@ export async function POST(request: NextRequest) {
         const { projectId, name, color, description, template } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         if (!name) return err("Project name required");
+        // Shape and length are checked inside initProject too, before it creates
+        // anything, so the MCP door gets the same rules; a ValidationError from
+        // there is answered as a 400 below.
         const meta = await initProject(projectId, name, { color, description, template });
         return ok({ success: true, project: meta });
       }
