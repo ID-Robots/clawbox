@@ -236,6 +236,11 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Waiting for gateway",
     "telegram.readyToChat": "Ready to chat",
     "telegram.botReady": "Telegram bot is ready",
+    // Hermes edition: the OpenClaw gateway is absent, and what the configure
+    // step actually starts is Hermes' own messaging gateway.
+    "telegram.hermesStartingService": "Starting the messaging service",
+    "telegram.hermesWaitingService": "Waiting for the messaging service",
+    "telegram.hermesPleaseWait": "Please wait while the messaging service starts",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connecting to the Internet",
@@ -255,6 +260,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Shut down device?",
     "wizard.restartConfirm": "Restart device?",
     "wizard.completionUnreachable": "Couldn't reach the device. Please check your connection and try again.",
+    // Hermes edition ships without the OpenClaw gateway, so the completion
+    // overlay names what is actually starting on the device.
+    "wizard.completionHermesTitle": "Starting your Hermes agent...",
+    "wizard.completionHermesSaving": "Saving your settings",
+    "wizard.completionHermesStarting": "Starting the Hermes agent",
+    "wizard.completionHermesWait": "Please wait while the agent starts",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -656,6 +667,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Изчакване на gateway",
     "telegram.readyToChat": "Готово за чат",
     "telegram.botReady": "Telegram ботът е готов",
+    "telegram.hermesStartingService": "Стартиране на услугата за съобщения",
+    "telegram.hermesWaitingService": "Изчакване на услугата за съобщения",
+    "telegram.hermesPleaseWait": "Моля, изчакайте, докато услугата за съобщения стартира",
 
     // === SetupWizard ===
     "wizard.help1Title": "Свързване с интернет",
@@ -675,6 +689,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Изключване на устройството?",
     "wizard.restartConfirm": "Рестартиране на устройството?",
     "wizard.completionUnreachable": "Не може да се свърже с устройството. Проверете връзката и опитайте отново.",
+    "wizard.completionHermesTitle": "Стартиране на вашия Hermes агент...",
+    "wizard.completionHermesSaving": "Запазване на настройките",
+    "wizard.completionHermesStarting": "Стартиране на Hermes агента",
+    "wizard.completionHermesWait": "Моля, изчакайте, докато агентът стартира",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -1075,6 +1093,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Warte auf Gateway",
     "telegram.readyToChat": "Bereit zum Chatten",
     "telegram.botReady": "Telegram-Bot ist bereit",
+    "telegram.hermesStartingService": "Nachrichtendienst wird gestartet",
+    "telegram.hermesWaitingService": "Warte auf den Nachrichtendienst",
+    "telegram.hermesPleaseWait": "Bitte warten Sie, während der Nachrichtendienst startet",
 
     // === SetupWizard ===
     "wizard.help1Title": "Internetverbindung herstellen",
@@ -1094,6 +1115,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Gerät ausschalten?",
     "wizard.restartConfirm": "Gerät neu starten?",
     "wizard.completionUnreachable": "Gerät konnte nicht erreicht werden. Bitte überprüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
+    "wizard.completionHermesTitle": "Ihr Hermes-Agent wird gestartet...",
+    "wizard.completionHermesSaving": "Einstellungen werden gespeichert",
+    "wizard.completionHermesStarting": "Hermes-Agent wird gestartet",
+    "wizard.completionHermesWait": "Bitte warten Sie, während der Agent startet",
 
     // === ProgressBar ===
     "progress.wifi": "WLAN",
@@ -1494,6 +1519,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Esperando al gateway",
     "telegram.readyToChat": "Listo para chatear",
     "telegram.botReady": "El bot de Telegram está listo",
+    "telegram.hermesStartingService": "Iniciando el servicio de mensajería",
+    "telegram.hermesWaitingService": "Esperando al servicio de mensajería",
+    "telegram.hermesPleaseWait": "Espera mientras se inicia el servicio de mensajería",
 
     // === SetupWizard ===
     "wizard.help1Title": "Conexión a Internet",
@@ -1513,6 +1541,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "¿Apagar el dispositivo?",
     "wizard.restartConfirm": "¿Reiniciar el dispositivo?",
     "wizard.completionUnreachable": "No se pudo conectar con el dispositivo. Comprueba tu conexión e inténtalo de nuevo.",
+    "wizard.completionHermesTitle": "Iniciando tu agente Hermes...",
+    "wizard.completionHermesSaving": "Guardando tu configuración",
+    "wizard.completionHermesStarting": "Iniciando el agente Hermes",
+    "wizard.completionHermesWait": "Espera mientras se inicia el agente",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -1913,6 +1945,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "En attente du gateway",
     "telegram.readyToChat": "Prêt à discuter",
     "telegram.botReady": "Le bot Telegram est prêt",
+    "telegram.hermesStartingService": "Démarrage du service de messagerie",
+    "telegram.hermesWaitingService": "En attente du service de messagerie",
+    "telegram.hermesPleaseWait": "Veuillez patienter pendant le démarrage du service de messagerie",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connexion à Internet",
@@ -1932,6 +1967,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Éteindre l'appareil ?",
     "wizard.restartConfirm": "Redémarrer l'appareil ?",
     "wizard.completionUnreachable": "Impossible de joindre l'appareil. Veuillez vérifier votre connexion et réessayer.",
+    "wizard.completionHermesTitle": "Démarrage de votre agent Hermes...",
+    "wizard.completionHermesSaving": "Enregistrement de vos paramètres",
+    "wizard.completionHermesStarting": "Démarrage de l'agent Hermes",
+    "wizard.completionHermesWait": "Veuillez patienter pendant le démarrage de l'agent",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2332,6 +2371,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "In attesa del gateway",
     "telegram.readyToChat": "Pronto per chattare",
     "telegram.botReady": "Il bot Telegram è pronto",
+    "telegram.hermesStartingService": "Avvio del servizio di messaggistica",
+    "telegram.hermesWaitingService": "In attesa del servizio di messaggistica",
+    "telegram.hermesPleaseWait": "Attendi mentre il servizio di messaggistica si avvia",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connessione a Internet",
@@ -2351,6 +2393,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Spegnere il dispositivo?",
     "wizard.restartConfirm": "Riavviare il dispositivo?",
     "wizard.completionUnreachable": "Impossibile raggiungere il dispositivo. Controlla la connessione e riprova.",
+    "wizard.completionHermesTitle": "Avvio del tuo agente Hermes...",
+    "wizard.completionHermesSaving": "Salvataggio delle impostazioni",
+    "wizard.completionHermesStarting": "Avvio dell'agente Hermes",
+    "wizard.completionHermesWait": "Attendi mentre l'agente si avvia",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2751,6 +2797,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "ゲートウェイを待機中",
     "telegram.readyToChat": "チャット準備完了",
     "telegram.botReady": "Telegramボットの準備ができました",
+    "telegram.hermesStartingService": "メッセージングサービスを起動中",
+    "telegram.hermesWaitingService": "メッセージングサービスを待機中",
+    "telegram.hermesPleaseWait": "メッセージングサービスの起動をお待ちください",
 
     // === SetupWizard ===
     "wizard.help1Title": "インターネット接続",
@@ -2770,6 +2819,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "デバイスをシャットダウンしますか？",
     "wizard.restartConfirm": "デバイスを再起動しますか？",
     "wizard.completionUnreachable": "デバイスに接続できませんでした。接続を確認してもう一度お試しください。",
+    "wizard.completionHermesTitle": "Hermes エージェントを起動しています...",
+    "wizard.completionHermesSaving": "設定を保存中",
+    "wizard.completionHermesStarting": "Hermes エージェントを起動中",
+    "wizard.completionHermesWait": "エージェントの起動をお待ちください",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3170,6 +3223,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Wachten op gateway",
     "telegram.readyToChat": "Klaar om te chatten",
     "telegram.botReady": "Telegram-bot is klaar",
+    "telegram.hermesStartingService": "Berichtenservice starten",
+    "telegram.hermesWaitingService": "Wachten op de berichtenservice",
+    "telegram.hermesPleaseWait": "Even geduld terwijl de berichtenservice start",
 
     // === SetupWizard ===
     "wizard.help1Title": "Verbinding maken met internet",
@@ -3189,6 +3245,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Apparaat uitschakelen?",
     "wizard.restartConfirm": "Apparaat herstarten?",
     "wizard.completionUnreachable": "Kan het apparaat niet bereiken. Controleer uw verbinding en probeer opnieuw.",
+    "wizard.completionHermesTitle": "Je Hermes-agent wordt gestart...",
+    "wizard.completionHermesSaving": "Instellingen opslaan",
+    "wizard.completionHermesStarting": "Hermes-agent starten",
+    "wizard.completionHermesWait": "Even geduld terwijl de agent start",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3589,6 +3649,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Väntar på gateway",
     "telegram.readyToChat": "Redo att chatta",
     "telegram.botReady": "Telegram-boten är redo",
+    "telegram.hermesStartingService": "Startar meddelandetjänsten",
+    "telegram.hermesWaitingService": "Väntar på meddelandetjänsten",
+    "telegram.hermesPleaseWait": "Vänta medan meddelandetjänsten startar",
 
     // === SetupWizard ===
     "wizard.help1Title": "Anslut till internet",
@@ -3608,6 +3671,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Stänga av enheten?",
     "wizard.restartConfirm": "Starta om enheten?",
     "wizard.completionUnreachable": "Det gick inte att nå enheten. Kontrollera anslutningen och försök igen.",
+    "wizard.completionHermesTitle": "Startar din Hermes-agent...",
+    "wizard.completionHermesSaving": "Sparar dina inställningar",
+    "wizard.completionHermesStarting": "Startar Hermes-agenten",
+    "wizard.completionHermesWait": "Vänta medan agenten startar",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -4008,6 +4075,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "等待网关就绪",
     "telegram.readyToChat": "准备就绪",
     "telegram.botReady": "Telegram 机器人已就绪",
+    "telegram.hermesStartingService": "正在启动消息服务",
+    "telegram.hermesWaitingService": "正在等待消息服务",
+    "telegram.hermesPleaseWait": "请稍候，消息服务正在启动",
 
     // === SetupWizard ===
     "wizard.help1Title": "连接互联网",
@@ -4027,6 +4097,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "确定关机吗？",
     "wizard.restartConfirm": "确定重启吗？",
     "wizard.completionUnreachable": "无法连接到设备。请检查您的连接并重试。",
+    "wizard.completionHermesTitle": "正在启动您的 Hermes 智能体...",
+    "wizard.completionHermesSaving": "正在保存您的设置",
+    "wizard.completionHermesStarting": "正在启动 Hermes 智能体",
+    "wizard.completionHermesWait": "请稍候，智能体正在启动",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",

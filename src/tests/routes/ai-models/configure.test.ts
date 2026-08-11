@@ -31,6 +31,26 @@ vi.mock("@/lib/clawkeep", () => ({
   unpairLocal: vi.fn(),
 }));
 
+// The configure route fires a catalog refresh out-of-band and deliberately does
+// NOT await it (step 8c). The real refreshInBackground starts a fetch/openclaw
+// fork and logs its outcome — `[catalog] refreshed …` or `[catalog] refresh
+// failed for …` — whenever it settles, which is after the test that triggered
+// it has already finished.
+//
+// That stray console write is what surfaced in CI as
+// `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`:
+// a log arriving while the worker was closing its RPC channel. The job reported
+// every one of its test files as passing and still exited 1 on the unhandled
+// rejection.
+//
+// Stubbing it here keeps the leak from ever starting, which is the fix — no
+// console silencing and no global unhandled-rejection swallow, either of which
+// would hide this class of bug rather than remove it. Nothing in this file
+// asserts on the refresh; it is out-of-band work by design.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  refreshInBackground: vi.fn(),
+}));
+
 // Hoisted so the vi.mock factories below (which are themselves hoisted by
 // vitest) can see these. A plain const declaration at file-body position
 // would be in the TDZ when the mock factory evaluates.

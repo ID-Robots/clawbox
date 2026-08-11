@@ -13,6 +13,7 @@ import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
 import { DISCORD_INVITE_URL } from "@/lib/community";
+import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
 
@@ -254,17 +255,29 @@ function LanguageMenu({
 function SetupCompletionOverlay({
   phase,
   completed,
+  hermes,
   t,
 }: {
   phase: number;
   completed: boolean;
+  /** Hermes edition: this device ships without the OpenClaw gateway. */
+  hermes: boolean;
   t: (key: string) => string;
 }) {
-  const steps = [
-    t("ai.restartingGateway"),
-    t("telegram.waitingGateway"),
-    t("ai.almostReady"),
-  ];
+  // A Hermes-edition box has no OpenClaw gateway installed at all (the unit is
+  // masked), so gateway copy would name a service that does not exist on the
+  // device — and the customer would be watching a spinner for it.
+  const steps = hermes
+    ? [
+        t("wizard.completionHermesSaving"),
+        t("wizard.completionHermesStarting"),
+        t("ai.almostReady"),
+      ]
+    : [
+        t("ai.restartingGateway"),
+        t("telegram.waitingGateway"),
+        t("ai.almostReady"),
+      ];
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-completion-overlay">
@@ -314,7 +327,11 @@ function SetupCompletionOverlay({
 
           <div className="text-center setup-finish-fade-in" style={{ animationDelay: "0.2s" }}>
             <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
-              {completed ? t("connected") : t("openclaw.connecting")}
+              {completed
+                ? t("connected")
+                : hermes
+                  ? t("wizard.completionHermesTitle")
+                  : t("openclaw.connecting")}
             </h2>
             <p className="text-sm text-[var(--text-muted)]">
               {completed ? t("ai.almostReady") : t("ai.pleaseDontClose")}
@@ -351,7 +368,7 @@ function SetupCompletionOverlay({
 
           {!completed && (
             <p className="text-xs text-[var(--text-muted)] text-center mt-2 setup-finish-fade-in" style={{ animationDelay: "0.3s" }}>
-              {t("telegram.pleaseWait")}
+              {hermes ? t("wizard.completionHermesWait") : t("telegram.pleaseWait")}
             </p>
           )}
         </div>
@@ -384,6 +401,22 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [showHelp, setShowHelp] = useState(false);
   const [showLang, setShowLang] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // Device edition. Seeded from the process-wide cache (the edition is baked
+  // into a root-owned env file and cannot change under a live page), so on a
+  // resume it is already known and the completion overlay never paints the
+  // wrong product's copy for a frame.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  const isHermesEdition = edition === "hermes";
+
+  useEffect(() => {
+    if (edition !== null) return;
+    let alive = true;
+    void resolveEdition().then((value) => { if (alive) setEdition(value); });
+    return () => { alive = false; };
+    // Runs once: `edition` is only read to skip a redundant fetch and it never
+    // returns to null.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const persistSetupProgress = useCallback(async (step: number) => {
     try {
@@ -464,6 +497,43 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       return false;
     }
 
+    /**
+     * Readiness on a Hermes-edition device.
+     *
+     * There is no OpenClaw gateway to poll here — it is not installed and its
+     * unit is masked, so /setup-api/gateway/health could only ever run out its
+     * attempts. What DOES have to come up is the Hermes dashboard
+     * (clawbox-hermes-dashboard.service, which the proxy unit fronts), and the
+     * models route reports exactly that: `stale` is false only when the live
+     * dashboard answered — every fallback source (the on-disk catalog, a cold
+     * start) is flagged stale. See src/lib/hermes-model-options.ts.
+     *
+     * The route is one the wizard already calls from the AI-models step, and by
+     * this point /setup/complete has issued the session cookie — so this adds no
+     * new surface and needs no new carve-out.
+     */
+    async function pollHermesReady() {
+      for (let attempt = 0; attempt < SETUP_COMPLETION_MAX_HEALTH_CHECKS; attempt += 1) {
+        if (cancelled) return false;
+        try {
+          // Unlike the gateway's TCP probe this route talks to the dashboard,
+          // so it gets its own deadline: a socket that accepts and then hangs
+          // must not stall the loop past the attempt budget.
+          const res = await fetch("/setup-api/hermes/models", {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.stale === false) return true;
+          }
+        } catch {
+          // The agent's dashboard is still coming up.
+        }
+        await delay(2000);
+      }
+      return false;
+    }
+
     async function postCompleteWithRetry(): Promise<Response> {
       // The POST can fail transiently if the gateway restart from the AI
       // step is still settling, or the browser's connection is briefly
@@ -505,9 +575,20 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         if (cancelled) return;
         setCompletionPhase(1);
 
-        const gatewayAvailable = await pollGatewayHealth();
-        if (!gatewayAvailable) {
-          console.warn("[SetupWizard] Gateway health did not become available during setup completion; continuing offline.");
+        // Resolve the edition inside the run rather than reading the state
+        // above it: the completion effect must never poll a harness this
+        // device does not ship, even on the resume path where the overlay is
+        // mounted before the mount effect has landed. The lookup is cached, so
+        // this costs nothing on the normal path.
+        const activeEdition = await resolveEdition();
+        if (cancelled) return;
+        setEdition(activeEdition);
+
+        const agentAvailable = activeEdition === "hermes"
+          ? await pollHermesReady()
+          : await pollGatewayHealth();
+        if (!agentAvailable) {
+          console.warn("[SetupWizard] The agent did not report ready during setup completion; continuing offline.");
         }
         if (cancelled) return;
 
@@ -658,7 +739,12 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       <main className="setup-main">
         <div className="w-full flex flex-col items-center">
         {completionStarted ? (
-          <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
+          <SetupCompletionOverlay
+            phase={completionPhase}
+            completed={completionComplete}
+            hermes={isHermesEdition}
+            t={t}
+          />
         ) : (
           <>
             {/* Completion failed and is no longer in flight (we're in the
