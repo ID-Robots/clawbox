@@ -99,3 +99,31 @@ describe("the TS and shell harness predicates agree", () => {
     );
   });
 });
+
+/**
+ * The updater dropping a step is NOT a substitute for install.sh's own edition
+ * guards, and this is the trap: once `applies()` filters `gateway_setup` out on
+ * hermes, the `is_hermes_edition` guard inside step_gateway_setup looks dead and
+ * invites deletion. It is not dead. step_post_update has no `applies()` — it
+ * runs on every SKU — and calls step_gateway_setup itself, so deleting that
+ * guard would reinstall and enable an OpenClaw gateway on a Hermes box midway
+ * through its own update. `install.sh --step gateway_setup` by hand is the same
+ * hole. These pin both ends so the trap fails loudly instead of shipping.
+ */
+describe("install.sh keeps its own edition guards", () => {
+  it("post_update still calls gateway_setup on every edition", () => {
+    expect(extractShellFunction("step_post_update")).toContain("step_gateway_setup");
+  });
+
+  it("gateway_setup refuses on hermes regardless of how it was reached", () => {
+    expect(extractShellFunction("step_gateway_setup")).toContain("is_hermes_edition &&");
+  });
+
+  it("the OpenClaw steps refuse on hermes too", () => {
+    for (const step of ["step_openclaw_install", "step_openclaw_patch"]) {
+      expect(extractShellFunction(step), `${step} needs its own guard`).toContain(
+        "is_hermes_edition &&",
+      );
+    }
+  });
+});

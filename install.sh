@@ -2276,6 +2276,17 @@ step_recover() {
 }
 
 step_gateway_setup() {
+  # DO NOT DELETE THIS GUARD AS "REDUNDANT" NOW THAT THE UPDATER FILTERS STEPS.
+  #
+  # The updater's `applies()` predicate drops the gateway_setup STEP on hermes,
+  # which looks like it makes this line dead. It does not: step_post_update has
+  # no such predicate — it runs on every SKU — and calls step_gateway_setup
+  # internally. This guard is the only thing standing between a Hermes box and
+  # an OpenClaw gateway being reinstalled and enabled halfway through its own
+  # update, on a SKU whose whole point is that the gateway is not there.
+  #
+  # The same applies to the guards in step_openclaw_install / step_openclaw_patch
+  # and to `install.sh --step <name>`, which can be run by hand on any edition.
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
   cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
