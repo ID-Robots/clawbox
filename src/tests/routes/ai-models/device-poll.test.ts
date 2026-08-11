@@ -316,10 +316,12 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(body.status).toBe("pending");
   });
 
-  // A flow that ends without completing should leave nothing behind: the state
-  // file and the token handoff file are two halves of the same flow, so both go.
+  // A flow the provider ends without completing drops its own state. It must
+  // NOT drop the handoff file: no branch that fails here has written tokens, so
+  // whatever is there belongs to another flow — possibly a finished
+  // authorization-code one still waiting for /configure.
   describe("interrupted flow cleanup", () => {
-    it("removes the handoff tokens when the token exchange fails", async () => {
+    it("keeps the handoff tokens when the token exchange fails", async () => {
       vi.stubGlobal("fetch", vi.fn()
         .mockResolvedValueOnce({
           ok: true,
@@ -337,11 +339,11 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       const res = await devicePollPost();
 
       expect(res.status).toBe(502);
-      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
       expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
     });
 
-    it("removes the handoff tokens when the provider returns no code_verifier", async () => {
+    it("keeps the handoff tokens when the provider returns no code_verifier", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ authorization_code: "test-auth-code" }),
@@ -350,8 +352,8 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       const res = await devicePollPost();
 
       expect(res.status).toBe(502);
-      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
       expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
     });
 
     it("sweeps a handoff file that is past the TTL", async () => {

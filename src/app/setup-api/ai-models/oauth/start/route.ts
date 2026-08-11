@@ -16,11 +16,6 @@ function base64url(buf: Buffer): string {
 
 export async function POST(request: Request) {
   try {
-    // A new sign-in supersedes any prior one — same rule the device-code entry
-    // point applies, so the handoff file always belongs to the flow in progress
-    // rather than to whichever one was abandoned last.
-    await clearHandoffTokens();
-
     let body: { provider?: string } = {};
     try {
       body = await request.json();
@@ -62,6 +57,12 @@ export async function POST(request: Request) {
       { mode: 0o600 }
     );
     await fs.rename(tmpPath, STATE_PATH);
+
+    // Same rule the device-code entry point applies: this flow supersedes any
+    // prior one, so drop a handoff an abandoned sign-in left behind — but only
+    // now that the replacement state exists, since the validation failures
+    // above return without starting anything.
+    await clearHandoffTokens();
 
     // For OpenAI: check if a previous attempt saved an organization_id.
     // Including `organization` in the authorize URL causes Auth0 to embed

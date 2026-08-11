@@ -1112,6 +1112,59 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toContain("expired");
   });
 
+  it("rejects and removes a handoff file whose contents cannot be parsed", async () => {
+    // A retry cannot fix this file, so leaving it would make every later
+    // attempt fail on the same content.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? "{not json"
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
+  it.each([
+    ["a non-numeric createdAt", "not-a-timestamp"],
+    ["a NaN createdAt", Number.NaN],
+    ["a createdAt in the future", Date.now() + 60 * 60 * 1000],
+  ])("rejects and removes a handoff file with %s", async (_label, createdAt) => {
+    // None of these yields an age that can be compared against the TTL, and a
+    // bare `now - createdAt > TTL` test passes for all three.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            createdAt,
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
   it("rejects and removes a handoff file that carries no createdAt", async () => {
     // Without a timestamp the file's age is unknown, so it cannot be shown to
     // be inside the TTL — it is refused like an expired one, and removed rather

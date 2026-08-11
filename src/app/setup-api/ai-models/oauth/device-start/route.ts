@@ -12,11 +12,6 @@ const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
 
 export async function POST(request: Request) {
   try {
-    // A new sign-in flow supersedes any prior one. Best-effort clear a stale
-    // token-handoff file left behind by an abandoned earlier flow so it can
-    // never be consumed by a later configure call.
-    await clearHandoffTokens();
-
     let body: { provider?: string } = {};
     try {
       body = await request.json();
@@ -95,6 +90,12 @@ export async function POST(request: Request) {
       { mode: 0o600 }
     );
     await fs.rename(tmpPath, STATE_PATH);
+
+    // This flow supersedes any prior one, so drop a handoff file an abandoned
+    // earlier sign-in left behind. Only now that the replacement state is on
+    // disk: a bad provider or an upstream failure returns above, and those must
+    // not end a sign-in that is still waiting to be consumed by configure.
+    await clearHandoffTokens();
 
     return NextResponse.json({
       verification_url: verificationUrl,
