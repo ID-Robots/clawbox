@@ -19,6 +19,13 @@ vi.mock("@/lib/code-projects", () => ({
   deployWebapp: vi.fn().mockResolvedValue(undefined),
   // The update path refreshes only index.html via this helper.
   writeWebappIndex: vi.fn().mockResolvedValue(undefined),
+  // The route maps this to a 400; deployWebapp throws it for a name it refuses.
+  ValidationError: class ValidationError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "ValidationError";
+    }
+  },
 }));
 
 import fs from "fs/promises";

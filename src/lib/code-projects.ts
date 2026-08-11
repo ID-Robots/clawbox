@@ -80,16 +80,18 @@ export function validateProjectId(id: string): boolean {
 export const MAX_PROJECT_NAME_LENGTH = 60;
 
 /**
- * The name a project may be created with, or a ValidationError.
+ * The name a project may be created with, trimmed — or a ValidationError.
  *
- * Checked here rather than at each caller because initProject writes the
- * directory and project.json before the name reaches the templates: a name the
- * templates cannot render has to be refused while nothing has been created yet,
- * so a rejected request leaves no project behind for the next attempt to
- * collide with. The MCP door declares the same limit (`zText(60)` in
- * mcp/tools/desktop.ts); this is where it is enforced.
+ * Checked in the library rather than at each route because initProject writes
+ * the directory and project.json before the name reaches the templates: a name
+ * the templates cannot render has to be refused while nothing has been created
+ * yet, so a rejected request leaves no project behind for the next attempt to
+ * collide with. deployWebapp applies it for the same reason — it is the
+ * chokepoint the webapps route and buildProject share. The MCP door declares
+ * the same limit (`zText(60)` in mcp/tools/desktop.ts); this is where it is
+ * enforced.
  */
-export function validateProjectName(name: unknown): string {
+function assertProjectName(name: unknown): string {
   if (typeof name !== "string") throw new ValidationError("Project name must be a string");
   const trimmed = name.trim();
   if (!trimmed) throw new ValidationError("Project name required");
@@ -142,8 +144,8 @@ export async function initProject(
   opts?: { color?: string; description?: string; template?: "blank" | "app" }
 ): Promise<ProjectMeta> {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
-  // Before anything is created on disk — see validateProjectName.
-  const projectName = validateProjectName(name);
+  // Before anything is created on disk — see assertProjectName.
+  const projectName = assertProjectName(name);
 
   const dir = projectDir(projectId);
   const exists = await fs.stat(dir).catch(() => null);
@@ -581,13 +583,16 @@ export async function deployWebapp(
   html: string,
   meta: { name: string; color?: string; icon?: string },
 ): Promise<void> {
+  // Same rule and same reason as initProject: the name reaches meta.json and
+  // the desktop label, so bound it before any of that is written.
+  const name = assertProjectName(meta.name);
   await writeWebappIndex(appId, html);
   await fs.writeFile(
     path.join(WEBAPPS_DIR, appId, "meta.json"),
-    JSON.stringify({ name: meta.name, color: meta.color || "#f97316", icon: meta.icon || "" }),
+    JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
-  await registerWebappInPreferences(appId, meta.name, {
+  await registerWebappInPreferences(appId, name, {
     color: meta.color,
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
