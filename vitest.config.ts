@@ -62,13 +62,26 @@ export default defineConfig({
         "src/app/setup-api/browser/route.ts",
         "src/app/setup-api/browser/manage/**",
       ],
+      // Vitest reads the four metrics at the TOP level of `thresholds`. Any
+      // other key here is treated as a glob selecting files to threshold, so
+      // the previous `global: { ... }` nesting (Jest's shape) silently became a
+      // glob matching no files, and the gate never ran. It type-checked, because
+      // the glob form accepts exactly that object shape.
+      //
+      // The standard for this project is statements 80 / branches 75 /
+      // functions 80 / lines 80. That is the goal and it has not been reached.
+      //
+      // The numbers below are NOT the standard — they are a ratchet stop, set
+      // just under coverage as measured on CI (2026-08-11: 64.64 / 53.70 /
+      // 62.27 / 66.77) so that coverage cannot regress while the gate is being
+      // brought back into use. Setting them straight to 80 would fail every PR
+      // on day one, and the gate would be switched off again. Raise them as
+      // coverage climbs; that is the only route to the standard above.
       thresholds: {
-        global: {
-          statements: 80,
-          branches: 75,
-          functions: 80,
-          lines: 80,
-        },
+        statements: 63,
+        branches: 52,
+        functions: 61,
+        lines: 65,
       },
     },
   },
