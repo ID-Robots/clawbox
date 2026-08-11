@@ -18,6 +18,8 @@ import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -25,6 +27,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { DISCORD_INVITE_URL } from "@/lib/community";
 
 /* ── Types ── */
 
@@ -971,6 +974,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (section !== "ai" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section, isMobile]);
+  // Which agent consumes the local model. Named the harness outright, and said
+  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
+  useEffect(() => {
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
+    return () => { alive = false; };
+  }, []);
+
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
   const [localAiError, setLocalAiError] = useState<string | null>(null);
@@ -1141,7 +1157,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const onApproved = (e: Event) => {
       const code = (e as CustomEvent<{ code?: string }>).detail?.code;
       refreshPairing();
-      if (code) setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code.toUpperCase()) : prev));
+      if (code) setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
     };
     window.addEventListener("clawbox:telegram-approved", onApproved);
     return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
@@ -1189,8 +1205,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [t]);
 
   const approvePairingCode = useCallback(async (rawCode: string) => {
-    const code = rawCode.trim().toUpperCase();
-    if (!/^[A-Z0-9]{8}$/.test(code)) {
+    // Either the 8-char code the bot DM'd, or a Hermes request id from the
+    // pending list — see src/lib/telegram-pairing-token.ts.
+    const code = normalizePairingToken(rawCode);
+    if (!isPairingToken(code)) {
       setTgPairingStatus({ type: "error", message: t("settings.pairingInvalidCode") });
       return;
     }
@@ -1206,7 +1224,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (r.ok && d.success) {
         if (Array.isArray(d.approved)) setTgApproved(d.approved);
         setTgPairingCode("");
-        setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
         window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
       } else {
@@ -2314,7 +2332,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {localAiStatus.running === false && !localAiStatus.standbyEnabled
                         ? "Configured, but currently offline."
                         : localAiStatus.running === false
-                          ? "Enabled with on-demand standby to free RAM until OpenClaw needs it."
+                          ? `Enabled with on-demand standby to free RAM until ${harnessLabel} needs it.`
                         : "Enabled and ready as your local backup model."}
                     </p>
                   </div>
@@ -2983,7 +3001,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </a>
 
             <a
-              href="https://discord.gg/FbKmnxYnpq"
+              href={DISCORD_INVITE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"

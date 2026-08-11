@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,11 @@ async function proxy(target: string, failMsg: string) {
 }
 
 export async function GET(req: Request) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   const url = new URL(req.url);
 
   // Per-skill detail (richer metadata the list omits: featured, updatedAt,

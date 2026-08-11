@@ -157,7 +157,7 @@ describe("AIModelsStep variants", () => {
   });
 
   it("renders only cloud and ClawBox providers in provider mode", async () => {
-    const { getByText, queryByRole, queryByText } = render(
+    const { getByRole, getByText, queryByRole, queryByText } = render(
       <AIModelsStep
         embedded
         providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
@@ -172,10 +172,17 @@ describe("AIModelsStep variants", () => {
     });
 
     expect(getByText("Connect AI Provider")).toBeInTheDocument();
+    // The list opens on the selected provider; the rest are one tap behind
+    // the same toggle, so reach OpenAI the way a customer does.
     expect(getByText("ClawBox AI")).toBeInTheDocument();
+    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("All-in cloud AI for ClawBox — backups, remote desktop, full support")).toBeInTheDocument();
+    // The plan opens as a summary that still states what it costs; the pitch
+    // and the feature list sit behind its "Change".
+    expect(getByText("Pro plan · €9/month")).toBeInTheDocument();
+    fireEvent.click(getByRole("button", { name: /^Plan/ }));
     expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection
     // is handled exclusively through the portal handoff. Verify nothing in
@@ -271,6 +278,8 @@ describe("AIModelsStep variants", () => {
       expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
     });
 
+    // The tier pills live behind the plan summary — open it, then pick Max.
+    fireEvent.click(getByRole("button", { name: /^Plan/ }));
     fireEvent.click(getByRole("radio", { name: /^Max tier/ }));
     fireEvent.click(getByRole("button", { name: /Get device code/i }));
 
@@ -323,18 +332,24 @@ describe("AIModelsStep variants", () => {
 
     // ClawBox AI's Subscription tab drives its own "Get device code"
     // button instead of the generic per-provider Connect label, so we
-    // jump straight to the other providers via Show-more.
-    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
-    fireEvent.click(getByRole("radio", { name: /OpenAI GPT/i }));
+    // jump straight to the other providers via Show-more. Picking one
+    // closes the list again — so every hop reopens it, exactly as a
+    // customer comparing providers would have to.
+    const pickProvider = (name: RegExp) => {
+      fireEvent.click(getByRole("button", { name: /Show more providers/i }));
+      fireEvent.click(getByRole("radio", { name }));
+    };
+
+    pickProvider(/OpenAI GPT/i);
     expect(getByRole("button", { name: "Connect to OpenAI GPT" })).toBeInTheDocument();
 
-    fireEvent.click(getByRole("radio", { name: /Anthropic Claude/i }));
+    pickProvider(/Anthropic Claude/i);
     expect(getByRole("button", { name: "Connect to Anthropic Claude" })).toBeInTheDocument();
 
-    fireEvent.click(getByRole("radio", { name: /Google Gemini/i }));
+    pickProvider(/Google Gemini/i);
     expect(getByRole("button", { name: "Connect to Google Gemini" })).toBeInTheDocument();
 
-    fireEvent.click(getByRole("radio", { name: /OpenRouter/i }));
+    pickProvider(/OpenRouter/i);
     expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
   });
 

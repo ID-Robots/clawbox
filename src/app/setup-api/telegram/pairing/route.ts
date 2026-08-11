@@ -1,19 +1,33 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
+import { getActiveHarness, type Harness } from "@/lib/harness";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
   readTelegramPairingRequests,
   approveTelegramPairing,
-  PAIRING_CODE_RE,
 } from "@/lib/openclaw-config";
+import {
+  approveHermesPairing,
+  listHermesPairing,
+  readHermesApprovedUsers,
+  readHermesPairingRequests,
+  notifyHermesTelegramUser,
+  type HermesPairingRequest,
+} from "@/lib/hermes-telegram";
+import { PAIRING_TOKEN_RE, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 
 export const dynamic = "force-dynamic";
 
-// OpenClaw's allowlist stores bare ids only. We remember the display name
+// Neither harness's allowlist stores a display name. We remember the name
 // captured at approval time (ClawBox-side, in config-store) so the UI can show
 // who each approved sender is.
 const APPROVED_NAMES_KEY = "telegram_approved_names";
+
+// What the bot tells a requester once the owner lets them in. OpenClaw sends
+// this itself (`pairing approve --notify`); Hermes has no such flag, so we send
+// it with `hermes send`.
+const APPROVED_NOTICE = "You're approved — send me a message and I'll answer.";
 
 async function isConfigured(): Promise<boolean> {
   const token = await get("telegram_bot_token");
@@ -30,14 +44,27 @@ async function readApprovedNames(): Promise<Record<string, string>> {
   return out;
 }
 
-async function buildApproved(names?: Record<string, string>): Promise<Array<{ id: string; name?: string }>> {
-  const [ids, nameMap] = await Promise.all([readTelegramAllowFrom(), names ?? readApprovedNames()]);
+/**
+ * Approved senders. Hermes' own store carries the display name, so it wins over
+ * ClawBox's remembered map; OpenClaw's allowlist is bare ids and needs the map.
+ */
+async function buildApproved(
+  harness: Harness,
+  names?: Record<string, string>,
+): Promise<Array<{ id: string; name?: string }>> {
+  const nameMap = names ?? (await readApprovedNames());
+  if (harness === "hermes") {
+    const approved = await readHermesApprovedUsers();
+    return approved.map(({ id, name }) => ({ id, name: name ?? nameMap[id] }));
+  }
+  const ids = await readTelegramAllowFrom();
   return ids.map((id) => ({ id, name: nameMap[id] }));
 }
 
 // GET — list approved senders (fast: a single file read). With `?pending=1` it
-// also runs `openclaw pairing list` (slow ~10-12s CLI cold-start on Jetson), so
-// pending is opt-in rather than fetched on every status refresh.
+// also runs the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s
+// cold start on a Jetson, so pending stays opt-in rather than being fetched on
+// every status refresh.
 export async function GET(request: Request) {
   try {
     if (!(await isConfigured())) {
@@ -46,16 +73,25 @@ export async function GET(request: Request) {
         { headers: { "Cache-Control": "no-store" } },
       );
     }
+    const harness = await getActiveHarness();
     const params = new URL(request.url).searchParams;
-    const approved = await buildApproved();
+    const approved = await buildApproved(harness);
     // `?poll=1` reads the pairing-store file (fast — safe for the desktop poller);
     // `?pending=1` uses the authoritative CLI (the Settings "Check" button).
-    const pending =
-      params.get("poll") === "1"
-        ? await readTelegramPairingRequests()
-        : params.get("pending") === "1"
-          ? await listTelegramPairingRequests()
-          : [];
+    const wantsPoll = params.get("poll") === "1";
+    const wantsPending = params.get("pending") === "1";
+    let pending: HermesPairingRequest[] = [];
+    if (harness === "hermes") {
+      if (wantsPoll) {
+        pending = await readHermesPairingRequests();
+      } else if (wantsPending) {
+        pending = (await listHermesPairing(request.signal)).pending;
+      }
+    } else if (wantsPoll) {
+      pending = await readTelegramPairingRequests();
+    } else if (wantsPending) {
+      pending = await listTelegramPairingRequests();
+    }
     return NextResponse.json(
       { configured: true, approved, pending },
       { headers: { "Cache-Control": "no-store" } },
@@ -68,7 +104,10 @@ export async function GET(request: Request) {
   }
 }
 
-// POST { code } — approve a pending pairing code and notify the requester.
+// POST { code } — approve a pending request and notify the requester. `code` is
+// the 8-char code the bot DM'd, or (Hermes only) the request id from the pending
+// list, which is the only approvable token there because Hermes stores codes
+// hashed. See src/lib/telegram-pairing-token.ts.
 export async function POST(request: Request) {
   try {
     let body: { code?: unknown };
@@ -78,8 +117,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const code = typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
-    if (!PAIRING_CODE_RE.test(code)) {
+    const harness = await getActiveHarness();
+    const code = normalizePairingToken(body.code);
+    if (!PAIRING_TOKEN_RE.test(code)) {
       return NextResponse.json(
         { error: "Enter the 8-character pairing code from the bot's message." },
         { status: 400 },
@@ -91,9 +131,11 @@ export async function POST(request: Request) {
     let approvedId: string | undefined;
     let approvedName: string | undefined;
     try {
-      const match = (await readTelegramPairingRequests()).find(
-        (r) => typeof r.code === "string" && r.code.toUpperCase() === code,
-      );
+      const requests =
+        harness === "hermes"
+          ? await readHermesPairingRequests()
+          : await readTelegramPairingRequests();
+      const match = requests.find((r) => samePairingToken(r.code, code));
       if (match) {
         approvedId = match.id;
         if (match.name) approvedName = match.name;
@@ -103,14 +145,25 @@ export async function POST(request: Request) {
     }
 
     try {
-      await approveTelegramPairing(code);
+      if (harness === "hermes") {
+        const result = await approveHermesPairing(code, request.signal);
+        // Hermes echoes the granted user back; trust it over the store read.
+        approvedId = result.userId ?? approvedId;
+        approvedName = result.userName ?? approvedName;
+        if (approvedId) {
+          // Never let a failed courtesy DM undo a completed approval.
+          await notifyHermesTelegramUser(approvedId, APPROVED_NOTICE);
+        }
+      } else {
+        await approveTelegramPairing(code);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // A spawn/timeout failure is an infrastructure problem (500); a non-zero
-      // exit is almost always a user-recoverable expired/unknown code (400).
-      if (/timed out|ENOENT|spawn/i.test(message)) {
+      // A spawn/timeout failure is an infrastructure problem (500); anything
+      // else is almost always a user-recoverable expired/unknown code (400).
+      if (/timed out|ENOENT|spawn|not installed|cancelled/i.test(message)) {
         return NextResponse.json(
-          { error: "Couldn't reach OpenClaw to approve the code. Try again in a moment." },
+          { error: "Couldn't reach the agent to approve the code. Try again in a moment." },
           { status: 500 },
         );
       }
@@ -129,7 +182,7 @@ export async function POST(request: Request) {
       names[approvedId] = approvedName;
       await set(APPROVED_NAMES_KEY, names);
     }
-    const approved = await buildApproved(names);
+    const approved = await buildApproved(harness, names);
     return NextResponse.json({ success: true, approved });
   } catch (err) {
     return NextResponse.json(

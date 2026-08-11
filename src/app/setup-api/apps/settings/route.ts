@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -27,6 +28,11 @@ const CONFIG_WRITERS: Record<string, (settings: Record<string, string | boolean>
 };
 
 export async function POST(req: Request) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   try {
     const { appId, settings } = await req.json();
     if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {

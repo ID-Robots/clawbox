@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
 import { setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import {
+  clearHermesTelegramPairingState,
+  ensureHermesGateway,
+  setHermesTelegramToken,
+} from "@/lib/hermes-telegram";
 
 export const dynamic = "force-dynamic";
 
@@ -32,14 +38,55 @@ export async function POST(request: Request) {
 
     // A different bot means a fresh allowlist — previously-approved senders
     // belong to the old bot. Detect a real token change (re-saving the same
-    // token keeps approvals) so we can reset OpenClaw's allowlist/pending stores
-    // and our name map below.
+    // token keeps approvals) so we can reset the harness's allowlist/pending
+    // stores and our name map below.
     const previousToken = await get("telegram_bot_token");
     const tokenChanged =
       typeof previousToken === "string" && previousToken.length > 0 && previousToken !== botToken;
 
     // Save to ClawBox config
     await set("telegram_bot_token", botToken);
+
+    // Hand the token to whichever harness this device actually runs. A Hermes
+    // device has no OpenClaw gateway at all (the unit is masked, the port is
+    // closed), so the OpenClaw path there stored a token nothing ever read and
+    // the bot never answered.
+    const harness = await getActiveHarness();
+
+    if (harness === "hermes") {
+      await setHermesTelegramToken(botToken, request.signal);
+
+      if (tokenChanged) {
+        await clearHermesTelegramPairingState();
+        await set("telegram_approved_names", undefined);
+      }
+
+      // Hermes' messaging gateway is the process that RECEIVES messages, so it
+      // has to be installed and up. As with the OpenClaw restart below, the
+      // token is already persisted here — a service failure is a warning, not a
+      // failed save.
+      try {
+        const status = await ensureHermesGateway(request.signal);
+        if (!status.running) {
+          return NextResponse.json({
+            success: true,
+            reset: tokenChanged,
+            restarted: false,
+            warning: "Saved — will apply on next gateway restart",
+          });
+        }
+      } catch (gatewayErr) {
+        console.error("[telegram/configure] Hermes gateway start failed:", gatewayErr);
+        return NextResponse.json({
+          success: true,
+          reset: tokenChanged,
+          restarted: false,
+          warning: "Saved — will apply on next gateway restart",
+        });
+      }
+
+      return NextResponse.json({ success: true, reset: tokenChanged, restarted: true });
+    }
 
     // Register Telegram channel with OpenClaw gateway
     await setTelegramToken(botToken);

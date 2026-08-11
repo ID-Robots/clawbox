@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
-import fs from "fs/promises";
+import { getActiveHarness } from "@/lib/harness";
+import { sanitizePreferences, validatePreference } from "@/lib/preference-schema";
+import { personaFilesFor, writeLanguagePersona } from "@/lib/language-persona";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +15,11 @@ function isAllowed(key: string) {
 
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
 // GET /setup-api/preferences?all=1  (returns all pref:* keys)
+//
+// Values are run through the same rules the write path enforces. A value
+// stored before those rules existed is DROPPED rather than served: this
+// endpoint feeds the agent-callable `preferences_get` tool, so anything the
+// store still holds from an older, unvalidated write must not reach a caller.
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const allParam = url.searchParams.get("all");
@@ -26,7 +33,7 @@ export async function GET(req: Request) {
         result[key.slice(5)] = value;
       }
     }
-    return NextResponse.json(result);
+    return NextResponse.json(sanitizePreferences(result));
   }
 
   const keysParam = url.searchParams.get("keys");
@@ -38,86 +45,35 @@ export async function GET(req: Request) {
   for (const key of keys) {
     result[key] = await config.get(`pref:${key}`);
   }
-  return NextResponse.json(result);
+  return NextResponse.json(sanitizePreferences(result));
 }
 
 // POST /setup-api/preferences  { wp_opacity: 80, wp_bg_color: "#111" }
+//
+// Every value is validated before it is stored. The request is rejected whole
+// rather than partially applied — a caller that sent an impossible value
+// should learn that, not have the rest of its bundle silently land.
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const entries: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(body)) {
-      if (isAllowed(key)) {
-        entries[`pref:${key}`] = value;
+      if (!isAllowed(key)) continue;
+      const check = validatePreference(key, value);
+      if (!check.ok) {
+        console.error(`[preferences] Rejected write: ${check.reason}`);
+        return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
+      entries[`pref:${key}`] = value;
     }
     if (Object.keys(entries).length > 0) {
       await config.setMany(entries);
     }
-    // When language changes, update OpenClaw agent workspace files
-    if (body.ui_language && typeof body.ui_language === "string") {
-      const LANG_NAMES: Record<string, string> = {
-        en: "English", bg: "Български", de: "Deutsch", es: "Español",
-        fr: "Français", it: "Italiano", ja: "日本語", nl: "Nederlands",
-        sv: "Svenska", zh: "中文",
-      };
-      // Constrain to a known language code before it's interpolated into the
-      // agent's SOUL.md/USER.md persona files. The raw request value must never
-      // reach those files — a value with newlines/Markdown headings would
-      // otherwise inject arbitrary instructions into the agent's system prompt
-      // (reachable pre-auth during the setup-AP window).
-      const requested = body.ui_language;
-      const lang = Object.hasOwn(LANG_NAMES, requested) ? requested : "en";
-      const langName = LANG_NAMES[lang] ?? "English";
-      const wsDir = "/home/clawbox/.openclaw/workspace";
-      await fs.mkdir(wsDir, { recursive: true }).catch(() => {});
-
-      // Update USER.md with language preference
-      const userFile = `${wsDir}/USER.md`;
-      try {
-        let userMd = await fs.readFile(userFile, "utf-8").catch(() => "# USER.md - About Your Human\n");
-        // Remove existing language line if present
-        userMd = userMd.replace(/\n- \*\*Language:\*\*.*\n/g, "\n");
-        // Add language preference after the header or at the end
-        const langLine = `- **Language:** ${langName} (${lang})` + (lang !== "en"
-          ? ` — Always respond in ${langName}`
-          : "");
-        if (userMd.includes("- **Name:**")) {
-          userMd = userMd.replace(/(- \*\*Name:\*\*.*\n)/, `$1${langLine}\n`);
-        } else {
-          userMd = userMd.trimEnd() + `\n${langLine}\n`;
-        }
-        await fs.writeFile(userFile, userMd, "utf-8");
-      } catch (err) {
-        console.error(`[preferences] Failed to update ${userFile}:`, err instanceof Error ? err.message : err);
-      }
-
-      // Also write SOUL.md language instruction for strong enforcement
-      if (lang !== "en") {
-        const soulFile = `${wsDir}/SOUL.md`;
-        try {
-          let soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "# SOUL.md - Who You Are\n");
-          // Remove existing language section
-          soulMd = soulMd.replace(/\n## Language\n[\s\S]*?(?=\n## |\n$|$)/, "");
-          // Append language section
-          soulMd = soulMd.trimEnd() + `\n\n## Language\n\nYou MUST respond in ${langName}. The user's preferred language is ${langName} (${lang}). All messages, explanations, and summaries must be in ${langName}. Only use English for code, technical terms, and tool names.\n`;
-          await fs.writeFile(soulFile, soulMd, "utf-8");
-        } catch (err) {
-          console.error(`[preferences] Failed to update ${soulFile}:`, err instanceof Error ? err.message : err);
-        }
-      } else {
-        // English — remove language section from SOUL.md if present
-        const soulFile = `${wsDir}/SOUL.md`;
-        try {
-          let soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "");
-          if (soulMd.includes("## Language")) {
-            soulMd = soulMd.replace(/\n## Language\n[\s\S]*?(?=\n## |\n$|$)/, "");
-            await fs.writeFile(soulFile, soulMd.trimEnd() + "\n", "utf-8");
-          }
-        } catch (err) {
-          console.error(`[preferences] Failed to update ${soulFile}:`, err instanceof Error ? err.message : err);
-        }
-      }
+    // When language changes, update the persona files of the harness that is
+    // actually running. Validation above already constrained ui_language to a
+    // locale we ship, so nothing free-form reaches the agent's system prompt.
+    if (typeof body.ui_language === "string" && body.ui_language) {
+      await writeLanguagePersona(body.ui_language, personaFilesFor(await getActiveHarness()));
     }
     return NextResponse.json({ ok: true });
   } catch (err) {

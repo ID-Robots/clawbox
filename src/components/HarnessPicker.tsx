@@ -9,7 +9,12 @@ interface HarnessEntry {
 }
 interface HarnessStatus {
   active: string;
-  harnesses: HarnessEntry[];
+  /** Optional on purpose: this is unvalidated JSON off the status route, and a
+      response that omits the list must render an empty picker, not throw. */
+  harnesses?: HarnessEntry[];
+  /** Single-harness edition (or dual without a premium license) → no switcher. */
+  locked?: boolean;
+  edition?: string;
 }
 
 // Lets the user pick which agent harness (OpenClaw / Hermes) backs the device.
@@ -61,6 +66,8 @@ export default function HarnessPicker() {
     [switching, status],
   );
 
+  const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
+
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
       <div className="flex items-center gap-2 mb-3">
@@ -74,6 +81,30 @@ export default function HarnessPicker() {
       <p className="text-xs text-[var(--text-muted)] mb-3">
         The engine that runs your agent. One shared identity; each harness keeps its own providers.
       </p>
+      {status?.locked ? (
+        // Single-harness edition: no switcher, just a read-only badge for the
+        // one agent this device runs.
+        <div className="flex items-center justify-between rounded-xl border border-[var(--coral-bright)] bg-orange-500/10 p-3">
+          <span className="flex items-center gap-2">
+            {/* Same dot convention as the switcher below. A fixed green read
+                "online" even when the status route had just reported the one
+                harness this edition has as down — and here the badge is the
+                only health signal the user gets. */}
+            <span
+              data-testid="harness-locked-dot"
+              title={activeEntry && !activeEntry.healthy ? `${activeEntry.label} is not running` : undefined}
+              className={`w-2 h-2 rounded-full ${activeEntry?.healthy ? "bg-emerald-400" : "bg-white/25"}`}
+            />
+            <span className="text-sm text-[var(--text-primary)] font-medium">
+              {activeEntry?.label ?? status.active}
+            </span>
+          </span>
+          <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+            <span className="material-symbols-rounded" style={{ fontSize: 13 }}>lock</span>
+            This edition
+          </span>
+        </div>
+      ) : (
       <div className="grid grid-cols-2 gap-3">
         {(status?.harnesses ?? []).map((h) => {
           const active = status?.active === h.id;
@@ -101,6 +132,7 @@ export default function HarnessPicker() {
           );
         })}
       </div>
+      )}
       {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
     </div>
   );

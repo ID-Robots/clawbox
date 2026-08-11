@@ -5,8 +5,16 @@ import SetupWizard from "@/components/SetupWizard";
 
 vi.mock("@/lib/i18n", () => ({
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  // The header now owns the language control, so the shell reads locale and
+  // LANGUAGES as well as t.
+  LANGUAGES: [
+    { code: "en", flag: "🇬🇧", label: "English" },
+    { code: "bg", flag: "🇧🇬", label: "Български" },
+  ],
   useT: () => ({
     t: (key: string) => key,
+    locale: "en",
+    setLocale: vi.fn(),
   }),
 }));
 

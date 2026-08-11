@@ -6,8 +6,12 @@ Wants=network-online.target
 # gateway-pre-start.sh. Keep the limiter window long enough to contain several
 # complete slow failures; inherited 5-in-10s defaults never tripped when one
 # failed cycle already took longer than ten seconds (issue #284).
+# Burst is well above the number of restarts a person can provoke by hand in an
+# hour (skill installs no longer restart at all; model/config changes do), so the
+# limiter only ever fires on a genuine crash loop, which produces starts far
+# faster than that.
 StartLimitIntervalSec=3600
-StartLimitBurst=5
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -19,9 +23,22 @@ ExecStartPre=/home/clawbox/clawbox/scripts/gateway-pre-start.sh
 # gateway-proxy.ts injects into the SPA). Passing a literal here would override
 # that and reintroduce the shared-token / UI-drift bug (issues #149, #150).
 ExecStart=/home/clawbox/.npm-global/bin/openclaw gateway --allow-unconfigured --bind lan
-# Retry crashes and rejected startups, but leave deliberate clean stops alone.
-Restart=on-failure
+# OpenClaw restarts itself by EXITING and letting its supervisor start it again:
+# it detects systemd from INVOCATION_ID/JOURNAL_STREAM, logs "restart mode: full
+# process restart (supervisor restart)", writes a handoff file and calls exit(0).
+# Under Restart=on-failure that clean exit was final — the gateway stayed down.
+# Restart=always is what OpenClaw's own `openclaw daemon` unit template uses, and
+# it is the only setting that honours that contract. `systemctl stop` still stops
+# the unit for good, so deliberate operator stops are unaffected.
+Restart=always
 RestartSec=5
+# Exit 78 (EX_CONFIG) is OpenClaw saying its configuration is unusable. Restarting
+# would only reproduce it, so let the unit stay down and be diagnosed instead.
+RestartPreventExitStatus=78
+# 143 = 128+SIGTERM, the normal shutdown path. Without this the unit is marked
+# failed every time it is stopped.
+SuccessExitStatus=0 143
+TimeoutStopSec=30
 # gateway-pre-start.sh runs as a blocking ExecStartPre. The default
 # ~90s start timeout could kill a legitimately slow first-boot pre-start
 # (plugin fetch/unpack on a cold Jetson) mid-flight and wedge the unit into

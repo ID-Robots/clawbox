@@ -1,0 +1,4 @@
+{
+  "//": "The MCP server is ES modules. Declaring it here (rather than at the repo root, which Next.js owns) lets node/tsx run these files for the mcp/check-tools.ts surface check exactly as bun runs them on the device.",
+  "type": "module"
+}

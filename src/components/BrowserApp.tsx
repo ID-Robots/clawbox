@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import ErrorWithFix from "./ErrorWithFix";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -27,6 +28,21 @@ interface BrowserAppProps {
 export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const { t } = useT();
   const [status, setStatus] = useState<BrowserStatus | null>(null);
+  // Which agent actually drives this browser. The copy used to say "OpenClaw"
+  // on every device — wrong, and confusing, on a Hermes box where the OpenClaw
+  // gateway isn't even installed. Defaults to OpenClaw (the native SKU) and is
+  // corrected as soon as the device answers.
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
+
+  useEffect(() => {
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
+    return () => { alive = false; };
+  }, []);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -142,7 +158,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           </div>
           <div>
             <h1 className="text-lg font-semibold">{t("browser.title")}</h1>
-            <p className="text-xs text-white/50">{t("browser.subtitle")}</p>
+            <p className="text-xs text-white/50">{t("browser.subtitle", { harness: harnessLabel })}</p>
           </div>
         </div>
       </div>
@@ -211,11 +227,11 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               ) : "2"}
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">{t("browser.openclawIntegration")}</h3>
+              <h3 className="font-medium text-sm">{t("browser.openclawIntegration", { harness: harnessLabel })}</h3>
               <p className="text-xs text-white/50 mt-1">
                 {isEnabled
-                  ? t("browser.enabledMessage")
-                  : t("browser.disabledMessage")}
+                  ? t("browser.enabledMessage", { harness: harnessLabel })
+                  : t("browser.disabledMessage", { harness: harnessLabel })}
               </p>
               {isEnabled && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -268,8 +284,8 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               <h3 className="font-medium text-sm">{t("browser.desktopBrowser")}</h3>
               <p className="text-xs text-white/50 mt-1">
                 {browserRunning
-                  ? t("browser.runningMessage")
-                  : t("browser.launchMessage")}
+                  ? t("browser.runningMessage", { harness: harnessLabel })
+                  : t("browser.launchMessage", { harness: harnessLabel })}
               </p>
               {browserRunning && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">

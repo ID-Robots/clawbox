@@ -15,6 +15,10 @@ import { DATA_DIR } from "./config-store";
 const PROTECTED_DIR_RES: RegExp[] = [
   /(^|\/)\.ssh(\/|$)/,
   /(^|\/)\.openclaw(\/|$)/,
+  // Hermes edition: ~/.hermes holds config.yaml (the ClawBox AI billing token,
+  // the dashboard signing secret and its scrypt password hash), .env (provider
+  // keys) and auth.json (OAuth tokens) — the Hermes equivalent of ~/.openclaw.
+  /(^|\/)\.hermes(\/|$)/,
   /(^|\/)\.codex(\/|$)/,
   /(^|\/)\.gnupg(\/|$)/,
   /(^|\/)\.aws(\/|$)/,
@@ -37,8 +41,10 @@ const PROTECTED_FILE_RES: RegExp[] = [
 
 // Exact secret files in the ClawBox data dir: the session-secret (forge cookies),
 // the service bearer tokens, and the config/kv stores that carry provider keys.
+// `.hermes-dashboard-pw` is the server-side password the dashboard proxy logs in
+// with — reading it is a full sign-in to the Hermes dashboard.
 const PROTECTED_FILES = new Set(
-  [".session-secret", ".mcp-token", ".local-ai-token", "config.json", "kv.json"]
+  [".session-secret", ".mcp-token", ".local-ai-token", ".hermes-dashboard-pw", "config.json", "kv.json"]
     .map((n) => path.join(DATA_DIR, n)),
 );
 

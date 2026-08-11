@@ -49,6 +49,29 @@ if ! [[ "$N_GPU_LAYERS" =~ ^[0-9]+$ ]] || [ "$N_GPU_LAYERS" -gt 999 ]; then
   echo "[llamacpp] Invalid LLAMACPP_N_GPU_LAYERS='${LLAMACPP_N_GPU_LAYERS-}'; falling back to 99"
   N_GPU_LAYERS=99
 fi
+
+# Whether Gemma thinks before answering. llama-server accepts exactly three
+# values — on | off | auto — where auto reads the model's own template, which
+# for Gemma 4 means ON.
+#
+# Measured on this hardware, same question, same answer: thinking on costs 1497
+# reasoning characters and 19.6s; off costs 0 and 4.0s. Roughly 5x, on a model
+# whose whole job is to be the fast local fallback. Every row of the model
+# bake-off was measured with it off, and the rig's own notes call that the
+# shipping config.
+#
+# It is not free: thinking ON is the only way this model gets weekday-arithmetic
+# questions right. So the dial is here rather than hardcoded — flip it in .env
+# and restart the service.
+LLAMACPP_REASONING="${LLAMACPP_REASONING:-off}"
+case "$LLAMACPP_REASONING" in
+  on|off|auto) ;;
+  *)
+    echo "[llamacpp] Invalid LLAMACPP_REASONING='${LLAMACPP_REASONING}' (expected on|off|auto); using 'off'"
+    LLAMACPP_REASONING=off
+    ;;
+esac
+echo "[llamacpp] reasoning=${LLAMACPP_REASONING}"
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -59,4 +82,5 @@ exec "$BIN_PATH" \
   --cache-type-v "$CACHE_TYPE_V" \
   --ctx-size "$CTX_SIZE" \
   --n-gpu-layers "$N_GPU_LAYERS" \
+  --reasoning "$LLAMACPP_REASONING" \
   --jinja

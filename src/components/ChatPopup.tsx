@@ -78,6 +78,14 @@ interface ChatPopupProps {
 // the colour (red error, green confirmation). Ignored for user/assistant.
 type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' }
 
+// One selectable entry in the Hermes provider pill, as reported by
+// /setup-api/hermes/models (which reads Hermes' live dashboard). Only rows the
+// device has credentials for get this far — see the seeding effect.
+interface HermesChatProvider {
+  id: string
+  name: string
+}
+
 interface ChatModelState {
   activeOptionId: string | null
   activeModel: string | null
@@ -138,10 +146,33 @@ import {
   extractProviderModelId,
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
+// Hermes chat header. Deliberately a separate namespace from the OpenClaw
+// pieces above: Hermes has its own provider slugs, its own model ids and its
+// own reasoning vocabulary, and the whole point of REQ 1 is that the two never
+// get mixed. The MODEL list is scoped by the same server contract the Hermes
+// settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
+// client-side filtering exists.
+import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import {
+  HERMES_AUTO_PROVIDER,
+  hermesProviderLabel,
+  hermesProviderPillLabel,
+} from '@/lib/hermes-providers'
+import {
+  HERMES_REASONING_DEFAULT,
+  HERMES_REASONING_LABELS,
+  clampReasoningForProvider,
+  hermesReasoningLevelsFor,
+  isHermesReasoningLevel,
+  type HermesReasoningLevel,
+} from '@/lib/hermes-reasoning'
+import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
+import { fetchHarness } from '@/lib/client-harness'
+import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
 // Strip gateway wrapper tags like <final>, <thinking>, etc.
 function stripGatewayTags(text: string): string {
@@ -172,7 +203,14 @@ function extractText(msg: unknown): string {
   return ''
 }
 
-const DEFAULT_SIZE = { w: 400, h: 500 }
+// 420, not the old 400, because of the header. The three selector pills spend
+// ~120px on their own padding, chevrons and gaps, so a 400px panel left ~154px
+// for the three LABELS — and the widest shipped default pairing, "Claude" +
+// "Sonnet 4.6" + "Medium", needs 158 even after every redundant word has been
+// squeezed out of it (see src/lib/chat-header-pills.ts). 20px is the whole
+// remaining gap; measured in the device's own Chromium, every provider/model
+// default in the catalog renders un-truncated at 420 and several did not at 400.
+const DEFAULT_SIZE = { w: 420, h: 500 }
 const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 // Floor for the chat window width. Below this the header selector pills would
 // squeeze past a readable size, so the resize handles (floating + docked panel)
@@ -197,6 +235,46 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Reactive copy of the harness for rendering (the ref drives connect/send at
   // call-time; this drives which header controls show).
   const [harnessMode, setHarnessMode] = useState<'openclaw' | 'hermes'>('openclaw')
+  // Hermes chat header — the same three controls the OpenClaw header has:
+  // PROVIDER → MODEL (scoped to that provider) → THINKING EFFORT.
+  //
+  // All three are PER-INVOCATION overrides: `hermes -z --provider/--reasoning`
+  // are documented as "for this invocation", so changing a pill never rewrites
+  // config.yaml. The Hermes settings panel stays the only thing that persists a
+  // device default; these choices persist in localStorage instead.
+  //
+  // Refs mirror the state so dispatchHermes can stay a stable useCallback([])
+  // and read the values at send-time (a pill changed mid-run therefore applies
+  // to the NEXT turn, never retroactively).
+  const [hermesProviders, setHermesProviders] = useState<HermesChatProvider[]>([])
+  const [hermesProvider, setHermesProvider] = useState('')
+  const hermesProviderRef = useRef('')
+  // The device's own configured pairing (config.yaml model.provider/default).
+  // It is the floor: the only pairing we may assume without a live model list.
+  const [hermesDevice, setHermesDevice] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
+  const hermesDeviceRef = useRef<{ provider: string; model: string }>({ provider: '', model: '' })
+  // The user's explicit model pick, keyed BY PROVIDER — so a remembered
+  // anthropic id can never leak into a ClawBox AI turn. Honoured only while the
+  // pick is still in that provider's live list (see the `hermesModel` memo).
+  const [hermesPicks, setHermesPicks] = useState<Record<string, string>>({})
+  const hermesModelRef = useRef('')
+  // The Hermes session this chat is threaded through. Empty until the first
+  // reply reports one; every later turn resumes it, which is what gives the
+  // conversation memory. Cleared when the user starts a new chat.
+  const hermesSessionRef = useRef('')
+  // What the LAST turn actually ran on. A resumed session keeps the system
+  // prompt it was created with, so after a switch the agent would still answer
+  // "What model are you?" with the old one (and echo its earlier claims from
+  // the transcript) even though the turn is genuinely routed to the new
+  // provider. Comparing against these lets the next turn state the change
+  // rather than discarding the conversation to get a fresh system prompt.
+  const hermesSentProviderRef = useRef('')
+  const hermesSentModelRef = useRef('')
+  const [hermesReasoning, setHermesReasoning] = useState<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
+  const hermesReasoningRef = useRef<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
+  // False until the level is real (from localStorage, from the device's
+  // agent.reasoning_effort, or picked by the user) rather than the placeholder.
+  const hermesReasoningKnownRef = useRef(false)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -257,6 +335,137 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // then watch every reply silently downgrade to flash because Mike's
   // gateway gates by user.tier — UI says one thing, gateway does another.
   const clawboxLogin = useClawboxLogin()
+
+  // ── Hermes header: provider-scoped model list ──
+  //
+  // The scoping is SERVER-side (src/lib/hermes-model-options.ts): the hook asks
+  // for `?provider=<slug>` and gets back that provider's models only, with a
+  // `current` that is "" whenever the device's saved model belongs to a
+  // different provider. There is nothing else in the payload to render, so the
+  // reported bug — select Anthropic, still see a deepseek id — is structurally
+  // impossible here, exactly as in the Hermes settings panel. No second,
+  // client-side filter exists to drift from it.
+  const { scope: hermesScope, loading: hermesModelsLoading } = useHermesModelOptions(
+    harnessMode === 'hermes' && hermesProvider ? hermesProvider : null,
+  )
+  // Whether the model pill should hold its place while the new provider's list
+  // arrives. Switching provider drops `scope` to null by design — showing the
+  // OLD provider's models would be the foreign-vendor bug this whole module
+  // exists to prevent — but unmounting the pill made the header visibly
+  // collapse to "Provider + Thinking" for a second and then reflow when the
+  // models landed. Two layout shifts where none is needed.
+  //
+  // `hadModelPill` remembers that the pill was showing a moment ago, so a
+  // provider that genuinely has one model (ClawBox AI) still never grows a
+  // pointless picker.
+  const hadModelPill = useRef(false)
+  const hermesModelCount = hermesScope?.models.length ?? 0
+  useEffect(() => {
+    if (!hermesModelsLoading) hadModelPill.current = hermesModelCount > 1
+  }, [hermesModelsLoading, hermesModelCount])
+  const showModelPill = hermesModelsLoading ? hadModelPill.current : hermesModelCount > 1
+
+  // DERIVED, never effect-synced: a remembered pick the newly selected provider
+  // doesn't serve is dropped on the spot, so the pill can never sit on a
+  // foreign vendor's id — not even for a single frame.
+  const hermesModel = useMemo(() => {
+    const models = hermesScope?.models ?? []
+    const picked = hermesPicks[hermesProvider]
+    if (picked && models.some(m => m.id === picked)) return picked
+    if (models.length) return hermesScope?.current || hermesScope?.defaultModel || models[0].id
+    // No live list for this provider (dashboard unreachable, or a provider that
+    // exposes no enumerable /v1/models). The ONLY pairing safe to assume is the
+    // device's own, because that is what it is running right now; for anything
+    // else we send no -m at all and let hermes fall back to its configured
+    // default rather than guess an id that provider may not serve.
+    return hermesProvider && hermesProvider === hermesDevice.provider ? hermesDevice.model : ''
+  }, [hermesScope, hermesPicks, hermesProvider, hermesDevice])
+
+  // Whether the scoped list for the CURRENT provider has landed. Lets the send
+  // path tell "this provider genuinely has no models" apart from "the list is
+  // still in flight" — the hook nulls `scope` while a newly selected provider's
+  // request is running, and those two need very different messages.
+  const hermesScopeReadyRef = useRef(false)
+
+  // Keep the send-time refs in step with what is rendered.
+  useEffect(() => { hermesScopeReadyRef.current = Boolean(hermesScope) }, [hermesScope])
+  useEffect(() => { hermesProviderRef.current = hermesProvider }, [hermesProvider])
+  useEffect(() => { hermesModelRef.current = hermesModel }, [hermesModel])
+  // Only the levels the SELECTED provider actually accepts. ClawBox AI rejects
+  // `ultra` outright (HTTP 400 reasoning_effort: unknown), so offering it would
+  // be offering a guaranteed failed turn.
+  const hermesReasoningOptions = useMemo(
+    () => hermesReasoningLevelsFor(hermesProvider),
+    [hermesProvider],
+  )
+  // What the pill DISPLAYS and what we send: a user sitting on Ultra who
+  // switches to ClawBox AI lands on the nearest supported level rather than
+  // showing a value with no matching option.
+  const hermesEffectiveReasoning = useMemo(
+    () => clampReasoningForProvider(hermesProvider, hermesReasoning),
+    [hermesProvider, hermesReasoning],
+  )
+  useEffect(() => { hermesReasoningRef.current = hermesEffectiveReasoning }, [hermesEffectiveReasoning])
+  useEffect(() => { hermesDeviceRef.current = hermesDevice }, [hermesDevice])
+
+  const hermesProviderName = useCallback(
+    (id: string) => hermesProviderLabel(id, hermesProviders.find(p => p.id === id)?.name),
+    [hermesProviders],
+  )
+
+  // Text of the header's provider pill. Also feeds the model pill, which drops
+  // whatever this already says (see shortModelPillLabel).
+  const hermesProviderPill = useMemo(
+    () => hermesProviderPillLabel(
+      hermesProvider,
+      hermesProviders.find(p => p.id === hermesProvider)?.name,
+    ),
+    [hermesProvider, hermesProviders],
+  )
+
+  const changeHermesProvider = useCallback((id: string) => {
+    if (id === hermesProviderRef.current) return
+    setHermesProvider(id)
+    writeHermesChatPrefs({ provider: id })
+    // The session is deliberately KEPT: switching provider mid-conversation
+    // must not throw the conversation away. The turn is routed correctly on a
+    // resumed session (verified — the billing record shows the new provider);
+    // the only casualty was the agent's SELF-knowledge, because a resumed
+    // session keeps the system prompt it was created with and the transcript
+    // still contains its earlier "I am X" claims. dispatchHermes therefore
+    // tells it about the switch on the next turn instead.
+    setMessages(msgs => [...msgs, {
+      role: 'system',
+      text: `Switched to ${hermesProviderName(id)}.`,
+      timestamp: Date.now(),
+      variant: 'success',
+    }])
+  }, [hermesProviderName])
+
+  const changeHermesModel = useCallback((id: string) => {
+    const provider = hermesProviderRef.current
+    if (!provider) return
+    setHermesPicks(prev => (prev[provider] === id ? prev : { ...prev, [provider]: id }))
+    // Read-modify-write: `models` is a nested map, so a shallow merge of the
+    // patch alone would drop every other provider's remembered pick.
+    writeHermesChatPrefs({ models: { ...readHermesChatPrefs().models, [provider]: id } })
+    // Session kept — see changeHermesProvider. The next turn announces the
+    // change to the agent rather than starting the conversation over.
+  }, [])
+
+  const changeHermesReasoning = useCallback((next: string) => {
+    const level: HermesReasoningLevel = isHermesReasoningLevel(next) ? next : HERMES_REASONING_DEFAULT
+    if (level === hermesReasoningRef.current) return
+    hermesReasoningKnownRef.current = true
+    setHermesReasoning(level)
+    writeHermesChatPrefs({ reasoning: level })
+    setMessages(msgs => [...msgs, {
+      role: 'system',
+      text: `Switched effort to ${HERMES_REASONING_LABELS[level]}.`,
+      timestamp: Date.now(),
+      variant: 'success',
+    }])
+  }, [])
 
   // Sync panel width from parent (handles async preferences load after mount)
   useEffect(() => {
@@ -593,6 +802,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (!keepHistoryReload) {
               setMessages([])
               greetedRef.current = true // prevent auto-greet
+              // Clearing the transcript starts a NEW conversation, so drop the
+              // threaded Hermes session too — otherwise the agent would still
+              // carry the old context the user just cleared away.
+              hermesSessionRef.current = ''
             }
             const evt = skillEventRef.current
             skillEventRef.current = null
@@ -1043,15 +1256,65 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const dispatchHermes = useCallback(async (text: string) => {
     const controller = new AbortController()
     hermesAbortRef.current = controller
+    // Read the header selections at send-time (see the refs' comment): the
+    // callback stays stable, and a pill changed mid-run applies to the next
+    // turn rather than retroactively to this one.
+    const provider = hermesProviderRef.current
+    const model = hermesModelRef.current
+    // HERMES_REASONING_DEFAULT is only a placeholder for the picker. Until the
+    // level is KNOWN (read from the device, or chosen by the user) we send no
+    // --reasoning at all, so a failed seeding fetch can't silently override the
+    // device's own agent.reasoning_effort with "medium".
+    const reasoning = hermesReasoningKnownRef.current ? hermesReasoningRef.current : ''
     try {
+      if (provider && provider !== HERMES_AUTO_PROVIDER && !model && provider !== hermesDeviceRef.current.provider) {
+        // Sending --provider without -m makes hermes fall back to config.yaml's
+        // model.default, which belongs to the CONFIGURED provider — i.e. it
+        // would run this provider against another one's model id. The route
+        // rejects that too (409); catching it here turns a raw error into an
+        // actionable one instead of burning a turn.
+        throw new Error(hermesScopeReadyRef.current
+          ? `No models are available for ${hermesProviderLabel(provider)} on this device. `
+            + 'Add credentials for it in Settings, or pick another provider.'
+          : `Still loading ${hermesProviderLabel(provider)}'s models — try again in a moment.`)
+      }
+      // Announce a mid-conversation switch. Only when we are RESUMING (a fresh
+      // session already gets a correct system prompt) and only when something
+      // actually changed, so a normal turn carries no extra text.
+      const switched = Boolean(hermesSessionRef.current)
+        && (hermesSentProviderRef.current !== provider || hermesSentModelRef.current !== model)
+        && Boolean(hermesSentProviderRef.current || hermesSentModelRef.current)
+      const outbound = switched
+        ? `[System note: this conversation has just been switched to model "${model || 'the provider default'}" `
+          + `via provider "${hermesProviderLabel(provider)}". You are now that model — disregard any earlier `
+          + `statement in this conversation about which model you are. Keep the conversation and its context.]\n\n`
+          + text
+        : text
       const res = await fetch('/setup-api/hermes/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: outbound,
+          ...(model ? { model } : {}),
+          ...(provider ? { provider } : {}),
+          ...(reasoning ? { reasoning } : {}),
+          // Continue this conversation instead of starting a fresh agent every
+          // turn — otherwise a follow-up like "is it removed now?" reaches an
+          // agent with no idea what "it" is.
+          ...(hermesSessionRef.current ? { sessionId: hermesSessionRef.current } : {}),
+        }),
         signal: controller.signal,
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
+      if (typeof data.sessionId === 'string' && data.sessionId) {
+        hermesSessionRef.current = data.sessionId
+      }
+      // Record what this turn ran on, so the NEXT one only announces a switch
+      // if something really changed. Set after success: a failed turn didn't
+      // establish anything, and the announcement should survive to be made.
+      hermesSentProviderRef.current = provider
+      hermesSentModelRef.current = model
       setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
@@ -1254,25 +1517,96 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     await switchChatModel({ model: target.model, label: target.label })
   }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
+  // Seed (or RE-seed) the Hermes header: which providers this device can
+  // actually talk to, what it is configured to use, and its effort level. The
+  // per-provider MODEL list is not fetched here — it comes from the scoped hook
+  // above, which re-asks the server whenever the provider changes. Device
+  // config is the floor; localStorage is the preference.
+  //
+  // Safe to re-run: every in-session choice is mirrored into localStorage by the
+  // change* callbacks, and those prefs win here, so a re-sync preserves the
+  // user's picks while picking up new credentials / a new device pairing.
+  const seedHermesHeader = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const mRes = await fetch('/setup-api/hermes/models', { cache: 'no-store', signal })
+      const mData = await mRes.json() as {
+        providers?: { id?: unknown; name?: unknown; authenticated?: unknown }[]
+        provider?: unknown
+        current?: unknown
+        reasoning?: unknown
+      }
+      if (signal?.aborted) return
+      // Offer only providers Hermes has credentials for (`authenticated:
+      // false` rows would give an empty model list and a failing turn).
+      // `null` means the source couldn't tell — keep those.
+      const rows: HermesChatProvider[] = (Array.isArray(mData?.providers) ? mData.providers : [])
+        .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
+        .map(p => ({
+          id: p.id as string,
+          name: typeof p.name === 'string' ? p.name : (p.id as string),
+        }))
+      const deviceProvider = typeof mData?.provider === 'string' ? mData.provider : ''
+      const deviceModel = typeof mData?.current === 'string' ? mData.current : ''
+      // The configured provider always belongs in the list even if Hermes
+      // reports it unauthenticated — it is what this chat is running on,
+      // so the header must be able to show it.
+      if (deviceProvider && !rows.some(r => r.id === deviceProvider)) {
+        rows.unshift({ id: deviceProvider, name: deviceProvider })
+      }
+      setHermesProviders(rows)
+      setHermesDevice({ provider: deviceProvider, model: deviceModel })
+
+      const prefs = readHermesChatPrefs()
+      // A remembered provider only wins while it is still on offer.
+      setHermesProvider(
+        (prefs.provider && rows.some(r => r.id === prefs.provider) ? prefs.provider : '')
+        || deviceProvider
+        || rows[0]?.id
+        || '',
+      )
+      if (prefs.models) setHermesPicks(prefs.models)
+      const knownReasoning = prefs.reasoning
+        ?? (isHermesReasoningLevel(mData?.reasoning) ? mData.reasoning : null)
+      hermesReasoningKnownRef.current = knownReasoning !== null
+      setHermesReasoning(knownReasoning ?? HERMES_REASONING_DEFAULT)
+    } catch { /* header falls back to a plain label */ }
+  }, [])
+
   // Resolve the active harness once, before connecting, so we never open the
   // OpenClaw WS in Hermes mode.
   useEffect(() => {
-    let cancelled = false
+    const controller = new AbortController()
     void (async () => {
       try {
-        const res = await fetch('/setup-api/harness/active', { cache: 'no-store' })
-        const data = await res.json()
-        if (!cancelled && data?.active === 'hermes') {
+        const data = await fetchHarness({ signal: controller.signal })
+        if (!controller.signal.aborted && data?.active === 'hermes') {
           harnessRef.current = 'hermes'
           setHarnessMode('hermes')
+          await seedHermesHeader(controller.signal)
         }
       } catch {
         // default to openclaw
       }
-      if (!cancelled) setHarnessLoaded(true)
+      if (!controller.signal.aborted) setHarnessLoaded(true)
     })()
-    return () => { cancelled = true }
-  }, [])
+    return () => { controller.abort() }
+  }, [seedHermesHeader])
+
+  // Re-seed when the settings panel changes the device's provider/model/tier or
+  // adds a credential. Without this the header keeps naming the OLD provider
+  // for the rest of the session — and `hermesDevice` is the sole basis for the
+  // "safe to send --provider without -m" decision, so a stale copy either
+  // blocks a legal turn or lets the route answer 409.
+  useEffect(() => {
+    if (harnessMode !== 'hermes') return
+    const controller = new AbortController()
+    const onChanged = () => { void seedHermesHeader(controller.signal) }
+    window.addEventListener('clawbox:hermes-model-state-changed', onChanged)
+    return () => {
+      controller.abort()
+      window.removeEventListener('clawbox:hermes-model-state-changed', onChanged)
+    }
+  }, [harnessMode, seedHermesHeader])
 
   // Pre-warm the connection on mount so opening chat is instant. In OpenClaw
   // mode this silently completes the gateway WS handshake; in Hermes mode
@@ -1560,9 +1894,83 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }}>
         <div className="chat-header-pills">
           {harnessMode === 'hermes' ? (
-            // Hermes manages its own provider/model config — the OpenClaw
-            // provider/model/reasoning pills don't apply, so show a plain label.
-            <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+            // Same three pills, same order and widths as the OpenClaw branch
+            // below — provider → model (scoped to it) → thinking effort. The
+            // row is 262px at the 400px docked default, of which ~142px is
+            // label text, so every pill label is de-duplicated against its
+            // neighbour (see src/lib/chat-header-pills.ts) to fit un-truncated.
+            // Below ~386px they still truncate with "…" rather than wrap (see
+            // .chat-header-pills in globals.css); the popovers keep full text.
+            // Falls back to a plain label until the catalogue loads.
+            hermesProviders.length > 0 ? (
+              <>
+                <HeaderDropdown
+                  ariaLabel="Chat provider"
+                  value={hermesProvider}
+                  triggerLabel={hermesProviderPill}
+                  options={hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) }))}
+                  onChange={changeHermesProvider}
+                  onPointerDown={stopHeaderDrag}
+                  triggerMaxWidth={130}
+                  popoverWidth={220}
+                />
+                {/* Hidden at a single option, matching the OpenClaw rule — a
+                    one-entry picker is noise. That is today's ClawBox AI case:
+                    its proxy serves exactly the one model of the active tier. */}
+                {showModelPill && (
+                  <HeaderDropdown
+                    ariaLabel="Hermes model"
+                    /* While the new provider's list loads there is no model to
+                       name yet — an ellipsis holds the pill's place rather than
+                       showing the previous provider's id, which would be wrong
+                       for a beat and is the mistake worth avoiding. */
+                    disabled={hermesModelsLoading}
+                    value={hermesModelsLoading ? '' : hermesModel}
+                    /* Trigger shows the model WITHOUT whatever the provider pill
+                       immediately to its left already says — "claude-fable-5"
+                       next to "Claude" is "fable-5". At the docked width the
+                       repeated vendor was eating the part that distinguishes one
+                       model from another ("claude-fable-5" → "claude-fab…").
+                       The popover keeps the full id. */
+                    triggerLabel={hermesModelsLoading ? '…' : shortModelPillLabel(hermesModel, hermesProviderPill)}
+                    options={(hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id }))}
+                    onChange={changeHermesModel}
+                    onPointerDown={stopHeaderDrag}
+                    triggerMaxWidth={140}
+                    /* Wider than OpenClaw's 240: Hermes ids are long
+                       `vendor/model` slugs. */
+                    popoverWidth={280}
+                  />
+                )}
+                {/* `hermes --reasoning` takes the same eight levels for every
+                    provider, but the CLI accepting a level is not the same as
+                    the backend doing anything with it. The on-device model's
+                    server ignores unknown JSON keys, so all eight settings
+                    were identical there — a dial wired to nothing. Providers
+                    with no dial report an empty level list, and get no pill. */}
+                {hermesReasoningOptions.length > 0 && (
+                  <HeaderDropdown
+                    ariaLabel="Reasoning effort"
+                    value={hermesEffectiveReasoning}
+                    /* Brain glyph instead of a "Thinking: " word prefix — see
+                       REASONING_PILL_ICON. The word cost 55px of a 142px row
+                       and truncated the level away; the glyph costs ~11px. */
+                    triggerLabel={HERMES_REASONING_LABELS[hermesEffectiveReasoning]}
+                    triggerIcon={REASONING_PILL_ICON}
+                    options={hermesReasoningOptions.map(level => ({
+                      id: level,
+                      label: HERMES_REASONING_LABELS[level],
+                    }))}
+                    onChange={changeHermesReasoning}
+                    onPointerDown={stopHeaderDrag}
+                    triggerMaxWidth={120}
+                    popoverWidth={180}
+                  />
+                )}
+              </>
+            ) : (
+              <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+            )
           ) : (<>
           {chatModelState && (() => {
             const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
@@ -1635,10 +2043,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
                   ...catalog.models,
                 ]
+            // Same de-duplication as the Hermes branch: the provider pill to
+            // the left already says "Claude", so this pill shows "Sonnet 4.6",
+            // not "Claude Sonnet 4.6". The popover keeps the full label.
+            const activeModelLabel = modelOptions.find(o => o.id === activeModelId)?.label
+              ?? activeModelId
             return (
               <HeaderDropdown
                 ariaLabel={`${activeOption.label} model`}
                 value={activeModelId}
+                triggerLabel={shortModelPillLabel(
+                  activeModelLabel,
+                  getProviderPillText(activeOption),
+                )}
                 options={modelOptions.map(option => ({
                   id: option.id,
                   label: option.label,
@@ -1683,7 +2100,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
-              triggerLabel={`Thinking: ${THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}`}
+              /* Brain glyph instead of a "Thinking: " word prefix — see
+                 REASONING_PILL_ICON. */
+              triggerLabel={THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}
+              triggerIcon={REASONING_PILL_ICON}
               triggerMaxWidth={120}
               popoverWidth={180}
             />

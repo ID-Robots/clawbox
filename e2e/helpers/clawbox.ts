@@ -427,6 +427,18 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    // The mocked device is an OpenClaw box. This route has to answer for real:
+    // this handler owns every /setup-api path and ends in a catch-all `{}`,
+    // which carries neither `active` nor `edition`, so fetchHarness resolves
+    // null. The desktop treats an unknown harness as "hide both harnesses'
+    // apps" (fail closed, page.tsx harnessHiddenAppIds), which silently took
+    // the App Store and the OpenClaw Control UI off the shelf — the two apps
+    // store-flow and installed-app-settings drive.
+    if (path === "/setup-api/harness/active") {
+      await fulfillJson(route, { active: "openclaw", edition: "openclaw" });
+      return;
+    }
+
     if (path === "/setup-api/setup/complete" && method === "POST") {
       Object.assign(setupState, {
         setup_complete: true,
@@ -1123,6 +1135,71 @@ export function wizardStepAfterWifi(page: Page) {
     .first();
 }
 
+/**
+ * Fill the credentials step the way a customer does.
+ *
+ * The hotspot password and its confirmation sit behind a disclosure on the
+ * hotspot's own card (CredentialsStep.tsx) — the row states the requirement,
+ * a tap opens the fields. Both are still mandatory: the primary action stays
+ * unavailable until they are supplied and matching, which is what every caller
+ * of this helper goes on to exercise.
+ */
+export async function fillCredentialsStep(page: Page) {
+  await page.locator("#cred-password").fill("clawbox-pass");
+  await page.locator("#cred-confirm").fill("clawbox-pass");
+  await page.getByRole("button", { name: /Hotspot Password/i }).click();
+  await page.locator("#hotspot-password").fill("hotspot-pass");
+  await page.locator("#hotspot-confirm").fill("hotspot-pass");
+}
+
+/**
+ * Choose an AI provider from the wizard's provider list.
+ *
+ * The list shows the provider currently in play and keeps the rest behind its
+ * "Show more providers" toggle (AIModelsStep.tsx), so anything other than the
+ * default needs the list opened first. Picking closes it again on the chosen
+ * row, so this is also how a test hops from one provider to the next.
+ */
+export async function pickAiProvider(page: Page, name: string) {
+  const step = page.getByTestId("setup-step-ai-models");
+  await expandAiProviderList(page);
+  await step.getByText(name, { exact: true }).first().click();
+}
+
+/**
+ * Open the provider list if anything is still hidden behind its toggle.
+ *
+ * Two async beats stand between arriving at this step and the list holding
+ * still, and the expansion has to be decided after BOTH:
+ *
+ *  1. the device edition resolves — until it does, the step's testid sits on a
+ *     neutral skeleton that renders no radiogroup at all;
+ *  2. the provider in play lands — `selectedProvider` is what collapses the
+ *     list onto a single row (`providerListCollapsed` in AIModelsStep.tsx), so
+ *     until it resolves the list renders in full with no toggle on it.
+ *
+ * A point-in-time `count()` taken between those two reads an uncollapsed list,
+ * concludes there is nothing to open, and the list then collapses underneath
+ * whatever the caller asserts next. The checked radio is beat 2's signal: the
+ * list cannot collapse before one exists, so waiting for it makes the count
+ * that follows a reading of the settled list rather than a race.
+ */
+export async function expandAiProviderList(page: Page) {
+  const step = page.getByTestId("setup-step-ai-models");
+  const group = step.getByRole("radiogroup", { name: "AI Provider" });
+  await expect(group).toBeVisible();
+  await expect(group.locator("input[type=radio]:checked")).toHaveCount(1);
+
+  const moreToggle = group.getByRole("button", { name: /more provider/i });
+  if ((await moreToggle.count()) > 0) {
+    await moreToggle.first().click();
+    // The toggle renders only while something is still hidden, so its going
+    // away is the list being fully open — and leaves the caller asserting
+    // against an expanded list rather than a mid-transition one.
+    await expect(moreToggle).toHaveCount(0);
+  }
+}
+
 export async function completeSetupWizard(page: Page) {
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
   // Ethernet-first happy path: a wired uplink lets the wizard advance in-page.
@@ -1142,14 +1219,11 @@ export async function completeSetupWizard(page: Page) {
   }
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
-  await page.locator("#cred-password").fill("clawbox-pass");
-  await page.locator("#cred-confirm").fill("clawbox-pass");
-  await page.locator("#hotspot-password").fill("hotspot-pass");
-  await page.locator("#hotspot-confirm").fill("hotspot-pass");
+  await fillCredentialsStep(page);
   await page.getByRole("button", { name: /^Connect$/ }).click();
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
-  await page.getByText("OpenAI GPT").click();
+  await pickAiProvider(page, "OpenAI GPT");
   await page.locator("#ai-api-key").fill("sk-test-openai-key");
   await page.getByRole("button", { name: /Connect to OpenAI GPT/i }).click();
 
@@ -1158,6 +1232,20 @@ export async function completeSetupWizard(page: Page) {
   // wizard now goes straight from AI provider to Telegram.
   await expect(page.getByTestId("setup-step-telegram")).toBeVisible();
   await page.getByRole("button", { name: "Skip for now" }).click();
+}
+
+/**
+ * Open the chat popup from the shelf's crab button.
+ *
+ * Not `getByRole("button", { name: "Chat" })`: three controls now answer to
+ * that name — the desktop icon, the shelf's app icon and this toggle — because
+ * the chat app's own label became the translated "Chat" (it used to be the
+ * unique "Claw"). Only this one opens the popup; the other two open a window.
+ * The shelf renders in two layouts and only one is on screen, hence `:visible`
+ * — the same shape openLauncher uses for its own button.
+ */
+export async function openChatPopup(page: Page) {
+  await page.locator('[data-testid="shelf-chat-button"]:visible').first().click();
 }
 
 export async function openLauncher(page: Page) {

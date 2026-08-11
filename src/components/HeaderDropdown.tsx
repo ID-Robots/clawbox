@@ -22,6 +22,13 @@ interface HeaderDropdownProps {
    * ("Codex") to fit a narrow header. Falls back to the active
    * option's `label`. */
   triggerLabel?: string
+  /** Material Symbols ligature rendered as a small leading glyph inside the
+   * closed trigger, e.g. "neurology" on the reasoning-effort pill. Use it when
+   * the value alone ("Medium") would not say WHICH control it belongs to: at
+   * 13px the glyph costs ~11px of row where the equivalent word prefix
+   * ("Thinking: ") cost ~55px and truncated the value away. Purely decorative
+   * — the accessible name still comes from `ariaLabel` + the label text. */
+  triggerIcon?: string
   /** Maximum trigger width before the label truncates with "...". */
   triggerMaxWidth?: number
   /** Width of the popover when open. Defaults to a comfortable 220px so
@@ -47,6 +54,7 @@ export function HeaderDropdown({
   onChange,
   ariaLabel,
   triggerLabel,
+  triggerIcon,
   triggerMaxWidth,
   popoverWidth = 220,
   disabled = false,
@@ -61,6 +69,11 @@ export function HeaderDropdown({
   const popoverRef = useRef<HTMLDivElement>(null)
   const activeOption = options.find(o => o.id === value)
   const listboxId = useId()
+  const labelText = triggerLabel ?? activeOption?.label ?? value
+  // `ariaLabel` names the CONTROL ("Reasoning effort"); on its own as
+  // aria-label it REPLACED the visible text, so a screen-reader user heard
+  // which dial it was but never its value. Compose both.
+  const accessibleName = ariaLabel ? `${ariaLabel}: ${labelText}` : labelText
 
   const close = useCallback(() => setOpen(false), [])
 
@@ -149,22 +162,42 @@ export function HeaderDropdown({
       <button
         ref={triggerRef}
         type="button"
-        aria-label={ariaLabel}
+        aria-label={accessibleName}
+        title={accessibleName}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
         disabled={disabled}
         onClick={() => !disabled && setOpen(o => !o)}
         className="header-dropdown-trigger"
-        style={triggerMaxWidth ? { maxWidth: triggerMaxWidth } : undefined}
+        style={{
+          ...(triggerMaxWidth ? { maxWidth: triggerMaxWidth } : null),
+          // Tighter than globals.css's 12/24 default. Measured on-device: this
+          // buys ~4px per pill back for the LABELS, which is what lets all
+          // three render un-truncated at the 400px docked default. The chevron
+          // below shrinks to match, so the clearance around it is unchanged.
+          // A pill with a leading glyph gives up most of its left padding —
+          // the glyph is the visual inset.
+          paddingLeft: triggerIcon ? 5 : 10,
+          paddingRight: 20,
+        }}
       >
+        {triggerIcon && (
+          <span
+            className="material-symbols-rounded"
+            aria-hidden="true"
+            style={{ fontSize: 13, marginRight: 4, flexShrink: 0, opacity: 0.75 }}
+          >
+            {triggerIcon}
+          </span>
+        )}
         <span className="header-dropdown-trigger-label">
-          {triggerLabel ?? activeOption?.label ?? value}
+          {labelText}
         </span>
         <span
           className="material-symbols-rounded header-dropdown-trigger-chevron"
           aria-hidden="true"
-          style={{ transform: open ? 'rotate(180deg)' : undefined }}
+          style={{ fontSize: 14, right: 3, transform: open ? 'rotate(180deg)' : undefined }}
         >
           expand_more
         </span>

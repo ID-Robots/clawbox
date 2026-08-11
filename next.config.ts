@@ -28,7 +28,16 @@ const nextConfig: NextConfig = {
   },
   async rewrites() {
     return {
-      // Run before filesystem/pages check — proxy gateway paths
+      // Run before filesystem/pages check — proxy gateway paths.
+      //
+      // These are NOT edition-aware on purpose: rewrites are compiled into
+      // .next/routes-manifest.json at BUILD time, but the edition is an
+      // INSTALL-time property (install.sh builds via `su - clawbox`, which drops
+      // CLAWBOX_EDITION from the environment, and it builds before the edition
+      // lock is baked). A build-time gate would therefore bake the wrong answer
+      // on a Hermes flash. The runtime gate lives in src/middleware.ts, which
+      // runs *before* beforeFiles rewrites and 404s these paths on the Hermes
+      // SKU (where the OpenClaw gateway is disabled+masked and would 502).
       beforeFiles: [
         // Gateway API (must come before Next.js page resolution)
         {

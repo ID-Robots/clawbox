@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
-import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
+import { getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
@@ -55,13 +55,8 @@ export async function POST(req: Request) {
       console.warn("[uninstall] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
     }
 
-    // Reload gateway so agent drops the skill
-    try {
-      await reloadGateway();
-    } catch (err) {
-      console.warn("[uninstall] reloadGateway failed:", err instanceof Error ? err.message : err);
-    }
-
+    // No gateway bounce: removing the skill directory is a change under a
+    // watched skill root, so the agent drops the skill on its next turn.
     return NextResponse.json({ ok: true, appId });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);

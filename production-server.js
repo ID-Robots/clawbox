@@ -163,6 +163,40 @@ try {
   console.warn("[production-server] Failed to set up MCP token:", err.message);
 }
 
+// ─── Register the MCP server with the agent harness ───
+// Having the token is not the same as the agent HAVING the tools: the harness
+// only spawns the MCP server if its own config lists it.
+//
+// On OpenClaw that registration is written by scripts/gateway-pre-start.sh, an
+// ExecStartPre of clawbox-gateway.service. On the Hermes SKU that unit is
+// masked, so nothing wrote it and `hermes mcp list` answered "No MCP servers
+// configured" — the agent had no device tools at all. scripts/register-mcp.sh
+// is the Hermes counterpart, and this is where it runs: clawbox-setup.service
+// is the one unit active on every edition, and both a deploy and an in-app
+// update finish by restarting it.
+//
+// Fire-and-forget on purpose. The reconcile is idempotent and takes ~200ms, but
+// it must never delay or block the web server coming up — a device whose UI
+// does not start is worse than one whose agent has to wait for the next boot.
+try {
+  const registerMcp = require("child_process").spawn(
+    "/bin/bash",
+    [path.join(__dirname, "scripts", "register-mcp.sh")],
+    { stdio: ["ignore", "pipe", "pipe"], env: process.env },
+  );
+  const note = (buf) => {
+    const line = buf.toString().trim();
+    if (line) console.log(`[production-server] ${line}`);
+  };
+  registerMcp.stdout.on("data", note);
+  registerMcp.stderr.on("data", note);
+  registerMcp.on("error", (err) => {
+    console.warn("[production-server] MCP registration could not run:", err.message);
+  });
+} catch (err) {
+  console.warn("[production-server] MCP registration could not run:", err.message);
+}
+
 // ─── Local-AI bearer token ───
 // Per-install token openclaw uses to call our /setup-api/local-ai/* proxy.
 // Mirrors the session secret bootstrap so middleware + the proxy route can

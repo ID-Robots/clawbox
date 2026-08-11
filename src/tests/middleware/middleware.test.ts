@@ -529,6 +529,88 @@ describe("middleware", () => {
     });
   });
 
+  describe("Hermes surfaces during the setup window", () => {
+    // The device broadcasts an OPEN AP while the wizard runs, so anything left
+    // pre-auth is reachable by anyone in radio range.
+    it.each([
+      "/setup-api/hermes/chat",        // agent turn with shell/tool access
+      "/setup-api/hermes/skills",
+      "/setup-api/hermes/skills/install",
+      "/setup-api/hermes/skills/uninstall",
+      "/setup-api/harness/select",     // rewrites which agent the device runs
+      "/setup-api/harness/status",     // desktop picker only, never the wizard
+    ])("gates %s during the setup window", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest(p))).status).toBe(401);
+    });
+
+    it.each([
+      "/setup-api/harness/active",
+      "/setup-api/hermes/models",
+      "/setup-api/hermes/clawai",
+      "/setup-api/hermes/oauth",
+      "/setup-api/hermes/provider-key",
+    ])("still allows the wizard's %s during the setup window", async (p) => {
+      // AIModelsStep → HermesProviderConfig calls all five before setup
+      // completes; gating them would make the Hermes SKU unprovisionable.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest(p))).status).toBe(200);
+    });
+  });
+
+  describe("gateway paths are edition-aware", () => {
+    function writeEditionFile(edition: string): string {
+      const file = path.join(tmpRoot, "edition.env");
+      fs.writeFileSync(file, `CLAWBOX_EDITION=${edition}\n`);
+      return file;
+    }
+
+    afterEach(() => {
+      delete process.env.CLAWBOX_EDITION_FILE;
+      delete process.env.CLAWBOX_EDITION;
+    });
+
+    it.each(["/api/state", "/assets/app.js", "/favicon.svg", "/favicon-32.png"])(
+      "404s the gateway-only path %s on the hermes edition",
+      async (p) => {
+        process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
+        vi.resetModules();
+        const mod = await import("@/middleware");
+
+        // The OpenClaw gateway is disabled+masked on this SKU, so the
+        // next.config rewrite would 502 instead of serving ClawBox's own 404.
+        expect((await mod.middleware(createRequest(p))).status).toBe(404);
+      },
+    );
+
+    it.each(["/api/state", "/assets/app.js", "/favicon.svg"])(
+      "leaves %s alone on the openclaw edition",
+      async (p) => {
+        process.env.CLAWBOX_EDITION_FILE = writeEditionFile("openclaw");
+        vi.resetModules();
+        const mod = await import("@/middleware");
+
+        expect((await mod.middleware(createRequest(p))).status).toBe(200);
+      },
+    );
+
+    it("does not 404 ClawBox's own paths on hermes", async () => {
+      process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      for (const p of ["/", "/login", "/setup-api/setup/status", "/apiary", "/assetstore"]) {
+        expect((await mod.middleware(createRequest(p))).status).not.toBe(404);
+      }
+    });
+  });
+
   describe("config export", () => {
     it("exports matcher config", async () => {
       const mod = await import("@/middleware");

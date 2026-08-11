@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
+import { readEdition } from "@/lib/edition-source";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -141,6 +142,31 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/apps/uninstall",
   "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token
+  // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
+  // AP, so anything left pre-auth is reachable by anyone in radio range.
+  //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
+  //   - /hermes/skills/* installs & uninstalls agent skills (code execution).
+  //   - /harness/select rewrites which agent the device runs.
+  // None of the three has any onboarding role: chat is only called from
+  // ChatPopup, the skills store only from HermesSkillsStore (both desktop-only,
+  // mounted from page.tsx), and the harness picker only from SettingsApp.
+  //
+  // Deliberately NOT listed — the wizard calls these BEFORE setup completes, so
+  // gating them would make the Hermes SKU unprovisionable:
+  //   /setup-api/harness/active         (AIModelsStep.tsx — the ONLY harness
+  //                                      route the wizard touches; /status is
+  //                                      HarnessPicker-only, so it is gated)
+  //   /setup-api/hermes/models          (HermesProviderConfig + useHermesModelOptions)
+  //   /setup-api/hermes/clawai          (ClawBox AI sign-in during onboarding)
+  //   /setup-api/hermes/oauth           (provider OAuth status during onboarding)
+  //   /setup-api/hermes/provider-key    (writes the provider key the wizard collects)
+  // That is exactly the same pre-auth exposure the OpenClaw SKU already accepts
+  // for /setup-api/ai-models/* on the same AP, and the read paths return status
+  // booleans (hasToken/loggedIn), never the stored secrets.
+  "/setup-api/hermes/chat",
+  "/setup-api/hermes/skills",
+  "/setup-api/harness/select",
+  "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
 ];
 // Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
 // `/setup-api/gateway/health`, which the wizard's readiness check legitimately
@@ -159,6 +185,16 @@ function isSensitiveSetupApi(pathname: string): boolean {
     if (p0 === p || p0.startsWith(p + "/")) return true;
   }
   return false;
+}
+
+// Paths that exist ONLY because next.config.ts rewrites them to the OpenClaw
+// gateway (see the edition check in the middleware body).
+const GATEWAY_ONLY_EXACT = new Set(["/favicon.svg", "/favicon-32.png"]);
+const GATEWAY_ONLY_PREFIXES = ["/api", "/assets"];
+
+function isGatewayOnlyPath(pathname: string): boolean {
+  if (GATEWAY_ONLY_EXACT.has(pathname)) return true;
+  return GATEWAY_ONLY_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 
 const PUBLIC_EXACT = new Set([
@@ -251,6 +287,27 @@ export async function middleware(request: NextRequest) {
       "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
       { status: 200, headers: { "Content-Type": "text/html" } }
     );
+  }
+
+  // 1b. Gateway paths on a Hermes device.
+  //
+  // next.config.ts rewrites /api/*, /assets/* and the two gateway favicons to
+  // the OpenClaw gateway at 127.0.0.1:18789. On the Hermes SKU that gateway is
+  // disabled+masked, so every one of those requests 502s. The rewrites can't be
+  // made conditional there: they are compiled into routes-manifest.json at
+  // BUILD time, install.sh builds via `su - clawbox` (which drops
+  // CLAWBOX_EDITION) and before the edition lock is baked — a build-time gate
+  // would evaluate on the wrong value. Middleware runs before beforeFiles
+  // rewrites (verified on-device: /api/zzz answered 401 from here, never the
+  // gateway), always sees the current edition, and survives a stale build.
+  //
+  // Nothing on the ClawBox side owns these paths: there is no src/app/api, no
+  // /assets route, and public/ has neither favicon.svg nor favicon-32.png.
+  if (isGatewayOnlyPath(pathname) && readEdition() === "hermes") {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    return new NextResponse("Not found", { status: 404, headers: { "Content-Type": "text/plain" } });
   }
 
   // 2. Public paths — no auth needed

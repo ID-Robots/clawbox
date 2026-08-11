@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import { kvGet, kvSet } from "./kv-store";
 import * as config from "./config-store";
 import { getOllamaBaseUrl } from "./local-ai-runtime";
+import { isPreferenceLanguage } from "./preference-schema";
 import {
   ensureFullPhraseSet,
   INSPIRATION_PHRASES,
@@ -150,7 +151,13 @@ interface GenerationContext {
 }
 
 async function gatherContext(): Promise<GenerationContext> {
-  const language = (await config.get("pref:ui_language") as string | null) ?? "en";
+  // Read straight from the store, so this bypasses the validation the
+  // /setup-api/preferences route applies — and buildPrompt interpolates the
+  // raw code into the model prompt. Re-check it here so a locale written
+  // before that validation existed falls back to English instead of arriving
+  // as prompt text.
+  const storedLanguage = await config.get("pref:ui_language");
+  const language = isPreferenceLanguage(storedLanguage) ? storedLanguage : "en";
   const languageName = LANG_NAMES[language] ?? "English";
   const userNameRaw = (await config.get("pref:ui_user_name") as string | null) ?? null;
   const userName = userNameRaw && userNameRaw.trim().length > 0 ? userNameRaw.trim() : null;

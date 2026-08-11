@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { setActiveHarness, isHarness, harnessHealthy } from "@/lib/harness";
+import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition } from "@/lib/harness";
 import { CONFIG_ROOT } from "@/lib/config-store";
 
 const exec = promisify(execFile);
@@ -12,6 +12,15 @@ const exec = promisify(execFile);
 // Switch the active agent harness (openclaw | hermes) and refresh the shared
 // identity into it. Providers/OAuth are per-harness and untouched here.
 export async function POST(request: Request) {
+  // Locked device (single-harness edition, or dual without a valid premium
+  // license): switching is disabled at the API too, not just hidden in the UI.
+  if (isSingleHarnessEdition()) {
+    return NextResponse.json(
+      { error: "Harness switching is not available on this device." },
+      { status: 403 },
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();

@@ -7,8 +7,7 @@ import StatusMessage from "./StatusMessage";
 import WifiHandoffOverlay from "./WifiHandoffOverlay";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
-import { useT, LANGUAGES } from "@/lib/i18n";
-import type { Locale } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 import { useDeviceAddress } from "@/hooks/useDeviceAddress";
 
 interface WifiStepProps {
@@ -16,7 +15,7 @@ interface WifiStepProps {
 }
 
 export default function WifiStep({ onNext }: WifiStepProps) {
-  const { locale, setLocale, t } = useT();
+  const { t } = useT();
   const { localUrl, primaryUrl } = useDeviceAddress();
   const [showWifiList, setShowWifiList] = useState(false);
   const [networks, setNetworks] = useState<WifiNetwork[] | null>(null);
@@ -43,10 +42,6 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   // spinning on "Connecting…" forever with the recommended button disabled.
   const [cableStuck, setCableStuck] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
-
-  // Language picker state
-  const [langOpen, setLangOpen] = useState(false);
-  const langDropdownRef = useRef<HTMLDivElement>(null);
 
   // Abort any in-flight WiFi connect/poll when the step unmounts. (Kept separate
   // from the ethernet poll so the eth effect re-running never aborts a connect.)
@@ -117,20 +112,6 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
     setCableStuck(false);
   }, [eth?.cable, eth?.connected]);
-
-  // Close language dropdown on outside click
-  useEffect(() => {
-    if (!langOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (langDropdownRef.current && !langDropdownRef.current.contains(e.target as Node)) {
-        setLangOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [langOpen]);
-
-  const currentLang = LANGUAGES.find((l) => l.code === locale) ?? LANGUAGES[0];
 
   const [hasScanned, setHasScanned] = useState(false);
 
@@ -302,52 +283,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           </p>
         </div>
 
-        {/* Language selector — shown on initial choice screen */}
+        {/* The language picker moved into the header actions (SetupWizard).
+            It is a device setting rather than a step of setup: in here it made
+            the card's opening rows chrome instead of content, and it existed
+            only on this one screen — so a customer who noticed the wrong
+            language on step 3 had nowhere to change it. */}
         {!showForm && !showWifiList && (
           <>
-            <div ref={langDropdownRef} className="relative mb-5">
-              <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
-                {t("wifi.language")}
-              </label>
-              <button
-                type="button"
-                onClick={() => setLangOpen((v) => !v)}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-left cursor-pointer hover:border-[var(--coral-bright)] transition-colors"
-              >
-                <span className="text-base leading-none">{currentLang.flag}</span>
-                <span className="flex-1 text-gray-200">{currentLang.label}</span>
-                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
-                  {langOpen ? "expand_less" : "expand_more"}
-                </span>
-              </button>
-
-              {langOpen && (
-                <div className="absolute z-20 left-0 right-0 mt-1 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl overflow-hidden">
-                  <div className="max-h-[240px] overflow-y-auto">
-                    {LANGUAGES.map((lang) => (
-                      <button
-                        key={lang.code}
-                        type="button"
-                        onClick={() => {
-                          setLocale(lang.code as Locale);
-                          setLangOpen(false);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left border-none cursor-pointer transition-colors text-sm ${
-                          locale === lang.code ? "bg-orange-500/10 text-gray-200" : "bg-transparent text-gray-300 hover:bg-[var(--bg-deep)]"
-                        }`}
-                      >
-                        <span className="text-base leading-none">{lang.flag}</span>
-                        <span className="flex-1">{lang.label}</span>
-                        {locale === lang.code && (
-                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* Ethernet status — recommended path, polled live so plugging a
                 cable in updates instantly. connected → ready; cable-only →
                 getting internet; no cable → recommend a cable or use Wi-Fi. */}

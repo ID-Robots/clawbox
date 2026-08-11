@@ -1,0 +1,128 @@
+import type { ClawboxAiTier } from "@/lib/clawbox-ai-models";
+
+/**
+ * ClawBox AI subscription-tier presentation data.
+ *
+ * Extracted out of AIModelsStep so the OpenClaw wizard and the Hermes provider
+ * panel render the SAME card from the SAME data — the two panels drifted
+ * before (Hermes showed a bare one-line row), and a shared module is the only
+ * thing that stops it happening again. Pure data, no JSX, no "use client": the
+ * Hermes clawai route needs `uiTierToDeviceTier` server-side and a route may
+ * not import a client component.
+ */
+
+export type ClawaiTier = "free" | "flash" | "pro";
+
+export const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
+
+export interface ClawaiTierInfo {
+  /** Plan label rendered to the user (Free/Pro/Max). Internal "flash" is
+   *  marketed as "Pro" and internal "pro" is "Max" — preserved for
+   *  backwards-compat with stored localStorage values + portal handshake.
+   *  Keep in lockstep with CLAWBOX_AI_TIER_LABEL in clawbox-ai-models.ts. */
+  planName: string;
+  /** Selector pill label — same as planName today, kept separate so the
+   *  pill can shorten if needed without touching the card. */
+  pillLabel: string;
+  priceEuro: number;
+  /** Subtitle on the price line — "free forever", "/month", etc. */
+  pricePeriod: string;
+  /** True for tiers that should advertise a 30-day free trial CTA. */
+  hasTrial: boolean;
+  /** Bullet copy shown in the highlight card. */
+  features: string[];
+  /** Tailwind palette classes for the highlight card + selector pill. */
+  cardClass: string;
+  cardHeadlineClass: string;
+  cardCheckClass: string;
+  pillActiveClass: string;
+}
+
+export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
+  free: {
+    planName: "Free plan",
+    pillLabel: "Free",
+    priceEuro: 0,
+    pricePeriod: "free forever",
+    hasTrial: false,
+    features: [
+      "Standard daily usage",
+      "DeepSeek V4 Flash",
+      "1 GB ClawKeep cloud backups",
+      "Portal access",
+    ],
+    cardClass: "border-white/10 bg-white/[0.03]",
+    cardHeadlineClass: "text-gray-100",
+    cardCheckClass: "text-emerald-300",
+    pillActiveClass: "bg-[var(--bg-surface)] text-gray-100",
+  },
+  flash: {
+    planName: "Pro plan",
+    pillLabel: "Pro",
+    priceEuro: 9,
+    pricePeriod: "/month",
+    // Pro bills from day one; flip to true if a trial returns.
+    hasTrial: false,
+    features: [
+      "5× more usage than Free",
+      "DeepSeek V4 Flash",
+      "5 GB ClawKeep cloud backups",
+      "Remote Desktop access",
+      "Priority processing",
+      "Email support",
+    ],
+    cardClass: "border-orange-400/20 bg-orange-500/5",
+    cardHeadlineClass: "text-orange-100",
+    cardCheckClass: "text-orange-300",
+    pillActiveClass: "bg-gradient-to-r from-orange-500/30 to-amber-500/20 text-orange-100",
+  },
+  pro: {
+    planName: "Max plan",
+    pillLabel: "Max",
+    priceEuro: 49,
+    pricePeriod: "/month",
+    hasTrial: true,
+    features: [
+      "Maximum usage",
+      "DeepSeek V4 Pro (frontier)",
+      "50 GB ClawKeep cloud backups",
+      "Remote Desktop access",
+      "Highest priority",
+      "Full Support — real humans via Call/Meeting",
+    ],
+    cardClass:
+      "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
+    cardHeadlineClass: "text-fuchsia-100",
+    cardCheckClass: "text-fuchsia-300",
+    pillActiveClass: "bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 text-pink-100",
+  },
+};
+
+export const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
+
+/** The one marketing line for ClawBox AI. Both panels render this string. */
+export const CLAWBOX_AI_DESCRIPTION =
+  "All-in cloud AI for ClawBox — backups, remote desktop, full support";
+
+export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
+  return value === "free" || value === "flash" || value === "pro" ? value : null;
+}
+
+/**
+ * UI tier → *device* tier (which model gets configured). Free and Pro both run
+ * DeepSeek V4 Flash (see CLAWAI_TIER_INFO.free.features); only Max gets the
+ * frontier weights. `ClawboxAiTier` has no "free" member because the device has
+ * nothing different to configure for it.
+ */
+export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
+  return tier === "pro" ? "pro" : "flash";
+}
+
+/**
+ * Device tier (or the raw stored value) → UI tier. `null`/absent means the
+ * portal reconciled the account down to Free, so the pill must show Free —
+ * not "Pro plan €9" for someone who is not paying.
+ */
+export function deviceTierToUiTier(stored: string | null | undefined): ClawaiTier {
+  return stored === "pro" ? "pro" : stored === "flash" ? "flash" : "free";
+}

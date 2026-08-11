@@ -8,6 +8,16 @@
 # prompt that never gets answered.
 
 # Service-management: each unit listed twice (with + without .service).
+#
+# NOTE on the clawbox-gateway grants below: sudoers has no way to express "only
+# on some editions", so on the HERMES SKU — where the OpenClaw gateway is an
+# unauthenticated agent surface with no role — these would otherwise let anyone
+# with clawbox-level access (SSH, the in-UI terminal, the agent's run_command)
+# restart it straight back onto the LAN. That is exactly why install.sh's
+# step_edition_gateway_state does not merely `disable` the unit on hermes: it
+# REMOVES the unit file and then persistently `mask`s it, so `systemctl start
+# clawbox-gateway` fails twice over (unit not found; unit is masked). The
+# `--runtime unmask` grant further down cannot undo a persistent /etc mask.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway.service

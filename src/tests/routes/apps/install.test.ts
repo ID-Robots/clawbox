@@ -28,7 +28,6 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  reloadGateway: vi.fn().mockResolvedValue(undefined),
   getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
 }));
@@ -47,8 +46,7 @@ describe("/setup-api/apps/install", () => {
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fsMod.default.writeFile).mockResolvedValue(undefined);
-    const { reloadGateway, getSkillsDir } = await import("@/lib/openclaw-config");
-    vi.mocked(reloadGateway).mockResolvedValue(undefined);
+    const { getSkillsDir } = await import("@/lib/openclaw-config");
     vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
     mockFetch.mockResolvedValue({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) });
     const mod = await import("@/app/setup-api/apps/install/route");

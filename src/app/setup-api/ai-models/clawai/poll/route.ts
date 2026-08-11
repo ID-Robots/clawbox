@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configure/route";
+import { getActiveHarness } from "@/lib/harness";
+import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
+import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import {
   type ClawAiConnectSession,
   clearClawAiSession,
@@ -75,6 +78,33 @@ async function readErrorBody(response: Response): Promise<string> {
 // that finalisation finished and trigger the success overlay.
 async function runConfigureInBackground(session: ClawAiConnectSession, accessToken: string) {
   try {
+    // The OpenClaw configure route below writes ~/.openclaw/openclaw.json and
+    // restarts the OpenClaw gateway, and it persists clawai_token only AFTER
+    // that. On a Hermes device that runtime isn't installed, so the write threw
+    // and the token was never stored — the device-login CTA could never
+    // succeed. Route Hermes devices through Hermes' own config instead.
+    // getActiveHarness() returns "openclaw" for every openclaw/dual-openclaw
+    // device, so the OpenClaw path below is untouched.
+    if ((await getActiveHarness()) === "hermes") {
+      const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+      try {
+        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier));
+      } catch (err) {
+        // Only our own message is safe to store/show — a raw spawn failure can
+        // carry the hermes binary path.
+        throw new ClawaiApplyError(
+          err instanceof ClawaiApplyError ? err.message : "Couldn't configure ClawBox AI on this device.",
+        );
+      }
+      await writeClawAiSession({
+        ...session,
+        status: "complete",
+        error: null,
+        completedAt: Date.now(),
+      });
+      return;
+    }
+
     const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
