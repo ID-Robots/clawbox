@@ -3,6 +3,7 @@ import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { sanitizePreferences, validatePreference } from "@/lib/preference-schema";
 import { personaFilesFor, writeLanguagePersona } from "@/lib/language-persona";
+import { logSafe } from "@/lib/log-safe";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,11 @@ export async function GET(req: Request) {
   if (allParam) {
     // Return all preferences
     const allConfig = await config.getAll();
-    const result: Record<string, unknown> = {};
+    // Null-prototype accumulator: the names come from outside this function, so
+    // an assignment here should always define an own property and never reach
+    // an inherited one such as `__proto__`. Same below, and in
+    // sanitizePreferences, which is where these objects end up.
+    const result: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(allConfig)) {
       if (key.startsWith("pref:")) {
         result[key.slice(5)] = value;
@@ -41,7 +46,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "keys or all param required" }, { status: 400 });
   }
   const keys = keysParam.split(",").filter(isAllowed);
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   for (const key of keys) {
     result[key] = await config.get(`pref:${key}`);
   }
@@ -61,7 +66,10 @@ export async function POST(req: Request) {
       if (!isAllowed(key)) continue;
       const check = validatePreference(key, value);
       if (!check.ok) {
-        console.error(`[preferences] Rejected write: ${check.reason}`);
+        // The reason is built from the rejected key, which is caller-supplied
+        // and only prefix-checked — bound and sanitise it like any other
+        // request-derived log field.
+        console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
       entries[`pref:${key}`] = value;

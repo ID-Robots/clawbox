@@ -1111,4 +1111,32 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(400);
     expect(body.error).toContain("expired");
   });
+
+  it("rejects and removes a handoff file that carries no createdAt", async () => {
+    // Without a timestamp the file's age is unknown, so it cannot be shown to
+    // be inside the TTL — it is refused like an expired one, and removed rather
+    // than left on disk for the next request to find.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
 });

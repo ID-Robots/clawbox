@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import fsp from "fs/promises";
+import path from "path";
 
 vi.mock("fs/promises", () => ({
   default: {
@@ -8,8 +9,14 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     rename: vi.fn(),
     mkdir: vi.fn(),
+    stat: vi.fn(),
   },
 }));
+
+// Built the same way the route builds them, so the expectations hold on a
+// developer's machine as well as on the device.
+const STATE_PATH = path.join("/test/data", "oauth-device-state.json");
+const TOKENS_PATH = path.join("/test/data", "oauth-device-tokens.json");
 
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/test/data",
@@ -44,6 +51,8 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
+    // Default: no handoff file on disk, so the age sweep is a no-op.
+    mockFs.stat.mockRejectedValue(new Error("ENOENT"));
 
     vi.stubGlobal("fetch", vi.fn());
 
@@ -305,6 +314,66 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     // Should not fail - should use device_auth_id as fallback
     expect(body.status).toBe("pending");
+  });
+
+  // A flow that ends without completing should leave nothing behind: the state
+  // file and the token handoff file are two halves of the same flow, so both go.
+  describe("interrupted flow cleanup", () => {
+    it("removes the handoff tokens when the token exchange fails", async () => {
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            authorization_code: "test-auth-code",
+            code_verifier: "test-verifier",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: () => Promise.resolve("Invalid code"),
+        }));
+
+      const res = await devicePollPost();
+
+      expect(res.status).toBe(502);
+      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
+      expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+    });
+
+    it("removes the handoff tokens when the provider returns no code_verifier", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ authorization_code: "test-auth-code" }),
+      }));
+
+      const res = await devicePollPost();
+
+      expect(res.status).toBe(502);
+      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
+      expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+    });
+
+    it("sweeps a handoff file that is past the TTL", async () => {
+      mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 20 * 60 * 1000 } as never);
+      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+
+      const res = await devicePollPost();
+
+      // No state file, so the poll itself is a 400 — the sweep runs regardless.
+      expect(res.status).toBe(400);
+      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
+    });
+
+    it("leaves a handoff file that is still inside the TTL", async () => {
+      mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 60 * 1000 } as never);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
+
+      const res = await devicePollPost();
+
+      expect((await res.json()).status).toBe("pending");
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
+    });
   });
 
   it("returns pending for unknown response format", async () => {

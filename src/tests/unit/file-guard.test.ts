@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -44,10 +44,106 @@ describe("isProtectedFilePath", () => {
     expect(guard.isProtectedFilePath(p)).toBe(true);
   });
 
-  it("flags the ClawBox data-dir secrets", () => {
-    for (const n of [".session-secret", ".mcp-token", ".local-ai-token", ".hermes-dashboard-pw", "config.json", "kv.json"]) {
-      expect(guard.isProtectedFilePath(path.join(DATA_DIR, n))).toBe(true);
-    }
+  // The inventory the product actually writes under DATA_DIR, as of this
+  // commit. It is here to show the rule covers the real directory — the rule
+  // itself is pinned by the runtime-name and unknown-name cases below, which do
+  // not depend on this list staying current.
+  it.each([
+    // Tokens and stores.
+    ".session-secret",
+    ".mcp-token",
+    ".local-ai-token",
+    ".local-ai-token-migrated",
+    ".hermes-dashboard-pw",
+    "config.json",
+    "kv.json",
+    "clawbox.db",
+    "dual-license.txt",
+    // OAuth flow files.
+    "oauth-device-tokens.json",
+    "oauth-device-state.json",
+    "oauth-state.json",
+    "oauth-org.json",
+    "clawai-connect-state.json",
+    // Credentials-change and login state.
+    ".chpasswd-input",
+    ".login-attempts.json",
+    // Tunnel and network state.
+    "tunnel-state.json",
+    "tunnel.pid",
+    "tunnel-url.txt",
+    "control-ui-origins.json",
+    "network.env",
+    "hotspot.env",
+    "ap-runtime.env",
+    "hostname.env",
+    "wifi-scan-cache.json",
+  ])("flags the data-dir server-state file %s", (n) => {
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, n))).toBe(true);
+  });
+
+  it("flags a nested file under a protected data-dir subtree", () => {
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, "cloudflared"))).toBe(true);
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, "cloudflared", "cert.pem"))).toBe(true);
+  });
+
+  // The rule is containment, so it has to hold for names that no list could
+  // carry: one the code generates at runtime, and one that does not exist yet.
+  it("flags a runtime-named atomic-write sidecar", () => {
+    expect(
+      guard.isProtectedFilePath(path.join(DATA_DIR, "oauth-device-tokens.json.tmp.deadbeef")),
+    ).toBe(true);
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, "config.json.tmp"))).toBe(true);
+  });
+
+  it("flags a data-dir file this test has never heard of", () => {
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, "some-future-store.json"))).toBe(true);
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, "future-dir", "nested", "x.bin"))).toBe(true);
+  });
+
+  // POSIX only: on Windows a backslash really is a separator, so the question
+  // does not arise. On the device it is a legal filename character, and a name
+  // containing one is a single entry in the data dir — not a path into the
+  // public subtree its first half happens to spell.
+  it.skipIf(path.sep !== "/")("reads a backslash in a name as part of the name", () => {
+    expect(guard.isProtectedFilePath(`${DATA_DIR}/webapps\\evil`)).toBe(true);
+    expect(guard.isProtectedFilePath(`${DATA_DIR}/icons\\..\\config.json`)).toBe(true);
+  });
+
+  it("keeps the data dir itself listable so its public subtrees can be reached", () => {
+    // The Files API filters a listing entry by entry; a protected DATA_DIR
+    // would make the whole directory unopenable and hide the subtrees below.
+    expect(guard.isProtectedFilePath(DATA_DIR)).toBe(false);
+  });
+
+  it.each([
+    "webapps",
+    "icons",
+    "catalog-cache",
+    "code-projects",
+    "llamacpp",
+  ])("does not over-block the public data-dir subtree %s", (sub) => {
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, sub))).toBe(false);
+    expect(guard.isProtectedFilePath(path.join(DATA_DIR, sub, "demo", "index.html"))).toBe(false);
+  });
+
+  it("does not over-block a sibling of the data dir", () => {
+    expect(guard.isProtectedFilePath(path.join(TEST_ROOT, "data-backup", "notes.txt"))).toBe(false);
+    expect(guard.isProtectedFilePath(path.join(TEST_ROOT, "src", "index.ts"))).toBe(false);
+  });
+
+  it.each([
+    `${home}/.clawkeep`,
+    `${home}/.clawkeep/token`,
+    `${home}/.clawkeep/passphrase`,
+    `${home}/.clawkeep/config.toml`,
+  ])("flags the backup tool's store %s", (p) => {
+    expect(guard.isProtectedFilePath(p)).toBe(true);
+  });
+
+  it("does not over-block a name that merely starts with .clawkeep", () => {
+    expect(guard.isProtectedFilePath(`${home}/.clawkeep-notes.txt`)).toBe(false);
+    expect(guard.isProtectedFilePath(`${home}/clawkeep/readme.md`)).toBe(false);
   });
 
   it.each([

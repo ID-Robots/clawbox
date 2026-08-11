@@ -4,6 +4,12 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
 import {
+  HANDOFF_TOKENS_PATH,
+  HANDOFF_TTL_MS,
+  clearHandoffTokens,
+  sweepStaleHandoffTokens,
+} from "@/lib/oauth-handoff";
+import {
   OPENAI_CLIENT_ID,
   OPENAI_DEVICE_TOKEN_URL,
   OPENAI_REDIRECT_URI,
@@ -13,7 +19,22 @@ import {
 export const dynamic = "force-dynamic";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
-const TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");
+
+/**
+ * Drop both halves of a sign-in the provider ended without completing: the
+ * in-flight state, and any handoff tokens an earlier attempt left behind.
+ *
+ * Used on the provider-failure branches only. The expiry branch in POST drops
+ * the state alone, because a device-code state can be expired while the handoff
+ * file holds fresh tokens from the *other* (authorization-code) flow; those are
+ * left for the age sweep to judge on their own timestamp.
+ */
+async function discardFlow(): Promise<void> {
+  await Promise.all([
+    fs.unlink(STATE_PATH).catch(() => {}),
+    clearHandoffTokens(),
+  ]);
+}
 
 interface DeviceTokens {
   access_token?: string;
@@ -32,13 +53,13 @@ async function persistTokensAndAck(
   tokens: DeviceTokens,
 ): Promise<NextResponse> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
   await fs.writeFile(
     tmpPath,
     JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),
     { mode: 0o600 },
   );
-  await fs.rename(tmpPath, TOKENS_PATH);
+  await fs.rename(tmpPath, HANDOFF_TOKENS_PATH);
   return NextResponse.json({ status: "complete" });
 }
 
@@ -108,7 +129,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
     const verifier = pollData.code_verifier;
     if (!verifier) {
       console.error("[device-poll/openai] No code_verifier in poll response:", pollData);
-      await fs.unlink(STATE_PATH).catch(() => {});
+      await discardFlow();
       return NextResponse.json(
         { error: "OpenAI did not return code_verifier" },
         { status: 502 }
@@ -141,7 +162,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
         exchangeRes.status,
         errText
       );
-      await fs.unlink(STATE_PATH).catch(() => {});
+      await discardFlow();
       return NextResponse.json(
         { error: `Token exchange failed (${exchangeRes.status})` },
         { status: 502 }
@@ -173,6 +194,8 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
 
 export async function POST() {
   try {
+    await sweepStaleHandoffTokens();
+
     let stored: StoredState;
     try {
       const raw = await fs.readFile(STATE_PATH, "utf-8");
@@ -189,7 +212,7 @@ export async function POST() {
     if (!stored.device_id && stored.device_auth_id) stored.device_id = stored.device_auth_id;
 
     // 15-minute expiry
-    if (Date.now() - stored.createdAt > 15 * 60 * 1000) {
+    if (Date.now() - stored.createdAt > HANDOFF_TTL_MS) {
       await fs.unlink(STATE_PATH).catch(() => {});
       return NextResponse.json(
         { error: "Device auth session expired. Please start again." },

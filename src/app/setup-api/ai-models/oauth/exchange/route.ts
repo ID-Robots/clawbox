@@ -5,13 +5,14 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+// Server-only handoff file the configure route reads on the `oauthHandoff`
+// path — the SAME file the device-code flow (device-poll) uses, so both take
+// its path from the one module that owns it.
+import { HANDOFF_TOKENS_PATH } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
 import { discoverGoogleProject } from "@/lib/google-project";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
-// Server-only handoff file the configure route reads on the `oauthHandoff`
-// path — the SAME file the device-code flow (device-poll) uses.
-const TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");
 
 // Persist the freshly-issued provider tokens to a 0600 server file and return
 // just a status, so the access/refresh/id tokens never travel back through the
@@ -24,13 +25,13 @@ async function persistTokensAndAck(
   extra?: { projectId?: string },
 ): Promise<NextResponse> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
   await fs.writeFile(
     tmpPath,
     JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),
     { mode: 0o600 },
   );
-  await fs.rename(tmpPath, TOKENS_PATH);
+  await fs.rename(tmpPath, HANDOFF_TOKENS_PATH);
   return NextResponse.json({ status: "complete", ...(extra?.projectId ? { projectId: extra.projectId } : {}) });
 }
 

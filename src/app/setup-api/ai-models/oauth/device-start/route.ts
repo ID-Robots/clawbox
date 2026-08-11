@@ -3,19 +3,19 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { DEVICE_AUTH_PROVIDERS } from "@/lib/oauth-config";
 
 export const dynamic = "force-dynamic";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
-const TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");
 
 export async function POST(request: Request) {
   try {
     // A new sign-in flow supersedes any prior one. Best-effort clear a stale
     // token-handoff file left behind by an abandoned earlier flow so it can
     // never be consumed by a later configure call.
-    await fs.unlink(TOKENS_PATH).catch(() => {});
+    await clearHandoffTokens();
 
     let body: { provider?: string } = {};
     try {

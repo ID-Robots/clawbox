@@ -5,6 +5,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
@@ -15,6 +16,11 @@ function base64url(buf: Buffer): string {
 
 export async function POST(request: Request) {
   try {
+    // A new sign-in supersedes any prior one — same rule the device-code entry
+    // point applies, so the handoff file always belongs to the flow in progress
+    // rather than to whichever one was abandoned last.
+    await clearHandoffTokens();
+
     let body: { provider?: string } = {};
     try {
       body = await request.json();

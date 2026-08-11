@@ -93,7 +93,7 @@ export function isAllowedPath(abs: string): boolean {
  * Used by the `bash` pre-flight, which sees a shell string rather than a path.
  */
 export const SECRET_NAME_RE =
-  /(^|[^\w.-])\.(ssh|hermes|openclaw|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
+  /(^|[^\w.-])\.(ssh|hermes|openclaw|clawkeep|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
 
 /**
  * Throw a BLOCKED_PATH the agent can act on. The message deliberately names no

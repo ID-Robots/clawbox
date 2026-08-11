@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll, setMany } from "@/lib/config-store";
+import { getAll, setMany } from "@/lib/config-store";
+import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
   findOpenclawBin,
@@ -483,7 +484,6 @@ export async function POST(request: Request) {
     // 15-minute TTL rather than forcing a full re-auth.
     let pendingHandoffTokensPath: string | null = null;
     if (body.authMode === "subscription" && body.oauthHandoff) {
-      const tokensPath = path.join(DATA_DIR, "oauth-device-tokens.json");
       let handoff: {
         provider?: string;
         access_token?: string;
@@ -493,19 +493,22 @@ export async function POST(request: Request) {
         createdAt?: number;
       };
       try {
-        handoff = JSON.parse(await fs.readFile(tokensPath, "utf-8"));
+        handoff = JSON.parse(await fs.readFile(HANDOFF_TOKENS_PATH, "utf-8"));
       } catch {
         return NextResponse.json(
           { error: "No pending OAuth tokens. Restart the sign-in flow." },
           { status: 400 },
         );
       }
+      // A file with no `createdAt` has no age we can check, so it cannot be
+      // shown to be inside the TTL — treat it the same as one that is past it.
       if (
         !handoff.access_token ||
-        (handoff.createdAt && Date.now() - handoff.createdAt > 15 * 60 * 1000)
+        !handoff.createdAt ||
+        Date.now() - handoff.createdAt > HANDOFF_TTL_MS
       ) {
         // Stale/invalid credential material — consume it so it can't linger.
-        await fs.unlink(tokensPath).catch(() => {});
+        await fs.unlink(HANDOFF_TOKENS_PATH).catch(() => {});
         return NextResponse.json(
           { error: "OAuth tokens missing or expired. Restart the sign-in flow." },
           { status: 400 },
@@ -519,7 +522,7 @@ export async function POST(request: Request) {
       body.idToken = handoff.id_token;
       body.refreshToken = handoff.refresh_token;
       body.expiresIn = handoff.expires_in;
-      pendingHandoffTokensPath = tokensPath;
+      pendingHandoffTokensPath = HANDOFF_TOKENS_PATH;
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
