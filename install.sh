@@ -323,6 +323,43 @@ ensure_env_setting() {
   fi
 }
 
+# Move a setting off a superseded default.
+#
+# ensure_env_setting only ever ADDS a key, so every device installed before a
+# default changed keeps the old value in .env forever - and both this script and
+# the Next.js runtime read .env, so a new default in the source would never
+# reach a device already in the field. This rewrites the value only when it is
+# byte-identical to the old default, so a value the operator chose themselves is
+# left exactly as they set it.
+migrate_env_setting() {
+  local env_file="$1"
+  local key="$2"
+  local old_value="$3"
+  local new_value="$4"
+  [ -f "$env_file" ] || return 0
+  local current_value
+  current_value=$(get_env_setting_or_default "$env_file" "$key" "")
+  if [ "$current_value" != "$old_value" ]; then
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "${env_file}.XXXXXX") || return 1
+  # Rewrite in place via a temp file rather than sed -i so an unusual character
+  # in either value cannot be read as sed syntax.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "${key}="*) printf '%s=%s\n' "$key" "$new_value" >> "$tmp" ;;
+      *) printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$env_file"
+  # mktemp created the temp file as root with 0600; carry the real file's mode
+  # and owner across so .env stays readable by the clawbox service user.
+  chmod --reference="$env_file" "$tmp" 2>/dev/null || true
+  chown --reference="$env_file" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$env_file"
+  echo "  Migrated ${key} from ${old_value} to ${new_value}"
+}
+
 get_env_setting_or_default() {
   local env_file="$1"
   local key="$2"
@@ -343,8 +380,14 @@ ensure_llamacpp_model_cached() {
   local MODEL_DIR="$PROJECT_DIR/data/llamacpp/models"
   local HF_REPO HF_FILE MODEL_PATH
 
-  HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf")
-  HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf")
+  # A device installed before the QAT switch still has the old repo/file pinned
+  # in .env, so migrate the pin before reading it - otherwise this function
+  # would keep re-downloading the superseded GGUF forever.
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
+
+  HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf")
+  HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf")
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
   mkdir -p "$MODEL_DIR"
@@ -352,6 +395,7 @@ ensure_llamacpp_model_cached() {
 
   if [ -f "$MODEL_PATH" ]; then
     echo "  Gemma 4 model already cached for offline use"
+    prune_superseded_llamacpp_model "$MODEL_DIR" "$HF_FILE"
     return 0
   fi
 
@@ -368,6 +412,22 @@ ensure_llamacpp_model_cached() {
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
   echo "  Gemma 4 model cached for offline startup"
+  prune_superseded_llamacpp_model "$MODEL_DIR" "$HF_FILE"
+}
+
+# The model is addressed by filename, so switching GGUF leaves the old 2.8GB
+# file sitting in the models directory doing nothing. Reclaim it - but only the
+# one filename we know we shipped, and never the file currently in use.
+prune_superseded_llamacpp_model() {
+  local model_dir="$1"
+  local active_file="$2"
+  local stale="gemma-4-e2b-it-edited-q4_0.gguf"
+
+  [ "$active_file" = "$stale" ] && return 0
+  [ -f "$model_dir/$stale" ] || return 0
+
+  rm -f "$model_dir/$stale"
+  echo "  Removed superseded GGUF ${stale}"
 }
 
 has_playwright_chromium() {
@@ -1429,8 +1489,13 @@ step_directories_permissions() {
   fi
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf"
+  # Keep these four lines in step with src/lib/llamacpp.ts - the model id is
+  # deliberately unchanged, only the GGUF moved. src/tests/unit/llamacpp-gguf-pin.test.ts
+  # fails if this file and that one ever disagree.
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
@@ -2002,6 +2067,23 @@ step_llamacpp_install() {
        && ! ldd /usr/local/bin/llama-server 2>/dev/null | grep -qiE 'libcuda|libcublas|libcudart'; then
     echo "  Existing llama-server was built without CUDA — rebuilding with GPU support"
     needs_rebuild="true"
+  fi
+
+  # A prebuilt binary skips the compile below, which is the single most
+  # expensive step in the whole install — measured at 18m51s on an Orin Nano,
+  # and it produces a byte-identical result on every device of the same model.
+  # Supplying one is opt-in (LLAMACPP_PREBUILT), so nothing changes for anyone
+  # who doesn't set it.
+  #
+  # It is validated before it is trusted, and ANY failure falls through to the
+  # source build. A device that ends up without a working llama-server is worse
+  # than a slow install, so the fast path is never allowed to be the last word.
+  if [ "$needs_rebuild" = "true" ] && [ -n "${LLAMACPP_PREBUILT:-}" ]; then
+    if install_prebuilt_llamacpp "$LLAMACPP_PREBUILT" "$ENABLE_GGML_CUDA"; then
+      needs_rebuild="false"
+    else
+      echo "  Falling back to building llama.cpp from source."
+    fi
   fi
 
   if [ "$needs_rebuild" = "true" ]; then

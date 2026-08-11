@@ -14,8 +14,11 @@ describe("llamacpp config helpers", () => {
 
     expect(mod.getDefaultLlamaCppModel()).toBe("gemma4-e2b-it-q4_0");
     expect(mod.LLAMACPP_RECOMMENDED_MODELS[0]?.id).toBe("gemma4-e2b-it-q4_0");
-    expect(mod.getDefaultLlamaCppRepo()).toBe("gguf-org/gemma-4-e2b-it-gguf");
-    expect(mod.getDefaultLlamaCppFile()).toBe("gemma-4-e2b-it-edited-q4_0.gguf");
+    // The model id is llama-server's --alias and stays put; the GGUF behind it
+    // moved to Google's QAT release after the on-device bake-off. See
+    // src/tests/unit/llamacpp-gguf-pin.test.ts for the installer cross-check.
+    expect(mod.getDefaultLlamaCppRepo()).toBe("google/gemma-4-E2B-it-qat-q4_0-gguf");
+    expect(mod.getDefaultLlamaCppFile()).toBe("gemma-4-E2B_q4_0-it.gguf");
   });
 
   it("normalizes a llama.cpp base URL to include /v1", async () => {
