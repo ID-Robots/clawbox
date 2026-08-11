@@ -23,12 +23,26 @@ if (!keyPath) {
   process.exit(1);
 }
 const device = arg("device");
-const days = arg("days");
+const daysRaw = arg("days");
+
+// --days is optional, but when it IS given it has to be a real, positive number
+// of days. `Number("30d")` is NaN, and a NaN expiry does not survive
+// JSON.stringify as a number — so an unchecked value here quietly produces a
+// licence with no usable expiry at all while the operator believes one was set.
+// Refuse the value instead of minting something that does not match the intent.
+let days;
+if (daysRaw !== undefined) {
+  days = Number(daysRaw);
+  if (!Number.isFinite(days) || days <= 0) {
+    console.error(`error: --days must be a positive number (got ${JSON.stringify(daysRaw)})`);
+    process.exit(1);
+  }
+}
 
 const payload = {
   feature: "dual",
   iat: Math.floor(Date.now() / 1000),
-  ...(days ? { exp: Math.floor(Date.now() / 1000) + Number(days) * 86400 } : {}),
+  ...(days !== undefined ? { exp: Math.floor(Date.now() / 1000) + days * 86400 } : {}),
   ...(device ? { deviceId: device } : {}),
 };
 

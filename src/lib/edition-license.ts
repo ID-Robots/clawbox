@@ -10,10 +10,10 @@
 // supplied via env CLAWBOX_DUAL_LICENSE or the file data/dual-license.txt.
 // payload = { feature: "dual", iat: <unix>, exp?: <unix>, deviceId?: <string> }.
 //
-// Until we generate the keypair and drop the real public key below (+ start
-// issuing licenses), DUAL_LICENSE_PUBKEY stays empty and verifyDualLicense()
-// returns false — so dual is locked everywhere by default, which is the safe
-// posture (single-harness editions never call this).
+// The keypair exists and the real public key is embedded below, so licensing is
+// live: verifyDualLicense() enforces it, and dual stays locked until a licence
+// we signed verifies. A missing or unverifiable licence keeps the device locked,
+// which is the safe posture (single-harness editions never call this).
 
 import crypto from "crypto";
 import fs from "fs";
@@ -43,11 +43,37 @@ export function isDualLicenseEnforced(): boolean {
   return DUAL_LICENSE_PUBKEY.length > 0;
 }
 
-interface LicensePayload {
+export interface LicensePayload {
   feature?: string;
   iat?: number;
   exp?: number;
   deviceId?: string;
+}
+
+/**
+ * Field-level checks applied to a licence payload AFTER its signature has been
+ * verified. Exported so the rules can be exercised directly.
+ *
+ * `exp` is optional — a licence without one is perpetual by design. But when
+ * the field is PRESENT it has to be a finite number: an absent `exp` and an
+ * `exp` we cannot read as a timestamp are different things, and treating the
+ * second as the first would skip the expiry check entirely. Anything present
+ * and not finite (null, a string, NaN) is rejected outright.
+ */
+export function isLicensePayloadValid(payload: LicensePayload, nowSec: number): boolean {
+  if (payload.feature !== "dual") return false;
+
+  if (payload.exp !== undefined) {
+    if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return false;
+    if (payload.exp <= nowSec) return false;
+  }
+
+  // Optional device binding: if the license names a device, it must match.
+  if (payload.deviceId) {
+    const deviceId = (process.env.CLAWBOX_DEVICE_ID || "").trim();
+    if (!deviceId || deviceId !== payload.deviceId) return false;
+  }
+  return true;
 }
 
 function readLicenseString(): string | null {
@@ -68,7 +94,7 @@ function readLicenseString(): string | null {
  * error (missing key, bad format, bad signature, expired).
  */
 export function verifyDualLicense(): boolean {
-  if (!DUAL_LICENSE_PUBKEY) return false; // licensing not wired yet → locked
+  if (!DUAL_LICENSE_PUBKEY) return false; // nothing to verify against → locked
   const license = readLicenseString();
   if (!license) return false;
 
@@ -85,16 +111,7 @@ export function verifyDualLicense(): boolean {
     if (!crypto.verify(null, payloadBuf, key, sigBuf)) return false;
 
     const payload = JSON.parse(payloadBuf.toString("utf8")) as LicensePayload;
-    if (payload.feature !== "dual") return false;
-    if (typeof payload.exp === "number" && payload.exp <= Math.floor(Date.now() / 1000)) {
-      return false;
-    }
-    // Optional device binding: if the license names a device, it must match.
-    if (payload.deviceId) {
-      const deviceId = (process.env.CLAWBOX_DEVICE_ID || "").trim();
-      if (!deviceId || deviceId !== payload.deviceId) return false;
-    }
-    return true;
+    return isLicensePayloadValid(payload, Math.floor(Date.now() / 1000));
   } catch {
     return false;
   }
