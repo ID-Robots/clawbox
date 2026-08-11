@@ -1147,6 +1147,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     // A field of the wrong shape means the file is not one this device wrote.
     ["a non-string access_token", `{"provider":"openai","access_token":{},"createdAt":${Date.now()}}`],
     ["a non-string provider", `{"provider":{},"access_token":"a.b.c","createdAt":${Date.now()}}`],
+    // Trims to nothing where it is used, so it is as unusable as a missing one.
+    ["a blank access_token", `{"provider":"openai","access_token":"   ","createdAt":${Date.now()}}`],
   ])("rejects and removes a handoff file with %s", async (_label, doc) => {
     // None of these yields something the route can use, and a bare
     // `now - createdAt > TTL` truthiness test passes for every one of them.

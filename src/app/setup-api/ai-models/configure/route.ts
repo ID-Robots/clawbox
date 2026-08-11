@@ -529,9 +529,12 @@ export async function POST(request: Request) {
       // shape means the file is not one of ours to use, so it goes down the
       // same path rather than being spliced into the body for a later check to
       // reject — which would leave it on disk for every retry to trip over.
+      // Trimmed, because the token is trimmed before it is used: a blank string
+      // is as unusable as a missing one, and would otherwise be refused further
+      // down with the file still on disk.
       const wellFormed =
         typeof handoff.access_token === "string" &&
-        handoff.access_token.length > 0 &&
+        handoff.access_token.trim().length > 0 &&
         (handoff.provider === undefined || typeof handoff.provider === "string");
       if (
         !wellFormed ||
