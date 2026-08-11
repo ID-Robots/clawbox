@@ -50,16 +50,30 @@ describe("/setup-api/preferences", () => {
     });
 
     it("returns specific keys", async () => {
-      mockGet.mockResolvedValue(80 as never);
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, "pref:ui_theme": "dark" });
       const req = new Request("http://localhost/setup-api/preferences?keys=wp_opacity");
       const res = await GET(req);
       const body = await res.json();
       expect(body).toEqual({ wp_opacity: 80 });
-      expect(mockGet).toHaveBeenCalledWith("pref:wp_opacity");
+    });
+
+    it("reads the store once however many keys are named", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, "pref:ui_theme": "dark" });
+      const req = new Request("http://localhost/setup-api/preferences?keys=wp_opacity,ui_theme");
+      const res = await GET(req);
+      expect(await res.json()).toEqual({ wp_opacity: 80, ui_theme: "dark" });
+      expect(mockGetAll).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers 400 when more keys are named than a read may carry", async () => {
+      const many = Array.from({ length: 40 }, (_, i) => `ui_key${i}`).join(",");
+      const res = await GET(new Request(`http://localhost/setup-api/preferences?keys=${many}`));
+      expect(res.status).toBe(400);
+      expect(mockGetAll).not.toHaveBeenCalled();
     });
 
     it("filters out non-allowed keys", async () => {
-      mockGet.mockResolvedValue(80 as never);
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, "pref:bad_key": "x" });
       const req = new Request("http://localhost/setup-api/preferences?keys=wp_opacity,bad_key");
       const res = await GET(req);
       const body = await res.json();

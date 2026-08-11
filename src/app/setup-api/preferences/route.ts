@@ -14,6 +14,12 @@ function isAllowed(key: string) {
   return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
 }
 
+// Most keys one read may name. Every caller in the app asks for a single key
+// (see SettingsApp, i18n, mascot-client); the whole set is fetched with `all=1`
+// instead. Bound it so the size of a response follows the store rather than the
+// request.
+const MAX_KEYS_PER_READ = 32;
+
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
 // GET /setup-api/preferences?all=1  (returns all pref:* keys)
 //
@@ -46,9 +52,19 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "keys or all param required" }, { status: 400 });
   }
   const keys = keysParam.split(",").filter(isAllowed);
+  if (keys.length > MAX_KEYS_PER_READ) {
+    return NextResponse.json(
+      { error: `at most ${MAX_KEYS_PER_READ} keys per request` },
+      { status: 400 },
+    );
+  }
+  // One read of the store rather than one per key: config.get() re-reads and
+  // re-parses the whole file synchronously on every call, so the work of a
+  // request would otherwise follow the length of its `keys` parameter.
+  const allConfig = await config.getAll();
   const result: Record<string, unknown> = Object.create(null);
   for (const key of keys) {
-    result[key] = await config.get(`pref:${key}`);
+    result[key] = allConfig[`pref:${key}`];
   }
   return NextResponse.json(sanitizePreferences(result));
 }
