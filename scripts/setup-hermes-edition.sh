@@ -42,11 +42,61 @@ fi
 # install.sh) is honoured for the first-flash case where the file doesn't exist
 # yet. Standalone runs with neither default to `hermes`, which is what this
 # script has always been used for.
-EDITION="${CLAWBOX_EDITION:-}"
-if [ -z "$EDITION" ] && [ -f "$EDITION_FILE" ]; then
-  EDITION="$(sed -n 's/^[[:space:]]*CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' "$EDITION_FILE" 2>/dev/null | tail -n 1 | tr -d '"'\'' ')"
+# Lower-case, and strip the quotes and whitespace an EnvironmentFile value may
+# carry, so a lock reading `CLAWBOX_EDITION="Hermes"` compares equal to `hermes`.
+_norm() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d "[:space:]\"'"; }
+
+RECORDED_EDITION=""
+if [ -f "$EDITION_FILE" ]; then
+  RECORDED_EDITION="$(_norm "$(sed -n 's/^[[:space:]]*CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' "$EDITION_FILE" 2>/dev/null | tail -n 1)")"
 fi
-EDITION="$(printf '%s' "${EDITION:-hermes}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+REQUESTED_EDITION="$(_norm "${CLAWBOX_EDITION:-}")"
+
+# This script is the OTHER writer of the edition lock (§4 below rewrites both
+# /etc/clawbox/edition.env and the legacy drop-in). install.sh refuses to change
+# a provisioned device's edition; without the same refusal here, `sudo
+# CLAWBOX_EDITION=dual bash scripts/setup-hermes-edition.sh` would rewrite the
+# lock on a hermes box and a later plain `install.sh` would then see recorded ==
+# requested, find no mismatch, and unmask and start the OpenClaw gateway on what
+# the customer bought as a Hermes appliance. Refusing at BOTH writers is what
+# makes the lock mean anything.
+#
+# Only a genuine disagreement is refused: no lock yet (first flash) or no
+# CLAWBOX_EDITION passed (the normal standalone repair run) are untouched, and
+# so is install.sh's own call — it runs step_edition_lock before
+# step_hermes_edition, so the two always agree by then.
+if [ -n "$RECORDED_EDITION" ] && [ -n "$REQUESTED_EDITION" ] \
+   && [ "$RECORDED_EDITION" != "$REQUESTED_EDITION" ]; then
+  if [ "${CLAWBOX_ALLOW_EDITION_CHANGE:-0}" = "1" ]; then
+    log "WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — provisioning '$REQUESTED_EDITION' over '$RECORDED_EDITION'."
+    log "         The '$RECORDED_EDITION' harness is NOT torn down and credentials are not migrated."
+  else
+    cat >&2 <<EOF
+[hermes-edition] ERROR: this device is already installed as the '$RECORDED_EDITION' edition.
+
+         Recorded edition:  $RECORDED_EDITION   ($EDITION_FILE)
+         Requested edition: $REQUESTED_EDITION
+
+       Provisioning would rewrite the edition lock, and neither this script nor
+       install.sh migrates a device between editions — the harness being left
+       behind keeps running and the AI provider sign-in does not move with it.
+       Changing a device's edition requires a reflash.
+       See https://docs.clawbox.com/editions/overview
+
+       Nothing has been changed. Drop CLAWBOX_EDITION to provision the edition
+       this device already is, or pass CLAWBOX_EDITION=$RECORDED_EDITION.
+       To overwrite it anyway, re-run with CLAWBOX_ALLOW_EDITION_CHANGE=1.
+EOF
+    exit 1
+  fi
+fi
+
+# An explicit request wins once it agrees with the lock (or the escape hatch was
+# used); otherwise fall back to the lock, then to this script's historical
+# default.
+EDITION="$REQUESTED_EDITION"
+[ -n "$EDITION" ] || EDITION="$RECORDED_EDITION"
+[ -n "$EDITION" ] || EDITION="hermes"
 case "$EDITION" in
   hermes|dual) ;;
   *)

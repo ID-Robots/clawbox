@@ -106,12 +106,34 @@ _read_edition_from_file() {
   printf '%s' "$v"
 }
 
+# The edition RECORDED on this device, from the root-owned records only and in
+# authority order. Deliberately excludes config/edition.txt: that is a
+# first-flash seed in a tree the customer owns, so it is a source for resolution
+# (below) but never evidence of what the device already IS.
+_read_recorded_edition() {
+  local v
+  v="$(_read_edition_from_file "$CLAWBOX_EDITION_FILE" || true)"
+  [ -n "$v" ] || v="$(_read_edition_from_file "$LEGACY_EDITION_DROPIN" || true)"
+  printf '%s' "$v"
+}
+
+# Lower-case and map anything unrecognised onto openclaw — the same rule the
+# resolution `case` below applies, minus the warning. Empty stays empty so
+# "no edition recorded" is distinguishable from "recorded as openclaw".
+_normalise_edition() {
+  local v
+  v="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$v" in
+    openclaw|hermes|dual|"") printf '%s' "$v" ;;
+    *) printf 'openclaw' ;;
+  esac
+}
+
+CLAWBOX_RECORDED_EDITION_RAW="$(_read_recorded_edition)"
+
 CLAWBOX_EDITION_RAW="${CLAWBOX_EDITION:-}"
 if [ -z "$CLAWBOX_EDITION_RAW" ]; then
-  CLAWBOX_EDITION_RAW="$(_read_edition_from_file "$CLAWBOX_EDITION_FILE" || true)"
-fi
-if [ -z "$CLAWBOX_EDITION_RAW" ]; then
-  CLAWBOX_EDITION_RAW="$(_read_edition_from_file "$LEGACY_EDITION_DROPIN" || true)"
+  CLAWBOX_EDITION_RAW="$CLAWBOX_RECORDED_EDITION_RAW"
 fi
 if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
   CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
@@ -131,6 +153,82 @@ case "$CLAWBOX_EDITION" in
     CLAWBOX_EDITION="openclaw"
     ;;
 esac
+
+# ── Refuse to change the edition of an already-provisioned device ────────────
+#
+# install.sh can INSTALL an edition. It cannot MIGRATE one, and it never
+# pretended to: nothing here stops, disables or masks the harness a device would
+# be LEAVING, and each harness keeps its provider credentials in its own file
+# (~/.hermes/config.yaml vs ~/.openclaw/openclaw.json), so a sign-in does not
+# move. The message below spells out what that costs an operator; the same
+# reasoning is in docs-site/editions/overview.mdx. Changing edition is a
+# reflash. scripts/setup-hermes-edition.sh is the other writer of the lock and
+# carries the same refusal — both writers have to, or neither means anything.
+#
+# ORDERING is load-bearing: this is the first thing after the edition resolves,
+# so it runs before the lock and drop-in are rewritten, before
+# step_edition_gateway_state masks or unmasks anything, and before any unit is
+# copied, enabled or started — on the full-install path AND on the `--step`
+# dispatch path the in-app updater uses, since both reach this point during
+# constant parsing. A refusal that fires after the gateway has been unmasked is
+# not a refusal.
+#
+# EVERY recorded-vs-requested difference counts, including openclaw -> dual and
+# hermes -> dual. `dual` is a distinct SKU (both harnesses plus a licence-gated
+# runtime switcher), and the additive direction fails the same way as the
+# destructive one: the harness being ADDED comes up with an empty provider
+# registry and no credentials, and setup_complete suppresses the step that would
+# populate them. The lock exists precisely so the SKU cannot be flipped from the
+# environment, so "upgrading" to premium by exporting a variable is exactly what
+# it must refuse.
+CLAWBOX_ALLOW_EDITION_CHANGE="${CLAWBOX_ALLOW_EDITION_CHANGE:-0}"
+CLAWBOX_RECORDED_EDITION="$(_normalise_edition "$CLAWBOX_RECORDED_EDITION_RAW")"
+
+# Empty means no lock has ever been written: a fresh install, which is exactly
+# how an edition is legitimately chosen. Untouched.
+if [ -n "$CLAWBOX_RECORDED_EDITION" ] && [ "$CLAWBOX_RECORDED_EDITION" != "$CLAWBOX_EDITION" ]; then
+  if [ "$CLAWBOX_ALLOW_EDITION_CHANGE" = "1" ]; then
+    cat >&2 <<EOF
+
+WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
+         '$CLAWBOX_RECORDED_EDITION' on a device that is already provisioned.
+         The installer does NOT migrate an edition: the '$CLAWBOX_RECORDED_EDITION' harness is
+         left running, and the AI provider sign-in is not carried across.
+         You are expected to finish the transition by hand.
+
+EOF
+  else
+    cat >&2 <<EOF
+
+ERROR: this device is already installed as the '$CLAWBOX_RECORDED_EDITION' edition.
+
+         Recorded edition:  $CLAWBOX_RECORDED_EDITION   ($CLAWBOX_EDITION_FILE)
+         Requested edition: $CLAWBOX_EDITION
+
+       The installer installs an edition; it does not migrate one. It has no
+       step that removes the harness a device is leaving, and the AI provider
+       sign-in lives in each harness's own config, so it does not move. A
+       device installed this way comes up with two harnesses running and no
+       usable model, while still reporting that setup is complete.
+
+       Changing a device's edition requires a REFLASH.
+       See https://docs.clawbox.com/editions/overview
+
+       Nothing has been changed. No unit was stopped, started or masked, and
+       the edition lock still reads '$CLAWBOX_RECORDED_EDITION'.
+
+       To re-install this device as the edition it already is, drop
+       CLAWBOX_EDITION from the command (the recorded value is used
+       automatically) or pass CLAWBOX_EDITION=$CLAWBOX_RECORDED_EDITION.
+
+       If you genuinely intend to overwrite the edition and will finish the
+       transition yourself, re-run with CLAWBOX_ALLOW_EDITION_CHANGE=1.
+
+EOF
+    exit 1
+  fi
+fi
+
 # The Hermes SKU: Hermes is the ONLY harness, the OpenClaw gateway is removed.
 is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }
 # Editions that ship the Hermes harness + dashboard (hermes AND the premium
@@ -227,6 +325,37 @@ if is_hermes_edition; then
     [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
   done
   EXPECTED_ACTIVE_SERVICES=("${_active_svcs[@]}")
+fi
+
+# Units belonging to a harness THIS edition does not run.
+#
+# EXPECTED_ACTIVE_SERVICES only ever describes what should be UP, which left
+# step_validate_services blind in one direction: it appends the Hermes units
+# inside `if has_hermes_harness`, so on the openclaw edition a fully running
+# Hermes stack was not merely tolerated, it was invisible. Nothing in install.sh
+# brings these down, so anything found here is a device that used to be another
+# edition. Both predicates are negated, so `dual` — the edition that legitimately
+# runs both — accumulates nothing and needs no special case.
+FOREIGN_EDITION_UNITS=()
+if ! has_hermes_harness; then
+  # The Hermes harness: the two ClawBox-managed dashboard units, plus the
+  # gateway unit the upstream Hermes installer writes. The latter is the one
+  # that holds the Telegram bot token, so leaving it running next to the
+  # OpenClaw gateway puts two pollers on one token — a permanent conflict loop.
+  FOREIGN_EDITION_UNITS+=(
+    clawbox-hermes-dashboard.service
+    clawbox-hermes-dashboard-proxy.service
+    hermes-gateway.service
+  )
+fi
+if ! has_openclaw_harness; then
+  # hermes: the OpenClaw gateway. The hermes-only probe in
+  # step_validate_services also names this unit — it is an unauthenticated agent
+  # surface on :18789 and earns its own message — but that probe only tests
+  # `is-active`. Listing it here keeps the mechanism symmetric and adds the
+  # `enabled but inactive` case. A masked gateway matches neither, so a
+  # correctly provisioned Hermes box reports nothing twice.
+  FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
 
 # Load persisted WiFi interface if available
@@ -2801,6 +2930,34 @@ step_validate_services() {
       esac
     fi
 
+    # Probe: no unit belonging to ANOTHER edition is running here.
+    #
+    # Every check above asks whether this edition's own units are UP, so a
+    # second harness left over from a previous edition scored zero failures and
+    # went unseen. Absence has to be asserted too, or "All N checks healthy" is
+    # printable on a box running two agents and two Telegram pollers.
+    #
+    # An absent unit answers `inactive` and a masked one answers `masked`, so
+    # neither arm matches and no `systemctl cat` guard is needed — which also
+    # means a unit that was masked while still running is still caught.
+    # `enabled but inactive` fails too: it is one reboot away from active.
+    local funit f_active f_enabled
+    for funit in "${FOREIGN_EDITION_UNITS[@]}"; do
+      f_active=$(systemctl is-active "$funit" 2>/dev/null || true)
+      f_enabled=$(systemctl is-enabled "$funit" 2>/dev/null || true)
+      case "$f_active" in
+        active|activating|reloading)
+          failed_probe+=("Edition: $funit is $f_active but belongs to another edition (this device is '$CLAWBOX_EDITION') — two agent harnesses are running on one box")
+          continue
+          ;;
+      esac
+      case "$f_enabled" in
+        enabled|enabled-runtime)
+          failed_probe+=("Edition: $funit is enabled but belongs to another edition (this device is '$CLAWBOX_EDITION') — it starts again on the next boot")
+          ;;
+      esac
+    done
+
     [ ${#failed_active[@]} -eq 0 ] && [ ${#failed_installed[@]} -eq 0 ] && [ ${#failed_probe[@]} -eq 0 ] && break
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 2
@@ -2810,6 +2967,11 @@ step_validate_services() {
   if is_test_mode; then probe_count=1; fi
   # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
   if is_hermes_edition; then probe_count=$(( probe_count + 3 )); fi
+  # One per foreign unit. Counted even when the unit is absent: "the other
+  # harness is not here" is a check that ran and passed, and folding it into the
+  # total is what stops the healthy line from being printable on a box that is
+  # running two of them.
+  probe_count=$(( probe_count + ${#FOREIGN_EDITION_UNITS[@]} ))
   local total=$(( ${#active_services[@]} + ${#EXPECTED_INSTALLED_SERVICES[@]} + probe_count ))
   local fails=$(( ${#failed_active[@]} + ${#failed_installed[@]} + ${#failed_probe[@]} ))
   if [ "$fails" -eq 0 ]; then
