@@ -39,7 +39,14 @@ function readJson(...segments: string[]): Record<string, unknown> {
   return JSON.parse(readFileSync(path.join(REPO_ROOT, ...segments), "utf8"));
 }
 
+// Application sources only. src/tests is skipped deliberately: this very file
+// names both specifiers in its comments, and vnc-app.test.tsx names one in a
+// vi.mock call, so scanning the tests would let the suite satisfy its own
+// "still deep-imports" guard after the real imports were gone.
+const TESTS_DIR = path.join(REPO_ROOT, "src", "tests");
+
 function sourceFiles(dir: string): string[] {
+  if (dir === TESTS_DIR) return [];
   const found: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -51,11 +58,14 @@ function sourceFiles(dir: string): string[] {
 
 // Discover the specifiers rather than hard-coding them, so a newly added deep
 // import is covered by these tests the day it lands instead of the day it breaks.
+// Only quoted specifiers count — a module-specifier position in an import, an
+// import(), or a `declare module` — so prose mentioning a path cannot stand in
+// for code importing it.
 const SUBPATH_SPECIFIERS = [
   ...new Set(
     sourceFiles(path.join(REPO_ROOT, "src")).flatMap((file) => [
-      ...readFileSync(file, "utf8").matchAll(/@novnc\/novnc\/[\w./-]+/g),
-    ].map((match) => match[0])),
+      ...readFileSync(file, "utf8").matchAll(/["'](@novnc\/novnc\/[\w./-]+)["']/g),
+    ].map((match) => match[1])),
   ),
 ].sort();
 
