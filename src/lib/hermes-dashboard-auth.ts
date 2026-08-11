@@ -30,6 +30,15 @@ const LOGIN_RETRY_COOLDOWN_MS = 10_000;
 // promise to every later caller until the server is restarted. Every request
 // this module issues is therefore bounded.
 const REQUEST_TIMEOUT_MS = 8_000;
+// Every request below sets this. Node's fetch defaults to "follow", which makes
+// a redirect invisible to the caller — the response that comes back is the one
+// from wherever Location pointed, not from the path we asked for, and a
+// redirected request can carry its body and headers there. Resolving redirects
+// manually keeps each call's answer the answer to the call it made: a 3xx from
+// the dashboard means the request did not reach the API, which is what the
+// callers below already treat as "not signed in". Same rule and same reason as
+// mcp/lib/api.ts.
+const REDIRECT_POLICY = "manual" as const;
 
 async function readPassword(): Promise<string> {
   try {
@@ -46,10 +55,13 @@ async function login(): Promise<string | null> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ provider: "basic", username: USERNAME, password: pw, next: "/" }),
+    redirect: REDIRECT_POLICY,
     // The caller's `init.signal` only covers `attempt()` below — login runs
     // before it and would otherwise be unbounded.
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+  // A redirect here is not a login: the cookies are read off THIS response, so
+  // treat anything that is not a 2xx as "no session".
   if (!res.ok) return null;
   const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
   const cookie = setCookies.map((c) => c.split(";", 1)[0]).filter(Boolean).join("; ");
@@ -69,6 +81,7 @@ export async function dashboardFetch(apiPath: string, init?: RequestInit): Promi
   const attempt = () =>
     fetch(`${DASH_ORIGIN}${apiPath}`, {
       ...init,
+      redirect: REDIRECT_POLICY,
       // Callers that don't bring their own deadline still get one — no request
       // from this module may be able to hang indefinitely.
       signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
