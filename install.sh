@@ -2022,6 +2022,88 @@ step_ollama_install() {
   fi
 }
 
+# Install a prebuilt llama.cpp build, but only if it is genuinely usable here.
+#
+# $1 = source: a .tar.gz on this device, or an http(s) URL to one
+# $2 = "ON" when this device expects a CUDA-enabled build
+# $3 = the llama.cpp directory whose build/bin the archive populates
+#
+# It is an ARCHIVE, not a bare binary. llama-server is a 15KB wrapper that
+# dlopens ~212MB of siblings (libggml-cuda.so alone is 193MB), and cmake bakes
+# an absolute RPATH pointing at the build tree — so the libraries have to land
+# back at that same path or the binary installs cleanly and then fails to start.
+# Unpacking build/bin reproduces exactly what a source build leaves behind,
+# minus the ~19 minutes.
+#
+# Returns 0 only when a validated build is in place. Every rejection returns
+# non-zero so the caller compiles instead: the ways a prebuilt goes wrong are
+# silent at install time and loud on a customer's device.
+install_prebuilt_llamacpp() {
+  local src="$1" want_cuda="$2" llama_dir="$3"
+  local tmp; tmp="$(mktemp -d)" || return 1
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  local archive="$tmp/prebuilt.tar.gz"
+
+  case "$src" in
+    http://*|https://*)
+      echo "  Fetching prebuilt llama.cpp from $src"
+      curl -fsSL --max-time 600 -o "$archive" "$src" \
+        || { echo "  Prebuilt download failed."; return 1; }
+      ;;
+    *)
+      [ -f "$src" ] || { echo "  Prebuilt not found at $src"; return 1; }
+      archive="$src"
+      ;;
+  esac
+
+  mkdir -p "$tmp/x"
+  # --force-local: tar reads "host:path" as a remote source, so any archive path
+  # containing a colon would otherwise fail with a confusing network error.
+  tar --force-local -xzf "$archive" -C "$tmp/x" 2>/dev/null     || { echo "  Prebuilt archive is unreadable."; return 1; }
+
+  # The archive is expected to contain the contents of build/bin.
+  local staged="$tmp/x"
+  [ -f "$staged/llama-server" ] || staged="$tmp/x/bin"
+  if [ ! -f "$staged/llama-server" ]; then
+    echo "  Prebuilt archive has no llama-server — ignoring it."
+    return 1
+  fi
+
+  # Right machine? A binary built on the flash host rather than a Jetson is the
+  # easy mistake, and it fails at exec with a confusing message.
+  if ! file -b "$staged/llama-server" 2>/dev/null | grep -q 'ARM aarch64'; then
+    echo "  Prebuilt is not aarch64 — ignoring it."
+    return 1
+  fi
+
+  # Right build? A CPU-only binary on a GPU device costs every inference
+  # silently, and the rebuild check above would flag it on the next update
+  # anyway — so catch it now rather than shipping it.
+  if [ "$want_cuda" = "ON" ] && [ ! -f "$staged/libggml-cuda.so.0" ] \
+     && ! ls "$staged"/libggml-cuda.so* >/dev/null 2>&1; then
+    echo "  Prebuilt has no CUDA backend but this device expects one — ignoring it."
+    return 1
+  fi
+
+  # Put the libraries where the RPATH will look for them.
+  mkdir -p "$llama_dir/build/bin"
+  cp -a "$staged/." "$llama_dir/build/bin/" || return 1
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$llama_dir" 2>/dev/null || true
+
+  # Does it actually run HERE? The check that catches a build made against a
+  # different CUDA/driver ABI — it passes every test above and then will not
+  # start on the customer's device.
+  if ! "$llama_dir/build/bin/llama-server" --version >/dev/null 2>&1; then
+    echo "  Prebuilt will not execute on this device — ignoring it."
+    return 1
+  fi
+
+  install -m 755 "$llama_dir/build/bin/llama-server" /usr/local/bin/llama-server || return 1
+  echo "  Installed prebuilt llama.cpp (skipped the source build)."
+  return 0
+}
+
 step_llamacpp_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping llama.cpp native build and model download"
@@ -2079,7 +2161,7 @@ step_llamacpp_install() {
   # source build. A device that ends up without a working llama-server is worse
   # than a slow install, so the fast path is never allowed to be the last word.
   if [ "$needs_rebuild" = "true" ] && [ -n "${LLAMACPP_PREBUILT:-}" ]; then
-    if install_prebuilt_llamacpp "$LLAMACPP_PREBUILT" "$ENABLE_GGML_CUDA"; then
+    if install_prebuilt_llamacpp "$LLAMACPP_PREBUILT" "$ENABLE_GGML_CUDA" "$LLAMA_DIR"; then
       needs_rebuild="false"
     else
       echo "  Falling back to building llama.cpp from source."
@@ -2088,9 +2170,18 @@ step_llamacpp_install() {
 
   if [ "$needs_rebuild" = "true" ]; then
     echo "  Installing llama.cpp server (CUDA=$ENABLE_GGML_CUDA)..."
+    # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
+    # whatever upstream happened to be that day — the two boxes here ended up on
+    # d2f8305 and db7d8b2, so "the same install" produced different inference
+    # binaries. This commit is the one proven on this hardware; move it
+    # deliberately, with a rebuild to prove the new one.
+    local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
     if [ ! -d "$LLAMA_DIR/.git" ]; then
-      as_clawbox git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
+      # Not --depth 1: a shallow clone of the default branch cannot check out an
+      # arbitrary commit, and the pin is the point.
+      as_clawbox git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
     fi
+    as_clawbox_login "cd $LLAMA_DIR && git fetch --quiet origin && git checkout --quiet $LLAMACPP_COMMIT"       || echo "  Warning: could not check out $LLAMACPP_COMMIT — building whatever is checked out."
     # Pin CUDA architectures to Jetson Orin's sm_87 so cmake doesn't spend
     # ~15 extra minutes probing / compiling kernels for datacenter and
     # desktop GPUs we don't target. Without this, configure on Jetson ARM
