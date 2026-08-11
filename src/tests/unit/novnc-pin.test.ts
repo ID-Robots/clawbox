@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -63,17 +64,60 @@ function importingSources(): string[] {
     .map((entry) => path.join(SRC_DIR, entry));
 }
 
+// Every module specifier in a file, read off the syntax tree. Three node kinds
+// carry one, and VNCApp uses all three:
+//
+//   import RFB from "..."                       ImportDeclaration
+//   await import("...")                         CallExpression on ImportKeyword
+//   typeof import("...").default                ImportTypeNode (type position)
+//
+// Matching quoted text instead would count a path named in a comment or held in
+// an ordinary string, which is the same hollowness as scanning the tests: the
+// guard below could stay green after the real import was deleted.
+function moduleSpecifiers(file: string): string[] {
+  const text = readFileSync(file, "utf8");
+
+  // Parsing every source file costs seconds; this parses the two that matter.
+  if (!text.includes(PACKAGE)) return [];
+
+  const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      found.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments[0] &&
+      ts.isStringLiteral(node.arguments[0])
+    ) {
+      found.push(node.arguments[0].text);
+    } else if (
+      ts.isImportTypeNode(node) &&
+      ts.isLiteralTypeNode(node.argument) &&
+      ts.isStringLiteral(node.argument.literal)
+    ) {
+      found.push(node.argument.literal.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(parsed);
+  return found;
+}
+
 // Discover the specifiers rather than hard-coding them, so a newly added deep
 // import is covered by these tests the day it lands instead of the day it breaks.
-// Only quoted occurrences count, so prose naming a path cannot stand in for code
-// importing one.
-const SPECIFIER_PATTERN = /["'](@novnc\/novnc\/[\w./-]+)["']/g;
-
 const SUBPATH_SPECIFIERS = [
   ...new Set(
-    importingSources().flatMap((file) =>
-      Array.from(readFileSync(file, "utf8").matchAll(SPECIFIER_PATTERN), (match) => match[1]),
-    ),
+    importingSources()
+      .flatMap(moduleSpecifiers)
+      .filter((specifier) => specifier.startsWith(`${PACKAGE}/`)),
   ),
 ].sort();
 
