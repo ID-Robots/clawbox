@@ -1,0 +1,128 @@
+---
+title: "Hermes Edition"
+icon: "feather"
+summary: "A ClawBox where Hermes Agent is the only agent — what ships, what is deliberately absent, and how the desktop and the agent's tools differ."
+---
+
+**ClawBox Hermes Edition** runs [Hermes Agent](https://nousresearch.com) by Nous
+Research as the only agent on the box. It is the same hardware, the same setup
+wizard, the same desktop and the same update path as a standard ClawBox — the
+agent underneath is different, and a few surfaces change with it.
+
+If you are not sure which edition you have, see [Editions](/editions/overview).
+
+## What ships
+
+<Columns cols={2}>
+  <Card title="Hermes Agent" icon="feather">
+    Installed at `~/.local/bin/hermes`, with its own configuration in `~/.hermes`.
+    It backs the desktop chat, Telegram, and the device tools.
+  </Card>
+  <Card title="Hermes dashboard" icon="gauge">
+    Hermes' own web interface, opened by the **Hermes** desktop icon. It sits
+    behind your normal ClawBox login.
+  </Card>
+  <Card title="Hermes Skills" href="/editions/hermes-skills" icon="puzzle-piece">
+    The **Skills** desktop app — the capability store for this edition.
+  </Card>
+  <Card title="ClawBox device tools" href="/technical/agent-interface" icon="toolbox">
+    The agent operates the device through the ClawBox MCP server, same as on
+    OpenClaw. The tool set is slightly different — see below.
+  </Card>
+</Columns>
+
+## What is absent, on purpose
+
+The OpenClaw gateway is not part of this edition. It is not installed, its
+systemd unit is stopped, disabled and masked, and the `openclaw` command does
+not exist on the box. Everything that depended on it is gone with it:
+
+| Surface | On a Hermes device |
+|---|---|
+| **App Store** desktop app | Not shown. [Hermes Skills](/editions/hermes-skills) is the equivalent. |
+| **OpenClaw Control UI** desktop app | Not shown. |
+| Gateway web paths (`/api/*`, `/chat`) | Return **404**. |
+| Gateway port `18789` | Closed — nothing is listening. |
+| Apps previously installed from the App Store | Hidden from the desktop. ClawBox webapps you or the agent built stay visible. |
+| `clawbox update` in the terminal | **Refused.** It would re-run the OpenClaw installer. Update from **Settings → System Update** instead. |
+
+<Warning>
+Do not try to start `clawbox-gateway.service` on a Hermes device. The unit is
+masked deliberately, nothing on this edition serves it, and re-enabling it puts
+the box in a state that support cannot reason about. Update through
+**Settings → System Update**, which does the right thing for the edition.
+</Warning>
+
+## The desktop
+
+Everything else on the desktop is unchanged — Chat, Terminal, Files, Browser,
+VS Code, Remote Desktop, Settings, ClawKeep and any webapps. Two icons are
+specific to this edition:
+
+- **Skills** — the [Hermes Skills](/editions/hermes-skills) store.
+- **Hermes** — the Hermes dashboard. It opens through an authenticated proxy on
+  port `8090`, using the ClawBox session you already have, so you do not log in
+  twice. The dashboard itself never leaves the device's own loopback interface.
+
+Use the dashboard when you want a Hermes feature ClawBox does not surface — the
+full provider registry, for instance. The everyday paths (chat, models,
+providers, skills, Telegram) are all in the ClawBox UI.
+
+## Chat
+
+The desktop chat and Telegram both talk to Hermes. Message-by-message you can
+change:
+
+- **Provider** and **model** — the pills in the chat header.
+- **Reasoning effort** — the brain icon, eight levels from *None* to *Ultra*.
+  This is a per-conversation override; the device default lives in Hermes'
+  own configuration. Providers that do not accept a reasoning level — including
+  the on-device model — simply do not show the control.
+
+Setting the device's default provider and model is a Settings job — see
+[AI Providers on Hermes](/editions/hermes-providers).
+
+## Telegram
+
+Telegram works the way it does on any ClawBox: connect a bot token in Settings,
+then approve each sender from the pairing request that appears. Underneath,
+Hermes runs its own gateway process and its own pairing store, so a bot token
+saved on an OpenClaw device is not the same record as one saved here. If you
+migrate a device by reflashing, re-enter the token.
+
+## What the agent can do
+
+The agent operates the device through the ClawBox MCP server, exactly as on an
+OpenClaw box. A tool that cannot work on the running edition is **not
+registered at all**, so the differences are visible to the agent rather than
+being failures it discovers at call time.
+
+| | OpenClaw | Hermes |
+|---|---|---|
+| Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
+| AI configuration | in Settings | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
+| Coding family (`bash`, file tools, web fetch/search) | yes | **no** — Hermes ships its own |
+| Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
+| Everything else | yes | yes |
+
+"Everything else" is the bulk of it: device status and stats, power, disk,
+logs, screen capture, Wi-Fi, backups, Telegram status, preferences, opening and
+listing desktop apps, notifications, webapps, code projects, and
+`browser_open`/`navigate`/`screenshot`/`close`.
+
+The full catalogue is on the [Agent Interface](/technical/agent-interface) page.
+
+## Updating
+
+Same as any ClawBox: **Settings → System Update**. Updates keep the edition —
+the installer reads the edition lock on every run and skips every OpenClaw step
+on this SKU.
+
+If an update ever leaves the Hermes side half-provisioned, the installer says so
+and prints the one command that repairs it:
+
+```bash
+sudo bash /home/clawbox/clawbox/install.sh --step hermes_edition
+```
+
+That step is idempotent and safe to re-run.

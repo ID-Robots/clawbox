@@ -1,88 +1,157 @@
 ---
 title: "Agent Interface (MCP)"
 icon: "toolbox"
-summary: "The device-control tools the AI agent gets — full MCP tool catalog, the clawbox CLI, and how webapp/code-assistant creation works."
+summary: "The device-control tools the AI agent gets — the full MCP tool catalog, how it differs by edition, the clawbox CLI, and the auth model."
 ---
 
-What makes ClawBox an *AI-operated OS* rather than a chat box: the OpenClaw agent is wired to a **ClawBox MCP server** (`mcp/clawbox-mcp.ts`, registered as `mcp.servers.clawbox` on every gateway start) exposing ~50 device tools. The agent can manage files, run commands, browse the real desktop Chromium, install apps, and build webapps — all authenticated back to the device APIs with a per-install bearer token.
+What makes ClawBox an *AI-operated OS* rather than a chat box: the on-device
+agent is wired to a **ClawBox MCP server** (`mcp/clawbox-mcp.ts`) exposing the
+device as tools. The agent can read system state, drive the desktop Chromium,
+manage the desktop, install capabilities, and build webapps — all authenticated
+back to the device APIs with a per-install bearer token.
+
+<Note>
+**The tool set depends on the [edition](/editions/overview).** A tool that
+cannot work on the running edition is not registered at all — the agent never
+sees it, rather than discovering it fails. The edition is resolved once at
+startup from the device's edition lock.
+</Note>
+
+## What differs by edition
+
+| | OpenClaw | Hermes |
+|---|---|---|
+| Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
+| AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
+| Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
+| Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
+| Everything else | yes | yes |
 
 ## Tool catalog
 
-### Shell & orchestration
+### Orientation — the agent calls these first
 | Tool | Purpose |
 |---|---|
-| `bash` | Run a shell command (30 s default / 10 min max; background mode available). Destructive patterns (`rm -rf /`, `dd`, `mkfs`, force-push, …) are hard-blocked |
-| `agent` | Spawn a background sub-agent running a command sequence |
-| `task_status` | Check a background task's output |
-| `clawbox_health` | Verify the MCP token + device API reachability — "run first when tools fail" |
+| `device_status` | Edition, agent, AI provider/model/thinking level, free disk, update waiting — in one call |
+| `clawbox_health` | Is the device API reachable, and is our token accepted — separates auth from connectivity |
+| `clawbox_context` | The on-device field guide plus the webapp storage/styling rules |
 
-### Files
+### System & device
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read text/images/PDF/notebooks (line-numbered, offset/limit) |
-| `write_file` / `edit_file` | Create/overwrite or exact-string-replace (staleness-checked, returns diffs) |
-| `list_directory`, `glob`, `grep` | Browse, find by pattern, content-search (ripgrep) |
-| `notebook_edit` | Edit Jupyter cells |
-
-### Web
-| Tool | Purpose |
-|---|---|
-| `web_fetch` | Fetch a URL → readable text/markdown (cached 15 min) |
-| `web_search` | Web search |
-
-### Browser (drives the real desktop Chromium via CDP — visible in Remote Desktop)
-`browser_open` (attach + navigate + screenshot), `browser_navigate`, `browser_click`, `browser_type`, `browser_keypress`, `browser_scroll`, `browser_screenshot`, `browser_close`.
-
-### System, network & UI
-| Tool | Purpose |
-|---|---|
-| `system_stats` / `system_info` | CPU/memory/disk/temperature/GPU, hostname |
-| `system_power` | Restart or shut down the device |
-| `wifi_scan` / `wifi_status` / `vnc_status` | Network + remote-display state |
-| `ui_open_app` / `ui_list_apps` / `ui_notify` | Open desktop apps, list them, send a desktop notification |
+| `system_stats` / `system_info` | CPU, memory, disk, temperature, hostname |
+| `system_power` | Restart or shut down — requires explicit confirmation and a reason |
+| `disk_usage` / `disk_cleanup` | Space report and reclaim |
+| `update_check` | Reports whether an update is waiting. It never installs one |
+| `logs_tail` / `screen_capture` | Recent logs, screenshot of the desktop |
+| `wifi_scan` / `wifi_status` / `vnc_status` | Network and remote-display state |
+| `backup_status` / `backup_list` / `backup_now` | ClawKeep backups |
+| `telegram_status` | Telegram connection state |
 | `preferences_get` / `preferences_set` | Persistent user preferences |
 
-### Apps & webapps
+`disk_usage`, `disk_cleanup`, `logs_tail` and `screen_capture` are probed at
+startup — if the device cannot support one, it is simply not offered.
+
+### Desktop, apps and building
 | Tool | Purpose |
 |---|---|
-| `app_search` / `app_install` / `app_uninstall` | The App Store (apps + skills from the portal) |
+| `ui_open_app` / `ui_list_apps` / `ui_notify` | Open desktop apps, list them, send a desktop notification |
+| `app_search` / `app_install` | The App Store — **OpenClaw edition only** |
+| `app_uninstall` | Remove an installed app |
 | `webapp_create` / `webapp_update` | Single-file HTML webapps installed straight onto the desktop |
-| `code_project_init` / `code_project_list` / `code_project_build` / `code_project_delete` | Multi-file code-assistant projects — scaffold → edit with the file tools → build deploys to the desktop |
-| `task_create` / `task_update` / `task_get` / `task_list` / `task_stop` | Agent task tracking with dependencies |
-| `clawbox_context` | Returns the on-device field guide (`CLAWBOX.md`) — loaded once at session start |
+| `code_project_init` / `code_project_list` / `code_project_build` / `code_project_delete` | Multi-file code-assistant projects — scaffold, edit, then build deploys to the desktop |
+
+### Hermes skills — **Hermes edition only**
+`skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
+
+Installing takes the full registry identifier; uninstalling takes the short
+name. `skill_install` returns the name so the agent never has to guess it. See
+[Hermes Skills](/editions/hermes-skills).
+
+### AI configuration — **Hermes edition only**
+`ai_list_models` · `ai_set_provider` · `ai_set_model`
+
+There is deliberately **no** tool for switching your ClawBox AI plan: that
+changes what you are billed, and "switch to a bigger plan for better results" is
+a one-line prompt-injection payload with a financial outcome. The plan is
+reported by `device_status`; changing it is one click in **Settings → AI**.
+
+### Browser (drives the real desktop Chromium — visible in Remote Desktop)
+`browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close` —
+both editions.
+
+`browser_click` · `browser_type` · `browser_keypress` · `browser_scroll` —
+**OpenClaw edition only**.
+
+`browser_type` reports a character count, never the text — it is the tool that
+types passwords.
+
+### Coding family — **OpenClaw edition only**
+`bash` · `job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
+`list_directory` · `glob` · `grep` · `notebook_edit` · `web_fetch` · `web_search`
+
+Hermes ships its own equivalents, so ClawBox does not add a second set.
+
+## Safety rails
+
+- **One protected-path list**, applied to descendants and not just the path
+  handed in: `list_directory` filters entries, `glob` filters results, and
+  `grep` filters both its search roots and every hit.
+- **Argv only.** Outside `bash`, no tool builds a shell string out of an
+  argument.
+- **Confirmation on irreversible actions.** `system_power` and
+  `code_project_delete` require an explicit confirm flag — something a web page
+  the agent happens to be reading cannot supply by accident.
+- **Timeouts and output caps everywhere**, so one slow call cannot stall a turn.
+- **Errors are instructions, not stack traces.** Every failure comes back as a
+  short code, a message and a suggested next step — never a raw trace or an
+  absolute path.
+- On the OpenClaw edition, plan around `bash` being as capable as the device
+  user. Its pre-flight refuses commands naming a credential store, but that is a
+  guard rail against a mistake, not a sandbox.
+- Telegram senders must be pairing-approved before the agent will act for them
+  ([details](/technical/authentication#security-posture-summary)).
 
 ## The `clawbox` CLI
 
-The same capabilities are shell-callable (used by agents in the Terminal and by admins over SSH):
+The same capabilities are shell-callable, from the Terminal app or over SSH:
 
 ```bash
 clawbox webapp create <appId> <name> [--html ...]   # install a desktop webapp
 clawbox app open <appId> | app list                 # drive the desktop
 clawbox notify "message"                            # desktop notification
 clawbox system stats | system info                  # metrics
+clawbox edition                                     # openclaw | hermes | dual
 clawbox code init|build|read|write|edit|search ...  # code-assistant projects
-sudo clawbox update                                 # full system update (runs install.sh)
+sudo clawbox update                                 # full system update — OpenClaw edition only
 ```
+
+`clawbox update` refuses to run on a Hermes device, because it would re-run the
+OpenClaw installer. Update a Hermes box from **Settings → System Update**.
 
 ## How authentication works
 
-- The MCP server talks to the device APIs at `http://127.0.0.1:80/setup-api/*` with the **MCP bearer token** (`data/.mcp-token`, seeded at boot, 0600).
-- The gateway launches the MCP server via bun with that token in its environment — reconciled automatically on every gateway start.
-- If tools suddenly fail with auth errors, `clawbox_health` diagnoses it; a gateway restart re-reconciles the registration.
-
-## Safety rails
-
-- `bash` refuses known-destructive patterns outright and warns on risky git operations.
-- Telegram senders must be pairing-approved before the agent will act for them ([details](/technical/authentication#security-posture-summary)).
-- Webapps persist data through the device KV API (no localStorage) and run as plain HTML on the desktop.
+- The MCP server talks to the device APIs at `http://127.0.0.1:80/setup-api/*`
+  with the **MCP bearer token** (`data/.mcp-token`, seeded at boot, `0600`).
+- The token lives in that file only. Nothing copies it into a harness config, so
+  rotating it is not a configuration-sync problem.
+- The agent gets these tools only if its harness has the server registered:
+  - **OpenClaw** — reconciled into the gateway's config on every gateway start.
+  - **Hermes** — reconciled into `~/.hermes/config.yaml` on every web-server
+    boot, and again at install time. Both paths are idempotent, so a restart, a
+    redeploy or an update all converge on the same entry.
+- If tools suddenly fail with auth errors, `clawbox_health` diagnoses it.
 
 ## For agent developers
 
-Working *on* a ClawBox (or building automation against one)? The stable integration surfaces are:
+Working *on* a ClawBox, or building automation against one? The stable
+integration surfaces are:
 
-1. **MCP tools** (this page) — through the OpenClaw agent.
-2. **`/setup-api/*` HTTP APIs** — session-cookie or MCP-bearer authenticated; the same APIs the desktop UI uses.
-3. **`clawbox` CLI** — over SSH or the Terminal app.
-4. The agent workspace guide seeded at `~/.openclaw/workspace/CLAWBOX.md` on-device.
+1. **MCP tools** (this page) — through the on-device agent.
+2. **`/setup-api/*` HTTP APIs** — session-cookie or MCP-bearer authenticated;
+   the same APIs the desktop UI uses.
+3. **`clawbox` CLI** — over SSH or in the Terminal app.
+4. The agent workspace guide seeded on the device.
 
-See the [Quick Reference](/technical/quick-reference) for the one-page fact sheet (ports, paths, services, commands).
+See the [Quick Reference](/technical/quick-reference) for the one-page fact
+sheet (ports, paths, services, commands).

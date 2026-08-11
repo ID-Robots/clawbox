@@ -1,0 +1,117 @@
+---
+title: "AI Providers on Hermes"
+icon: "plug"
+summary: "Pick the model that powers a Hermes-edition ClawBox — sign in, paste an API key, use ClawBox AI, or run the on-device model."
+---
+
+On a [Hermes-edition](/editions/hermes) ClawBox, the provider panel drives
+Hermes' own configuration. There is no separate ClawBox copy of your provider
+settings: what you choose here is what Hermes uses, in chat, in Telegram and for
+the agent's own work.
+
+You reach it in two places, and they are the same panel:
+
+- during first-boot setup, at the **AI provider** step;
+- afterwards, in **Settings → AI Provider**, headed **Hermes models**.
+
+## Providers in the panel
+
+<Columns cols={2}>
+  <Card title="Sign in" icon="right-to-bracket">
+    **Anthropic** (Claude) · **OpenAI** (Codex) · **GitHub Copilot** · **Nous Portal**
+  </Card>
+  <Card title="Paste an API key" icon="key">
+    **OpenRouter** · **Anthropic** · **Google Gemini** · **z.ai / GLM** · **Kimi**
+  </Card>
+</Columns>
+
+Anthropic appears in both lists — sign in with your account, or paste an API
+key, whichever suits you.
+
+**ClawBox AI** sits above the rest as its own row. It works on this edition: it
+is wired into Hermes as a custom provider, so it behaves like any other provider
+once selected. See [Subscriptions](/guides/subscriptions) for what each plan
+includes.
+
+<Note>
+The panel is a deliberate shortlist, not the whole of what Hermes supports.
+Hermes knows a much longer provider registry; anything not listed here stays
+reachable from the **Hermes** dashboard on the desktop. Configure it there and
+it shows up in the ClawBox panel and chat header afterwards.
+</Note>
+
+## Connecting a provider
+
+<Steps>
+  <Step title="Pick the provider">
+    Select its row. The panel loads the models that provider offers.
+  </Step>
+  <Step title="Sign in, or paste a key">
+    For a sign-in provider, use **Sign in ↗**. That opens Hermes' own
+    authentication page in a new tab — the flow is Hermes', not a ClawBox
+    imitation of it. Finish there and come back; the panel notices and refreshes.
+
+    For a key provider, paste the key into the **API key** field. The key is
+    stored by Hermes on the device and is never displayed back to you.
+  </Step>
+  <Step title="Choose a default model">
+    Pick from **Default model**. The list is what that provider actually offers
+    on your account, so it is short until you have signed in or added a key.
+  </Step>
+  <Step title="Save">
+    **Save model & provider**. The key, if you entered one, is stored first —
+    it is what unlocks the model list.
+  </Step>
+</Steps>
+
+<Warning>
+Switching provider always resets the model to that provider's default. This is
+deliberate: model identifiers are not portable between providers — OpenRouter
+spells a model one way and the vendor's own API spells it another — so carrying
+the old name across would produce a device configured with a model its provider
+has never heard of.
+</Warning>
+
+If a provider has no usable model yet — not signed in, or no key — saving is
+refused with a message saying so rather than leaving the device pointed at
+something that cannot answer.
+
+## The on-device model
+
+A Hermes ClawBox can also run a model locally, with nothing leaving the box. It
+is configured separately, in **Settings → Local AI**, because it works the same
+way on both editions.
+
+- It appears in the provider and chat pickers as **Gemma 4 (on-device)**.
+- It runs with **on-demand standby**: the model wakes on the first request and
+  sleeps again afterwards to give the RAM back. The first message after a quiet
+  period is therefore slower than the ones that follow.
+- It has **no reasoning-effort control** — the backend does not take one, so the
+  chat header hides the dial while it is selected.
+- Turning it on makes it *available*; it does not take over. Making it your
+  default is a separate, explicit choice.
+
+<Note>
+ClawBox Connect (Jetson Orin Nano, 8 GB) runs a small model comfortably and is
+best paired with a cloud provider for heavier work. See
+[Hardware](/hardware/clawbox-connect).
+</Note>
+
+## Reasoning effort
+
+Hermes takes a reasoning level per request. In the ClawBox chat header the brain
+icon offers eight: **None, Minimal, Low, Medium, High, X-High, Max, Ultra**.
+
+That control is a per-conversation override — it does not rewrite the device
+default. Two details worth knowing:
+
+- Not every provider accepts every level. Choosing a provider that tops out
+  lower clamps your selection **down** to the nearest level it supports rather
+  than failing.
+- Providers with no reasoning dial at all — the on-device model among them —
+  hide the control entirely.
+
+## Changing provider later
+
+Any time, from **Settings → AI Provider**. Nothing needs restarting and no
+re-setup is involved; the next message uses the new provider.

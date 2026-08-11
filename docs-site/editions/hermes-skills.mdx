@@ -1,0 +1,123 @@
+---
+title: "Hermes Skills"
+icon: "puzzle-piece"
+summary: "The capability store on a Hermes-edition ClawBox — how to find, install and remove skills, and where they live on the device."
+---
+
+On a [Hermes-edition](/editions/hermes) ClawBox, the **Skills** desktop app
+takes the place of the OpenClaw App Store. A skill is a packaged capability the
+agent can use — a set of instructions and supporting files that teach it how to
+do something specific, like work with PDFs or drive a particular service.
+
+Open it from the desktop icon labelled **Skills**, or ask the agent to install
+one for you.
+
+## The store
+
+Two tabs:
+
+- **Installed** — everything on the device right now, with a category filter and
+  counts. This opens first.
+- **Browse** — the full catalogue, with search, source filters and paging.
+
+Each card opens a detail view with the skill's own documentation, where it came
+from, and what it needs.
+
+<Note>
+The first time you open **Browse** on a new device, ClawBox builds the local
+catalogue. That takes about a minute and happens once; the store says so while
+it works. Afterwards, browsing, searching and paging are served from the copy on
+the device — they are fast, and they work with no internet connection.
+</Note>
+
+### Where skills come from
+
+The catalogue aggregates several public registries. The store shows the source
+on every result and lets you filter by it — among them the skills bundled with
+Hermes itself, GitHub, ClawHub, LobeHub, NVIDIA, OpenAI, Anthropic and Hugging
+Face.
+
+A few things are worth knowing before you install:
+
+<AccordionGroup>
+  <Accordion title="You cannot install from a URL">
+    Only registry identifiers are accepted. Installing arbitrary code from an
+    address typed into a box is not a capability this device offers, and the
+    store will refuse it.
+  </Accordion>
+  <Accordion title="Scan verdicts are respected">
+    A skill whose install-time scan does not come back clean is not installed.
+    The store does not offer an override for it.
+  </Accordion>
+  <Accordion title="Some skills are not for this platform">
+    Skills declare which platforms they support. One that does not support Linux
+    is shown as incompatible rather than silently installed on a box it cannot
+    run on.
+  </Accordion>
+  <Accordion title="Names repeat across registries">
+    Thousands of catalogue entries share short names — `pdf`, `notion`, `arxiv`
+    and so on exist several times over from different publishers. This is why
+    installing takes a full identifier and not a bare name: it is the only way
+    to be sure you get the one you were looking at.
+  </Accordion>
+</AccordionGroup>
+
+## Installing and removing
+
+From the store, it is one button in either direction. Nothing needs restarting —
+the skill is available to the agent immediately.
+
+If you are working over SSH or in the Terminal app, note the asymmetry, because
+it catches people out:
+
+```bash
+hermes skills install official/security/1password   # full registry identifier
+hermes skills uninstall 1password                   # short name
+```
+
+Install takes the **identifier** — publisher, category and name. Uninstall takes
+the **name** the skill was installed under. The Skills app handles the
+translation for you; only direct CLI use needs to care.
+
+## Letting the agent do it
+
+The agent has skill tools of its own on this edition, so you can simply ask:
+
+> *"Find a skill for reading PDFs and install it."*
+
+It can search, inspect, install, list and uninstall. These tools exist only on
+the Hermes edition — on an OpenClaw device the agent gets the App Store tools
+instead. See [Agent Interface](/technical/agent-interface).
+
+## Where skills live
+
+Under Hermes' own data directory, `~/.hermes/skills/`:
+
+| Path | What it is |
+|---|---|
+| `~/.hermes/skills/<category>/<name>/SKILL.md` | The skill itself — instructions plus any supporting files |
+| `~/.hermes/skills/.hub/lock.json` | The record of everything installed from the store |
+| `~/.hermes/skills/.bundled_manifest` | What shipped with the device |
+
+The store uses those three to tell apart the skills that came with your box,
+the ones you installed, and any the agent wrote for itself.
+
+<Note>
+`~/.hermes` is device state. It survives updates and is wiped by a factory
+reset, along with the rest of the device's data — see
+[Filesystem Layout](/technical/filesystem).
+</Note>
+
+## Skills versus apps
+
+They are not the same thing, and the difference matters if you are coming from
+an OpenClaw ClawBox:
+
+- An **app** is something *you* open — a window on the desktop.
+- A **skill** is something the *agent* uses. It has no icon and no window; you
+  notice it because the agent becomes able to do something it could not do
+  before.
+
+Building something with a window on a Hermes box is still possible, and works
+identically to OpenClaw: ask the agent for a webapp, and it builds and installs
+one onto the desktop.
