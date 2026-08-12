@@ -42,6 +42,13 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "html", "clover"],
+      // Write the summary even when a test failed. Without this the reports are
+      // skipped on a failing run, so pr-tests-coverage.yml's "Parse coverage"
+      // step — which runs `if: always()` precisely so the PR comment can show
+      // numbers on a red build — never found the file and silently reported
+      // nothing. It does not affect the gate: a failing test fails the job
+      // either way.
+      reportOnFailure: true,
       include: ["src/**/*.ts", "src/**/*.tsx"],
       exclude: [
         "src/**/*.test.ts",

@@ -27,6 +27,16 @@ updates:
       # Majors are opt-in — do them by hand, not on Dependabot's schedule.
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # @novnc/novnc 1.7.0 is a breaking change wearing a minor version number:
+      # it drops lib/ for core/ and declares `"exports": "./core/rfb.js"` as a
+      # bare string, so EVERY subpath import is refused — including the
+      # keysymdef one src/lib/vnc-keys.ts needs. There is no drop-in rewrite,
+      # so the manifest pins 1.6.0 exactly (src/tests/unit/novnc-pin.test.ts
+      # guards it). Without this rule the weekly run rewrites that pin and
+      # opens a PR that can only ever fail. Remove this when upstream restores
+      # subpath exports — then take the bump by hand.
+      - dependency-name: "@novnc/novnc"
+        update-types: ["version-update:semver-minor"]
 
   # npm entry exists ONLY for security-update PRs (the bun ecosystem doesn't
   # support them; package-lock.json is kept in sync for this + the dependency
