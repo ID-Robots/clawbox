@@ -37,11 +37,22 @@ function installShAccepts(ref: string): boolean {
   const script = [
     "set -uo pipefail",
     extractShellFunction("is_safe_git_ref"),
-    `is_safe_git_ref ${JSON.stringify(ref)}`,
+    // The ref arrives as $1, never interpolated into the script text. Embedding
+    // it would quote for JavaScript rather than for bash, and the two entries
+    // that matter most would be compared as different strings: a real newline
+    // becomes a literal backslash-n inside bash double quotes, and `$(id)` gets
+    // command-substituted, so the shell would be validating the output of `id`
+    // while isSafeBranch validated the literal. Both still return "reject", so
+    // the bug hides as a passing test.
+    'is_safe_git_ref "$1"',
   ].join("\n");
   // cwd is deliberately outside any git repo: install.sh runs from wherever the
   // operator invoked it, so the answer must not depend on being inside one.
-  return spawnSync("bash", ["-c", script], { cwd: path.parse(REPO).root }).status === 0;
+  return (
+    spawnSync("bash", ["-c", script, "is_safe_git_ref", ref], {
+      cwd: path.parse(REPO).root,
+    }).status === 0
+  );
 }
 
 // Real branch names, near-misses, and the values that historically resolved
@@ -85,6 +96,14 @@ const CORPUS = [
   "ünïcode",
   "beta; rm -rf /",
   "$(id)",
+  // Canaries for the harness rather than for the validators. Both sides must
+  // reject these literally. If the ref were ever interpolated into the shell
+  // script instead of passed as an argument, bash would substitute them to
+  // "main" and accept, while isSafeBranch kept rejecting the literal — so the
+  // agreement assertion below fails loudly instead of passing on two different
+  // strings.
+  "$(echo main)",
+  "`echo main`",
   "",
 ];
 
