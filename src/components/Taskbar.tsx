@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import type { WindowState } from "@/hooks/useWindows";
+import { DISCORD_INVITE_URL } from "@/lib/community";
 
 interface TaskbarProps {
   windows: WindowState[];
@@ -61,7 +62,7 @@ export default function Taskbar({ windows, onWindowClick, onExternalLink }: Task
             />
           </button>
           <button
-            onClick={() => onExternalLink("https://discord.gg/FbKmnxYnpq")}
+            onClick={() => onExternalLink(DISCORD_INVITE_URL)}
             aria-label="Join our Discord"
             className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[#5865F2] transition transform hover:scale-110"
             title="Discord"

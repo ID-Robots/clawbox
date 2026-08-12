@@ -22,6 +22,53 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+// ── Session ───────────────────────────────────────────────────────────────
+
+/** The password `10-setup-wizard.spec.ts` sets while running the wizard. */
+export const SETUP_PASSWORD = "clawbox-e2e-pass";
+
+/** One of the durations `/login-api` accepts, in seconds. */
+const SESSION_DURATION_SECONDS = 21_600;
+
+/**
+ * Log in and return the `clawbox_session` cookie as a ready-to-send
+ * `name=value` pair.
+ *
+ * Browser-driven specs get this cookie for free from the Playwright context.
+ * Specs that open a raw socket do not: a WebSocket upgrade is served by
+ * `production-server.js` and never passes through the Next.js request
+ * pipeline, so those specs have to carry the session on the upgrade request
+ * themselves — exactly as the desktop UI does.
+ */
+export async function loginSessionCookie(
+  password: string = SETUP_PASSWORD,
+): Promise<string> {
+  const res = await fetch(`${BASE_URL}/login-api`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password, duration: SESSION_DURATION_SECONDS }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `POST /login-api → ${res.status} ${res.statusText}: ${await res.text()}`,
+    );
+  }
+  // `getSetCookie()` keeps multiple Set-Cookie headers separate; the single
+  // -header fallback keeps this working on any runtime that lacks it.
+  const headers = res.headers as Headers & { getSetCookie?: () => string[] };
+  const cookies =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : [res.headers.get("set-cookie") ?? ""];
+  for (const raw of cookies) {
+    const match = /(?:^|,\s*)(clawbox_session=[^;,]+)/.exec(raw);
+    if (match) return match[1];
+  }
+  throw new Error(
+    `/login-api returned 200 but set no clawbox_session cookie: ${cookies.join(" | ")}`,
+  );
+}
+
 export interface SetupStatus {
   setup_complete: boolean;
   wifi_configured: boolean;

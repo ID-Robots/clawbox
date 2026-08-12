@@ -1,0 +1,131 @@
+export const dynamic = "force-dynamic";
+
+import { NextResponse } from "next/server";
+import { get, setMany } from "@/lib/config-store";
+import { hermesConfigGet } from "@/lib/hermes-config-cache";
+import { getActiveHarness } from "@/lib/harness";
+import {
+  CLAWAI_PROVIDER,
+  ClawaiApplyError,
+  applyClawaiToHermes,
+  clawaiModelForTier,
+} from "@/lib/hermes-clawai";
+import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+
+async function readToken(): Promise<string> {
+  const t = await get("clawai_token");
+  return typeof t === "string" ? t.trim() : "";
+}
+
+/**
+ * Shape check for a pasted ClawBox AI token. Deliberately a charset+length
+ * test rather than a prefix match: the token becomes `providers.clawai.api_key`
+ * via argv, so what matters is that it cannot be read as a flag or carry
+ * anything argv-hostile. Whether it is a VALID credential is the proxy's call —
+ * a wrong-but-well-formed token surfaces as an auth failure on the first turn,
+ * which is a clearer signal than us guessing at the format.
+ */
+function isPlausibleClawaiToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{15,255}$/.test(value);
+}
+
+/** The RAW stored tier, before the display coercion below. `null` means the
+ *  portal reconciled the account down to Free (the status route writes
+ *  clawai_tier: null), which the UI must render as Free — not as "Pro plan €9". */
+async function readStoredTier(): Promise<ClawboxAiTier | null> {
+  return normalizeClawboxAiTier(await get("clawai_tier"));
+}
+
+async function requireHermes(): Promise<NextResponse | null> {
+  if ((await getActiveHarness()) !== "hermes") {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return null;
+}
+
+// Is ClawBox AI available (token present) and currently the active Hermes provider?
+export async function GET() {
+  const blocked = await requireHermes();
+  if (blocked) return blocked;
+
+  const [token, tierStored] = await Promise.all([readToken(), readStoredTier()]);
+  const tier: ClawboxAiTier = tierStored ?? "flash";
+  // Memoised against config.yaml's mtime: this GET runs on every chat open and
+  // every Settings visit, and the CLI spawn behind it costs ~600 ms each time.
+  const active = (await hermesConfigGet("model.provider")) === CLAWAI_PROVIDER;
+  return NextResponse.json({
+    hasToken: Boolean(token),
+    tier,
+    tierStored,
+    active,
+    model: clawaiModelForTier(tier),
+  });
+}
+
+// Configure Hermes to use ClawBox AI from the stored device token. Optional
+// { tier } override — accepts the UI's three-tier vocabulary ("free"/"flash"/
+// "pro") as well as the device's two ("flash"/"pro").
+export async function POST(request: Request) {
+  const blocked = await requireHermes();
+  if (blocked) return blocked;
+
+  let tier: ClawboxAiTier = (await readStoredTier()) ?? "flash";
+  let body: unknown = null;
+  try {
+    body = await request.json();
+  } catch {
+    // No body → keep the stored tier.
+  }
+  const requested = (body as { tier?: unknown } | null)?.tier;
+  if (requested !== undefined) {
+    // A present-but-unrecognised tier is a 400, NOT a silent fall back to the
+    // stored value: falling back meant a user who picked Free stayed on the €49
+    // frontier model. Matches /setup-api/ai-models/clawai/start's strictness.
+    const uiTier = normalizeClawaiUiTier(requested);
+    if (!uiTier) {
+      return NextResponse.json(
+        { error: "tier must be 'free', 'flash', or 'pro' when provided" },
+        { status: 400 },
+      );
+    }
+    tier = uiTierToDeviceTier(uiTier);
+  }
+
+  // A caller may PASTE a token instead of running the device-code flow — the
+  // portal shows one, and on a device that can't open a browser (or where the
+  // handoff failed) that is the only way in. A supplied token is stored first
+  // so the rest of the product (the wizard's status route, ClawKeep pairing,
+  // a later re-apply) sees the same value the config does.
+  const suppliedToken = typeof (body as { token?: unknown } | null)?.token === "string"
+    ? ((body as { token?: string }).token || "").trim()
+    : "";
+  if (suppliedToken) {
+    if (!isPlausibleClawaiToken(suppliedToken)) {
+      return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
+    }
+    await setMany({ clawai_token: suppliedToken });
+  }
+
+  const token = suppliedToken || (await readToken());
+  // A token starting with "-" would be read by hermes as a flag, so it is as
+  // unusable as no token at all.
+  if (!token || token.startsWith("-")) {
+    return NextResponse.json(
+      { error: "Sign in to ClawBox AI first, or paste a token from the portal." },
+      { status: 409 },
+    );
+  }
+
+  try {
+    const result = await applyClawaiToHermes(token, tier);
+    return NextResponse.json({ ok: true, ...result });
+  } catch (err) {
+    // Only OUR own error text is safe to echo — a raw spawn error can carry the
+    // hermes binary path.
+    return NextResponse.json(
+      { error: err instanceof ClawaiApplyError ? err.message : "Couldn't configure ClawBox AI" },
+      { status: 502 },
+    );
+  }
+}

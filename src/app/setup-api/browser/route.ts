@@ -3,10 +3,126 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import net from "net";
+import { lookup as dnsLookup } from "dns/promises";
 
 const exec = promisify(execFile);
 const CDP_PORT = 18800;
 const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+
+// SEC-4: the automation browser must not be steerable to `file://` (local-file
+// exfil — the JSON response hands back a screenshot of whatever it renders) or
+// to the device's own internal services (SSRF). Restrict to http(s) and reject
+// hosts that are, or resolve to, loopback/private/link-local addresses.
+function isPrivateIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const p = ip.split(".").map(Number);
+    if (p[0] === 127 || p[0] === 10 || p[0] === 0) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64/10 CGNAT
+    if (p[0] >= 224) return true;
+    return false;
+  }
+  const lc = ip.toLowerCase();
+  if (lc === "::1" || lc === "::") return true;
+  // fe80::/10 link-local spans fe80–febf, not just the fe80 prefix; fc00::/7
+  // unique-local is fc/fd. ff00::/8 is multicast.
+  if (/^fe[89ab]/.test(lc) || lc.startsWith("fc") || lc.startsWith("fd") || lc.startsWith("ff")) return true;
+  if (lc.startsWith("::ffff:")) {
+    // IPv4-mapped IPv6. WHATWG URL normalizes these to the HEX form
+    // (::ffff:7f00:1), so a plain recurse on the suffix (expecting dotted
+    // ::ffff:127.0.0.1) misses loopback/private targets. Canonicalize both
+    // forms to dotted IPv4; fail closed on any unrecognized ::ffff: shape.
+    const mapped = lc.slice(7);
+    if (net.isIPv4(mapped)) return isPrivateIp(mapped);
+    const hx = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
+    if (hx) {
+      const hi = parseInt(hx[1], 16), lo = parseInt(hx[2], 16);
+      return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    }
+    return true;
+  }
+  return false;
+}
+
+// getaddrinfo runs on the libuv threadpool (size 4 by default). A hostile or
+// dead resolver can hang each lookup for the OS timeout, and enough concurrent
+// nav requests would exhaust the pool and stall unrelated fs/crypto work. Cap
+// the wait so validateNavUrl fails closed instead of blocking indefinitely.
+const DNS_TIMEOUT_MS = 3000;
+async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("DNS lookup timed out")), DNS_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([dnsLookup(host, { all: true }), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Returns an error message if the URL is not safe to navigate to, else null. */
+async function validateNavUrl(url: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "Invalid URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)`;
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return "Blocked internal host";
+  if (net.isIP(host)) {
+    return isPrivateIp(host) ? "Blocked internal address" : null;
+  }
+  try {
+    const results = await lookupWithTimeout(host);
+    if (results.some((r) => isPrivateIp(r.address))) return "Blocked internal address";
+  } catch {
+    return "Host did not resolve";
+  }
+  return null;
+}
+
+// validateNavUrl only vets the URL the caller passes; page.goto then follows
+// HTTP 3xx redirects and re-resolves DNS itself, so a public URL that 302s to
+// (or DNS-rebinds onto) an internal host would still be reached and screenshot.
+// Install a request-level guard on the page that re-validates every top-level
+// navigation — including each redirect hop — against the same private-address
+// rules, aborting before the browser connects. Idempotent per page.
+type GuardablePage = {
+  route: (glob: string, handler: (route: {
+    request: () => { url: () => string; isNavigationRequest: () => boolean };
+    abort: (reason?: string) => Promise<void>;
+    continue: () => Promise<void>;
+  }) => void | Promise<void>) => Promise<void>;
+  __navGuardInstalled?: boolean;
+};
+async function installNavGuard(page: GuardablePage): Promise<void> {
+  if (page.__navGuardInstalled) return;
+  page.__navGuardInstalled = true;
+  await page.route("**/*", async (route) => {
+    const req = route.request();
+    // Only pay the DNS-resolution cost on top-level navigations — the requests
+    // whose rendered result gets screenshot and where redirect/rebind SSRF
+    // lands. Subresources continue unblocked.
+    if (!req.isNavigationRequest()) {
+      await route.continue();
+      return;
+    }
+    const err = await validateNavUrl(req.url());
+    if (err) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
+}
 
 // Playwright key name mapping (browser KeyboardEvent.key → Playwright key names)
 const KEY_MAP: Record<string, string> = {
@@ -116,7 +232,15 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
-      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, { timeout: 30_000 });
+      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, {
+        timeout: 30_000,
+        // Chromium gates the CDP WebSocket upgrade on Origin against
+        // --remote-allow-origins (pinned to this exact value in
+        // scripts/launch-browser.sh). Send a matching Origin so our automation
+        // connects while a rebound web page's own origin is rejected — closing
+        // the CDP DNS-rebinding takeover. Keep this byte-identical to the flag.
+        headers: { Origin: CDP_ENDPOINT },
+      });
       browser.on("disconnected", () => {
         if (cachedBrowser === browser) cachedBrowser = null;
         // Also drop a stale in-flight promise so a disconnect that races
@@ -151,10 +275,13 @@ export async function POST(req: Request) {
       }
 
       const page = context.pages().at(-1) ?? await context.newPage();
+      await installNavGuard(page as unknown as GuardablePage);
       await page.bringToFront().catch(() => {});
 
       const { url } = body;
       if (url) {
+        const navErr = await validateNavUrl(url);
+        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
@@ -187,7 +314,6 @@ export async function POST(req: Request) {
         title: await page.title().catch(() => ""),
         screenshot: screenshot ? screenshot.toString("base64") : null,
         canGoBack: await page.evaluate(() => window.history.length > 1).catch(() => false),
-        canGoForward: false,
       };
     };
 
@@ -197,6 +323,9 @@ export async function POST(req: Request) {
       case "navigate": {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
+        await installNavGuard(page as unknown as GuardablePage);
+        const navErr = await validateNavUrl(url);
+        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
         return NextResponse.json(await respond());
       }
@@ -236,12 +365,21 @@ export async function POST(req: Request) {
 
       case "keydown": {
         const { key } = body;
+        if (typeof key !== "string" || key.length === 0) {
+          return NextResponse.json({ error: "key required" }, { status: 400 });
+        }
         const pwKey = KEY_MAP[key] || key;
-        // Single printable character → type it; special key → press it
-        if (pwKey.length === 1 && !KEY_MAP[key]) {
-          await page.keyboard.type(pwKey);
-        } else {
-          await page.keyboard.press(pwKey);
+        // Single printable character → type it; special key → press it. A
+        // key name Playwright doesn't recognise makes press() throw — treat
+        // that as a client error rather than letting it become a raw 500.
+        try {
+          if (pwKey.length === 1 && !KEY_MAP[key]) {
+            await page.keyboard.type(pwKey);
+          } else {
+            await page.keyboard.press(pwKey);
+          }
+        } catch {
+          return NextResponse.json({ error: `Unknown key: ${key}` }, { status: 400 });
         }
         await page.waitForTimeout(100);
         return NextResponse.json(await respond());

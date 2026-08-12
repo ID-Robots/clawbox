@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { WEBAPPS_DIR, APP_ID_RE, deployWebapp, writeWebappIndex } from "@/lib/code-projects";
+import { WEBAPPS_DIR, APP_ID_RE, ValidationError, deployWebapp, writeWebappIndex } from "@/lib/code-projects";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -107,6 +107,11 @@ export async function POST(request: NextRequest) {
       url: `/setup-api/webapps?app=${appId}`,
     });
   } catch (err) {
+    // A rejected field is the caller's to fix, so answer 400 rather than
+    // reporting it as a server failure.
+    if (err instanceof ValidationError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to create webapp" },
       { status: 500 }

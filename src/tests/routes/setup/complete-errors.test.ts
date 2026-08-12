@@ -7,6 +7,7 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/auth", () => ({
   getSessionSigningSecret: vi.fn(),
   createSessionCookie: vi.fn(),
+  getSessionGeneration: vi.fn(async () => 0),
 }));
 
 import { setMany } from "@/lib/config-store";

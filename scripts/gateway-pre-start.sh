@@ -905,6 +905,18 @@ else:
     print(default)
 PY
 )"
+# Make sure the workspace skills root exists before the gateway starts.
+# OpenClaw's skills watcher (skills.load.watch, on by default) hands each
+# configured root to chokidar once, when a turn first builds the skills
+# snapshot; a root that does not exist at that moment is simply never watched,
+# and it is not re-attached later because the watch target list has not
+# changed. Creating the directory up front means the very first skill a
+# customer installs lands in an already-watched root, so the running gateway
+# notices it without being restarted.
+if [ -d "$CLAWBOX_WORKSPACE" ]; then
+  mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
+fi
+
 CLAWBOX_GUIDE_SRC="/home/clawbox/clawbox/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then

@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./helpers/coverage";
-import { installClawboxMocks } from "./helpers/clawbox";
+import { installClawboxMocks, openChatPopup } from "./helpers/clawbox";
 
 async function installFakeGatewaySocket(page: Page) {
   await page.addInitScript(() => {
@@ -147,7 +147,7 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await page.getByRole("button", { name: "Chat" }).click();
+  await openChatPopup(page);
   await expect(page.getByTestId("chat-popup")).toBeVisible();
 
   const chatInput = page.locator("textarea").last();
@@ -184,7 +184,7 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await page.getByRole("button", { name: "Chat" }).click();
+  await openChatPopup(page);
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
   // Provider dropdown is a custom popover (HeaderDropdown), not a
@@ -225,7 +225,7 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await page.getByRole("button", { name: "Chat" }).click();
+  await openChatPopup(page);
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
   await page.getByTestId("chat-popup").evaluate((el) => {
@@ -288,7 +288,7 @@ test("chat popup opens Local AI settings when local AI is not configured", async
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await page.getByRole("button", { name: "Chat" }).click();
+  await openChatPopup(page);
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
   await page.getByRole("button", { name: "Chat provider" }).click();

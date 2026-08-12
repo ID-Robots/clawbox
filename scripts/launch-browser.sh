@@ -119,7 +119,7 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
   "${SANDBOX_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
-  --remote-allow-origins=* \
+  --remote-allow-origins="http://127.0.0.1:${CDP_PORT}" \
   --user-data-dir="$PROFILE" \
   --no-first-run \
   --no-default-browser-check \

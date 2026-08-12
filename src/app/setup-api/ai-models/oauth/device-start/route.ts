@@ -3,6 +3,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { DEVICE_AUTH_PROVIDERS } from "@/lib/oauth-config";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +20,10 @@ export async function POST(request: Request) {
     }
 
     const providerName = body.provider || "openai";
-    const config = DEVICE_AUTH_PROVIDERS[providerName];
+    // Own-property check so inherited keys ("__proto__"/"constructor") can't
+    // resolve to a truthy Object.prototype value and bypass this 400 (they'd
+    // otherwise proceed with undefined config fields → a fetch(undefined) 500).
+    const config = Object.hasOwn(DEVICE_AUTH_PROVIDERS, providerName) ? DEVICE_AUTH_PROVIDERS[providerName] : undefined;
     if (!config) {
       return NextResponse.json(
         { error: `Device auth not supported for provider: ${providerName}` },
@@ -86,6 +90,12 @@ export async function POST(request: Request) {
       { mode: 0o600 }
     );
     await fs.rename(tmpPath, STATE_PATH);
+
+    // This flow supersedes any prior one, so drop a handoff file an abandoned
+    // earlier sign-in left behind. Only now that the replacement state is on
+    // disk: a bad provider or an upstream failure returns above, and those must
+    // not end a sign-in that is still waiting to be consumed by configure.
+    await clearHandoffTokens();
 
     return NextResponse.json({
       verification_url: verificationUrl,

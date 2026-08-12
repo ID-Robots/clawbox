@@ -47,9 +47,36 @@ function detectLocale(): Locale {
   return VALID_LOCALES.has(lang) ? (lang as Locale) : "en";
 }
 
+/**
+ * Keep `<html lang>` in step with the locale the UI is actually rendering.
+ *
+ * The root layout is a server component and every route (desktop, /login, the
+ * captive portal) shares it, while the locale is only known on the client —
+ * it comes from the `pref:ui_language` preference, falling back to
+ * `navigator.language`. So the attribute is written from an effect rather than
+ * from render: the server keeps emitting `lang="en"`, hydration sees exactly
+ * what was serialized, and the correction lands one commit later. Without it a
+ * screen reader pronounces Bulgarian, Japanese or German copy with an English
+ * voice — every locale but `en` is affected.
+ *
+ * Only the OUTERMOST provider writes: SettingsApp mounts nested I18nProviders
+ * for the embedded AIModelsStep, and each of those starts at "en" and only
+ * learns the real locale after its own fetch resolves, so letting them write
+ * would flip the document back to English every time Settings opened.
+ */
+export function useSyncHtmlLang(locale: Locale, isRootProvider: boolean) {
+  useEffect(() => {
+    if (!isRootProvider || typeof document === "undefined") return;
+    document.documentElement.setAttribute("lang", locale);
+  }, [locale, isRootProvider]);
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>("en");
   const [translations, setTranslations] = useState<Record<string, string> | null>(null);
+  // Read BEFORE this provider's own value is published, so it sees the parent
+  // context (null when this is the outermost provider on the page).
+  useSyncHtmlLang(locale, useContext(I18nContext) === null);
 
   // Load saved preference or detect from browser
   useEffect(() => {

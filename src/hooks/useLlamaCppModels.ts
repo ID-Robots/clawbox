@@ -46,7 +46,10 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
     }
   }, []);
 
-  const saveLlamaCppConfig = useCallback(async (model: string) => {
+  // `options.activate` = the user clicked "Switch to Gemma 4", i.e. asked for
+  // this model to become the one that answers. A plain enable omits it and
+  // keeps the customer's chosen provider in place.
+  const saveLlamaCppConfig = useCallback(async (model: string, options?: { activate?: boolean }) => {
     const trimmedModel = model.trim();
     if (!trimmedModel) {
       onSaveError("Enter the llama.cpp model ID first.");
@@ -64,6 +67,7 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
         body: JSON.stringify({
           model: trimmedModel,
           scope: configureScope,
+          activate: options?.activate === true,
         }),
       });
 

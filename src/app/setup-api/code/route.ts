@@ -52,6 +52,7 @@ export async function POST(request: NextRequest) {
         const { projectId, name, color, description, template } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         if (!name) return err("Project name required");
+        // Also checked in initProject, before anything is written.
         const meta = await initProject(projectId, name, { color, description, template });
         return ok({ success: true, project: meta });
       }

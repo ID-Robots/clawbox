@@ -34,16 +34,50 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
     expect(parsed.hostname.length).toBeGreaterThan(0);
   });
 
-  test("app list prints the built-in app names", async () => {
-    // CLI prints a header then one app name per line — not JSON.
+  test("app list prints the built-in apps for this edition", async () => {
+    // The CLI prints an edition-tagged header, then one `<id> — <name>` line
+    // per app — not JSON. The set is edition-dependent (see `builtInApps` in
+    // mcp/lib/context.ts): every edition gets the common apps, and each
+    // harness adds its own on top. Asking the CLI which edition it is keeps
+    // this assertion true on an OpenClaw box and on a Hermes box, instead of
+    // pinning it to whichever one CI happens to install.
+    const edition = (
+      await dockerExec(cli("edition"), { user: "clawbox", timeoutMs: 30_000 })
+    ).trim();
+    expect(edition, "`clawbox edition` should name a known edition").toMatch(
+      /^(openclaw|hermes|dual)$/,
+    );
+
     const out = await dockerExec(cli("app", "list"), {
       user: "clawbox",
       timeoutMs: 30_000,
     });
-    expect(out).toMatch(/Built-in apps:/i);
-    expect(out).toMatch(/\bsettings\b/);
-    expect(out).toMatch(/\bfiles\b/);
-    expect(out).toMatch(/\bterminal\b/);
+
+    // Header carries the edition, so a reader knows which app set this is.
+    expect(out).toMatch(
+      new RegExp(`^Built-in apps \\(${edition} edition\\):`, "im"),
+    );
+
+    // Common apps — listed on every edition.
+    for (const id of ["settings", "terminal", "files", "browser", "vnc"]) {
+      expect(out, `built-in app '${id}' should be listed`).toMatch(
+        new RegExp(`^\\s+${id} — `, "m"),
+      );
+    }
+
+    // Harness-specific apps. A Hermes box has the skills app and neither the
+    // OpenClaw chat app nor the store; listing an app whose backend isn't
+    // installed would point the agent at a window that cannot open. The
+    // premium `dual` edition resolves to the OpenClaw set.
+    if (edition === "hermes") {
+      expect(out).toMatch(/^\s+hermes-skills — /m);
+      expect(out).not.toMatch(/^\s+openclaw — /m);
+      expect(out).not.toMatch(/^\s+store — /m);
+    } else {
+      expect(out).toMatch(/^\s+openclaw — /m);
+      expect(out).toMatch(/^\s+store — /m);
+      expect(out).not.toMatch(/^\s+hermes-skills — /m);
+    }
   });
 
   test("notify writes a ui:pending-action with the message into kv.json", async () => {

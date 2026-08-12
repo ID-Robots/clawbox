@@ -1,0 +1,21 @@
+{
+  "//": "The MCP server is EXCLUDED from the root tsconfig (see its `exclude`), so nothing typechecked it. This project does. Run: bun run typecheck:mcp. The src/lib modules listed below are the only ones mcp/** may import — each has a transitive import graph of relative paths + node builtins, so nothing drags the Next.js server runtime or the @/ alias into this stdio process.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["esnext"],
+    "jsx": "preserve",
+    "incremental": false
+  },
+  "include": [
+    "**/*.ts",
+    "../src/lib/edition-source.ts",
+    "../src/lib/file-guard.ts",
+    "../src/lib/config-store.ts",
+    "../src/lib/hermes-skills.ts",
+    "../src/lib/hermes-reasoning.ts",
+    "../src/lib/hermes-providers.ts"
+  ],
+  "exclude": []
+}

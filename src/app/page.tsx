@@ -12,6 +12,7 @@ import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
+import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
@@ -25,7 +26,17 @@ import ChatPopup from "@/components/ChatPopup";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
+import { fetchHarness } from "@/lib/client-harness";
+import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
+import {
+  layoutIcons,
+  layoutsEqual,
+  moveIcon,
+  storageGeometry,
+  type IconLayout,
+  type LayoutGeometry,
+} from "@/lib/desktop-icon-layout";
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
@@ -35,7 +46,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -45,8 +56,14 @@ interface AppDef {
 
 const apps: AppDef[] = [
   { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "clawbox", name: "Claw", color: "#0a0f1a", type: "chat", pinned: true },
+  { id: "clawbox", name: "app.chat", color: "#0a0f1a", type: "chat", pinned: true },
   { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
+  // Hermes dashboard — only shown on the Hermes edition. Opened via the
+  // auth-gated dashboard proxy (url computed at click time from the host).
+  { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
+  // Hermes Skills Store — only shown on the Hermes edition (gated below via
+  // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
+  { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
@@ -57,6 +74,64 @@ const apps: AppDef[] = [
 ];
 const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
 
+// Desktop icon grid metrics. Module-level so the resize listener can derive
+// `rowsPerColumn` without reaching into the component.
+const CELL_H = 110; // px — one icon cell, label included
+const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
+
+/**
+ * Declared order for icons that have no saved slot yet.
+ *
+ * Built-ins follow the order they are declared in `apps` above; store-installed
+ * apps follow the persisted install order and lead, which is where a freshly
+ * installed app has always appeared. The point is that this is DECLARED — the
+ * previous code fell back to whatever order the arrays happened to be in when
+ * the layout ran, and since the harness resolves asynchronously that order
+ * differed from load to load.
+ */
+function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
+  return [...installedAppIds, ...DEFAULT_DESKTOP_APPS.map((id) => `desktop-${id}`)];
+}
+
+// Apps that only make sense on ONE harness. The other harness's backend isn't
+// installed, so its app would open onto errors:
+//   - "openclaw" is the OpenClaw gateway Control UI.
+//   - "store" is the OpenClaw App Store — it installs OpenClaw desktop apps via
+//     the openclaw binary and reloads the OpenClaw gateway. On Hermes the Skills
+//     app ("hermes-skills") is the equivalent surface.
+//   - "hermes" / "hermes-skills" are the Hermes dashboard and skills store.
+// BOTH the icon-layout filter (harnessHiddenAppIds) and getAllApps read THESE
+// lists — keep them the single source of the policy so a hidden app can never be
+// visible in one surface and hidden in another.
+const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store"] as const;
+const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
+
+/**
+ * Should an app the user installed from the OpenClaw store still be shown?
+ *
+ * An `installed` app IS an OpenClaw skill: its window (InstalledAppSettings)
+ * calls /setup-api/apps/settings + /apps/skill-info, both of which shell out to
+ * the openclaw binary, and its uninstall reloads the OpenClaw gateway. None of
+ * that exists on a Hermes device, so the window would open onto errors — hide
+ * it. A WEBAPP (meta.webappUrl) is different: those are ClawBox code-assistant
+ * builds served by /setup-api/webapps, harness-independent, and frequently the
+ * Hermes agent's OWN output — hiding them would be the regression, not the fix.
+ *
+ * This filters what is RENDERED only. The persisted installedApps list is never
+ * mutated, so a dual box that switches back finds its layout intact.
+ *
+ * While the harness is still unresolved (null) these stay VISIBLE, unlike the
+ * built-in harness apps: they are the majority case on an OpenClaw box, they
+ * are not the surface goal B forbids, and hiding then re-showing them would
+ * flash the whole desktop on every load.
+ */
+function isInstalledAppVisible(meta: InstalledMeta | undefined, harness: string | null): boolean {
+  return harness !== "hermes" || !!meta?.webappUrl;
+}
+
+// LAN port of the auth-gated Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js).
+const HERMES_DASH_PROXY_PORT = 8090;
+
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
   return <span className={`material-symbols-rounded ${className}`} style={{ fontSize: size }}>{name}</span>;
@@ -64,6 +139,11 @@ function MIcon({ name, className = "", size = 24 }: { name: string; className?: 
 
 function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
+
+  if (id === "hermes") {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} style={{ objectFit: "contain", borderRadius: 6 }} />;
+  }
 
   if (id === "browser") {
     return (
@@ -110,6 +190,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
         <circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
       </svg>
     );
+  }
+
+  if (id === "hermes-skills") {
+    return <MIcon name="extension" className="text-white" size={px} />;
   }
 
   const iconMap: Record<string, string> = {
@@ -238,9 +322,82 @@ function ChromeDesktopInner() {
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
   const [installedMeta, setInstalledMeta] = useState<Record<string, InstalledMeta>>({});
 
+  // ─── Active agent harness (openclaw | hermes) ───
+  // On a Hermes device the OpenClaw gateway isn't installed, so hide the
+  // OpenClaw-only Control UI app rather than surface a broken window.
+  // Starts UNRESOLVED, never "openclaw": defaulting to a harness painted the
+  // OpenClaw App Store on a Hermes device for one round-trip (and forever if
+  // the fetch failed), which is exactly the surface that must not be reachable.
+  // A few retries first — this is a same-origin call to our own server, so if
+  // it keeps failing the desktop has bigger problems than two missing icons.
+  // True once a wallpaper has been settled — either restored from the
+  // device's saved preference or defaulted from the harness. Whichever of
+  // those two requests answers first wins, and the other must not
+  // overwrite it.
+  const wallpaperChosen = useRef(false);
+  const [activeHarness, setActiveHarness] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async (attempt: number): Promise<void> => {
+      try {
+        const d = await fetchHarness({ force: attempt > 0 });
+        if (!alive) return;
+        if (d?.active) {
+          setActiveHarness(d.active);
+          // A Hermes device that has never picked a wallpaper opens on the
+          // Hermes art. Guarded on wallpaperChosen because the preferences
+          // request and this one race, and a saved choice must survive
+          // whichever order they land in.
+          if (d.active === "hermes" && !wallpaperChosen.current) {
+            wallpaperChosen.current = true;
+            setWallpaperId("hermes");
+          }
+          return;
+        }
+        throw new Error("no harness");
+      } catch {
+        if (!alive || attempt >= 2) return; // stay unresolved = stay closed
+        setTimeout(() => { if (alive) load(attempt + 1); }, 500 * (attempt + 1));
+      }
+    };
+    load(0);
+    return () => { alive = false; };
+  }, []);
+
+  // The harness-specific apps hidden on this edition (OpenClaw Control-UI +
+  // App Store on Hermes; the Hermes dashboard + Hermes Skills Store on
+  // OpenClaw). See OPENCLAW_ONLY_APP_IDS / HERMES_ONLY_APP_IDS. Until the
+  // harness is known BOTH sets are hidden — fail closed.
+  const harnessHiddenAppIds = useMemo<string[]>(
+    () =>
+      activeHarness === "hermes"
+        ? [...OPENCLAW_ONLY_APP_IDS]
+        : activeHarness === "openclaw"
+          ? [...HERMES_ONLY_APP_IDS]
+          : [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS],
+    [activeHarness],
+  );
+
   // ─── Desktop shortcuts for built-in apps ───
   const [desktopApps, setDesktopApps] = useState<string[]>(DEFAULT_DESKTOP_APPS);
+  // Desktop shortcuts minus the hidden harness app — the icon-layout logic must
+  // use THIS (not the raw list), otherwise the hidden app reserves an empty
+  // grid slot and leaves a gap.
+  const visibleDesktopApps = useMemo(
+    () => desktopApps.filter((id) => !harnessHiddenAppIds.includes(id)),
+    [desktopApps, harnessHiddenAppIds],
+  );
   const [hiddenInstalledApps, setHiddenInstalledApps] = useState<string[]>([]);
+  // Store-installed apps that should actually be drawn. Computed ONCE here
+  // because four different layout paths need the same answer — when they
+  // diverge, a hidden app keeps its grid slot and leaves a gap.
+  const visibleInstalledAppIds = useMemo(
+    () =>
+      installedApps.filter(
+        (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
+      ),
+    [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
+  );
   const handleAddToDesktop = useCallback((appId: string) => {
     // Also unhide installed apps when adding to desktop
     setHiddenInstalledApps(prev => prev.filter(id => id !== appId && id !== `installed-${appId}`));
@@ -267,8 +424,12 @@ function ChromeDesktopInner() {
   // ─── Wallpapers ───
   const wallpapers = [
     { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
+    { id: "hermes", name: "Hermes", gradient: "", stars: false, nebula: false, image: "/hermes-wallpaper.jpeg" },
     { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
   ] as const;
+  // Both wallpapers stay available on every device — this only decides which
+  // one a device that has never chosen starts on. A Hermes box opens on the
+  // Hermes art; OpenClaw is untouched.
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
   type WpFit = "fill" | "fit" | "center";
@@ -286,8 +447,14 @@ function ChromeDesktopInner() {
       .then(r => r.json())
       .then((data: Record<string, unknown>) => {
         prefsLoaded.current = true;
-        // Wallpaper
-        if (data.wp_id) setWallpaperId(String(data.wp_id));
+        // Wallpaper. A saved choice always wins; wallpaperChosen records that
+        // one exists, so the harness default below can't overwrite it later —
+        // the two answers arrive from different requests and either can land
+        // first.
+        if (data.wp_id) {
+          setWallpaperId(String(data.wp_id));
+          wallpaperChosen.current = true;
+        }
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
         if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
@@ -443,13 +610,23 @@ function ChromeDesktopInner() {
   }, []);
 
   // ─── Desktop icon grid + mobile detection (single resize listener) ───
-  const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false });
+  // `rowsPerColumn` lives in this state — not read ad hoc inside the layout
+  // function — so that a change in viewport HEIGHT reflows the icons too. It
+  // used to be sampled from window.innerHeight at arrange time while only the
+  // column count (a width derivative) could trigger an arrange, so shrinking a
+  // window vertically left the icons laid out for the old height.
+  const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false, rowsPerColumn: 6 });
   useEffect(() => {
     const update = () => {
       const w = window.innerWidth;
       const cellW = w < 500 ? 85 : 100;
       const cols = Math.max(3, Math.floor(w / cellW));
-      setGridDims({ cols, cellW, mobile: w < 768 });
+      const rowsPerColumn = Math.max(1, Math.floor((window.innerHeight - TASKBAR_RESERVE) / CELL_H));
+      setGridDims((prev) =>
+        prev.cols === cols && prev.cellW === cellW && prev.mobile === w < 768 && prev.rowsPerColumn === rowsPerColumn
+          ? prev
+          : { cols, cellW, mobile: w < 768, rowsPerColumn },
+      );
     };
     update();
     window.addEventListener("resize", update);
@@ -459,8 +636,7 @@ function ChromeDesktopInner() {
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
   const CELL_W = gridDims.cellW;
-  const CELL_H = 110; // px
-  const [iconPositions, setIconPositions] = useState<Record<string, { row: number; col: number }>>({});
+  const [iconPositions, setIconPositions] = useState<IconLayout>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
@@ -641,89 +817,64 @@ function ChromeDesktopInner() {
 
 
 
-  // Arrange all desktop icons — desktop: single column top-left, mobile: centered grid
-  const arrangeIcons = useCallback(() => {
-    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
-    const allIconIds = [...visibleInstalled, ...builtinIds];
-    if (allIconIds.length === 0) return;
-    // Sort by current position to preserve visual order
-    allIconIds.sort((a, b) => {
-      const pa = iconPositions[a] || { row: 999, col: 999 };
-      const pb = iconPositions[b] || { row: 999, col: 999 };
-      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-    });
-    const positions: Record<string, { row: number; col: number }> = {};
-    const mobile = typeof window !== "undefined" && window.innerWidth < 768;
-    if (mobile) {
-      // Mobile: top-aligned grid, filling columns left to right
-      const cols = Math.min(allIconIds.length, GRID_COLS);
-      allIconIds.forEach((id, i) => {
-        positions[id] = { row: Math.floor(i / cols), col: i % cols };
-      });
-    } else {
-      // Desktop: fill column-by-column, top-to-bottom, wrapping to the next
-      // column once the current one would overflow the visible viewport.
-      // Previously this always used col: 0, which piled every icon into a
-      // single vertical column that ran off the bottom of the screen as
-      // soon as the user had more icons than fit.
-      //
-      // Leave a small margin at the bottom for the taskbar (~60 px) so the
-      // last icon in a column isn't clipped by it.
-      const TASKBAR_RESERVE = 72;
-      const viewportHeight = typeof window !== "undefined" ? window.innerHeight : CELL_H * 6;
-      const rowsPerColumn = Math.max(1, Math.floor((viewportHeight - TASKBAR_RESERVE) / CELL_H));
-      const maxCols = Math.max(1, GRID_COLS);
-      allIconIds.forEach((id, i) => {
-        const col = Math.min(Math.floor(i / rowsPerColumn), maxCols - 1);
-        const row = i - col * rowsPerColumn;
-        positions[id] = { row, col };
-      });
-    }
-    setIconPositions(positions);
-  }, [installedApps, hiddenInstalledApps, desktopApps, iconPositions]);
+  // ─── Desktop icon layout ───
+  // Every icon drawn on the desktop, in one place. Four code paths used to
+  // rebuild this list independently; when they disagreed a hidden app kept its
+  // grid slot and left a gap.
+  const allIconIds = useMemo(
+    () => [...visibleInstalledAppIds, ...visibleDesktopApps.map((id) => `desktop-${id}`)],
+    [visibleInstalledAppIds, visibleDesktopApps],
+  );
 
-  // Auto-arrange when icons are added/removed or grid dimensions change
+  const iconCanonicalOrder = useMemo(() => canonicalIconOrder(installedApps), [installedApps]);
+
+  // Narrow viewports fill row-by-row like a phone home screen; wide ones fill
+  // column-by-column like a desktop. Both flows are DENSE and idempotent — see
+  // src/lib/desktop-icon-layout.ts.
+  const iconGeometry = useMemo<LayoutGeometry>(
+    () => ({
+      flow: isMobile ? "row" : "column",
+      cols: Math.max(1, GRID_COLS),
+      rowsPerColumn: gridDims.rowsPerColumn,
+    }),
+    [isMobile, GRID_COLS, gridDims.rowsPerColumn],
+  );
+
+  // The layout actually drawn. Derived — never stale — so a hole, a slot left
+  // behind by a hidden app, a newly installed icon, or a viewport change is
+  // repaired in the same render it appears, before anything is painted.
+  const iconLayout = useMemo(
+    () => layoutIcons(allIconIds, iconPositions, iconGeometry, iconCanonicalOrder),
+    [allIconIds, iconPositions, iconGeometry, iconCanonicalOrder],
+  );
+
+  // What gets SAVED. Always the column encoding, even while a phone draws the
+  // same icons row-by-row, so one encoding round-trips at every viewport and a
+  // rotation reflows the desktop without reordering it.
+  const storedIconLayout = useMemo(
+    () => layoutIcons(allIconIds, iconPositions, storageGeometry(iconGeometry), iconCanonicalOrder),
+    [allIconIds, iconPositions, iconGeometry, iconCanonicalOrder],
+  );
+
+  // Persist the repaired layout. `layoutIcons` is idempotent, so this settles
+  // after one pass instead of looping — and the saved `icon_grid` converges on
+  // exactly the order the user sees.
   useEffect(() => {
-    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
-    const allIconIds = [...visibleInstalled, ...builtinIds];
-    const missing = allIconIds.filter((id) => !iconPositions[id]);
-    const overflow = allIconIds.some((id) => iconPositions[id] && iconPositions[id].col >= GRID_COLS);
-    if (missing.length === 0 && !overflow) return;
-    arrangeIcons();
-  }, [installedApps, hiddenInstalledApps, desktopApps, GRID_COLS]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (allIconIds.length === 0) return;
+    setIconPositions((prev) => (layoutsEqual(prev, storedIconLayout) ? prev : storedIconLayout));
+  }, [storedIconLayout, allIconIds.length]);
 
-  // Get icon position. On mobile we ignore the persisted desktop layout
-  // (which was built around a single left-aligned column) and lay icons out
-  // in a grid that fills the viewport row-by-row, like a phone home screen.
-  const mobileIconOrder = useMemo(() => {
-    if (!isMobile) return null;
-    const visibleInstalled = installedApps.filter((id) => !hiddenInstalledApps.includes(id));
-    const builtinIds = desktopApps.map((id) => `desktop-${id}`);
-    const all = [...visibleInstalled, ...builtinIds];
-    all.sort((a, b) => {
-      const pa = iconPositions[a] || { row: 999, col: 999 };
-      const pb = iconPositions[b] || { row: 999, col: 999 };
-      return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-    });
-    const map: Record<string, { row: number; col: number }> = {};
-    all.forEach((id, i) => {
-      map[id] = { row: Math.floor(i / GRID_COLS), col: i % GRID_COLS };
-    });
-    return map;
-  }, [isMobile, installedApps, hiddenInstalledApps, desktopApps, iconPositions, GRID_COLS]);
+  const getIconPosition = useCallback(
+    (appId: string) => iconLayout[appId] ?? iconPositions[appId] ?? { row: 0, col: 0 },
+    [iconLayout, iconPositions],
+  );
 
-  const getIconPosition = useCallback((appId: string, _index: number) => {
-    if (mobileIconOrder && mobileIconOrder[appId]) return mobileIconOrder[appId];
-    return iconPositions[appId] || { row: 0, col: 0 };
-  }, [iconPositions, mobileIconOrder]);
-
-  const isGridCellOccupied = useCallback((row: number, col: number, excludeId?: string) => {
-    return Object.entries(iconPositions).some(
-      ([id, pos]) => id !== excludeId && pos.row === row && pos.col === col
-    );
-  }, [iconPositions]);
+  // "Arrange icons" means: forget the hand-made order and go back to the
+  // declared one. Compacting is no longer something the user has to ask for —
+  // the layout above is always dense — so this is now the undo for dragging.
+  const arrangeIcons = useCallback(() => {
+    setIconPositions(layoutIcons(allIconIds, {}, storageGeometry(iconGeometry), iconCanonicalOrder));
+  }, [allIconIds, iconGeometry, iconCanonicalOrder]);
 
   const snapToGrid = useCallback((clientX: number, clientY: number): { row: number; col: number } | null => {
     if (!gridRef.current) return null;
@@ -741,7 +892,6 @@ function ChromeDesktopInner() {
       e.preventDefault();
       e.stopPropagation();
     }
-    let mobileSynced = false;
     const startX = e.clientX;
     const startY = e.clientY;
     let isDragging = false;
@@ -773,12 +923,9 @@ function ChromeDesktopInner() {
       if (!isDragging && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
       if (!isDragging) {
         isDragging = true;
-        // Sync mobile-computed positions into iconPositions only once a real
-        // drag starts, so taps don't trigger redundant state writes.
-        if (isMobile && mobileIconOrder && !mobileSynced) {
-          mobileSynced = true;
-          setIconPositions(mobileIconOrder);
-        }
+        // No mobile position sync needed any more: iconPositions is kept in the
+        // storage encoding on every viewport, so a drop can be resolved against
+        // it directly.
         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
         setDraggingIcon(appId);
       }
@@ -825,46 +972,14 @@ function ChromeDesktopInner() {
               return prev;
             });
           } else {
-            // Single icon drop: insert at target and shift others right if occupied
-            setIconPositions(prev => {
-              const next = { ...prev };
-              // If target cell is empty, just move there
-              const occupantId = Object.entries(next).find(
-                ([id, pos]) => id !== appId && pos.row === target.row && pos.col === target.col
-              )?.[0];
-              if (!occupantId) {
-                return { ...next, [appId]: target };
-              }
-              // Sort all icons by position (row-major) to get current linear order
-              const allIds = Object.keys(next).filter(id => id !== appId);
-              allIds.sort((a, b) => {
-                const pa = next[a], pb = next[b];
-                return pa.row !== pb.row ? pa.row - pb.row : pa.col - pb.col;
-              });
-              // Find where to insert based on target position
-              const targetLinear = target.row * GRID_COLS + target.col;
-              let insertIdx = allIds.findIndex(id => {
-                const p = next[id];
-                return p.row * GRID_COLS + p.col >= targetLinear;
-              });
-              if (insertIdx === -1) insertIdx = allIds.length;
-              // Insert the dragged icon into the sequence
-              allIds.splice(insertIdx, 0, appId);
-              // Find the grid bounds from current layout (use the centering offsets)
-              const minRow = Math.min(...Object.values(next).map(p => p.row));
-              const minCol = Math.min(...Object.values(next).map(p => p.col));
-              // Determine cols used in current layout
-              const maxCol = Math.max(...Object.values(next).map(p => p.col));
-              const layoutCols = maxCol - minCol + 1;
-              // Re-assign positions sequentially from the same starting offset
-              const positions: Record<string, { row: number; col: number }> = {};
-              allIds.forEach((id, i) => {
-                const col = i % layoutCols;
-                const row = Math.floor(i / layoutCols);
-                positions[id] = { row: row + minRow, col: col + minCol };
-              });
-              return positions;
-            });
+            // Single icon drop: the icon takes the dropped slot and everything
+            // else closes ranks around it. A drag therefore reorders the
+            // desktop rather than pinning one icon to an absolute cell — the
+            // grid has to stay dense and has to reflow when the window changes
+            // shape, and an absolute cell survives neither.
+            setIconPositions((prev) =>
+              moveIcon(appId, target, allIconIds, prev, iconGeometry, iconCanonicalOrder),
+            );
           }
         }
       }
@@ -874,7 +989,7 @@ function ChromeDesktopInner() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  }, [snapToGrid, isGridCellOccupied, selectedIcons, isMobile, mobileIconOrder, GRID_COLS]);
+  }, [snapToGrid, selectedIcons, isMobile, allIconIds, iconGeometry, iconCanonicalOrder]);
 
 
   // Update clock
@@ -939,7 +1054,10 @@ function ChromeDesktopInner() {
     const installedAppDefs: AppDef[] = [];
     for (const appId of installedApps) {
       const meta = installedMeta[appId];
-      if (meta) {
+      // Store-installed OpenClaw skills are unusable on Hermes (see
+      // isInstalledAppVisible) — they must not reach the launcher, the shelf,
+      // or any openApp(id) path either, not just the desktop grid.
+      if (meta && isInstalledAppVisible(meta, activeHarness)) {
         const isWebapp = !!meta.webappUrl;
         const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
         installedAppDefs.push({
@@ -955,8 +1073,12 @@ function ChromeDesktopInner() {
         });
       }
     }
+    // Per-harness apps come from the SAME computed list the icon layout uses,
+    // so the two can never disagree — including while the harness is still
+    // unresolved, when both harnesses' apps are hidden.
+    const harnessApps = apps.filter((a) => !harnessHiddenAppIds.includes(a.id));
     return [
-      ...apps,
+      ...harnessApps,
       ...installedAppDefs,
       {
         id: "setup",
@@ -968,7 +1090,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta]);
+  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
@@ -982,7 +1104,12 @@ function ChromeDesktopInner() {
     if (!app) return;
 
     if (app.type === "external" && app.url) {
-      window.open(app.url, "_blank", "noopener,noreferrer");
+      // The Hermes dashboard opens through its auth-gated proxy on the same
+      // host (port 8090), computed at click time so it works over LAN/mDNS/cable.
+      const url = app.url === "hermes-dashboard"
+        ? `${window.location.protocol}//${window.location.hostname}:${HERMES_DASH_PROXY_PORT}/`
+        : app.url;
+      window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
 
@@ -1288,7 +1415,7 @@ function ChromeDesktopInner() {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
-        setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+        setPairingRequests((prev) => prev.filter((r) => !samePairingToken(r.code, code)));
         window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Approved — the bot let them know." } }));
       } else {
@@ -1319,7 +1446,7 @@ function ChromeDesktopInner() {
   useEffect(() => {
     const onApproved = (e: Event) => {
       const code = (e as CustomEvent<{ code?: string }>).detail?.code;
-      if (code) setPairingRequests((prev) => prev.filter((r) => (r.code || "").toUpperCase() !== code.toUpperCase()));
+      if (code) setPairingRequests((prev) => prev.filter((r) => !samePairingToken(r.code, code)));
     };
     window.addEventListener("clawbox:telegram-approved", onApproved);
     return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
@@ -1429,6 +1556,8 @@ function ChromeDesktopInner() {
             onUninstall={requestUninstallApp}
           />
         );
+      case "hermes_skills":
+        return <HermesSkillsStore />;
       case "installed":
         return app.storeApp ? (
           <InstalledAppSettings
@@ -1490,9 +1619,9 @@ function ChromeDesktopInner() {
 
   const activeWindowId = getActiveWindowId();
 
-  // Get installed store apps for desktop display (exclude hidden ones)
-  const installedAppDefs = installedApps
-    .filter((appId) => !hiddenInstalledApps.includes(appId))
+  // Installed store apps drawn on the desktop. Uses the SAME visibility memo as
+  // the layout maths above — if the two disagree, a hidden app keeps its slot.
+  const installedAppDefs = visibleInstalledAppIds
     .map((appId) => {
       const meta = installedMeta[appId];
       if (!meta) return null;
@@ -1500,8 +1629,8 @@ function ChromeDesktopInner() {
     })
     .filter((a): a is StoreApp => a !== null);
 
-  // Built-in apps with desktop shortcuts
-  const desktopBuiltinApps = desktopApps
+  // Built-in apps with desktop shortcuts (hide the other harness's apps).
+  const desktopBuiltinApps = visibleDesktopApps
     .map((appId) => apps.find((a) => a.id === appId))
     .filter((a): a is AppDef => !!a);
 
@@ -1838,9 +1967,9 @@ function ChromeDesktopInner() {
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
       <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
-      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && mobileIconOrder ? `${(Math.floor((Object.keys(mobileIconOrder).length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
-        {installedAppDefs.map((app, i) => {
-          const pos = getIconPosition(app.id, i);
+      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && allIconIds.length > 0 ? `${(Math.floor((allIconIds.length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
+        {installedAppDefs.map((app) => {
+          const pos = getIconPosition(app.id);
           const isBeingDragged = draggingIcon === app.id;
           const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== app.id && selectedIcons.size > 1 && selectedIcons.has(app.id) && selectedIcons.has(draggingIcon);
           const isRecent = recentlyInstalled === app.id;
@@ -1900,9 +2029,9 @@ function ChromeDesktopInner() {
         })}
 
         {/* Built-in app desktop shortcuts */}
-        {desktopBuiltinApps.map((app, i) => {
+        {desktopBuiltinApps.map((app) => {
           const iconId = `desktop-${app.id}`;
-          const pos = getIconPosition(iconId, installedAppDefs.length + i);
+          const pos = getIconPosition(iconId);
           const isBeingDragged = draggingIcon === iconId;
           const isGroupMemberDragged = draggingIcon !== null && draggingIcon !== iconId && selectedIcons.size > 1 && selectedIcons.has(iconId) && selectedIcons.has(draggingIcon);
           const isSelected = selectedIcons.has(iconId);
@@ -1959,7 +2088,7 @@ function ChromeDesktopInner() {
 
         {/* Ghost indicator for drop target */}
         {draggingIcon && dragGhost && (() => {
-          const isOccupied = Object.entries(iconPositions).some(
+          const isOccupied = Object.entries(iconLayout).some(
             ([id, pos]) => id !== draggingIcon && pos.row === dragGhost.row && pos.col === dragGhost.col
           );
           if (isOccupied) {
@@ -2357,16 +2486,36 @@ function ChromeDesktopInner() {
             </>
             ); })() : (
             <>
-              <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> App Store
-              </button>
+              {/* The store entry follows the harness: on Hermes there is no App
+                  Store and Hermes Skills is its equivalent. Both entries were
+                  hard-coded and opened ids that no longer resolve on Hermes. */}
+              {/* Driven by the same hidden-app list as every other surface, so
+                  an unresolved harness offers NEITHER store rather than the
+                  wrong one. */}
+              {!harnessHiddenAppIds.includes("hermes-skills") && (
+                <button onClick={() => openApp("hermes-skills")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>extension</span> Hermes Skills
+                </button>
+              )}
+              {!harnessHiddenAppIds.includes("store") && (
+                <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> App Store
+                </button>
+              )}
               <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> Terminal
               </button>
               <div className="border-t border-white/10 my-1" />
-              <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="w-4 h-4 inline-block"><AppIcon id="openclaw" size="w-4 h-4" /></span> OpenClaw
-              </button>
+              {!harnessHiddenAppIds.includes("hermes") && (
+                <button onClick={() => openApp("hermes")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="w-4 h-4 inline-block"><AppIcon id="hermes" size="w-4 h-4" /></span> Hermes
+                </button>
+              )}
+              {!harnessHiddenAppIds.includes("openclaw") && (
+                <button onClick={() => openApp("openclaw")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="w-4 h-4 inline-block"><AppIcon id="openclaw" size="w-4 h-4" /></span> OpenClaw
+                </button>
+              )}
               <button onClick={() => arrangeIcons()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
               </button>

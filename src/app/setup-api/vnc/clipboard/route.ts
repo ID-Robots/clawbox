@@ -33,6 +33,26 @@ interface XclipResult {
   code: number;
 }
 
+// `xclip` may not be installed (or the guest X display may be absent). spawn
+// then fails with ENOENT — surface a clean 503 the UI can show ("clipboard
+// bridge unavailable") instead of leaking a raw "spawn xclip ENOENT" 500.
+// EACCES/EPERM mean the binary is present but not executable (bad perms /
+// restricted): same "unavailable" story from the user's side, so map them to
+// the same 503 rather than leaking a raw permission 500.
+function unavailableResponse(err: unknown): NextResponse | null {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === "ENOENT" || code === "EACCES" || code === "EPERM") {
+    const detail = code === "ENOENT"
+      ? "xclip is not installed on this device."
+      : "xclip is installed but not executable on this device.";
+    return NextResponse.json(
+      { error: `Clipboard bridge unavailable: ${detail}`, unavailable: true },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  return null;
+}
+
 function runXclip(args: string[], display: string, input?: string): Promise<XclipResult> {
   return new Promise((resolve, reject) => {
     const isWrite = input !== undefined;
@@ -103,9 +123,12 @@ export async function GET() {
       display,
     );
     if (code !== 0) {
-      // xclip returns non-zero when the selection is empty; treat that as
-      // an empty string rather than an error so the UI can render "(empty)".
-      const isEmpty = stderr.includes("There is no owner");
+      // xclip returns non-zero when the selection is empty; treat that as an
+      // empty string rather than an error so the UI can render "(empty)".
+      // Different xclip builds word this differently: "There is no owner for
+      // the selection" (no selection at all) vs "target STRING not available"
+      // (a selection exists but holds no text) — both mean "empty" to us.
+      const isEmpty = /there is no owner|target string not available/i.test(stderr);
       if (isEmpty) {
         return NextResponse.json({ text: "" }, { headers: { "Cache-Control": "no-store" } });
       }
@@ -116,8 +139,11 @@ export async function GET() {
     }
     return NextResponse.json({ text: stdout }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "xclip read failed" },
+    // Only genuinely unexpected errors reach here (ENOENT/EACCES/EPERM are
+    // handled above). Return a static message rather than echoing err.message,
+    // which can leak spawn/path internals.
+    return unavailableResponse(err) ?? NextResponse.json(
+      { error: "xclip read failed" },
       { status: 500 },
     );
   }
@@ -163,8 +189,10 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "xclip write failed" },
+    // See the GET handler: static message for unexpected errors, no err.message
+    // echo. ENOENT/EACCES/EPERM are already mapped to a clean 503 above.
+    return unavailableResponse(err) ?? NextResponse.json(
+      { error: "xclip write failed" },
       { status: 500 },
     );
   }

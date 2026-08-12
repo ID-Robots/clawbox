@@ -1,10 +1,12 @@
 {
   "name": "clawbox-setup",
-  "version": "3.1.11",
+  "version": "3.9.0",
   "private": true,
   "description": "ClawBox setup wizard and dashboard",
   "scripts": {
     "mcp": "bun run mcp/clawbox-mcp.ts",
+    "typecheck:mcp": "tsc -p mcp/tsconfig.json",
+    "check:mcp-tools": "bun run mcp/check-tools.ts",
     "terminal-server": "bun run scripts/terminal-server.ts",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
@@ -24,7 +26,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@novnc/novnc": "^1.6.0",
+    "@novnc/novnc": "1.6.0",
     "@types/ws": "^8.18.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -57,12 +59,13 @@
     "tailwindcss": "^4.0.0",
     "typescript": "5.9.3",
     "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "undici": "^7.29.0",
     "postcss": "^8.5.23",
     "sharp": "^0.35.0",
-    "nanoid": "^3.3.17"
+    "nanoid": "^3.3.17",
+    "vite": "^7.3.5"
   }
 }

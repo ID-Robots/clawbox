@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configure/route";
+import { getActiveHarness } from "@/lib/harness";
+import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
+import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import {
   type ClawAiConnectSession,
   clearClawAiSession,
@@ -13,6 +16,11 @@ export const dynamic = "force-dynamic";
 const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
   || "https://openclawhardware.dev/api/clawbox-ai/device-poll";
+
+// Max time a session may sit in `configuring` before the poll route gives up
+// on the background configure and surfaces a retryable error. A gateway
+// restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
+const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
 
 interface UpstreamPollResponse {
   status?: string;
@@ -70,6 +78,33 @@ async function readErrorBody(response: Response): Promise<string> {
 // that finalisation finished and trigger the success overlay.
 async function runConfigureInBackground(session: ClawAiConnectSession, accessToken: string) {
   try {
+    // The OpenClaw configure route below writes ~/.openclaw/openclaw.json and
+    // restarts the OpenClaw gateway, and it persists clawai_token only AFTER
+    // that. On a Hermes device that runtime isn't installed, so the write threw
+    // and the token was never stored — the device-login CTA could never
+    // succeed. Route Hermes devices through Hermes' own config instead.
+    // getActiveHarness() returns "openclaw" for every openclaw/dual-openclaw
+    // device, so the OpenClaw path below is untouched.
+    if ((await getActiveHarness()) === "hermes") {
+      const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+      try {
+        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier));
+      } catch (err) {
+        // Only our own message is safe to store/show — a raw spawn failure can
+        // carry the hermes binary path.
+        throw new ClawaiApplyError(
+          err instanceof ClawaiApplyError ? err.message : "Couldn't configure ClawBox AI on this device.",
+        );
+      }
+      await writeClawAiSession({
+        ...session,
+        status: "complete",
+        error: null,
+        completedAt: Date.now(),
+      });
+      return;
+    }
+
     const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -115,11 +150,24 @@ export async function POST() {
   if (session.status === "complete") {
     return NextResponse.json({ status: "complete" });
   }
-  if (session.status === "configuring") {
-    return NextResponse.json({ status: "configuring" });
-  }
   if (session.status === "error" && session.error) {
     return NextResponse.json({ status: "error", error: session.error });
+  }
+  if (session.status === "configuring") {
+    // The background configure normally flips the session to complete/error
+    // within a gateway-restart cycle. If it never reports back (process died
+    // mid-restart, etc.) the session would sit in `configuring` forever and
+    // the UI would poll indefinitely. Time it out into a retryable error so
+    // the user can request a fresh code.
+    const configuringStartedAt = session.configuringStartedAt ?? session.createdAt;
+    if (Date.now() - configuringStartedAt > CONFIGURING_TIMEOUT_MS) {
+      await clearClawAiSession();
+      return NextResponse.json(
+        { status: "error", error: "ClawBox AI setup timed out while finishing up. Please request a new code and try again." },
+        { status: 408 },
+      );
+    }
+    return NextResponse.json({ status: "configuring" });
   }
 
   if (isClawAiSessionExpired(session)) {
@@ -208,7 +256,12 @@ export async function POST() {
   // off the configure off the request lifecycle and acknowledge the
   // poll quickly. The next poll tick — typically within `interval`
   // seconds — sees `configuring` or `complete` and the UI advances.
-  const configuringSession: ClawAiConnectSession = { ...session, status: "configuring", error: null };
+  const configuringSession: ClawAiConnectSession = {
+    ...session,
+    status: "configuring",
+    error: null,
+    configuringStartedAt: Date.now(),
+  };
   await writeClawAiSession(configuringSession);
   void runConfigureInBackground(configuringSession, accessToken);
 

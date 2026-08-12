@@ -138,6 +138,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Connect AI Model",
     "ai.description": "Select your AI provider and enter your API key or subscription token.",
     "ai.fullyLocal": "Fully local",
+    "ai.loadingPanel": "Loading AI settings…",
     "ai.skipUseLocalOnly": "Skip — I'll use only local AI",
     "ai.clawaiDesc": "Register once, then paste your token",
     "ai.clawaiHint": "Create a ClawBox AI portal account, generate a token, and paste it during setup to connect your device.",
@@ -235,6 +236,11 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Waiting for gateway",
     "telegram.readyToChat": "Ready to chat",
     "telegram.botReady": "Telegram bot is ready",
+    // Hermes edition: the OpenClaw gateway is absent, and what the configure
+    // step actually starts is Hermes' own messaging gateway.
+    "telegram.hermesStartingService": "Starting the messaging service",
+    "telegram.hermesWaitingService": "Waiting for the messaging service",
+    "telegram.hermesPleaseWait": "Please wait while the messaging service starts",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connecting to the Internet",
@@ -254,6 +260,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Shut down device?",
     "wizard.restartConfirm": "Restart device?",
     "wizard.completionUnreachable": "Couldn't reach the device. Please check your connection and try again.",
+    // Hermes edition ships without the OpenClaw gateway, so the completion
+    // overlay names what is actually starting on the device.
+    "wizard.completionHermesTitle": "Starting your Hermes agent...",
+    "wizard.completionHermesSaving": "Saving your settings",
+    "wizard.completionHermesStarting": "Starting the Hermes agent",
+    "wizard.completionHermesWait": "Please wait while the agent starts",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -334,7 +346,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "Tunnel URL",
     "remoteControl.copy": "Copy",
     "remoteControl.copied": "Copied",
-    "remoteControl.checkDevices": "Check devices in portal",
+    "remoteControl.addDevice": "Add device for quick access",
     "remoteControl.regenerate": "Regenerate Tunnel URL",
     "remoteControl.regenerating": "Regenerating…",
     "remoteControl.stop": "Stop Remote Access",
@@ -557,6 +569,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Свързване на AI модел",
     "ai.description": "Изберете AI доставчик и въведете API ключ или токен за абонамент.",
     "ai.fullyLocal": "Изцяло локален",
+    "ai.loadingPanel": "Зареждане на AI настройките…",
     "ai.skipUseLocalOnly": "Пропусни — ще използвам само локален AI",
     "ai.clawaiDesc": "Най-достъпен — започнете безплатно",
     "ai.clawaiHint": "ClawBox AI е безплатен и предварително конфигуриран. Просто натиснете по-долу, за да започнете — не е нужен API ключ или акаунт.",
@@ -654,6 +667,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Изчакване на gateway",
     "telegram.readyToChat": "Готово за чат",
     "telegram.botReady": "Telegram ботът е готов",
+    "telegram.hermesStartingService": "Стартиране на услугата за съобщения",
+    "telegram.hermesWaitingService": "Изчакване на услугата за съобщения",
+    "telegram.hermesPleaseWait": "Моля, изчакайте, докато услугата за съобщения стартира",
 
     // === SetupWizard ===
     "wizard.help1Title": "Свързване с интернет",
@@ -673,6 +689,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Изключване на устройството?",
     "wizard.restartConfirm": "Рестартиране на устройството?",
     "wizard.completionUnreachable": "Не може да се свърже с устройството. Проверете връзката и опитайте отново.",
+    "wizard.completionHermesTitle": "Стартиране на вашия Hermes агент...",
+    "wizard.completionHermesSaving": "Запазване на настройките",
+    "wizard.completionHermesStarting": "Стартиране на Hermes агента",
+    "wizard.completionHermesWait": "Моля, изчакайте, докато агентът стартира",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -752,7 +772,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "URL на тунела",
     "remoteControl.copy": "Копирай",
     "remoteControl.copied": "Копирано",
-    "remoteControl.checkDevices": "Преглед на устройства в портала",
+    "remoteControl.addDevice": "Добави устройството за бърз достъп",
     "remoteControl.regenerate": "Ново URL на тунела",
     "remoteControl.regenerating": "Регенериране…",
     "remoteControl.stop": "Спри дистанционния достъп",
@@ -975,6 +995,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "KI-Modell verbinden",
     "ai.description": "Wähle deinen KI-Anbieter und gib deinen API-Schlüssel oder Abo-Token ein.",
     "ai.fullyLocal": "Vollständig lokal",
+    "ai.loadingPanel": "KI-Einstellungen werden geladen…",
     "ai.skipUseLocalOnly": "Überspringen — nur lokale KI verwenden",
     "ai.clawaiDesc": "Am günstigsten — kostenlos starten",
     "ai.clawaiHint": "ClawBox AI ist kostenlos und vorkonfiguriert. Klicke einfach unten, um loszulegen — kein API-Schlüssel oder Konto nötig.",
@@ -1072,6 +1093,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Warte auf Gateway",
     "telegram.readyToChat": "Bereit zum Chatten",
     "telegram.botReady": "Telegram-Bot ist bereit",
+    "telegram.hermesStartingService": "Nachrichtendienst wird gestartet",
+    "telegram.hermesWaitingService": "Warte auf den Nachrichtendienst",
+    "telegram.hermesPleaseWait": "Bitte warten Sie, während der Nachrichtendienst startet",
 
     // === SetupWizard ===
     "wizard.help1Title": "Internetverbindung herstellen",
@@ -1091,6 +1115,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Gerät ausschalten?",
     "wizard.restartConfirm": "Gerät neu starten?",
     "wizard.completionUnreachable": "Gerät konnte nicht erreicht werden. Bitte überprüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
+    "wizard.completionHermesTitle": "Ihr Hermes-Agent wird gestartet...",
+    "wizard.completionHermesSaving": "Einstellungen werden gespeichert",
+    "wizard.completionHermesStarting": "Hermes-Agent wird gestartet",
+    "wizard.completionHermesWait": "Bitte warten Sie, während der Agent startet",
 
     // === ProgressBar ===
     "progress.wifi": "WLAN",
@@ -1170,7 +1198,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
     "remoteControl.copy": "Kopieren",
     "remoteControl.copied": "Kopiert",
-    "remoteControl.checkDevices": "Geräte im Portal anzeigen",
+    "remoteControl.addDevice": "Gerät für Schnellzugriff hinzufügen",
     "remoteControl.regenerate": "Tunnel-URL neu generieren",
     "remoteControl.regenerating": "Wird neu generiert…",
     "remoteControl.stop": "Fernzugriff stoppen",
@@ -1393,6 +1421,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Conectar modelo de IA",
     "ai.description": "Selecciona tu proveedor de IA e introduce tu clave API o token de suscripción.",
     "ai.fullyLocal": "Totalmente local",
+    "ai.loadingPanel": "Cargando la configuración de IA…",
     "ai.skipUseLocalOnly": "Omitir — usaré solo IA local",
     "ai.clawaiDesc": "Más asequible — empieza gratis",
     "ai.clawaiHint": "ClawBox AI es gratuito y viene preconfigurado. Solo haz clic abajo para empezar — no necesitas clave API ni cuenta.",
@@ -1490,6 +1519,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Esperando al gateway",
     "telegram.readyToChat": "Listo para chatear",
     "telegram.botReady": "El bot de Telegram está listo",
+    "telegram.hermesStartingService": "Iniciando el servicio de mensajería",
+    "telegram.hermesWaitingService": "Esperando al servicio de mensajería",
+    "telegram.hermesPleaseWait": "Espera mientras se inicia el servicio de mensajería",
 
     // === SetupWizard ===
     "wizard.help1Title": "Conexión a Internet",
@@ -1509,6 +1541,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "¿Apagar el dispositivo?",
     "wizard.restartConfirm": "¿Reiniciar el dispositivo?",
     "wizard.completionUnreachable": "No se pudo conectar con el dispositivo. Comprueba tu conexión e inténtalo de nuevo.",
+    "wizard.completionHermesTitle": "Iniciando tu agente Hermes...",
+    "wizard.completionHermesSaving": "Guardando tu configuración",
+    "wizard.completionHermesStarting": "Iniciando el agente Hermes",
+    "wizard.completionHermesWait": "Espera mientras se inicia el agente",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -1588,7 +1624,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "URL del túnel",
     "remoteControl.copy": "Copiar",
     "remoteControl.copied": "Copiado",
-    "remoteControl.checkDevices": "Ver dispositivos en el portal",
+    "remoteControl.addDevice": "Añadir dispositivo para acceso rápido",
     "remoteControl.regenerate": "Regenerar URL del túnel",
     "remoteControl.regenerating": "Regenerando…",
     "remoteControl.stop": "Detener acceso remoto",
@@ -1811,6 +1847,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Connecter un modèle d'IA",
     "ai.description": "Sélectionnez votre fournisseur d'IA et entrez votre clé API ou jeton d'abonnement.",
     "ai.fullyLocal": "Entièrement local",
+    "ai.loadingPanel": "Chargement des paramètres IA…",
     "ai.skipUseLocalOnly": "Passer — je n'utiliserai que l'IA locale",
     "ai.clawaiDesc": "Le plus abordable — commencez gratuitement",
     "ai.clawaiHint": "ClawBox AI est gratuit et préconfiguré. Cliquez ci-dessous pour commencer — aucune clé API ni compte nécessaire.",
@@ -1908,6 +1945,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "En attente du gateway",
     "telegram.readyToChat": "Prêt à discuter",
     "telegram.botReady": "Le bot Telegram est prêt",
+    "telegram.hermesStartingService": "Démarrage du service de messagerie",
+    "telegram.hermesWaitingService": "En attente du service de messagerie",
+    "telegram.hermesPleaseWait": "Veuillez patienter pendant le démarrage du service de messagerie",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connexion à Internet",
@@ -1927,6 +1967,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Éteindre l'appareil ?",
     "wizard.restartConfirm": "Redémarrer l'appareil ?",
     "wizard.completionUnreachable": "Impossible de joindre l'appareil. Veuillez vérifier votre connexion et réessayer.",
+    "wizard.completionHermesTitle": "Démarrage de votre agent Hermes...",
+    "wizard.completionHermesSaving": "Enregistrement de vos paramètres",
+    "wizard.completionHermesStarting": "Démarrage de l'agent Hermes",
+    "wizard.completionHermesWait": "Veuillez patienter pendant le démarrage de l'agent",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2006,7 +2050,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "URL du tunnel",
     "remoteControl.copy": "Copier",
     "remoteControl.copied": "Copié",
-    "remoteControl.checkDevices": "Voir les appareils du portail",
+    "remoteControl.addDevice": "Ajouter l'appareil pour un accès rapide",
     "remoteControl.regenerate": "Régénérer l'URL du tunnel",
     "remoteControl.regenerating": "Régénération…",
     "remoteControl.stop": "Arrêter l’accès à distance",
@@ -2229,6 +2273,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Connetti modello IA",
     "ai.description": "Seleziona il tuo fornitore di IA e inserisci la chiave API o il token dell'abbonamento.",
     "ai.fullyLocal": "Completamente locale",
+    "ai.loadingPanel": "Caricamento impostazioni IA…",
     "ai.skipUseLocalOnly": "Salta — userò solo l'IA locale",
     "ai.clawaiDesc": "Più conveniente — inizia gratis",
     "ai.clawaiHint": "ClawBox AI è gratuito e preconfigurato. Clicca qui sotto per iniziare — non servono chiave API né account.",
@@ -2326,6 +2371,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "In attesa del gateway",
     "telegram.readyToChat": "Pronto per chattare",
     "telegram.botReady": "Il bot Telegram è pronto",
+    "telegram.hermesStartingService": "Avvio del servizio di messaggistica",
+    "telegram.hermesWaitingService": "In attesa del servizio di messaggistica",
+    "telegram.hermesPleaseWait": "Attendi mentre il servizio di messaggistica si avvia",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connessione a Internet",
@@ -2345,6 +2393,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Spegnere il dispositivo?",
     "wizard.restartConfirm": "Riavviare il dispositivo?",
     "wizard.completionUnreachable": "Impossibile raggiungere il dispositivo. Controlla la connessione e riprova.",
+    "wizard.completionHermesTitle": "Avvio del tuo agente Hermes...",
+    "wizard.completionHermesSaving": "Salvataggio delle impostazioni",
+    "wizard.completionHermesStarting": "Avvio dell'agente Hermes",
+    "wizard.completionHermesWait": "Attendi mentre l'agente si avvia",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2424,7 +2476,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "URL del tunnel",
     "remoteControl.copy": "Copia",
     "remoteControl.copied": "Copiato",
-    "remoteControl.checkDevices": "Vedi dispositivi nel portale",
+    "remoteControl.addDevice": "Aggiungi dispositivo per l'accesso rapido",
     "remoteControl.regenerate": "Rigenera URL del tunnel",
     "remoteControl.regenerating": "Rigenerazione in corso…",
     "remoteControl.stop": "Ferma accesso remoto",
@@ -2647,6 +2699,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "AIモデルを接続",
     "ai.description": "AIプロバイダーを選択し、APIキーまたはサブスクリプショントークンを入力してください。",
     "ai.fullyLocal": "完全ローカル",
+    "ai.loadingPanel": "AI設定を読み込み中…",
     "ai.skipUseLocalOnly": "スキップ — ローカルAIのみを使用します",
     "ai.clawaiDesc": "最もお手頃 — 無料で始める",
     "ai.clawaiHint": "ClawBox AIは無料で設定済みです。下のボタンをクリックするだけで始められます。APIキーもアカウントも不要です。",
@@ -2744,6 +2797,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "ゲートウェイを待機中",
     "telegram.readyToChat": "チャット準備完了",
     "telegram.botReady": "Telegramボットの準備ができました",
+    "telegram.hermesStartingService": "メッセージングサービスを起動中",
+    "telegram.hermesWaitingService": "メッセージングサービスを待機中",
+    "telegram.hermesPleaseWait": "メッセージングサービスの起動をお待ちください",
 
     // === SetupWizard ===
     "wizard.help1Title": "インターネット接続",
@@ -2763,6 +2819,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "デバイスをシャットダウンしますか？",
     "wizard.restartConfirm": "デバイスを再起動しますか？",
     "wizard.completionUnreachable": "デバイスに接続できませんでした。接続を確認してもう一度お試しください。",
+    "wizard.completionHermesTitle": "Hermes エージェントを起動しています...",
+    "wizard.completionHermesSaving": "設定を保存中",
+    "wizard.completionHermesStarting": "Hermes エージェントを起動中",
+    "wizard.completionHermesWait": "エージェントの起動をお待ちください",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -2842,7 +2902,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "トンネル URL",
     "remoteControl.copy": "コピー",
     "remoteControl.copied": "コピーしました",
-    "remoteControl.checkDevices": "ポータルでデバイスを確認",
+    "remoteControl.addDevice": "デバイスを追加してクイックアクセス",
     "remoteControl.regenerate": "トンネルURLを再生成",
     "remoteControl.regenerating": "再生成中…",
     "remoteControl.stop": "リモートアクセスを停止",
@@ -3065,6 +3125,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "AI-model verbinden",
     "ai.description": "Kies je AI-provider en voer je API-sleutel of abonnementstoken in.",
     "ai.fullyLocal": "Volledig lokaal",
+    "ai.loadingPanel": "AI-instellingen laden…",
     "ai.skipUseLocalOnly": "Overslaan — ik gebruik alleen lokale AI",
     "ai.clawaiDesc": "Meest betaalbaar — gratis beginnen",
     "ai.clawaiHint": "ClawBox AI is gratis en vooraf geconfigureerd. Klik hieronder om te beginnen — geen API-sleutel of account nodig.",
@@ -3162,6 +3223,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Wachten op gateway",
     "telegram.readyToChat": "Klaar om te chatten",
     "telegram.botReady": "Telegram-bot is klaar",
+    "telegram.hermesStartingService": "Berichtenservice starten",
+    "telegram.hermesWaitingService": "Wachten op de berichtenservice",
+    "telegram.hermesPleaseWait": "Even geduld terwijl de berichtenservice start",
 
     // === SetupWizard ===
     "wizard.help1Title": "Verbinding maken met internet",
@@ -3181,6 +3245,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Apparaat uitschakelen?",
     "wizard.restartConfirm": "Apparaat herstarten?",
     "wizard.completionUnreachable": "Kan het apparaat niet bereiken. Controleer uw verbinding en probeer opnieuw.",
+    "wizard.completionHermesTitle": "Je Hermes-agent wordt gestart...",
+    "wizard.completionHermesSaving": "Instellingen opslaan",
+    "wizard.completionHermesStarting": "Hermes-agent starten",
+    "wizard.completionHermesWait": "Even geduld terwijl de agent start",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3260,7 +3328,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
     "remoteControl.copy": "Kopieer",
     "remoteControl.copied": "Gekopieerd",
-    "remoteControl.checkDevices": "Apparaten in portal bekijken",
+    "remoteControl.addDevice": "Apparaat toevoegen voor snelle toegang",
     "remoteControl.regenerate": "Tunnel-URL opnieuw genereren",
     "remoteControl.regenerating": "Opnieuw genereren…",
     "remoteControl.stop": "Externe toegang stoppen",
@@ -3483,6 +3551,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "Anslut AI-modell",
     "ai.description": "Välj din AI-leverantör och ange din API-nyckel eller prenumerationstoken.",
     "ai.fullyLocal": "Helt lokal",
+    "ai.loadingPanel": "Läser in AI-inställningar…",
     "ai.skipUseLocalOnly": "Hoppa över — jag använder bara lokal AI",
     "ai.clawaiDesc": "Mest prisvärd — börja gratis",
     "ai.clawaiHint": "ClawBox AI är gratis och förkonfigurerat. Klicka nedan för att komma igång — ingen API-nyckel eller konto behövs.",
@@ -3580,6 +3649,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "Väntar på gateway",
     "telegram.readyToChat": "Redo att chatta",
     "telegram.botReady": "Telegram-boten är redo",
+    "telegram.hermesStartingService": "Startar meddelandetjänsten",
+    "telegram.hermesWaitingService": "Väntar på meddelandetjänsten",
+    "telegram.hermesPleaseWait": "Vänta medan meddelandetjänsten startar",
 
     // === SetupWizard ===
     "wizard.help1Title": "Anslut till internet",
@@ -3599,6 +3671,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "Stänga av enheten?",
     "wizard.restartConfirm": "Starta om enheten?",
     "wizard.completionUnreachable": "Det gick inte att nå enheten. Kontrollera anslutningen och försök igen.",
+    "wizard.completionHermesTitle": "Startar din Hermes-agent...",
+    "wizard.completionHermesSaving": "Sparar dina inställningar",
+    "wizard.completionHermesStarting": "Startar Hermes-agenten",
+    "wizard.completionHermesWait": "Vänta medan agenten startar",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -3678,7 +3754,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
     "remoteControl.copy": "Kopiera",
     "remoteControl.copied": "Kopierad",
-    "remoteControl.checkDevices": "Visa enheter i portalen",
+    "remoteControl.addDevice": "Lägg till enheten för snabb åtkomst",
     "remoteControl.regenerate": "Generera ny tunnel-URL",
     "remoteControl.regenerating": "Genererar ny URL…",
     "remoteControl.stop": "Stoppa fjärråtkomst",
@@ -3901,6 +3977,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "ai.title": "连接 AI 模型",
     "ai.description": "选择 AI 供应商并输入 API 密钥或订阅令牌。",
     "ai.fullyLocal": "完全本地",
+    "ai.loadingPanel": "正在加载 AI 设置…",
     "ai.skipUseLocalOnly": "跳过 — 我只使用本地 AI",
     "ai.clawaiDesc": "最实惠 — 免费开始",
     "ai.clawaiHint": "ClawBox AI 免费且已预配置。点击下方即可开始——无需 API 密钥或账户。",
@@ -3998,6 +4075,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.waitingGateway": "等待网关就绪",
     "telegram.readyToChat": "准备就绪",
     "telegram.botReady": "Telegram 机器人已就绪",
+    "telegram.hermesStartingService": "正在启动消息服务",
+    "telegram.hermesWaitingService": "正在等待消息服务",
+    "telegram.hermesPleaseWait": "请稍候，消息服务正在启动",
 
     // === SetupWizard ===
     "wizard.help1Title": "连接互联网",
@@ -4017,6 +4097,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "wizard.shutdownConfirm": "确定关机吗？",
     "wizard.restartConfirm": "确定重启吗？",
     "wizard.completionUnreachable": "无法连接到设备。请检查您的连接并重试。",
+    "wizard.completionHermesTitle": "正在启动您的 Hermes 智能体...",
+    "wizard.completionHermesSaving": "正在保存您的设置",
+    "wizard.completionHermesStarting": "正在启动 Hermes 智能体",
+    "wizard.completionHermesWait": "请稍候，智能体正在启动",
 
     // === ProgressBar ===
     "progress.wifi": "WiFi",
@@ -4096,7 +4180,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.tunnelUrlLabel": "隧道 URL",
     "remoteControl.copy": "复制",
     "remoteControl.copied": "已复制",
-    "remoteControl.checkDevices": "在门户中查看设备",
+    "remoteControl.addDevice": "添加设备以便快速访问",
     "remoteControl.regenerate": "重新生成隧道URL",
     "remoteControl.regenerating": "重新生成中…",
     "remoteControl.stop": "停止远程访问",

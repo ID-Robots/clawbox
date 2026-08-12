@@ -5,7 +5,9 @@ import { promisify } from "util";
 import { execFile as execFileCb } from "child_process";
 import { setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
-import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway } from "@/lib/openclaw-config";
+import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway, openclawIsAbsent } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
+import { removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
 const execFile = promisify(execFileCb);
 const OPENCLAW_BIN = findOpenclawBin();
@@ -45,13 +47,27 @@ export async function POST(request: Request) {
       local_ai_configured_at: undefined,
     });
 
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.model.fallbacks",
-      JSON.stringify([]),
-      "--json",
-    ]).catch(() => {});
+    // Clearing the OpenClaw fallback only applies where OpenClaw exists. On the
+    // Hermes SKU there is no binary to spawn (it would ENOENT); the Hermes
+    // unregister below is what actually takes effect there.
+    if (!openclawIsAbsent()) {
+      await runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "agents.defaults.model.fallbacks",
+        JSON.stringify([]),
+        "--json",
+      ]).catch(() => {});
+    }
+
+    // Hermes keeps its own providers block, so disabling here has to unregister
+    // there too — otherwise the picker keeps offering a model that is no longer
+    // running, which fails only once the customer actually sends a message.
+    if ((await getActiveHarness()) === "hermes") {
+      await removeLocalAiFromHermes().catch((err) => {
+        console.error("[local-ai] Hermes local provider removal failed:", err);
+      });
+    }
 
     await restartGateway().catch(() => {});
 

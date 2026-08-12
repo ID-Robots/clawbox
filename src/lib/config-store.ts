@@ -20,7 +20,20 @@ function readConfig(): Record<string, unknown> {
 
 function writeConfig(data: Record<string, unknown>): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2));
+  // config.json holds real secrets (clawai portal token, telegram bot token).
+  // Write to a fresh temp file at 0o600 then atomically rename over the target,
+  // so the live config is never briefly world-readable (writeFileSync's `mode`
+  // is ignored when the destination already exists, e.g. a 0644 file from an
+  // older build). chmod the temp too, in case a stale temp survived a crash
+  // and pre-existed at 0644 (rename would then carry those perms across).
+  const tmp = CONFIG_PATH + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {
+    // best-effort; a failed chmod must not break config writes
+  }
+  fs.renameSync(tmp, CONFIG_PATH);
 }
 
 export async function get(key: string): Promise<unknown> {

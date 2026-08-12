@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 
@@ -308,6 +309,19 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     setConfirmInstall(app);
   }, []);
 
+  const dismissConfirmInstall = useCallback(() => setConfirmInstall(null), []);
+  // Generated, not hardcoded: dialogs on this desktop can stack, and two
+  // elements sharing an id would point aria-labelledby at whichever the
+  // browser found first.
+  const confirmTitleId = useId();
+  // Focus containment for the install confirmation below. `open` is the hook's
+  // normal contract for a dialog whose panel is rendered conditionally from a
+  // component that stays mounted — not a workaround for anything here.
+  const confirmPanelRef = useModalDialog<HTMLDivElement>({
+    open: confirmInstall !== null,
+    onClose: dismissConfirmInstall,
+  });
+
   const handleInstall = useCallback(async (app: StoreApp) => {
     setConfirmInstall(null);
     setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "installing" } }));
@@ -429,22 +443,30 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     );
   };
 
-  // Install confirmation modal — shared across all views
+  // Install confirmation modal — shared across all views.
+  //
+  // The dialog role sits on the PANEL, not on the full-screen backdrop: on the
+  // backdrop the accessible dialog is the entire viewport and its accessible
+  // name absorbs everything behind the scrim. Escape used to be an onKeyDown on
+  // that same backdrop div, which never fired — a div is not focusable, so the
+  // key event was never routed to it. useModalDialog owns Escape, the Tab
+  // cycle, focus-in on open and focus-restore on close.
   const confirmModal = confirmInstall && (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={() => setConfirmInstall(null)}
-      onKeyDown={e => { if (e.key === 'Escape') setConfirmInstall(null); }}
-      role="dialog" aria-modal="true" aria-labelledby="confirm-install-title">
-      <div className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+      onClick={dismissConfirmInstall}>
+      <div
+        ref={confirmPanelRef}
+        role="dialog" aria-modal="true" aria-labelledby={confirmTitleId}
+        className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
-            <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }}>download</span>
+            <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }} aria-hidden="true">download</span>
           </div>
-          <h3 id="confirm-install-title" className="text-lg font-semibold">{t("store.confirmTitle", { name: confirmInstall.name })}</h3>
+          <h3 id={confirmTitleId} className="text-lg font-semibold">{t("store.confirmTitle", { name: confirmInstall.name })}</h3>
         </div>
         <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
           <div className="flex gap-2">
-            <span className="material-symbols-rounded text-yellow-400 shrink-0" style={{ fontSize: 18 }}>warning</span>
+            <span className="material-symbols-rounded text-yellow-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
             <p className="text-sm text-yellow-200/80">
               {t("store.confirmMessage")}
             </p>
@@ -452,12 +474,14 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         </div>
         <div className="flex gap-3 justify-end">
           <button
-            onClick={() => setConfirmInstall(null)}
+            type="button"
+            onClick={dismissConfirmInstall}
             className="px-4 py-2 rounded-lg text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
             {t("cancel")}
           </button>
           <button
+            type="button"
             onClick={() => handleInstall(confirmInstall)}
             className="px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors cursor-pointer"
             style={{ backgroundColor: BRAND_ORANGE }}

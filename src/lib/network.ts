@@ -312,9 +312,12 @@ async function doScan(): Promise<WifiNetwork[]> {
       .split("\n")
       .filter((line) => line.trim())
       .map((line) => {
-        // nmcli terse mode uses ':' as delimiter; SSID could contain ':'
-        // but SIGNAL, SECURITY, FREQ are at the end - parse from right
-        const parts = line.split(":");
+        // nmcli terse mode uses ':' as delimiter and escapes a literal ':' in
+        // the SSID as '\:'. Use the escaping-aware parser (naive split(":")
+        // would split on the escaped colon and leave a stray backslash,
+        // mangling SSIDs that contain a colon). SIGNAL/SECURITY/FREQ have no
+        // colons, so we still pop them off the right.
+        const parts = parseNmcliTerseLine(line);
         if (parts.length < 4) {
           console.warn("[WiFi] Dropping malformed nmcli line:", line);
           return null;
@@ -402,6 +405,15 @@ export function setConnectStatus(status: ConnectStatus): void {
   connectStatus = status;
 }
 
+// execFile embeds the full argv (including the WPA PSK we pass to nmcli) into
+// its rejection message, so any error we log OR propagate would leak the
+// plaintext password. Scrub the known secret out before it can reach a log
+// line or an API response body.
+function redactSecret(text: string, secret?: string): string {
+  if (!secret) return text;
+  return text.split(secret).join("***");
+}
+
 export async function switchToClient(
   ssid: string,
   password?: string
@@ -450,7 +462,7 @@ export async function switchToClient(
       return { message: stdout.trim() };
     } catch (err) {
       lastErr = err;
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactSecret(err instanceof Error ? err.message : String(err), password);
       console.warn(`[WiFi] Connect attempt ${attempt}/${CONNECT_RETRIES} failed: ${msg}`);
       // A wrong password fails the WPA 4-way handshake — retrying with the same
       // password is pointless, so stop early and report it precisely.
@@ -466,7 +478,7 @@ export async function switchToClient(
     }
   }
 
-  console.error("[WiFi] All connect attempts failed, restoring AP:", lastErr instanceof Error ? lastErr.message : lastErr);
+  console.error("[WiFi] All connect attempts failed, restoring AP:", redactSecret(lastErr instanceof Error ? lastErr.message : String(lastErr), password));
 
     // Delete the just-attempted client profile. `nmcli device wifi connect`
     // leaves behind a saved connection (autoconnect on by default) for the
@@ -527,7 +539,10 @@ export async function switchToClient(
     if (wrongKey) {
       throw new WifiAuthError(`Incorrect password for "${ssid}"`);
     }
-    throw lastErr;
+    // Re-throw with the PSK scrubbed: the connect route stores err.message into
+    // the (pre-auth-readable) connect-status, so the raw execFile message would
+    // otherwise leak the plaintext password to the client.
+    throw new Error(redactSecret(lastErr instanceof Error ? lastErr.message : String(lastErr), password));
   } finally {
     clearConnectLock();
   }

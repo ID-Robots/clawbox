@@ -1,13 +1,39 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+// Server-only handoff file the configure route reads on the `oauthHandoff`
+// path — the SAME file the device-code flow (device-poll) uses, so both take
+// its path from the one module that owns it.
+import { HANDOFF_TOKENS_PATH } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
 import { discoverGoogleProject } from "@/lib/google-project";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
+
+// Persist the freshly-issued provider tokens to a 0600 server file and return
+// just a status, so the access/refresh/id tokens never travel back through the
+// browser across the plain-HTTP setup-AP hop (the device-code flow already does
+// this; the auth-code flow here now matches). The non-secret Google projectId
+// is safe to return for the client to relay in the (tokenless) configure body.
+async function persistTokensAndAck(
+  provider: string,
+  tokens: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number },
+  extra?: { projectId?: string },
+): Promise<NextResponse> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  await fs.writeFile(
+    tmpPath,
+    JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),
+    { mode: 0o600 },
+  );
+  await fs.rename(tmpPath, HANDOFF_TOKENS_PATH);
+  return NextResponse.json({ status: "complete", ...(extra?.projectId ? { projectId: extra.projectId } : {}) });
+}
 
 function parseErrorMessage(text: string, status: number): string {
   try {
@@ -156,7 +182,7 @@ export async function POST(request: Request) {
       const orgPath = path.join(path.dirname(STATE_PATH), "oauth-org.json");
       await fs.unlink(orgPath).catch(() => {});
 
-      return NextResponse.json({
+      return persistTokensAndAck("openai", {
         access_token: tokenData.access_token,
         id_token: tokenData.id_token,
         refresh_token: tokenData.refresh_token,
@@ -179,12 +205,15 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_in: tokenData.expires_in,
-      ...(projectId ? { projectId } : {}),
-    });
+    return persistTokensAndAck(
+      provider,
+      {
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        expires_in: tokenData.expires_in,
+      },
+      { projectId },
+    );
   } catch (err) {
     return NextResponse.json(
       {

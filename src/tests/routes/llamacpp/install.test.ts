@@ -4,6 +4,9 @@ import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { NextResponse } from "next/server";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+// Imported rather than spelled out so a GGUF swap cannot leave this suite
+// asserting a filename the app no longer asks for.
+import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
 
 vi.mock("child_process", () => ({
   spawn: vi.fn(),
@@ -115,7 +118,7 @@ describe("POST /setup-api/llamacpp/install", () => {
       const normalized = String(target);
       if (
         normalized === "/usr/local/bin/llama-server"
-        || normalized.endsWith("gemma-4-e2b-it-edited-q4_0.gguf")
+        || normalized.endsWith(DEFAULT_LLAMACPP_HF_FILE)
       ) {
         return { size: 1 } as never;
       }
@@ -187,8 +190,8 @@ describe("POST /setup-api/llamacpp/install", () => {
       "bash",
       expect.arrayContaining([
         expect.stringContaining("scripts/start-llamacpp.sh"),
-        "gguf-org/gemma-4-e2b-it-gguf",
-        "gemma-4-e2b-it-edited-q4_0.gguf",
+        DEFAULT_LLAMACPP_HF_REPO,
+        DEFAULT_LLAMACPP_HF_FILE,
         "gemma4-e2b-it-q4_0",
       ]),
       expect.objectContaining({
@@ -241,7 +244,7 @@ describe("POST /setup-api/llamacpp/install", () => {
     mockFs.stat.mockImplementation((async (target: unknown) => {
       const normalized = String(target);
       const isRuntimeArtifact = normalized === "/usr/local/bin/llama-server"
-        || normalized.endsWith("gemma-4-e2b-it-edited-q4_0.gguf");
+        || normalized.endsWith(DEFAULT_LLAMACPP_HF_FILE);
       if (isRuntimeArtifact && installComplete) return { size: 1 } as never;
       throw new Error("ENOENT");
     }) as typeof fsp.stat);
@@ -352,7 +355,7 @@ describe("POST /setup-api/llamacpp/install", () => {
     mockFs.stat.mockImplementation((async (target: unknown) => {
       if (
         String(target) === "/usr/local/bin/llama-server"
-        || String(target).endsWith("gemma-4-e2b-it-edited-q4_0.gguf")
+        || String(target).endsWith(DEFAULT_LLAMACPP_HF_FILE)
       ) {
         return { size: 1 } as never;
       }

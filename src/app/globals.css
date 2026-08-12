@@ -55,6 +55,198 @@
 
   --background: var(--bg-deep);
   --foreground: var(--text-primary);
+
+  /* ─────────────────────────────────────────────────────────────────────
+     LADDERS
+     Everything below names a value the product was already painting by
+     hand. Adding a name changes nothing on its own — a component has to
+     opt in — so this block is a deliberate visual no-op.
+     ───────────────────────────────────────────────────────────────────── */
+
+  /* ── ground ────────────────────────────────────────────────────────────
+     Two grounds shipped, and they were never rivals — they were one name
+     doing two jobs. --bg-deep #111827 is the INSET colour: the well under
+     a segmented tab tray (AIModelsStep), the provider-list backing, the
+     tier pill tray. The page ground is #0a0f1a, hardcoded three times —
+     setup/page.tsx, layout.tsx's PWA themeColor twice, and page.tsx's
+     desktop fallback. #0a0f1a wins because it is what the customer's
+     browser chrome and splash screen already paint, so anything else
+     creates a seam at the edge of the viewport on a phone.
+
+     --bg-deep keeps its inset job and its value. --background still
+     resolves to it, so nothing moves today. */
+  --ground: #0a0f1a;
+  --ground-fade: rgba(10, 15, 26, 0.88);   /* header scrim, mid stop */
+  --ground-0: rgba(10, 15, 26, 0);         /* header scrim, tail     */
+
+  /* ── fill ladder ───────────────────────────────────────────────────────
+     Four rungs. The measured white alphas across src/components cluster
+     hard at .03 / .06 / .10 / .15 (14 / 46 / 75 / 28 uses); the strays in
+     between are nudges, not steps. */
+  --fill-1: rgba(255, 255, 255, 0.03);     /* quiet inset               */
+  --fill-2: rgba(255, 255, 255, 0.06);     /* inert tile, input, track  */
+  --fill-3: rgba(255, 255, 255, 0.10);     /* hover on a row            */
+  --fill-4: rgba(255, 255, 255, 0.15);     /* pressed                   */
+
+  /* ── line ──────────────────────────────────────────────────────────────
+     One OUTER border (--border-subtle, above — the product's only border
+     token) and two inner hairlines. The product does not draw internal
+     dividers in steel; it draws them in white alpha. */
+  --hair: rgba(255, 255, 255, 0.06);       /* divider inside a bordered box */
+  --hair-2: rgba(255, 255, 255, 0.10);     /* edge of a quiet control       */
+
+  /* ── the two meanings ──────────────────────────────────────────────────
+     --coral-bright is ACTION, --cyan-bright is DONE, on every box and
+     under every harness. Those two are never re-pointed; what follows only
+     names alphas that were already being typed by hand. .25 / .30 / .40
+     already have names (--shadow-coral-mid, --border-accent, --logo-glow)
+     and are not restated here. */
+  --coral-wash: rgba(249, 115, 22, 0.06);  /* selected row                  */
+  --coral-tint: rgba(249, 115, 22, 0.15);  /* badge / panel fill            */
+  --coral-halo: rgba(249, 115, 22, 0.50);  /* current step glow, ProgressBar */
+  --coral-ring: rgba(249, 115, 22, 0.60);  /* focus outline                 */
+  --cyan-wash: rgba(0, 229, 204, 0.10);
+  --cyan-edge: rgba(0, 229, 204, 0.25);
+  /* Ink for a glyph sitting ON a cyan fill — near-black with the hue in it,
+     so a tick on a cyan disc doesn't read as pure black on colour. */
+  --cyan-ink: #06202a;
+  /* Coral's edge weight. --border-accent is the same value under an older
+     name; both are kept so existing callers don't have to churn, and so the
+     hue set reads consistently (wash / tint / edge / halo / ring). */
+  --coral-edge: rgba(249, 115, 22, 0.30);
+
+  /* Destructive and caution. Same wash/edge/ink shape as the hues above —
+     five component ports each improvised these from Tailwind (red-500/10,
+     red-500/25, red-400) because the ladder stopped at cyan, and a sixth
+     would have invented a sixth dialect. Values are the ones StatusMessage
+     already ships, so nothing changes on screen. */
+  --red-wash: rgba(239, 68, 68, 0.10);
+  --red-edge: rgba(239, 68, 68, 0.25);
+  --red-ink: #f87171;
+  --amber-wash: rgba(251, 191, 36, 0.10);
+  --amber-edge: rgba(251, 191, 36, 0.25);
+  --amber-ink: #fcd34d;
+
+  /* ── radius ────────────────────────────────────────────────────────────
+     8px dominates (210 uses of rounded-lg), then 12 for inputs, 16 for
+     cards, full for chips and radios. 9/10/11/14px do not exist here. */
+  --r-1: 8px;
+  --r-2: 12px;
+  --r-3: 16px;
+  --r-full: 999px;
+
+  /* ── type ──────────────────────────────────────────────────────────────
+     Six rungs and nothing between them. --font-display / --font-body are
+     declared in @theme above and neither webfont ships, so this all
+     renders system-ui today; the slot names stay so a future drop-in
+     reaches these surfaces too. */
+  --t-1: 11px;   /* eyebrow, rail label, chip, counter        */
+  --t-2: 12px;   /* caption, helper, small button, mono value */
+  --t-3: 13px;   /* the assurance line                        */
+  --t-4: 14px;   /* lede, list rows                           */
+  --t-5: 15px;   /* body, h2, primary button label            */
+  --t-6: 26px;   /* h1                                        */
+
+  /* Three weights. 700 is the product's font-bold on every H1, 600 its
+     font-semibold on labels and buttons, 400 for anything longer than a
+     line. There is no 500 step and no 640 — 640 is a variable-font weight
+     the system fallback cannot hit, so it rounds unpredictably. */
+  --w-body: 400;
+  --w-label: 600;
+  --w-head: 700;
+
+  /* Line height per ROLE, not per size — a 14px lede and a 14px table row
+     want different leading. Named because two ported components picked
+     different values for the same role (1.625 vs 1.5) and the disagreement
+     was invisible until they sat side by side. */
+  --lh-head: 1.15;   /* h1/h2 — tight, they are short           */
+  --lh-body: 1.6;    /* lede and prose                          */
+  --lh-tight: 1.45;  /* list rows, helper text, dense surfaces  */
+
+  /* Mono. Not a webfont: this is the stack the terminal, the device code,
+     version strings and the Telegram token field already use, named once so
+     they cannot drift apart. */
+  --f-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Tracking. Only two: uppercase micro-labels need air, and a device code
+     read aloud from a screen needs more. Body text gets none. */
+  --tr-label: 0.06em;
+  --tr-code: 0.16em;
+
+  /* Control heights. 48 is the primary and any field a finger uses, 44 the
+     minimum touch target anywhere, 40 the quiet secondary. */
+  --h-control: 48px;
+  --h-touch: 44px;
+  --h-quiet: 40px;
+
+  /* A press reads as the control moving under the finger, not as it fading.
+     One value so every button agrees. */
+  --press-scale: 0.98;
+
+  /* ── space ─────────────────────────────────────────────────────────────
+     4pt. The rule: the gap BETWEEN two things is at least one rung larger
+     than the largest gap INSIDE either of them. */
+  --s-0: 2px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+  --s-9: 64px;
+
+  /* ── motion ────────────────────────────────────────────────────────────
+     Five durations on a x1.75 ladder, anchored at the bottom by the 0.1s
+     "instantaneous" threshold and capped under the 1s flow-of-thought
+     limit. Five easings, of which one is deliberately not a curve:
+     --ease-truth is linear because an easing curve fabricates a velocity
+     profile the box never reported, and a progress bar that keeps gliding
+     after the data stopped is lying. */
+  --travel: 16px;   /* X translate = a different screen  */
+  --lift: 8px;      /* Y translate = more of this screen */
+
+  --d-1: 80ms;      /* instant feedback: press, focus ring           */
+  --d-2: 140ms;     /* state change on something already on screen   */
+  --d-3: 240ms;     /* in-step reveal or dismiss                     */
+  --d-4: 400ms;     /* one step leaves and the next arrives          */
+  --d-5: 700ms;     /* reserved: the handoff, the reconnection       */
+  --d-exit: 160ms;  /* --d-4 split: 160 out …                        */
+  --d-enter: 240ms; /* … 240 in. Arrival is what must be legible.    */
+  --stagger: 40ms;  /* x4 bands, maximum                             */
+  --busy-delay: 200ms; /* before any busy affordance appears         */
+
+  --ease-entrance: cubic-bezier(0, 0, 0.38, 0.9);
+  --ease-exit: cubic-bezier(0.2, 0, 1, 0.9);
+  --ease-standard: cubic-bezier(0.2, 0, 0.38, 0.9);
+  --ease-emphasis: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-truth: linear;
+}
+
+/* Reduced motion overrides the motion tokens EXPLICITLY rather than
+   multiplying them: a multiplier lands on sub-frame durations the browser
+   rounds unpredictably, which is "off" wearing a costume. Reduced motion is
+   not no motion — opacity and colour changes survive, because removing them
+   removes information. The blanket 0.01ms rule further down still applies to
+   the perpetual decorative animations it was written for. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --travel: 0px;
+    --lift: 0px;
+    --d-1: 0ms;
+    --d-2: 100ms;
+    --d-3: 120ms;
+    --d-4: 160ms;
+    --d-5: 200ms;
+    --d-exit: 80ms;
+    --d-enter: 80ms;
+    --stagger: 0ms;
+    --ease-entrance: linear;
+    --ease-exit: linear;
+    --ease-standard: linear;
+    --ease-emphasis: linear;
+  }
 }
 
 html,
@@ -119,7 +311,13 @@ h6 {
   background-clip: text;
 }
 
-/* Gradient button — coral red */
+/* Gradient button — coral red.
+ *
+ * NOTE for anyone styling a button that carries this class: the rule is
+ * unlayered, so it beats every Tailwind utility regardless of specificity —
+ * `disabled:bg-*` and `hover:bg-*` will appear to do nothing. Two component
+ * ports each lost time to that. Override the surface with an inline style, or
+ * drop the class for the state you want to paint differently. */
 .btn-gradient {
   background: linear-gradient(135deg, var(--coral-bright) 0%, var(--coral-dark) 100%);
   transition: opacity 0.2s, transform 0.2s;
@@ -294,6 +492,389 @@ h6 {
   line-height: 1.3;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SETUP WIZARD SHELL — header, progress rail, stage
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.setup-shell {
+  --setup-hdr-h: 56px;      /* matches ChromeShelf's 56px — the bar the
+                               customer meets ten minutes later */
+  --setup-gutter: 16px;
+  --setup-card-w: 520px;    /* the wizard's own measure, max-w-[520px] */
+  --setup-rail-w: 560px;    /* card + 40: 20px proud on each side, so the
+                               rail reads as the card's shoulder */
+}
+@media (min-width: 720px) {
+  .setup-shell {
+    --setup-hdr-h: 64px;
+    --setup-gutter: 24px;
+  }
+}
+
+/* ── the bar ──────────────────────────────────────────────────────────────
+   The SURFACE is full-bleed; the MEASURE is a child. Putting a max-width on
+   the element that also paints the background is what produces an opaque
+   slab with two hard vertical edges sitting on the wallpaper — one element
+   doing two jobs. .setup-chrome never takes a width, and never a border:
+   its bottom boundary is the progress rail, so the edge carries information
+   instead of just drawing a line. */
+.setup-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  width: 100%;
+  background: linear-gradient(
+    to bottom,
+    var(--ground) 0,
+    var(--ground-fade) calc(var(--setup-hdr-h) - 6px),
+    var(--ground-0) 100%
+  );
+  padding-bottom: 20px;   /* the scrim dissolves instead of cutting… */
+  margin-bottom: -20px;   /* …and the tail costs the page no height  */
+  border: 0;
+  pointer-events: none;   /* the tail must not eat clicks */
+}
+.setup-chrome > * {
+  pointer-events: auto;
+}
+
+.setup-chrome-inner {
+  height: var(--setup-hdr-h);
+  width: min(100% - (var(--setup-gutter) * 2), 1120px);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+/* ── brand lockup ────────────────────────────────────────────────────────
+   Both assets are trimmed to their ink — the crab's claws reach its right
+   edge and the wordmark's "C" starts at its left — so a nominal 8px reads
+   as almost touching. 14px is where the two stop fighting. */
+.setup-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+  min-width: 0;
+  text-decoration: none;
+}
+.setup-brand-mark {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex: none;
+}
+.setup-brand-word {
+  display: none;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: var(--w-head);
+  line-height: 1;
+  white-space: nowrap;
+}
+@media (min-width: 640px) {
+  .setup-brand-word { display: block; }
+}
+
+/* Hermes enters as a BYLINE in the metadata slot, not as a second lockup.
+   Two equal wordmarks either side of a rule is the sponsor-bar pattern and
+   no amount of styling gets you out of a structure. A middot rather than a
+   divider, and only the glyph at full strength — one small bright mark
+   reads as a badge, a bright wordmark reads as a logo. */
+.setup-cobrand {
+  display: none;
+  align-items: baseline;
+  gap: 5px;
+  font-size: var(--t-1);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: none;
+}
+.setup-cobrand::before {
+  content: "·";
+  margin-right: var(--s-1);
+  color: var(--text-muted);
+}
+.setup-cobrand .setup-caduceus {
+  font-size: var(--t-3);
+  line-height: 1;
+  color: var(--agent-ink, var(--text-secondary));
+}
+.setup-cobrand .setup-cobrand-name {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: var(--w-label);
+}
+/* On a phone keep the GLYPH and drop the words: the crisp mark survives
+   small, the words do not. */
+@media (max-width: 719px) {
+  .setup-cobrand .setup-cobrand-name,
+  .setup-cobrand::before { display: none; }
+  .setup-cobrand { margin-left: var(--s-1); }
+}
+
+/* ── actions ─────────────────────────────────────────────────────────── */
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-0);
+  flex: none;
+}
+.setup-icon-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-1);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color var(--d-2) var(--ease-standard),
+              background-color var(--d-2) var(--ease-standard);
+}
+.setup-icon-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+@media (min-width: 560px) {
+  .setup-icon-btn { width: 36px; height: 36px; }
+}
+
+/* ── the progress rail ───────────────────────────────────────────────────
+   Capped at 560 so the five labels sit 108px apart at every width from 940
+   to 1920 and the group always reads as one object rather than five words
+   spread thin across a wide bar. It never stretches.
+
+   The current station is marked by THICKNESS and LENGTH, not decoration —
+   the same move ChromeShelf makes with its 6px→16px active pill. Done
+   segments recede to teal at 55%: they are finished, they are not
+   competing with the one thing that is current. */
+.setup-rail {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.setup-rail-track {
+  display: flex;
+  gap: var(--s-1);
+  height: 5px;
+  align-items: flex-end;
+}
+.setup-seg {
+  flex: 1;
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--fill-2);
+  overflow: hidden;
+  transition: height var(--d-2) var(--ease-standard);
+}
+.setup-seg i {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--cyan-bright);
+  opacity: 0.55;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--d-3) var(--ease-standard),
+              background-color var(--d-2) var(--ease-standard),
+              opacity var(--d-2) var(--ease-standard);
+}
+.setup-seg.is-done i { transform: scaleX(1); }
+.setup-seg.is-now { height: 5px; }
+.setup-seg.is-now i {
+  transform: scaleX(1);
+  background: var(--coral-bright);
+  opacity: 1;
+  box-shadow: 0 0 8px var(--coral-halo);   /* the shipped ProgressBar glow */
+}
+/* Finish: five objects become one continuous bar. */
+.setup-rail-track.is-finished { gap: 0; }
+.setup-rail-track.is-finished .setup-seg { height: 3px; border-radius: 0; }
+.setup-rail-track.is-finished .setup-seg:first-child {
+  border-radius: var(--r-full) 0 0 var(--r-full);
+}
+.setup-rail-track.is-finished .setup-seg:last-child {
+  border-radius: 0 var(--r-full) var(--r-full) 0;
+}
+.setup-rail-track.is-finished .setup-seg i {
+  transform: scaleX(1);
+  background: var(--cyan-bright);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.setup-rail-labels { display: none; list-style: none; }
+.setup-rail-here {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--t-2);
+  color: var(--text-secondary);
+}
+.setup-rail-here b {
+  font-size: var(--t-1);
+  font-weight: var(--w-body);
+  color: var(--coral-bright);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.setup-rail-here span {
+  color: var(--text-primary);
+  font-weight: var(--w-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-rail-here.is-finished b { color: var(--cyan-bright); }
+
+/* Below the labelled breakpoint the rail's track IS the bar's bottom edge:
+   full-bleed, pinned outside the measure, so the header stays ONE row at
+   every width — including Bulgarian, whose strings run ~35% long. The
+   counter and the current station's name ride inline on that same row. */
+@media (max-width: 939px) {
+  .setup-rail-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 20px;      /* above the scrim's tail */
+    height: 2px;
+    gap: 0;
+  }
+  .setup-seg { height: 2px; border-radius: 0; }
+  .setup-seg.is-now { height: 2px; }
+  .setup-seg.is-now i { box-shadow: none; }
+}
+
+/* A 560px labelled rail plus the lockup plus three 36px buttons needs
+   ~930px of measure before the three stop colliding. Above that the rail is
+   pinned to the viewport's own centre axis — the axis the 520px card sits
+   on — so its position is independent of how wide the brand or the actions
+   happen to be in the active locale. */
+@media (min-width: 940px) {
+  .setup-chrome-inner { position: relative; }
+  .setup-rail {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: var(--setup-rail-w);
+    flex: none;
+  }
+  .setup-rail-here { display: none; }
+  .setup-rail-labels { display: flex; gap: var(--s-1); }
+  .setup-rail-labels li {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    font-size: var(--t-1);
+    font-weight: var(--w-body);
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color var(--d-2) var(--ease-standard);
+  }
+  /* Done labels recede. Four teal words would compete with the one coral
+     word that matters, and the teal segment above already says "done". */
+  .setup-rail-labels li.is-done { color: var(--text-muted); }
+  .setup-rail-labels li.is-now {
+    color: var(--coral-bright);
+    font-weight: var(--w-label);
+  }
+}
+
+/* ── the stage ───────────────────────────────────────────────────────────
+   Top-anchored, not centred. Centring is what makes the card's top edge —
+   and so its H1 — slide up and down as the steps change height, because the
+   steps range from ~430px to ~700px tall. Anchored, all five screens share
+   one horizon. The 40px measures from the bar's bottom edge, because the
+   scrim's 20px tail is negative-margined away. */
+.setup-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: var(--s-8) var(--setup-gutter) var(--s-9);
+  position: relative;
+  z-index: 1;
+}
+
+.setup-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--setup-gutter) var(--s-6);
+  position: relative;
+  z-index: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   HERMES CO-BRANDING — scoped to the wizard shell
+   ClawBox owns the frame and the wayfinding; Hermes owns the ground and the
+   agent's own surfaces. A pixel changes for Hermes if and only if it
+   describes the AGENT; it does not change if it describes the SETUP.
+
+   Palette source: hermes-agent/web/src/themes/presets.ts (defaultTheme,
+   label "Hermes Teal") and web/src/index.css. NOT the Docusaurus theme —
+   that is the marketing site, and it is where the gold came from.
+
+   #0a0f1a → #041c1c is 1.06:1. The HUE moves, the LUMINANCE does not, so
+   every contrast pairing in the wizard survives untouched: coral is 6.31:1
+   on the new ground, cyan 11.01:1, body ink 16.91:1.
+   ═══════════════════════════════════════════════════════════════════════ */
+[data-agent="hermes"] .setup-shell {
+  /* 1. the ground and the surfaces mixed from it */
+  --ground: #041c1c;
+  --ground-fade: rgba(4, 28, 28, 0.88);
+  --ground-0: rgba(4, 28, 28, 0);
+  --surface-card: rgba(14, 36, 35, 0.75);
+  --surface-card-strong: rgba(14, 36, 35, 0.9);
+  --bg-surface: #132826;
+  --bg-elevated: #182c2a;
+  --bg-deep: #0e2423;
+
+  /* 2. the agent tokens are ADDITIVE. --coral-bright and --cyan-bright are
+     deliberately NOT redefined: coral means ACTION and cyan means DONE on
+     every box, under every harness. Re-pointing them once put the wizard's
+     two opposed states 1.08:1 apart — the single most important thing a
+     setup wizard communicates, destroyed to make a tint. */
+  --agent-ink: #ffe6cb;                    /* midground: text AND accent */
+  --agent-ink-2: rgba(255, 230, 203, 0.8);
+  --agent-ink-3: rgba(255, 230, 203, 0.65);
+  --agent-on-ink: #041c1c;                 /* text ON a cream plate */
+  --agent-line: rgba(255, 230, 203, 0.15); /* the one hairline weight */
+  --agent-card: #0e2423;
+  --agent-muted: #182c2a;
+  --agent-warn: #ffbd38;                   /* the ONLY sanctioned gold */
+  --agent-live: #4ade80;
+  --agent-term-bg: #000000;
+  --agent-term-fg: #f0e6d2;
+}
+[data-agent="hermes"] .setup-cobrand { display: inline-flex; }
+
+/* Agent-scoped surfaces opt in per panel. Only a panel that describes the
+   agent takes Hermes' language; a panel that describes setup stays ClawBox.
+   Hermes separates with line, never with elevation. */
+[data-agent="hermes"] .setup-shell [data-surface="agent"] {
+  background: var(--agent-card);
+  border: 1px solid var(--agent-line);
+  border-radius: var(--r-1);
+  color: var(--agent-ink);
+  box-shadow: none;
+}
+
 /* Card surface — matching openclawhardware.dev dark sections */
 .card-surface {
   background: var(--surface-card);
@@ -370,7 +951,9 @@ html {
   border: 2px solid var(--border-subtle);
   border-top-color: var(--coral-bright);
   border-radius: 50%;
-  animation: spin 0.6s linear infinite;
+  /* Match Tailwind's animate-spin (1s) so the two spinner systems that appear
+     together in the wizard rotate at the same speed. */
+  animation: spin 1s linear infinite;
   display: inline-block;
 }
 
@@ -640,13 +1223,18 @@ html {
 }
 
 @keyframes welcome-powerup {
-  0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); filter: drop-shadow(0 0 8px rgba(249,115,22,0.4)); }
-  33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); filter: drop-shadow(0 0 14px rgba(249,115,22,0.6)); }
-  66% { transform: translateY(-4px) scale(1.08) rotate(2deg); filter: drop-shadow(0 0 10px rgba(249,115,22,0.5)); }
+  0%, 100% { transform: translateY(0) scale(1.05) rotate(0deg); }
+  33% { transform: translateY(-6px) scale(1.1) rotate(-2deg); }
+  66% { transform: translateY(-4px) scale(1.08) rotate(2deg); }
 }
 
 .animate-welcome-powerup {
   animation: welcome-powerup 1.5s ease-in-out infinite;
+  /* Static glow: animating filter:drop-shadow repaints the filtered region on
+     every frame (expensive on the Jetson iGPU). Keep the glow, animate only the
+     compositor-friendly transform above. */
+  filter: drop-shadow(0 0 10px rgba(249, 115, 22, 0.5));
+  will-change: transform;
 }
 
 @keyframes clawbox-notification-shield-blink {
@@ -775,4 +1363,22 @@ input[type="range"].appearance-none::-moz-range-track {
 }
 .clawkeep-shelf-glow-orange {
   --glow-color: rgba(245, 158, 11, 0.95);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Reduced motion (WCAG 2.3.3). The setup wizard and desktop run many perpetual
+   decorative animations at once (mascot idle, pulse rings, orbits, spinners,
+   shelf glow). Honor the OS "reduce motion" setting: near-zero durations and a
+   single iteration collapse infinite loops to a static end state while keeping
+   layout intact. The mascot's rAF movement loop is gated separately in JS.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

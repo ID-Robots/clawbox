@@ -76,6 +76,31 @@ export function validateProjectId(id: string): boolean {
   return APP_ID_RE.test(id);
 }
 
+/** Longest project name the desktop label and the starter templates carry. */
+export const MAX_PROJECT_NAME_LENGTH = 60;
+
+/**
+ * The name a project may be created with, trimmed — or a ValidationError.
+ *
+ * Checked in the library rather than at each route because initProject writes
+ * the directory and project.json before the name reaches the templates: a name
+ * the templates cannot render has to be refused while nothing has been created
+ * yet, so a rejected request leaves no project behind for the next attempt to
+ * collide with. deployWebapp applies it for the same reason — it is the
+ * chokepoint the webapps route and buildProject share. The MCP door declares
+ * the same limit (`zText(60)` in mcp/tools/desktop.ts); this is where it is
+ * enforced.
+ */
+function assertProjectName(name: unknown): string {
+  if (typeof name !== "string") throw new ValidationError("Project name must be a string");
+  const trimmed = name.trim();
+  if (!trimmed) throw new ValidationError("Project name required");
+  if (trimmed.length > MAX_PROJECT_NAME_LENGTH) {
+    throw new ValidationError(`Project name must be at most ${MAX_PROJECT_NAME_LENGTH} characters`);
+  }
+  return trimmed;
+}
+
 /** Resolve a file path inside a project directory, preventing traversal. */
 function safePath(projectId: string, filePath: string): string {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
@@ -85,6 +110,21 @@ function safePath(projectId: string, filePath: string): string {
     throw new ValidationError("Path traversal denied");
   }
   return resolved;
+}
+
+/**
+ * Guard a mutating (write/edit/delete) target. The raw-string `=== "project.json"`
+ * checks were bypassable with equivalent spellings ("./project.json"), and a
+ * path resolving to the project root itself ("." / "./") would let a single
+ * file-delete recursively wipe the whole project. Check the RESOLVED path.
+ */
+function assertMutableTarget(projectId: string, absPath: string): void {
+  if (path.basename(absPath) === "project.json") {
+    throw new ValidationError("Cannot modify project.json");
+  }
+  if (absPath === path.join(PROJECTS_DIR, projectId)) {
+    throw new ValidationError("Refusing to target the project root");
+  }
 }
 
 function projectDir(projectId: string): string {
@@ -104,6 +144,8 @@ export async function initProject(
   opts?: { color?: string; description?: string; template?: "blank" | "app" }
 ): Promise<ProjectMeta> {
   if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
+  // Before anything is created on disk — see assertProjectName.
+  const projectName = assertProjectName(name);
 
   const dir = projectDir(projectId);
   const exists = await fs.stat(dir).catch(() => null);
@@ -114,7 +156,7 @@ export async function initProject(
   const now = new Date().toISOString();
   const meta: ProjectMeta = {
     projectId,
-    name,
+    name: projectName,
     color: opts?.color || "#f97316",
     description: opts?.description || "",
     created: now,
@@ -132,14 +174,14 @@ export async function initProject(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(name)}</title>
+  <title>${escapeHtml(projectName)}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
   </style>
 </head>
 <body>
-  <h1>${escapeHtml(name)}</h1>
+  <h1>${escapeHtml(projectName)}</h1>
 </body>
 </html>`,
       "utf-8"
@@ -153,7 +195,7 @@ export async function initProject(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(name)}</title>
+  <title>${escapeHtml(projectName)}</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -187,13 +229,20 @@ h1 {
       "utf-8"
     );
 
+    // The name is written into app.js — once as a line comment and once inside
+    // a JS template literal assigned to innerHTML. escapeHtml alone leaves the
+    // template-literal metacharacters (` $ \) and newlines untouched, so a name
+    // like "`;fetch('/setup-api/...')`" would break out of the literal and run
+    // as code when the built app loads on the ClawBox origin (stored XSS).
+    const commentName = projectName.replace(/[\r\n]+/g, " ");
+    const innerName = jsTemplateEscape(escapeHtml(projectName));
     await fs.writeFile(
       path.join(dir, "app.js"),
-      `// ${escapeHtml(name)} — ClawBox Web App
+      `// ${commentName} — ClawBox Web App
 document.addEventListener('DOMContentLoaded', () => {
   const app = document.getElementById('app');
   app.innerHTML = \`
-    <h1>${escapeHtml(name)}</h1>
+    <h1>${innerName}</h1>
     <p>Edit the project files to build your app.</p>
   \`;
 });
@@ -289,8 +338,8 @@ export async function writeFile(
   filePath: string,
   content: string
 ): Promise<void> {
-  if (filePath === "project.json") throw new ValidationError("Cannot overwrite project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
 
   const size = Buffer.byteLength(content, "utf-8");
   if (size > MAX_FILE_SIZE) {
@@ -318,8 +367,8 @@ export async function editFile(
   newString: string,
   replaceAll = false
 ): Promise<{ applied: number }> {
-  if (filePath === "project.json") throw new ValidationError("Cannot edit project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
   let content = await fs.readFile(absPath, "utf-8");
 
   if (!content.includes(oldString)) {
@@ -357,8 +406,8 @@ export async function editFile(
 }
 
 export async function deleteFile(projectId: string, filePath: string): Promise<void> {
-  if (filePath === "project.json") throw new ValidationError("Cannot delete project.json");
   const absPath = safePath(projectId, filePath);
+  assertMutableTarget(projectId, absPath);
   await fs.rm(absPath, { recursive: true });
   await touchProject(projectId);
 }
@@ -377,14 +426,29 @@ export async function searchFiles(
 
   let matcher: (line: string) => boolean;
   if (opts?.regex) {
-    const flags = opts.caseSensitive ? "g" : "gi";
+    // Cap the pattern length to limit worst-case backtracking a caller can set
+    // up (JS has no native regex timeout; a pattern like "(a+)+$" over a long
+    // line backtracks exponentially and would block the single-threaded event
+    // loop). Combined with the per-line slice below this bounds the work.
+    if (pattern.length > 200) {
+      throw new ValidationError("Regex pattern too long (max 200 chars)");
+    }
+    // No global flag: only test() is used, and the 'g' flag makes test()
+    // stateful (persisting lastIndex), which silently skips alternating matches.
+    const flags = opts.caseSensitive ? "" : "i";
+    // Flagged by CodeQL js/regex-injection: the pattern is a search FILTER, not
+    // a guard. It decides no path, permission or sanitisation outcome — only
+    // which lines of this device's own project files come back to the caller
+    // that asked. /setup-api/code sits behind the session / MCP-bearer gate.
     let re: RegExp;
     try {
       re = new RegExp(pattern, flags);
     } catch {
       throw new ValidationError(`Invalid regex pattern: ${pattern}`);
     }
-    matcher = (line) => re.test(line);
+    // Bound each test to a slice so a pathological pattern against a very long
+    // line (files can be up to 512 KB) can't hang the process.
+    matcher = (line) => re.test(line.length > 2000 ? line.slice(0, 2000) : line);
   } else {
     const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
     matcher = (line) =>
@@ -464,7 +528,9 @@ export async function buildProject(
         const jsPath = safePath(projectId, src);
         const js = await fs.readFile(jsPath, "utf-8");
         filesInlined++;
-        return `<script>\n${js}\n</script>`;
+        // Neutralize any literal "</script>" in the source so it can't close
+        // the inlined block early and dump the remainder into the DOM.
+        return `<script>\n${escapeScriptClose(js)}\n</script>`;
       } catch {
         return match;
       }
@@ -517,13 +583,16 @@ export async function deployWebapp(
   html: string,
   meta: { name: string; color?: string; icon?: string },
 ): Promise<void> {
+  // Same rule and same reason as initProject: the name reaches meta.json and
+  // the desktop label, so bound it before any of that is written.
+  const name = assertProjectName(meta.name);
   await writeWebappIndex(appId, html);
   await fs.writeFile(
     path.join(WEBAPPS_DIR, appId, "meta.json"),
-    JSON.stringify({ name: meta.name, color: meta.color || "#f97316", icon: meta.icon || "" }),
+    JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
-  await registerWebappInPreferences(appId, meta.name, {
+  await registerWebappInPreferences(appId, name, {
     color: meta.color,
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
@@ -539,6 +608,19 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/** Escape a value for safe embedding inside a JS template literal (`...`). */
+function jsTemplateEscape(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\$/g, "\\$");
+}
+
+/** Neutralize a literal `</script` so inlined JS can't break out of a <script>. */
+function escapeScriptClose(s: string): string {
+  return s.replace(/<\/(script)/gi, "<\\/$1");
 }
 
 function isExternalUrl(href: string): boolean {

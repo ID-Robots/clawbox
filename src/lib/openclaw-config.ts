@@ -4,8 +4,35 @@ import path from "path";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { readEdition } from "@/lib/edition-source";
 
 const exec = promisify(execFile);
+
+/**
+ * Thrown when the OpenClaw CLI is asked to run on an edition that does not ship
+ * it. The Hermes SKU has no `openclaw` binary at all (see `openclawIsAbsent`),
+ * so a spawn would fail deep inside a request with a raw `spawn openclaw
+ * ENOENT` — a confusing, un-actionable error. Callers that have a Hermes-native
+ * equivalent should route to it *before* reaching the CLI; this typed error is
+ * the backstop for the paths that don't, so they can fail cleanly and honestly
+ * instead of blaming the user's credentials.
+ */
+export class OpenclawUnavailableError extends Error {
+  constructor(message = "The OpenClaw CLI is not available on this edition.") {
+    super(message);
+    this.name = "OpenclawUnavailableError";
+  }
+}
+
+/**
+ * True when this device ships no `openclaw` binary — i.e. the Hermes edition.
+ * openclaw is present on the `openclaw` and `dual` SKUs; only `hermes` removes
+ * it. Keyed on the edition (a root-owned env read) rather than a filesystem
+ * probe so it is synchronous and cannot be spoofed by a user-writable path.
+ */
+export function openclawIsAbsent(): boolean {
+  return readEdition() === "hermes";
+}
 
 /**
  * Options for {@link runOpenclawConfigSet}.
@@ -106,6 +133,13 @@ interface SpawnOpenclawOptions {
  * it carries the ConfigMutationConflictError signature used for retry.
  */
 function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
+  // Chokepoint guard: on an edition with no openclaw binary, refuse with a
+  // typed error rather than spawn the bare `"openclaw"` fallback (findOpenclawBin
+  // returns that string when no real path resolves) and surface a raw ENOENT
+  // from inside a request. Every config-set / pairing call funnels through here.
+  if (openclawIsAbsent()) {
+    return Promise.reject(new OpenclawUnavailableError());
+  }
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false } = options;
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -753,14 +787,32 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
   }
 }
 
+/**
+ * True when this device has no OpenClaw gateway to restart.
+ *
+ * The Hermes edition removes it: `clawbox-gateway.service` is MASKED and port
+ * 18789 is closed. Hermes has no equivalent daemon — the CLI is invoked per
+ * request and reads its config each time — so there is nothing to bounce after
+ * a model change, and treating that as a failure is what produced "AI model
+ * configured but gateway failed to restart. Try rebooting the device." on a
+ * device where the configuration had in fact been written correctly.
+ */
+export function gatewayIsAbsent(): boolean {
+  return readEdition() === "hermes";
+}
+
 export async function restartGateway(): Promise<void> {
+  if (gatewayIsAbsent()) return;
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       timeout: 60000,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (/clawbox-gateway\.service.*not found|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+    // "is masked" is the other way this unit says "I am not running here" — a
+    // masked unit is a deliberate removal, not an error to surface. Without it
+    // the message fell past this branch to the throw below.
+    if (/clawbox-gateway\.service.*(?:not found|is masked)|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
       try {
         await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           timeout: 60000,
@@ -786,34 +838,23 @@ export async function restartGateway(): Promise<void> {
   }
 }
 
-/** Send SIGUSR1 to the gateway so it restarts and picks up newly-installed skills. */
-export async function reloadGateway(): Promise<void> {
-  try {
-    // The gateway process renames its argv to just "openclaw", so the old
-    // `pgrep -f "openclaw-gateway"` matched nothing and SIGUSR1 was never sent —
-    // installing a skill left the gateway untouched and the chat's reload
-    // overlay hung forever. Resolve the PID deterministically from systemd,
-    // falling back to an exact process-name match for dev / non-systemd runs.
-    let pid = 0;
-    try {
-      const { stdout } = await exec("systemctl", ["show", "clawbox-gateway.service", "-p", "MainPID", "--value"], { timeout: 5_000 });
-      pid = parseInt(stdout.trim(), 10);
-    } catch { /* not under systemd — fall through to pgrep */ }
-    if (!Number.isFinite(pid) || pid <= 0) {
-      const { stdout } = await exec("pgrep", ["-x", "openclaw"], { timeout: 5_000 });
-      pid = parseInt(stdout.trim().split("\n")[0], 10);
-    }
-    if (Number.isFinite(pid) && pid > 0) {
-      process.kill(pid, "SIGUSR1");
-    }
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ESRCH") {
-      console.warn("[openclaw-config] reloadGateway failed:", err instanceof Error ? err.message : err);
-    }
-  }
-}
-
+/*
+ * There is deliberately no reloadGateway() here.
+ *
+ * Installing a skill needs no gateway bounce at all. OpenClaw watches its skill
+ * roots itself — `skills.load.watch` defaults to true, and `<workspace>/skills`
+ * (where `openclaw skills install` writes, and where getSkillsDir() points) is
+ * one of the roots it watches. A write there bumps the skills snapshot version,
+ * and the next agent turn rebuilds the snapshot from disk. The gateway's own
+ * `skills.status` handler re-reads the workspace on every call, so the App Store
+ * and the CLI see a new skill immediately without any signal being sent.
+ *
+ * The previous implementation sent SIGUSR1 to the gateway's MainPID. To OpenClaw
+ * that signal does not mean "reload" — it means "restart", and under a detected
+ * supervisor (systemd sets INVOCATION_ID/JOURNAL_STREAM, so always here) OpenClaw
+ * services it by exiting 0 and handing off to the supervisor. Every skill install
+ * therefore stopped the gateway and left it to systemd to bring back.
+ */
 /** Find the openclaw binary — checks common locations including nvm, caches result. */
 let _openclawBinCache: string | null = null;
 export function findOpenclawBin(): string {

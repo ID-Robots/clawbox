@@ -57,6 +57,7 @@ import {
   searchFiles,
   buildProject,
   APP_ID_RE,
+  MAX_PROJECT_NAME_LENGTH,
   WEBAPPS_DIR,
   ValidationError,
   NotFoundError,
@@ -138,6 +139,41 @@ describe("code-projects", () => {
 
     it("rejects invalid project ID", async () => {
       await expect(initProject("../hack", "Bad")).rejects.toThrow(ValidationError);
+    });
+
+    describe("the name it will accept", () => {
+      // Checked before anything is created, so a refused name leaves no
+      // directory behind for the next attempt to collide with.
+      const badNames: Array<[string, unknown]> = [
+        ["a name of the wrong type", 42],
+        ["a missing name", undefined],
+        ["an empty name", ""],
+        ["a name that is only spaces", "   "],
+        ["a name past the length limit", "x".repeat(MAX_PROJECT_NAME_LENGTH + 1)],
+      ];
+
+      for (const [label, name] of badNames) {
+        it(`refuses ${label} without creating anything`, async () => {
+          mockStat.mockRejectedValue(new Error("ENOENT"));
+          await expect(
+            initProject("test-app", name as string),
+          ).rejects.toThrow(ValidationError);
+          expect(mockMkdir).not.toHaveBeenCalled();
+          expect(mockWriteFile).not.toHaveBeenCalled();
+        });
+      }
+
+      it("stores a name with surrounding whitespace trimmed", async () => {
+        mockStat.mockRejectedValue(new Error("ENOENT"));
+        const meta = await initProject("test-app", "  Test App  ");
+        expect(meta.name).toBe("Test App");
+      });
+
+      it("accepts a name exactly at the length limit", async () => {
+        mockStat.mockRejectedValue(new Error("ENOENT"));
+        const name = "x".repeat(MAX_PROJECT_NAME_LENGTH);
+        await expect(initProject("test-app", name)).resolves.toMatchObject({ name });
+      });
     });
 
     it("rejects duplicate project", async () => {

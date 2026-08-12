@@ -3,7 +3,13 @@ import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
 import { get, set, setMany } from "./config-store";
-import { findOpenclawBin, restartGateway } from "./openclaw-config";
+import {
+  findOpenclawBin,
+  restartGateway,
+  openclawIsAbsent,
+  gatewayIsAbsent,
+} from "./openclaw-config";
+import { hasHermesHarness } from "./edition-source";
 import { isPortOpen } from "./port-probe";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
@@ -46,6 +52,17 @@ interface UpdateStepDef {
    * the unit finish in the background. Genuine unit failures still fail.
    */
   advisoryOnOverrun?: boolean;
+  /**
+   * Whether this step applies to the device it is about to run on. Absent
+   * means "always applies".
+   *
+   * install.sh's step bodies already no-op per edition, but they cannot answer
+   * this question: by the time bash runs, the UI line exists and the step's
+   * timeout is already ticking. A predicate here lets the runner DROP the step
+   * from the list entirely, so a Hermes owner is never shown OpenClaw work
+   * being "completed" on a box that has no OpenClaw.
+   */
+  applies?: () => boolean;
 }
 
 /** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
@@ -179,7 +196,11 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
 }
 
 /** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
-const SAFE_BRANCH = /^[A-Za-z0-9._\-/]+$/;
+// The negative lookahead rejects a leading '-' (or '/'): a branch token that
+// starts with '-' is parsed by git as an option flag (e.g. "-D", "--all")
+// rather than a ref, which smuggles switches into the checkout/fetch commands
+// and bricks the updater. Real branch names never start with '-' or '/'.
+const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
 
 /**
  * Determine which branch to update to, in priority order:
@@ -305,6 +326,8 @@ async function waitForGateway(timeoutMs: number): Promise<boolean> {
 }
 
 async function runOpenclawDoctorFix(): Promise<void> {
+  // No openclaw binary on the Hermes edition — nothing to doctor.
+  if (openclawIsAbsent()) return;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: 90_000,
@@ -425,18 +448,25 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     label: "Updating OpenClaw",
     timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,
+    // Keyed on the binary, not the edition: there is nothing to install where
+    // no `openclaw` ships. (Hermes today; the two predicates can diverge.)
+    applies: () => !openclawIsAbsent(),
   },
   {
     id: "openclaw_patch",
     label: "Patching OpenClaw gateway",
     timeoutMs: 30_000,
     requiresRoot: true,
+    applies: () => !openclawIsAbsent(),
   },
   {
     id: "gateway_setup",
     label: "Configuring gateway service",
     timeoutMs: 30_000,
     requiresRoot: true,
+    // Keyed on the unit, not the binary: clawbox-gateway.service is removed
+    // and masked by step_edition_gateway_state, so there is none to configure.
+    applies: () => !gatewayIsAbsent(),
   },
   {
     id: RESTART_STEP_ID,
@@ -468,13 +498,46 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     advisoryOnOverrun: true,
   },
   {
+    // Re-provision the Hermes side: dashboard + proxy units, dashboard auth,
+    // shared identity, MCP registration, gateway removal.
+    //
+    // Ordering is load-bearing: AFTER post_update, so step_systemd_services has
+    // already refreshed the unit files this reinstalls and restarts, and after
+    // the rebuild, so it is the NEW install.sh being dispatched.
+    id: "hermes_edition",
+    label: "Provisioning Hermes edition",
+    timeoutMs: 300_000,
+    requiresRoot: true,
+    applies: () => hasHermesHarness(),
+  },
+  {
     id: "gateway_verify",
     label: "Verifying gateway health",
     timeoutMs: 90_000,
     customRun: () => ensureGatewayHealthy(),
     failFast: true,
+    // The gateway is absent by design on this SKU — port 18789 is closed and
+    // the unit is masked — so this step could only ever throw. It also
+    // directly contradicted the step before it: post_update's smoke test
+    // fails the install if anything IS listening on 18789.
+    applies: () => !gatewayIsAbsent(),
   },
 ];
+
+/**
+ * Evaluated per run, never memoized: the edition is read from a root-owned
+ * file that post_update itself can re-bake (step_edition_lock migrates a
+ * pre-3.x box onto /etc/clawbox/edition.env), so a list frozen at module load
+ * could describe the wrong SKU.
+ *
+ * Callers must resolve this ONCE and feed the same array to both `state.steps`
+ * and the runner — `runUpdate` addresses `state.steps[i]` by position, so two
+ * independently-filtered lists would silently label every step after the first
+ * omission with its neighbour's name.
+ */
+function applicableSteps(): UpdateStepDef[] {
+  return UPDATE_STEPS.filter((step) => !step.applies || step.applies());
+}
 
 /**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
@@ -622,10 +685,15 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
     getTargetVersion(),
-    execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
-      .then(({ stdout }) => stdout.trim() || null)
-      // Fallback: read version from the installed package.json
-      .catch(() => readPkgVersion(OPENCLAW_PKG)),
+    // The Hermes edition ships no openclaw binary, so skip the spawn and read
+    // the version from the installed package.json (absent there too → null,
+    // which is correct: there is no OpenClaw version to report on Hermes).
+    openclawIsAbsent()
+      ? readPkgVersion(OPENCLAW_PKG)
+      : execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
+          .then(({ stdout }) => stdout.trim() || null)
+          // Fallback: read version from the installed package.json
+          .catch(() => readPkgVersion(OPENCLAW_PKG)),
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
@@ -715,15 +783,15 @@ function createStepStates(steps: UpdateStepDef[]): StepState[] {
   return steps.map((s) => ({ id: s.id, label: s.label, status: "pending" as const }));
 }
 
-function createInitialState(): UpdateState {
+function createInitialState(steps: UpdateStepDef[]): UpdateState {
   return {
     phase: "idle",
-    steps: createStepStates(UPDATE_STEPS),
+    steps: createStepStates(steps),
     currentStepIndex: -1,
   };
 }
 
-let state: UpdateState = createInitialState();
+let state: UpdateState = createInitialState(applicableSteps());
 let running = false;
 
 export function getUpdateState(): UpdateState {
@@ -731,7 +799,7 @@ export function getUpdateState(): UpdateState {
 }
 
 export function resetUpdateState(): void {
-  state = createInitialState();
+  state = createInitialState(applicableSteps());
   running = false;
 }
 
@@ -771,7 +839,11 @@ export async function checkContinuation(): Promise<boolean> {
 
   await set("update_needs_continuation", undefined);
 
-  const restartIndex = UPDATE_STEPS.findIndex((s) => s.id === RESTART_STEP_ID);
+  // Resolve the list ONCE and reuse it for the state, the resume index and the
+  // runner. The edition is stable across the reboot (post_update re-bakes the
+  // same value), so this matches the list the pre-restart half ran.
+  const steps = applicableSteps();
+  const restartIndex = steps.findIndex((s) => s.id === RESTART_STEP_ID);
   const startFrom = restartIndex + 1;
 
   // The flag only proves the rebuild unit was STARTED, not that it rebuilt
@@ -790,7 +862,7 @@ export async function checkContinuation(): Promise<boolean> {
     const message = unitFailed
       ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
       : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
-    state = createInitialState();
+    state = createInitialState(steps);
     state.phase = "failed";
     for (let i = 0; i < restartIndex; i++) {
       state.steps[i].status = "completed";
@@ -802,14 +874,14 @@ export async function checkContinuation(): Promise<boolean> {
   }
 
   running = true;
-  state = createInitialState();
+  state = createInitialState(steps);
   state.phase = "running";
   for (let i = 0; i <= restartIndex; i++) {
     state.steps[i].status = "completed";
   }
   state.currentStepIndex = startFrom;
 
-  launchUpdate(UPDATE_STEPS, startFrom, { markCompleted: true });
+  launchUpdate(steps, startFrom, { markCompleted: true });
   return true;
 }
 
@@ -819,11 +891,12 @@ export function startUpdate(): { started: boolean; error?: string } {
   }
 
   running = true;
-  state = createInitialState();
+  const steps = applicableSteps();
+  state = createInitialState(steps);
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  launchUpdate(UPDATE_STEPS, 0, { markCompleted: true });
+  launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }
 
@@ -854,6 +927,14 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (running) {
     return { started: false, error: "Update already in progress" };
+  }
+  // Every step in this list is OpenClaw's, so there is no filtered version of
+  // it worth running — the whole flow is inapplicable. Refuse honestly instead
+  // of no-opping the two install steps and then failing on a gateway this SKU
+  // does not have. The UI never offers this on Hermes (getVersionInfo reports
+  // no OpenClaw update), but the endpoint is reachable regardless.
+  if (openclawIsAbsent()) {
+    return { started: false, error: "This edition does not ship OpenClaw." };
   }
 
   running = true;

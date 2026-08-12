@@ -1,0 +1,143 @@
+---
+title: "Editions"
+icon: "layer-group"
+summary: "Every ClawBox ships as one edition — OpenClaw, Hermes, or Dual. What each one is, how it is chosen, and how to tell which one you have."
+---
+
+The same ClawBox hardware ships in one of three **editions**. The edition decides
+which AI agent runs the box, which apps appear on the desktop, and which tools
+the agent gets. It is chosen when the device is produced and does not change
+afterwards.
+
+## The three editions
+
+| | Agent | Capability store | Desktop |
+|---|---|---|---|
+| **OpenClaw** — the standard product | OpenClaw gateway | App Store | OpenClaw Control UI |
+| **Hermes** | Hermes Agent by Nous Research | Hermes Skills | Hermes dashboard |
+| **Dual** — premium | Both, switchable at runtime | Both | Both |
+
+<Columns cols={2}>
+  <Card title="Hermes Edition" href="/editions/hermes" icon="feather">
+    What is on the box, what is absent, and how the desktop differs.
+  </Card>
+  <Card title="AI Providers on Hermes" href="/editions/hermes-providers" icon="plug">
+    Sign in, paste a key, or run the on-device model.
+  </Card>
+  <Card title="Hermes Skills" href="/editions/hermes-skills" icon="puzzle-piece">
+    The capability store that takes the place of the App Store.
+  </Card>
+  <Card title="Agent Interface" href="/technical/agent-interface" icon="toolbox">
+    The device tools the agent gets — the set differs by edition.
+  </Card>
+</Columns>
+
+**OpenClaw** is what every ClawBox was before editions existed, and it is the
+default: a device installed with no edition specified is an OpenClaw device.
+
+**Hermes** runs [Hermes Agent](https://nousresearch.com) by Nous Research as the
+*only* agent. The OpenClaw gateway is not part of this edition — it is not
+installed, its service is masked, and the `openclaw` command is absent. See
+[Hermes Edition](/editions/hermes).
+
+**Dual** installs both harnesses and enables a runtime switcher in Settings. It
+is a premium option: the switcher only unlocks with a licence issued by ID
+Robots. Without a valid licence a Dual device behaves as a locked OpenClaw
+device rather than exposing the switcher.
+
+## How the edition is chosen
+
+The edition is selected at **flash time**, when the device image is written and
+the installer first runs. The installer records it in a root-owned file,
+`/etc/clawbox/edition.env`:
+
+```text
+CLAWBOX_EDITION=hermes
+```
+
+That file — not an environment variable and not any file in your home directory
+— is what every part of the system reads to decide which edition it is on: the
+web server resolves it per request, the installer reads it on every update, and
+the agent's MCP server reads it once at startup.
+
+<Note>
+The edition is a property of the install, not a setting. Nothing in the desktop,
+Settings or the API changes it, and updates never change it. Moving a device
+from one edition to another is a production operation — the device is reflashed.
+Talk to support before you plan around it.
+</Note>
+
+If you are installing OpenClaw OS on your own Jetson, set `CLAWBOX_EDITION`
+before running the installer:
+
+```bash
+sudo CLAWBOX_EDITION=hermes bash install.sh
+```
+
+Valid values are `openclaw`, `hermes` and `dual`. An unrecognised value prints a
+warning and installs as `openclaw`.
+
+That variable chooses the edition on a **first** install. On a device that has
+already been installed, the installer compares it against the recorded edition
+and stops if they differ, before it changes anything:
+
+```text
+ERROR: this device is already installed as the 'hermes' edition.
+
+         Recorded edition:  hermes   (/etc/clawbox/edition.env)
+         Requested edition: openclaw
+```
+
+Re-running the installer with the edition the device already is — or with no
+`CLAWBOX_EDITION` at all, which reads the recorded value — is the normal
+re-install and update path and is unaffected. `dual` counts as its own edition
+here, so moving to or from it is a change like any other.
+
+The installer does not migrate an edition. It will stop and disable the harness
+the device is leaving — two agents on one box conflict over shared resources such
+as the Telegram bot token, so that half is not left to chance — but each harness
+keeps its AI provider sign-in in its own configuration file, and signing in does
+not carry across. A device installed over the top of another edition ends up with
+no usable model while still reporting that setup is complete, which is why the
+transition is refused rather than half performed. Changing a device's edition is
+a reflash.
+
+If an edition's units are ever found running on a device that does not belong to
+that edition, the installer reports them and brings them down. To keep them
+exactly as they are — while diagnosing, for instance — run the installer with
+`CLAWBOX_KEEP_FOREIGN_UNITS=1`; the check still reports them, it just does not
+act. To bring them down on demand:
+
+```bash
+sudo bash /home/clawbox/clawbox/install.sh --step edition_foreign_teardown
+```
+
+## Which edition am I on?
+
+Over SSH or in the Terminal app:
+
+```bash
+clawbox edition          # prints: openclaw | hermes | dual
+```
+
+From anything that speaks to the device API, `GET /setup-api/harness/status`
+returns the edition alongside `locked` and the active harness.
+
+You can also tell by looking. On a Hermes device the desktop has a **Skills**
+icon and a **Hermes** icon, and no App Store or OpenClaw Control UI. On an
+OpenClaw device it is the other way round.
+
+## What is the same on every edition
+
+Nearly everything else. The setup wizard, the desktop environment and its
+windows, Terminal, Files, VS Code, Remote Desktop, the browser automation,
+webapps and the code assistant, ClawKeep backups, updates, networking and
+mDNS, and the login model are all edition-independent.
+
+## What differs
+
+- **The agent**, and therefore the chat backend.
+- **The capability store** — App Store on OpenClaw, [Hermes Skills](/editions/hermes-skills) on Hermes.
+- **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers).
+- **The agent's own tool set** — some [MCP tools](/technical/agent-interface) exist on one edition only.
+- **Telegram plumbing** — the messages and the pairing-approval flow work the same way for you; the process behind them is the harness's own.

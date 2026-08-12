@@ -17,6 +17,7 @@ vi.mock("fs/promises", () => ({
     chown: vi.fn(),
     mkdir: vi.fn(),
     rm: vi.fn(),
+    unlink: vi.fn(),
   },
 }));
 
@@ -28,6 +29,26 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("@/lib/clawkeep", () => ({
   unpairLocal: vi.fn(),
+}));
+
+// The configure route fires a catalog refresh out-of-band and deliberately does
+// NOT await it (step 8c). The real refreshInBackground starts a fetch/openclaw
+// fork and logs its outcome — `[catalog] refreshed …` or `[catalog] refresh
+// failed for …` — whenever it settles, which is after the test that triggered
+// it has already finished.
+//
+// That stray console write is what surfaced in CI as
+// `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`:
+// a log arriving while the worker was closing its RPC channel. The job reported
+// every one of its test files as passing and still exited 1 on the unhandled
+// rejection.
+//
+// Stubbing it here keeps the leak from ever starting, which is the fix — no
+// console silencing and no global unhandled-rejection swallow, either of which
+// would hide this class of bug rather than remove it. Nothing in this file
+// asserts on the refresh; it is out-of-band work by design.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  refreshInBackground: vi.fn(),
 }));
 
 // Hoisted so the vi.mock factories below (which are themselves hoisted by
@@ -67,6 +88,11 @@ vi.mock("@/lib/openclaw-config", () => ({
   // based on the active provider. Tests don't care about the side effect; just
   // make the import resolve.
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
+  // Edition guard: these tests exercise the OpenClaw path, so openclaw is
+  // present. The Hermes branch (openclawIsAbsent → true) is covered separately
+  // in configure-hermes.test.ts.
+  openclawIsAbsent: vi.fn().mockReturnValue(false),
+  OpenclawUnavailableError: class OpenclawUnavailableError extends Error {},
 }));
 
 // llamacpp / local-ai-runtime have pure getters, but local-ai-runtime
@@ -174,6 +200,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.chown.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.rm.mockResolvedValue(undefined);
+    mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockReadOpenClawConfig.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -609,7 +636,11 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("handles missing auth profiles file", async () => {
-    mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+    // A genuinely absent file (ENOENT) → treated as no profiles yet. Real fs
+    // errors carry a `.code`; a message-only Error would now (correctly) be
+    // treated as an unexpected read failure and fail closed.
+    const enoent = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+    mockFs.readFile.mockRejectedValue(enoent);
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
@@ -943,5 +974,229 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
     expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
+  });
+
+  // SEC-12: server-side OAuth token handoff. On the handoff path the browser
+  // posts no provider tokens — configure reads them from the 0600 file that
+  // device-poll wrote, consumes it, and proceeds as if they were in the body.
+  it("reads OAuth tokens from the server-side handoff file and consumes it", async () => {
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // The handoff file is deleted after read so tokens don't linger on disk.
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+    // The access token from the file lands in the oauth auth profile.
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.profiles["codex:default"].access).toBe("access.token.jwt");
+    expect(written.profiles["codex:default"].id).toBe("id.token.jwt");
+  });
+
+  it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {
+    // The file says openai (→ codex profile); the body claims google. The
+    // tokens were minted for openai, so the file's provider must win — binding
+    // them under google:default would be wrong.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "google",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    expect(res.status).toBe(200);
+    // Profile is codex:default (openai subscription), NOT google:default.
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.profiles["codex:default"]).toBeDefined();
+    expect(written.profiles["google:default"]).toBeUndefined();
+
+    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    expect(commands.some((c) => c.startsWith("config set agents.defaults.model.primary codex/"))).toBe(true);
+  });
+
+  it("keeps the handoff file for a retry when the gateway restart fails", async () => {
+    mockRestartGateway.mockRejectedValue(new Error("gateway down"));
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    // A transient 5xx must NOT consume the tokens — the client can retry within
+    // the TTL rather than being forced through a full re-auth.
+    expect(res.status).toBe(502);
+    expect(mockFs.unlink).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the handoff file is missing on the subscription handoff path", async () => {
+    mockFs.readFile.mockImplementation(async (file) => {
+      if (String(file).endsWith("oauth-device-tokens.json")) {
+        throw new Error("ENOENT");
+      }
+      return JSON.stringify({ version: 1, profiles: {} });
+    });
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("No pending OAuth tokens");
+  });
+
+  it("returns 400 when the handoff tokens are expired", async () => {
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            createdAt: Date.now() - 20 * 60 * 1000, // 20 min ago > 15 min TTL
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+  });
+
+  it("rejects and removes a handoff file whose contents cannot be parsed", async () => {
+    // A retry cannot fix this file, so leaving it would make every later
+    // attempt fail on the same content.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? "{not json"
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
+  // Written as raw documents rather than through JSON.stringify: it serialises
+  // NaN and Infinity as `null`, which would quietly turn the non-finite case
+  // into the missing-createdAt case already covered below. `1e999` parses to
+  // Infinity, which is what the route's Number.isFinite check is there for.
+  const handoffDoc = (fields: string) =>
+    `{"provider":"openai","access_token":"access.token.jwt","id_token":"id.token.jwt",${fields}}`;
+
+  it.each([
+    ["a non-numeric createdAt", handoffDoc(`"createdAt":"not-a-timestamp"`)],
+    ["a non-finite createdAt", handoffDoc(`"createdAt":1e999`)],
+    ["a createdAt in the future", handoffDoc(`"createdAt":${Date.now() + 60 * 60 * 1000}`)],
+    // A field of the wrong shape means the file is not one this device wrote.
+    ["a non-string access_token", `{"provider":"openai","access_token":{},"createdAt":${Date.now()}}`],
+    ["a non-string provider", `{"provider":{},"access_token":"a.b.c","createdAt":${Date.now()}}`],
+    // Trims to nothing where it is used, so it is as unusable as a missing one.
+    ["a blank access_token", `{"provider":"openai","access_token":"   ","createdAt":${Date.now()}}`],
+  ])("rejects and removes a handoff file with %s", async (_label, doc) => {
+    // None of these yields something the route can use, and a bare
+    // `now - createdAt > TTL` truthiness test passes for every one of them.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? doc
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
+  });
+
+  it("rejects and removes a handoff file that carries no createdAt", async () => {
+    // Without a timestamp the file's age is unknown, so it cannot be shown to
+    // be inside the TTL — it is refused like an expired one, and removed rather
+    // than left on disk for the next request to find.
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("expired");
+    expect(mockFs.unlink).toHaveBeenCalledWith(
+      expect.stringContaining("oauth-device-tokens.json"),
+    );
   });
 });

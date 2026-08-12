@@ -8,6 +8,8 @@ const execFileMock = vi.hoisted(() => vi.fn((file: string, args?: unknown, optio
 
 const mockPage = vi.hoisted(() => ({
   goto: vi.fn().mockResolvedValue(undefined),
+  // Redirect/rebind SSRF guard installs a request interceptor via page.route.
+  route: vi.fn().mockResolvedValue(undefined),
   url: vi.fn().mockReturnValue("https://www.google.com"),
   title: vi.fn().mockResolvedValue("Google"),
   screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
@@ -143,7 +145,10 @@ describe("/setup-api/browser", () => {
   it("launches a browser session by attaching to desktop Chromium over CDP", async () => {
     const { body } = await launchSession();
 
-    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", { timeout: 30_000 });
+    expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:18800", {
+      timeout: 30_000,
+      headers: { Origin: "http://127.0.0.1:18800" },
+    });
     expect(mockPage.bringToFront).toHaveBeenCalled();
     expect(body.sessionId).toBeDefined();
     expect(body.url).toBe("https://www.google.com");

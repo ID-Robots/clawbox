@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
-import { reloadGateway, getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
+import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
+import { boundPreferenceText } from "@/lib/preference-schema";
+import { setPreferences } from "@/lib/preference-store";
 
 const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
 const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
@@ -38,8 +41,9 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
   // in the POST handler failed. Matches what AppStore.tsx's apiToStoreApp
   // stores for UI-initiated installs, so both paths produce identical meta.
   const remoteIconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
+  // The name ends up in a stored preference, so bound it to what one may hold.
   const fallback: InstalledMeta = {
-    name: titleCaseFromSlug(appId),
+    name: boundPreferenceText(titleCaseFromSlug(appId), appId),
     color: DEFAULT_CATEGORY_COLOR,
     iconUrl: remoteIconUrl,
   };
@@ -60,7 +64,7 @@ async function lookupStoreMeta(appId: string): Promise<InstalledMeta> {
       ? CATEGORY_COLORS[category]
       : DEFAULT_CATEGORY_COLOR;
     return {
-      name: match.name ?? fallback.name,
+      name: boundPreferenceText(match.name, fallback.name),
       color,
       iconUrl: remoteIconUrl,
     };
@@ -74,7 +78,12 @@ async function downloadIcon(appId: string): Promise<{ saved: boolean }> {
   const iconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
   const iconPath = path.join(ICONS_DIR, `${appId}.png`);
   try {
-    const [res] = await Promise.all([fetch(iconUrl), fs.mkdir(ICONS_DIR, { recursive: true })]);
+    // Bound the icon fetch: it's awaited inline before the install proceeds, so
+    // a stalled ClawHub host would otherwise hang the whole install request.
+    const [res] = await Promise.all([
+      fetch(iconUrl, { signal: AbortSignal.timeout(10_000) }),
+      fs.mkdir(ICONS_DIR, { recursive: true }),
+    ]);
     if (!res.ok) return { saved: false };
     const buffer = Buffer.from(await res.arrayBuffer());
     await fs.writeFile(iconPath, buffer);
@@ -163,9 +172,10 @@ async function syncInstalledPreferences(appId: string): Promise<string | undefin
     if (!alreadyListed) {
       nextUpdates["pref:installed_apps"] = [...list, appId];
     }
-    if (Object.keys(nextUpdates).length > 0) {
-      await configSetMany(nextUpdates);
-    }
+    // setPreferences applies the preference rules — this does not go through
+    // POST /setup-api/preferences, and the update carries over every entry read
+    // above alongside the one being added.
+    await setPreferences(nextUpdates);
     return undefined;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -174,21 +184,18 @@ async function syncInstalledPreferences(appId: string): Promise<string | undefin
   }
 }
 
-async function reloadGatewaySafely(): Promise<string | undefined> {
-  try {
-    await reloadGateway();
-    return undefined;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Gateway reload failed";
-    console.warn("[apps/install] Gateway reload failed after successful install:", msg);
-    return msg;
-  }
-}
-
 export async function POST(req: Request) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   try {
     const { appId } = await req.json();
-    if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
+    // Reject a leading hyphen: appId is passed positionally to
+    // `openclaw skills install <appId>`, so "-x"/"--force" would be parsed as a
+    // CLI flag rather than a package name.
+    if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 
@@ -203,15 +210,12 @@ export async function POST(req: Request) {
 
     const clawhubResult = await installSkill(openclawBin, appId);
 
-    let reloadError: string | undefined;
     let preferenceSyncError: string | undefined;
     if (clawhubResult.success) {
-      // Pref sync (config-store writes) and gateway reload (HTTP) are
-      // independent — run them in parallel.
-      [preferenceSyncError, reloadError] = await Promise.all([
-        syncInstalledPreferences(appId),
-        reloadGatewaySafely(),
-      ]);
+      // No gateway bounce here on purpose: the skill landed under
+      // `<workspace>/skills`, which OpenClaw watches itself, so the running
+      // gateway picks it up without being signalled. See openclaw-config.ts.
+      preferenceSyncError = await syncInstalledPreferences(appId);
     }
 
     // `ok: false` lets MCP/CLI callers detect the case where install+icon
@@ -222,7 +226,6 @@ export async function POST(req: Request) {
       iconSaved,
       iconPath: iconSaved ? `/setup-api/apps/icon/${appId}` : null,
       clawhub: clawhubResult,
-      reloadError,
       preferenceSyncError,
     });
   } catch (err) {

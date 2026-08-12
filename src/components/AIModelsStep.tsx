@@ -5,6 +5,7 @@ import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
+import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
   getLlamaCppOverlayProgress,
@@ -16,100 +17,25 @@ import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import type { LlamaCppCallbacks } from "@/hooks/useLlamaCppModels";
 import { useT } from "@/lib/i18n";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
-import { copyToClipboard } from "@/lib/clipboard";
 import {
   extractProviderModelId,
   isCatalogProvider,
   isValidModelId,
 } from "@/lib/provider-models";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
-
-type ClawaiTier = "free" | "flash" | "pro";
-const CLAWAI_TIER_STORAGE_KEY = "clawbox:ai-models:clawai-tier";
-
-interface ClawaiTierInfo {
-  /** Plan label rendered to the user (Free/Pro/Max). Internal "flash" is
-   *  marketed as "Pro" and internal "pro" is "Max" — preserved for
-   *  backwards-compat with stored localStorage values + portal handshake. */
-  planName: string;
-  /** Selector pill label — same as planName today, kept separate so the
-   *  pill can shorten if needed without touching the card. */
-  pillLabel: string;
-  priceEuro: number;
-  /** Subtitle on the price line — "free forever", "/month", etc. */
-  pricePeriod: string;
-  /** True for tiers that should advertise a 30-day free trial CTA. */
-  hasTrial: boolean;
-  /** Bullet copy shown in the highlight card. */
-  features: string[];
-  /** Tailwind palette classes for the highlight card + selector pill. */
-  cardClass: string;
-  cardHeadlineClass: string;
-  cardCheckClass: string;
-  pillActiveClass: string;
-}
-
-const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
-  free: {
-    planName: "Free plan",
-    pillLabel: "Free",
-    priceEuro: 0,
-    pricePeriod: "free forever",
-    hasTrial: false,
-    features: [
-      "Standard daily usage",
-      "DeepSeek V4 Flash",
-      "1 GB ClawKeep cloud backups",
-      "Portal access",
-    ],
-    cardClass: "border-white/10 bg-white/[0.03]",
-    cardHeadlineClass: "text-gray-100",
-    cardCheckClass: "text-emerald-300",
-    pillActiveClass: "bg-[var(--bg-surface)] text-gray-100",
-  },
-  flash: {
-    planName: "Pro plan",
-    pillLabel: "Pro",
-    priceEuro: 9,
-    pricePeriod: "/month",
-    // Pro bills from day one; flip to true if a trial returns.
-    hasTrial: false,
-    features: [
-      "5× more usage than Free",
-      "DeepSeek V4 Flash",
-      "5 GB ClawKeep cloud backups",
-      "Remote Desktop access",
-      "Priority processing",
-      "Email support",
-    ],
-    cardClass: "border-orange-400/20 bg-orange-500/5",
-    cardHeadlineClass: "text-orange-100",
-    cardCheckClass: "text-orange-300",
-    pillActiveClass: "bg-gradient-to-r from-orange-500/30 to-amber-500/20 text-orange-100",
-  },
-  pro: {
-    planName: "Max plan",
-    pillLabel: "Max",
-    priceEuro: 49,
-    pricePeriod: "/month",
-    hasTrial: true,
-    features: [
-      "Maximum usage",
-      "DeepSeek V4 Pro (frontier)",
-      "50 GB ClawKeep cloud backups",
-      "Remote Desktop access",
-      "Highest priority",
-      "Full Support — real humans via Call/Meeting",
-    ],
-    cardClass:
-      "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
-    cardHeadlineClass: "text-fuchsia-100",
-    cardCheckClass: "text-fuchsia-300",
-    pillActiveClass: "bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 text-pink-100",
-  },
-};
-
-const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
+import { ButtonSpinner } from "./ButtonSpinner";
+import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
+import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
+import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { cachedEdition, fetchHarness } from "@/lib/client-harness";
+// Tier data + the ClawBox AI card/row/device-login now live in shared modules so
+// the Hermes provider panel renders the SAME experience instead of a lookalike.
+import {
+  CLAWAI_TIER_STORAGE_KEY,
+  normalizeClawaiUiTier,
+  type ClawaiTier,
+} from "@/lib/clawbox-ai-tiers";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -119,6 +45,15 @@ interface AIModelsStepProps {
   defaultProviderId?: string;
   currentProviderId?: string | null;
   currentModel?: string | null;
+  /**
+   * Whether the local model is the harness's ACTIVE selection, as opposed to
+   * merely installed. `currentProviderId` only ever reported the latter, so the
+   * llama.cpp panel showed an "already configured" pill — and hid its own
+   * switch button — on devices that were not actually using the model.
+   * Undefined keeps the old provider-id-derived behaviour for callers that
+   * don't know the difference (the setup wizard).
+   */
+  localAiIsActive?: boolean;
   openClawAIOfferRequest?: number;
   requestedProviderId?: string | null;
   providerSelectionRequest?: number;
@@ -164,10 +99,6 @@ function normalizeSelectableProvider(provider: string | null | undefined): strin
 function getConnectButtonLabel(providerName?: string | null) {
   return providerName ? `Connect to ${providerName}` : "Connect";
 }
-
-const ButtonSpinner = (
-  <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-);
 
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
@@ -215,46 +146,41 @@ function ConfiguringOverlay({
   }, []);
 
   return (
-    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-8 pt-4 pb-8 outline-none">
+    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-2 pt-2 pb-6 outline-none">
       <style>{`
         @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
-        @keyframes aimodels-check-circle { to { stroke-dashoffset: 0 } }
-        @keyframes aimodels-fade-in { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
-        @keyframes aimodels-pulse-ring { 0% { transform: scale(0.8); opacity: 0.6 } 50% { transform: scale(1.2); opacity: 0 } 100% { transform: scale(0.8); opacity: 0.6 } }
-        @keyframes aimodels-orbit { from { transform: rotate(0deg) translateX(40px) rotate(0deg) } to { transform: rotate(360deg) translateX(40px) rotate(-360deg) } }
-        .aimodels-fade-in { animation: aimodels-fade-in 0.4s ease-out both }
-        .aimodels-step-enter { animation: aimodels-fade-in 0.3s ease-out both }
+        @keyframes aimodels-fade-in { from { opacity: 0; transform: translateY(var(--lift)) } to { opacity: 1; transform: translateY(0) } }
+        .aimodels-fade-in { animation: aimodels-fade-in var(--d-3) var(--ease-entrance) both }
       `}</style>
 
-      {/* Central icon with orbiting particles */}
-      <div className="relative w-24 h-24 flex items-center justify-center">
-        {/* Pulse rings */}
-        <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite" }} />
-        <div className="absolute inset-2 rounded-full border border-emerald-500/10" style={{ animation: "aimodels-pulse-ring 2s ease-in-out infinite 0.5s" }} />
-
-        {/* Orbiting dots */}
-        {!completed && phase >= 1 && [0, 1, 2].map((i) => (
-          <div key={i} className="absolute inset-0 flex items-center justify-center" style={{ animation: `aimodels-orbit ${3 + i * 0.5}s linear infinite`, animationDelay: `${i * 0.4}s` }}>
-            <div className="w-2 h-2 rounded-full bg-[var(--coral-bright)]" style={{ opacity: 0.4 + i * 0.2 }} />
-          </div>
-        ))}
-
+      {/* The provider mark, and nothing orbiting it. Two counter-rotating
+          dot rings and a pulsing halo ran at the same speed at 0% and at
+          99% of a gateway restart — perpetual motion bound to no state,
+          while the checklist and the percentage below it were doing the
+          actual reporting. The mark sits in the product's own tile
+          instead, and turns cyan (DONE) when the work lands. */}
+      <div
+        className={`flex h-[72px] w-[72px] items-center justify-center rounded-[var(--r-3)] ${
+          completed ? "bg-[var(--cyan-wash)]" : "bg-[var(--fill-2)]"
+        }`}
+        style={{ transition: "background-color var(--d-3) var(--ease-standard)" }}
+      >
         {completed ? (
-          <svg width="48" height="48" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
-            <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-circle 0.6s ease-out 0.1s forwards" }} />
-            <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw 0.4s ease-out 0.5s forwards" }} />
+          <svg width="44" height="44" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
+            <circle cx="28" cy="28" r="25" stroke="var(--cyan-bright)" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-draw var(--d-5) var(--ease-emphasis) 100ms forwards" }} />
+            <path d="M17 28l7 7 15-15" stroke="var(--cyan-bright)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw var(--d-3) var(--ease-entrance) var(--d-5) forwards" }} />
           </svg>
         ) : (
-          <AIProviderIcon provider={provider} size={56} className="aimodels-fade-in" />
+          <AIProviderIcon provider={provider} size={44} className="aimodels-fade-in" />
         )}
       </div>
 
       {/* Provider name */}
-      <div className="text-center aimodels-fade-in" style={{ animationDelay: "0.3s" }}>
-        <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
+      <div className="text-center aimodels-fade-in" style={{ animationDelay: "var(--stagger)" }}>
+        <h2 className="text-[length:var(--t-6)] leading-[1.15] font-bold text-[var(--text-primary)] mb-2">
           {completed ? t("connected") : t("ai.settingUp", { provider: providerName })}
         </h2>
-        <p className="text-sm text-[var(--text-muted)]">
+        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)]">
           {completed
             ? detail || t("ai.configured")
             : detail || `${t("ai.configuringAssistant")}${dots}`}
@@ -262,45 +188,56 @@ function ConfiguringOverlay({
       </div>
 
       {/* Progress steps */}
-      <div className="w-full max-w-[280px] space-y-2.5 mt-2">
-        {steps.map((step, i) => (
-          <div
-            key={i}
-            className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
-              completed || i <= phase ? "opacity-100" : "opacity-0 translate-y-1"
-            }`}
-            style={completed || i <= phase ? { animation: "aimodels-fade-in 0.3s ease-out both", animationDelay: `${i * 0.1}s` } : undefined}
-          >
-            {completed || i < phase ? (
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+      <ul className="w-full max-w-[280px] space-y-2 list-none">
+        {steps.map((step, i) => {
+          const stepDone = completed || i < phase;
+          const stepNow = !completed && i === phase;
+          const reached = completed || i <= phase;
+          return (
+            <li
+              key={i}
+              className={`flex items-center gap-2 text-[length:var(--t-2)] ${
+                reached ? "opacity-100" : "opacity-0 translate-y-1"
+              }`}
+              style={{
+                transition: "opacity var(--d-2) var(--ease-standard), transform var(--d-2) var(--ease-standard)",
+                transitionDelay: `calc(${Math.min(i, 3)} * var(--stagger))`,
+              }}
+            >
+              {stepDone ? (
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--cyan-wash)] text-[var(--cyan-bright)] shrink-0">
+                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>check</span>
+                </span>
+              ) : stepNow ? (
+                <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+                </span>
+              ) : (
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--fill-1)] shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--fill-4)]" />
+                </span>
+              )}
+              <span className={stepDone ? "text-[var(--cyan-bright)]" : stepNow ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}>
+                {step}
               </span>
-            ) : i === phase ? (
-              <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
-              </span>
-            ) : (
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
-              </span>
-            )}
-            <span className={completed || i <= phase ? (completed || i < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
-              {step}
-            </span>
-          </div>
-        ))}
-      </div>
+            </li>
+          );
+        })}
+      </ul>
 
       {progressPercent !== null && !completed && (
-        <div className="w-full max-w-[280px] mt-1">
-          <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] mb-1.5">
-            <span>{providerName}</span>
-            <span>{progressPercent}%</span>
+        <div className="w-full max-w-[280px]">
+          <div className="flex items-center justify-between gap-2 text-[length:var(--t-1)] text-[var(--text-muted)] mb-2">
+            <span className="truncate">{providerName}</span>
+            <span className="tabular-nums shrink-0">{progressPercent}%</span>
           </div>
-          <div className="w-full h-2 bg-[var(--bg-deep)] rounded-full overflow-hidden">
+          {/* Linear, because --ease-truth is the only honest curve for a
+              bar that reports someone else's progress: an easing curve
+              would invent a velocity the box never reported. */}
+          <div className="w-full h-1 bg-[var(--fill-2)] rounded-[var(--r-full)] overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all duration-300"
-              style={{ width: `${progressPercent}%` }}
+              className="h-full bg-[var(--coral-bright)] rounded-[var(--r-full)]"
+              style={{ width: `${progressPercent}%`, transition: "width var(--d-3) var(--ease-truth)" }}
             />
           </div>
         </div>
@@ -310,7 +247,7 @@ function ConfiguringOverlay({
          models — can take 10-15 min on Jetson. Cloud providers finish in
          seconds, so they get the shorter generic copy. */}
       {!completed && phase >= 1 && (
-        <p className="text-xs text-[var(--text-muted)] text-center mt-2 aimodels-step-enter">
+        <p className="text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)] text-center aimodels-fade-in">
           {provider === "llamacpp" || provider === "ollama"
             ? t("ai.pleaseDontCloseLocal")
             : t("ai.pleaseDontClose")}
@@ -319,8 +256,6 @@ function ConfiguringOverlay({
     </div>
   );
 }
-
-const PRIMARY_PROVIDER_IDS = new Set(["clawai", "openai", "anthropic", "llamacpp"]);
 
 const PROVIDERS: Provider[] = [
   {
@@ -397,6 +332,15 @@ const PROVIDERS: Provider[] = [
     description: "Claude models by Anthropic",
     authOptions: [
       {
+        // Redirect-based OAuth (auth-code). Gated by availableOAuth, which
+        // already includes "anthropic" (OAUTH_PROVIDERS.anthropic), so this
+        // surfaces the Claude Pro/Max subscription sign-in in the wizard.
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Connect your Claude Pro/Max subscription via OAuth.",
+      },
+      {
         mode: "token",
         label: "API Key",
         placeholder: "sk-ant-api03-...",
@@ -441,6 +385,21 @@ const PROVIDERS: Provider[] = [
 // Providers that use device code flow instead of redirect-based OAuth
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 
+// One recipe for the filled action, written once. The press is a 2% scale on
+// :active — the pointer is already on the control, so the feedback belongs
+// under the finger rather than on hover, where a 5% grow moved the label out
+// from under a thumb that had not lifted yet. Disabled reads as "not yet"
+// (a quiet fill) rather than as a faded version of the live button.
+const PRIMARY_ACTION_CLASS =
+  "w-full min-h-[48px] px-6 btn-gradient text-white rounded-[var(--r-1)] font-semibold text-[length:var(--t-5)] cursor-pointer flex items-center justify-center gap-2 " +
+  "transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] active:scale-[0.98] " +
+  "disabled:bg-none disabled:bg-[var(--fill-2)] disabled:text-[var(--text-muted)] disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100";
+
+// The quiet inline link/toggle used for "get a new code", "restart sign-in"
+// and the model-picker escape hatch.
+const QUIET_LINK_CLASS =
+  "bg-transparent border-none p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]";
+
 
 export default function AIModelsStep({
   onNext,
@@ -450,6 +409,7 @@ export default function AIModelsStep({
   defaultProviderId,
   currentProviderId = null,
   currentModel = null,
+  localAiIsActive,
   openClawAIOfferRequest = 0,
   requestedProviderId = null,
   providerSelectionRequest = 0,
@@ -532,6 +492,28 @@ export default function AIModelsStep({
   );
   const [showMoreProviders, setShowMoreProviders] = useState(false);
   const [availableOAuth, setAvailableOAuth] = useState<string[] | null>(null);
+  // Device edition — on a Hermes edition this step doesn't apply (Hermes manages
+  // its own providers/models), so we show a short Hermes panel instead.
+  // Seeded from the process-wide cache so re-opening Settings (or moving
+  // between its sections) skips the skeleton entirely — the edition cannot
+  // change under a live page. The lazy initialiser reads null on the very first
+  // mount, which is what the server rendered, so hydration still matches.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  useEffect(() => {
+    if (edition !== null) return;
+    // /harness/active, not /harness/status: both carry `edition`, but status
+    // also runs per-harness liveness probes (~500 ms of retry sleep here).
+    // Whatever happens, `edition` always leaves null — so the loader below can
+    // never become a permanent state.
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive) setEdition(d?.edition || "openclaw");
+    });
+    return () => { alive = false; };
+    // Runs once: `edition` is only read to skip a redundant fetch, and it never
+    // returns to null.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -570,6 +552,14 @@ export default function AIModelsStep({
   const [customModelId, setCustomModelId] = useState<string>("");
   const [useCustomModel, setUseCustomModel] = useState<boolean>(false);
   const [modelTouched, setModelTouched] = useState(false);
+  // Presentation only: the catalog default is right for almost everyone and
+  // the helper below already says the model can be changed from the chat
+  // window later, so the picker opens as a one-line summary instead of a
+  // label + 48px select + toggle + two lines of help. It is forced open
+  // whenever a custom model id is in play, so a model the customer typed is
+  // never hidden behind a chevron. No state the save path reads is gated on
+  // this — `selectedModelId` / `customModelId` live above it either way.
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!activeCatalog || !selectedProvider) {
@@ -604,9 +594,7 @@ export default function AIModelsStep({
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => {
     if (typeof window === "undefined") return "flash";
-    const stored = window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY);
-    if (stored === "free" || stored === "pro" || stored === "flash") return stored;
-    return "flash";
+    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
   });
   const persistClawaiTier = useCallback((tier: ClawaiTier) => {
     setClawaiTier(tier);
@@ -619,22 +607,6 @@ export default function AIModelsStep({
       }
     }
   }, []);
-  // ClawBox AI device-auth state — modeled after RFC 8628 / the OpenAI
-  // device flow above. The user_code is generated on the device (or
-  // upstream), shown in the Subscription tab, and the user types it on
-  // the ClawBox portal. We poll the local /clawai/poll endpoint, which
-  // in turn polls the upstream service for token issuance.
-  const [clawaiDeviceCode, setClawaiDeviceCode] = useState<string | null>(null);
-  const [clawaiCodeCopied, setClawaiCodeCopied] = useState(false);
-  const clawaiCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Cancel any in-flight "Copied" flash on unmount so the timer doesn't
-  // call setState on an unmounted component.
-  useEffect(() => () => {
-    if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
-  }, []);
-  const [clawaiVerificationUrl, setClawaiVerificationUrl] = useState<string | null>(null);
-  const [clawaiDevicePolling, setClawaiDevicePolling] = useState(false);
-
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
   const [authCode, setAuthCode] = useState("");
@@ -652,16 +624,6 @@ export default function AIModelsStep({
   const oauthStartControllerRef = useRef<AbortController | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
-  const clawAiStartControllerRef = useRef<AbortController | null>(null);
-  const clawAiPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clawAiPollControllerRef = useRef<AbortController | null>(null);
-  // Tracks whether we've already surfaced the configuring overlay for
-  // the current device-auth attempt. The poll route returns
-  // `configuring` for every tick while the background gateway restart
-  // is in flight, so without this latch the overlay would reset to
-  // phase 0 every interval and look like the progress bar is looping
-  // back to the start.
-  const clawAiConfiguringShownRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     setDevicePolling(false);
@@ -672,27 +634,37 @@ export default function AIModelsStep({
     pollControllerRef.current?.abort();
   }, []);
 
-  const stopClawAiPolling = useCallback(() => {
-    if (clawAiPollRef.current) {
-      clearTimeout(clawAiPollRef.current);
-      clawAiPollRef.current = null;
-    }
-    clawAiPollControllerRef.current?.abort();
-    clawAiPollControllerRef.current = null;
-    clawAiStartControllerRef.current?.abort();
-    clawAiStartControllerRef.current = null;
-    clawAiConfiguringShownRef.current = false;
-    setClawaiDevicePolling(false);
-  }, []);
+  // The ClawBox AI device-auth state machine (start → poll → configuring →
+  // complete) lives in a shared hook so the Hermes provider panel runs the SAME
+  // flow. Its terminal callbacks are declared further down, so they're reached
+  // through a ref rather than a forward reference; the hook's own start/stop/
+  // reset identities are stable.
+  const clawaiFinishRef = useRef<{
+    complete: () => void;
+    error: (message: string) => void;
+    configuring: () => void;
+  }>({ complete: () => {}, error: () => {}, configuring: () => {} });
+
+  const clawaiLogin = useClawaiDeviceLogin({
+    scope: configureScope,
+    getTier: () => clawaiTier,
+    onStart: () => setStatus(null),
+    onBusyChange: setSaving,
+    onConfiguring: () => clawaiFinishRef.current.configuring(),
+    onComplete: () => clawaiFinishRef.current.complete(),
+    onError: (message) => clawaiFinishRef.current.error(message),
+  });
+  // Stable identities (see the hook) — pulled out so effects/callbacks can
+  // depend on them directly instead of on the whole result object.
+  const { start: startClawaiLogin, stop: stopClawaiLogin, reset: resetClawaiLogin } = clawaiLogin;
 
   useEffect(() => {
     if (normalizedCurrentProvider !== "clawai") return;
-    stopClawAiPolling();
+    stopClawaiLogin();
+    resetClawaiLogin();
     setSaving(false);
     setStatus((current) => (current?.type === "error" ? null : current));
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-  }, [normalizedCurrentProvider, stopClawAiPolling]);
+  }, [normalizedCurrentProvider, stopClawaiLogin, resetClawaiLogin]);
 
   useEffect(() => {
     fetch("/setup-api/ai-models/oauth/providers")
@@ -707,8 +679,6 @@ export default function AIModelsStep({
       exchangeControllerRef.current?.abort();
       oauthStartControllerRef.current?.abort();
       pollControllerRef.current?.abort();
-      clawAiStartControllerRef.current?.abort();
-      if (clawAiPollRef.current) clearTimeout(clawAiPollRef.current);
     };
   }, []);
 
@@ -752,9 +722,7 @@ export default function AIModelsStep({
 
   const showSuccessAndContinue = useCallback(() => {
     tryCloseOAuthWindow(oauthWindowRef);
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-    setClawaiDevicePolling(false);
+    resetClawaiLogin();
     // Dispatch the gateway-restart signal as soon as we know the configure
     // round-trip succeeded — well before the success overlay's 900 ms exit
     // timer expires. The chat popup listens for this event to extend its
@@ -765,7 +733,21 @@ export default function AIModelsStep({
       window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
     }
     completeConfiguring();
-  }, [completeConfiguring, configureScope]);
+  }, [completeConfiguring, configureScope, resetClawaiLogin]);
+
+  // Wire the device-login hook's terminal callbacks now that the overlay
+  // helpers exist. Going through the ref (rather than passing them to the hook
+  // directly) keeps the hook above them in source order without a forward
+  // reference, and keeps its start/stop/reset identities stable. The device
+  // flow is only ever entered from a click, i.e. long after the first commit,
+  // so updating the ref in an effect is soon enough.
+  useEffect(() => {
+    clawaiFinishRef.current = {
+      complete: showSuccessAndContinue,
+      error: showError,
+      configuring: () => showConfiguring("generic"),
+    };
+  }, [showConfiguring, showError, showSuccessAndContinue]);
 
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
@@ -777,6 +759,7 @@ export default function AIModelsStep({
     onSaveSuccess: () => showSuccessAndContinue(),
     onSaveError: (message: string) => showError(message),
     onPullError: (message: string) => showError(message),
+    onDeleteError: (message: string) => showError(message),
     onClearStatus: () => setStatus(null),
   }), [showError, showSuccessAndContinue]);
 
@@ -971,6 +954,10 @@ export default function AIModelsStep({
 
   const selectProvider = useCallback((id: string) => {
     userSelectedProviderRef.current = true;
+    // The list was expanded to make this choice; the choice is made, so it
+    // closes on the chosen row rather than leaving the catalogue open above
+    // the controls the customer now has to reach.
+    setShowMoreProviders(false);
     syncProviderSelection(id);
   }, [syncProviderSelection]);
 
@@ -1034,125 +1021,14 @@ export default function AIModelsStep({
     await saveProviderConfig(payload);
   };
 
-  // Single tick of the upstream-issuance poll. Schedules itself again
-  // every `interval` seconds while the session stays in `pending` or
-  // `configuring`. The server-side route returns `configuring` as soon
-  // as the upstream issues a token and runs the gateway-restart in the
-  // background; we keep polling at that point so the UI advances when
-  // the configure pipeline writes `complete`.
-  const pollClawAiDeviceAuth = useCallback(async (interval: number) => {
-    clawAiPollControllerRef.current?.abort();
-    const controller = new AbortController();
-    clawAiPollControllerRef.current = controller;
-    try {
-      const response = await fetch("/setup-api/ai-models/clawai/poll", {
-        method: "POST",
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: string };
-      if (data.status === "complete") {
-        stopClawAiPolling();
-        setSaving(false);
-        showSuccessAndContinue();
-        return;
-      }
-      if (data.status === "configuring") {
-        // Token landed; the device is now restarting the gateway.
-        // Surface the configuring overlay (drops the device-code page)
-        // and keep polling on the `pending` cadence so we pick up
-        // `complete` as soon as the background configure finishes.
-        // Latch via clawAiConfiguringShownRef so subsequent ticks (the
-        // server returns `configuring` for every tick while the gateway
-        // restart is in flight) don't reset the overlay back to phase
-        // 0 and make the progress bar look like it's looping.
-        if (!clawAiConfiguringShownRef.current) {
-          clawAiConfiguringShownRef.current = true;
-          setClawaiDeviceCode(null);
-          setClawaiVerificationUrl(null);
-          setClawaiDevicePolling(false);
-          setSaving(false);
-          showConfiguring("generic");
-        }
-        clawAiPollRef.current = setTimeout(() => {
-          void pollClawAiDeviceAuth(interval);
-        }, Math.max(interval, 1) * 1000);
-        return;
-      }
-      if (data.status === "error" || (!response.ok && response.status === 410)) {
-        stopClawAiPolling();
-        setSaving(false);
-        setClawaiDeviceCode(null);
-        showError(data.error || "ClawBox AI authorisation failed");
-        return;
-      }
-      // Pending (or transient upstream blip): schedule the next tick.
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, Math.max(interval, 1) * 1000);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      // Network glitch — back off and try again instead of dropping
-      // the user out of the flow.
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, Math.max(interval, 1) * 1000);
-    }
-  }, [showConfiguring, showError, showSuccessAndContinue, stopClawAiPolling]);
-
-  // Kicks off the device-authorisation handshake: asks the server for a
-  // user_code + verification_url, shows them in the Subscription tab,
-  // and starts polling for token issuance. The user types the code on
-  // the ClawBox portal — there's no popup to open here, so the embedded
-  // Chromium's pop-up blocker is no longer in the critical path.
-  const startClawaiDeviceAuth = useCallback(async () => {
-    setStatus(null);
-    setSaving(true);
-    setClawaiDeviceCode(null);
-    setClawaiVerificationUrl(null);
-    stopClawAiPolling();
-
-    const controller = new AbortController();
-    clawAiStartControllerRef.current = controller;
-    try {
-      const response = await fetch("/setup-api/ai-models/clawai/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: configureScope, tier: clawaiTier }),
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      if (!response.ok) {
-        throw new Error(await extractError(response, "Failed to start ClawBox AI authorisation"));
-      }
-      const data = await response.json() as { user_code?: string; verification_url?: string; interval?: number };
-      if (!data.user_code || !data.verification_url) {
-        throw new Error("ClawBox AI did not return a device code");
-      }
-      setClawaiDeviceCode(data.user_code);
-      setClawaiVerificationUrl(data.verification_url);
-      setClawaiDevicePolling(true);
-      setSaving(false);
-      const interval = typeof data.interval === "number" && data.interval > 0 ? data.interval : 5;
-      clawAiPollRef.current = setTimeout(() => {
-        void pollClawAiDeviceAuth(interval);
-      }, interval * 1000);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      setSaving(false);
-      showError(`Failed: ${err instanceof Error ? err.message : err}`);
-    }
-  }, [clawaiTier, configureScope, extractError, pollClawAiDeviceAuth, showError, stopClawAiPolling]);
-
   const lastHandledOfferRef = useRef(0);
   useEffect(() => {
     if (!openClawAIOfferRequest || openClawAIOfferRequest === lastHandledOfferRef.current) return;
     if (!allowedProviders.some((provider) => provider.id === "clawai")) return;
     lastHandledOfferRef.current = openClawAIOfferRequest;
     selectProvider("clawai");
-    void startClawaiDeviceAuth();
-  }, [allowedProviders, startClawaiDeviceAuth, openClawAIOfferRequest, selectProvider]);
+    void startClawaiLogin();
+  }, [allowedProviders, startClawaiLogin, openClawAIOfferRequest, selectProvider]);
 
   const lastHandledProviderSelectionRef = useRef(0);
   useEffect(() => {
@@ -1172,7 +1048,7 @@ export default function AIModelsStep({
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
-    tokenData: { access_token: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string }
+    tokenData: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string; oauthHandoff?: boolean }
   ) => {
     saveControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1187,20 +1063,37 @@ export default function AIModelsStep({
       // this, picking a model in the wizard would silently be ignored
       // for OAuth providers.
       const subscriptionModel = getRequestedCatalogModelId(true);
+      // Device-auth (server-side handoff): the provider tokens were persisted
+      // to a server-only file by device-poll, so we send no token fields —
+      // just the handoff flag telling configure to read them there. The
+      // redirect/exchange path (Anthropic) still posts the real tokens.
+      const configureBody = tokenData.oauthHandoff
+        ? {
+            scope: configureScope,
+            provider: selectedProvider,
+            authMode: "subscription",
+            oauthHandoff: true,
+            // projectId is not a secret (a GCP identifier) — relay it in the
+            // body for the Google handoff since the server-only token file
+            // doesn't carry it.
+            ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
+            ...(subscriptionModel ? { model: subscriptionModel } : {}),
+          }
+        : {
+            scope: configureScope,
+            provider: selectedProvider,
+            apiKey: tokenData.access_token,
+            authMode: "subscription",
+            idToken: tokenData.id_token,
+            refreshToken: tokenData.refresh_token,
+            expiresIn: tokenData.expires_in,
+            ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
+            ...(subscriptionModel ? { model: subscriptionModel } : {}),
+          };
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scope: configureScope,
-          provider: selectedProvider,
-          apiKey: tokenData.access_token,
-          authMode: "subscription",
-          idToken: tokenData.id_token,
-          refreshToken: tokenData.refresh_token,
-          expiresIn: tokenData.expires_in,
-          ...(tokenData.projectId ? { projectId: tokenData.projectId } : {}),
-          ...(subscriptionModel ? { model: subscriptionModel } : {}),
-        }),
+        body: JSON.stringify(configureBody),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -1256,10 +1149,12 @@ export default function AIModelsStep({
       const data = await res.json();
       if (controller.signal.aborted) return;
 
-      if (data.status === "complete" && data.access_token) {
+      if (data.status === "complete") {
         stopPolling();
         setDeviceSaving(true);
-        await saveOAuthToken(data);
+        // Tokens never touch the browser: device-poll persisted them to a
+        // server-only file. Signal the configure route to read them there.
+        await saveOAuthToken({ oauthHandoff: true });
         return;
       }
 
@@ -1374,9 +1269,14 @@ export default function AIModelsStep({
       if (!exchangeRes.ok) return showError(await extractError(exchangeRes, "Token exchange failed"));
       const tokenData = await exchangeRes.json();
       if (controller.signal.aborted) return;
-      if (!tokenData.access_token) return showError("No access token received");
-
-      await saveOAuthToken(tokenData);
+      // Exchange now persists the tokens server-side and returns only a status
+      // (keeping access/refresh/id tokens off the plain-HTTP setup-AP hop), so
+      // complete the config through the same server-side handoff the
+      // device-code flow uses. projectId (non-secret) is relayed for Google.
+      if (tokenData.status !== "complete") {
+        return showError(tokenData.error || "Sign-in did not complete");
+      }
+      await saveOAuthToken({ oauthHandoff: true, projectId: tokenData.projectId });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
@@ -1385,8 +1285,8 @@ export default function AIModelsStep({
     }
   };
 
+  // ClawBox AI's description lives in the shared row (CLAWBOX_AI_DESCRIPTION).
   const providerDesc: Record<string, string> = {
-    clawai: "All-in cloud AI for ClawBox — backups, remote desktop, full support",
     anthropic: t("ai.claudeModels"),
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
@@ -1456,11 +1356,38 @@ export default function AIModelsStep({
 
   const renderProviderModelPicker = () => {
     if (!activeCatalog || !selected) return null;
+    const modelPickerExpanded = modelPickerOpen || useCustomModel;
+    const currentModelLabel =
+      activeCatalog.models.find((option) => option.id === selectedModelId)?.label
+      || selectedModelId
+      || activeCatalog.defaultModelId;
+    if (!modelPickerExpanded) {
+      return (
+        <button
+          type="button"
+          onClick={() => setModelPickerOpen(true)}
+          aria-expanded={false}
+          className="mt-4 flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--fill-1)] border border-[var(--hair-2)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--fill-2)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+        >
+          <span className="flex min-w-0 flex-col">
+            <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
+              Model
+            </span>
+            <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+              {currentModelLabel}
+            </span>
+          </span>
+          <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
+            Change
+          </span>
+        </button>
+      );
+    }
     return (
       <div className="mt-4">
         <label
           htmlFor="ai-provider-model"
-          className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+          className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
         >
           Model
         </label>
@@ -1472,7 +1399,7 @@ export default function AIModelsStep({
               setModelTouched(true);
               setSelectedModelId(e.target.value);
             }}
-            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
           >
             {activeCatalog.models.map((option) => (
               <option key={option.id} value={option.id}>
@@ -1496,7 +1423,7 @@ export default function AIModelsStep({
             }
             spellCheck={false}
             autoComplete="off"
-            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
           />
         )}
         {activeCatalog.allowCustom && (
@@ -1506,14 +1433,14 @@ export default function AIModelsStep({
               setModelTouched(true);
               setUseCustomModel((value) => !value);
             }}
-            className="mt-1.5 bg-transparent p-0 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
+            className="mt-2 bg-transparent p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
           >
             {useCustomModel
               ? "Pick from curated list"
               : "Enter a custom model ID…"}
           </button>
         )}
-        <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+        <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
           {selected.id === "openrouter"
             ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
             : "You can switch between the curated models from the chat window anytime."}
@@ -1524,7 +1451,7 @@ export default function AIModelsStep({
 
   const renderDeviceAuth = () => (
     <div>
-      <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
+      <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mb-4 leading-[1.6]">
         {currentDevice.description}
       </p>
 
@@ -1532,13 +1459,13 @@ export default function AIModelsStep({
         <button
           type="button"
           onClick={startDeviceAuth}
-          className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+          className={PRIMARY_ACTION_CLASS}
         >
           {embedded ? currentDevice.button : selectedConnectLabel}
         </button>
       ) : (
         <div>
-          <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
+          <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] text-center">
             <button
               type="button"
               onClick={() => {
@@ -1547,13 +1474,13 @@ export default function AIModelsStep({
                   oauthWindowRef.current = win;
                 }
               }}
-              className="w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm"
+              className="w-full min-h-[48px] px-4 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-semibold rounded-[var(--r-1)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-[length:var(--t-4)] cursor-pointer"
             >
               {t("ai.openAuthPage")}
             </button>
-            <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
-            <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-              <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
+            <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
+            <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-[var(--r-1)] inline-flex items-center gap-2">
+              <span className="text-[length:var(--t-6)] font-mono font-bold text-[var(--text-primary)] tracking-[0.16em] select-all">
                 {deviceCode}
               </span>
               <button
@@ -1573,19 +1500,19 @@ export default function AIModelsStep({
                   } catch { /* ignore */ }
                 }}
                 id="copy-code-btn"
-                className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
+                className="ml-1 px-2 py-1 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] hover:bg-[var(--bg-surface)] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
               >
                 {t("copy")}
               </button>
             </div>
-            <p className="mt-2 text-xs text-[var(--text-muted)]">
+            <p className="mt-2 text-[length:var(--t-2)] text-[var(--text-muted)]">
               {t("ai.codeExpires")}
             </p>
           </div>
 
           {(devicePolling || deviceSaving) && (
-            <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-              <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+            <div className="flex items-center gap-2 text-[length:var(--t-2)] text-[var(--text-secondary)]">
+              <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
               {deviceSaving ? t("ai.authorizedConnecting") : t("ai.waitingAuth")}
             </div>
           )}
@@ -1593,7 +1520,7 @@ export default function AIModelsStep({
           <button
             type="button"
             onClick={startDeviceAuth}
-            className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
+            className={`mt-2 ${QUIET_LINK_CLASS}`}
           >
             {t("ai.getNewCode")}
           </button>
@@ -1604,7 +1531,7 @@ export default function AIModelsStep({
 
   const renderRedirectOAuth = () => (
     <div>
-      <p className="text-xs text-[var(--text-secondary)] mb-4 leading-relaxed">
+      <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mb-4 leading-[1.6]">
         {currentOAuth.description}
       </p>
 
@@ -1612,26 +1539,29 @@ export default function AIModelsStep({
         <button
           type="button"
           onClick={startOAuth}
-          className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer"
+          className={PRIMARY_ACTION_CLASS}
         >
           {embedded ? currentOAuth.button : selectedConnectLabel}
         </button>
       ) : (
         <div>
-          <div className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg">
-            <p className="text-xs text-[var(--text-primary)] leading-relaxed">
-              {currentOAuth.steps.map((step, i) => (
-                <span key={i}>
-                  {i > 0 && <br />}
-                  <strong className="text-[var(--coral-bright)]">{i + 1}.</strong> {step}
+          {/* A numbered list, not three lines separated by <br>: the steps
+              are an ordered list, so a screen reader should be told how
+              many there are and which one it is on. */}
+          <ol className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] list-none space-y-1">
+            {currentOAuth.steps.map((step, i) => (
+              <li key={i} className="flex gap-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-primary)]">
+                <span aria-hidden="true" className="shrink-0 font-semibold text-[var(--coral-bright)] tabular-nums">
+                  {i + 1}.
                 </span>
-              ))}
-            </p>
-          </div>
+                <span className="min-w-0">{step}</span>
+              </li>
+            ))}
+          </ol>
 
           <label
             htmlFor="oauth-auth-code"
-            className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+            className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
           >
             {currentOAuth.inputLabel}
           </label>
@@ -1646,13 +1576,13 @@ export default function AIModelsStep({
             placeholder={currentOAuth.inputPlaceholder}
             spellCheck={false}
             autoComplete="off"
-            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
           />
 
           <button
             type="button"
             onClick={startOAuth}
-            className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
+            className={`mt-2 ${QUIET_LINK_CLASS}`}
           >
             {t("ai.restartAuth")}
           </button>
@@ -1681,18 +1611,92 @@ export default function AIModelsStep({
   }, [configuringState?.completed, handleConfiguringDone]);
 
   const baseProviders = providerIdSet ? allowedProviders : PROVIDERS;
-  const collapseSecondary = baseProviders.some((provider) => PRIMARY_PROVIDER_IDS.has(provider.id));
-  const displayedProviders = collapseSecondary
-    ? baseProviders.filter((provider) => PRIMARY_PROVIDER_IDS.has(provider.id) || showMoreProviders || selectedProvider === provider.id)
+  // The list opens on the provider that is actually in play and keeps the rest
+  // one tap behind the same toggle that used to reveal only the secondary
+  // ones. Four rows plus that toggle is ~350px of catalogue standing on top of
+  // a card whose whole job is one button, and the customer taking the default
+  // — ClawBox AI, already selected — was being asked to scroll past the
+  // alternatives to reach it. Nothing is removed: the toggle is always there
+  // while anything is hidden, and choosing from the expanded list closes it
+  // again (see selectProvider) so browsing the options never leaves the action
+  // stranded below the fold.
+  //
+  // The `selectedInList` guard matters for the frame between a provider set
+  // changing and the effect that re-points `selectedProvider` at it: filtering
+  // on a selection that isn't there yet would render an empty list.
+  const selectedInList = baseProviders.some((provider) => provider.id === selectedProvider);
+  const providerListCollapsed = !showMoreProviders && selectedInList && baseProviders.length > 1;
+  const displayedProviders = providerListCollapsed
+    ? baseProviders.filter((provider) => provider.id === selectedProvider)
     : baseProviders;
-  const shouldShowMoreProviders = collapseSecondary && !showMoreProviders && baseProviders.some((provider) => !PRIMARY_PROVIDER_IDS.has(provider.id));
+  const shouldShowMoreProviders = providerListCollapsed;
   const resolvedTitle = title ?? t("ai.title");
   const resolvedDescription = description ?? t("ai.description");
   const embeddedConnectLabel = t("settings.connect");
 
+  // Edition resolves asynchronously (see the /harness/active effect above).
+  // Until it lands, render a NEUTRAL skeleton rather than the OpenClaw
+  // radiogroup: on a Hermes device the OpenClaw provider list would otherwise
+  // paint for the length of the round-trip and then be swapped for the Hermes
+  // panel — a visible flash of the wrong product. The skeleton reuses the exact
+  // wrapper + card shell BOTH branches render (same width, padding, radius and
+  // position), so only the card's inner content changes when the edition
+  // arrives — no layout jump. `data-testid` is kept so anything waiting on the
+  // step doesn't race the fetch.
+  //
+  // The row count is taken from `displayedProviders`, which is known
+  // SYNCHRONOUSLY here: a hardcoded five rows was one too many for the wizard
+  // (4 primary providers) and four too many for Settings → Local AI (a single
+  // llamacpp row), so the card visibly collapsed the moment the edition landed.
+  // The contextual area below the list reserves the same min-height both
+  // branches use for their selected-provider controls.
+  if (edition === null) {
+    return (
+      <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
+        <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8" role="status" aria-busy="true">
+          <span className="sr-only">{t("ai.loadingPanel")}</span>
+          <div aria-hidden="true" className="animate-pulse">
+            <div className="h-8 w-2/3 rounded-[var(--r-1)] bg-[var(--fill-3)] mb-2" />
+            <div className="h-4 w-full rounded-[var(--r-1)] bg-[var(--fill-2)] mb-2" />
+            <div className="h-4 w-4/5 rounded-[var(--r-1)] bg-[var(--fill-2)] mb-6" />
+            <div className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+              {Array.from({ length: Math.max(1, displayedProviders.length) }, (_, row) => (
+                <div key={row} className="flex items-center gap-3 px-4 py-3.5 border-b border-[var(--hair)] last:border-b-0">
+                  <span className="w-5 h-5 rounded-full bg-[var(--fill-3)] shrink-0" />
+                  <span className="w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-3)] shrink-0" />
+                  <span className="flex-1 min-w-0">
+                    <span className="block h-3.5 w-1/3 rounded-[var(--r-1)] bg-[var(--fill-3)] mb-2" />
+                    <span className="block h-3 w-2/3 rounded-[var(--r-1)] bg-[var(--fill-2)]" />
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 min-h-[240px]">
+              <div className="h-12 w-full rounded-[var(--r-1)] bg-[var(--fill-2)]" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
+  // provider config this step drives — render Hermes' own model/provider/key
+  // config instead.
+  //
+  // EXCEPT when this step is scoped to the local model (Settings → Local AI).
+  // llama.cpp and Ollama run on the device and are configured through the
+  // local-ai routes, which are the same on both harnesses — so the Hermes panel
+  // has nothing to do with them. Handing it the local section replaced a single
+  // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
+  // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
+  if (edition === "hermes" && configureScope !== "local") {
+    return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
+  }
+
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
+      <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8 relative overflow-hidden">
         {configuringState && (
           <ConfiguringOverlay
             provider={configuringState.provider}
@@ -1706,23 +1710,35 @@ export default function AIModelsStep({
         )}
         {/* Hide form content when configuring overlay is shown */}
         <div className={configuringState ? "invisible h-0 overflow-hidden" : ""}>
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-2">
+        <h1 className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
           {resolvedTitle}
         </h1>
-        <p className="text-[var(--text-secondary)] mb-5 leading-relaxed">
+        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)] mb-6">
           {resolvedDescription}
         </p>
 
-        <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden">
+        <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
           {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
+            // ClawBox AI's row is shared verbatim with the Hermes provider panel
+            // (same component, not a lookalike) so the two can never drift.
+            if (provider.id === "clawai") {
+              return (
+                <ClawboxAiProviderRow
+                  key={provider.id}
+                  radioName="ai-provider"
+                  selected={isSelected}
+                  onSelect={() => selectProvider(provider.id)}
+                />
+              );
+            }
             return (
               <label
                 key={provider.id}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer ${
+                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--hair)] last:border-b-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
                   isSelected
-                    ? "bg-orange-500/5"
-                    : "hover:bg-[var(--surface-card)]"
+                    ? "bg-[var(--coral-wash)]"
+                    : "hover:bg-[var(--fill-3)]"
                 }`}
               >
                 <input
@@ -1735,34 +1751,33 @@ export default function AIModelsStep({
                 />
                 <span
                   aria-hidden="true"
-                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
+                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${
                     isSelected
                       ? "border-[var(--coral-bright)]"
-                      : "border-gray-600"
+                      : "border-[var(--border-subtle)]"
                   }`}
                 >
                   {isSelected && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />
                   )}
                 </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
+                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0">
                   <AIProviderIcon provider={provider.id} size={22} />
                 </span>
-                <div className="flex-1">
-                  <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                <div className="flex-1 min-w-0">
+                  <span className="flex flex-wrap items-center gap-2 text-[length:var(--t-4)] font-semibold text-[var(--text-primary)]">
                     {provider.name}
-                    {provider.id === "clawai" && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
-                        {t("recommended")}
-                      </span>
-                    )}
                     {provider.id === "llamacpp" && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
+                      /* Cyan is DONE-and-verified everywhere else in the box;
+                         "runs entirely on this device" is the one other fact
+                         it is allowed to carry, and it is the fact this row
+                         exists to state. */
+                      <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
                         {t("ai.fullyLocal")}
                       </span>
                     )}
                   </span>
-                  <span className="block text-xs text-[var(--text-muted)]">
+                  <span className="block text-[length:var(--t-2)] leading-[1.45] text-[var(--text-muted)]">
                     {providerDesc[provider.id] ?? provider.description}
                   </span>
                 </div>
@@ -1773,15 +1788,20 @@ export default function AIModelsStep({
             <button
               type="button"
               onClick={() => setShowMoreProviders(true)}
-              className="w-full px-4 py-2.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer hover:bg-[var(--bg-surface)]/50 transition-colors text-left"
+              aria-expanded={false}
+              // No border-top of its own: the row above it is no longer the
+              // list's last child, so that row's bottom hairline is already
+              // the divider. Two would draw a 2px seam.
+              className="flex w-full min-h-[48px] items-center gap-2 px-4 py-3 text-[length:var(--t-4)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer hover:bg-[var(--fill-3)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-left"
             >
+              <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 18 }}>expand_more</span>
               {t("ai.showMore")}
             </button>
           )}
         </div>
 
         {selected?.id === "ollama" && (
-          <div className="mt-5 space-y-4">
+          <div className="mt-3 space-y-4">
             <OllamaModelPanel
               ollamaRunning={ollamaRunning}
               ollamaModels={ollamaModels}
@@ -1806,11 +1826,11 @@ export default function AIModelsStep({
         )}
 
         {selected?.id === "llamacpp" && (
-          <div className="mt-5 space-y-4">
+          <div className="mt-3 space-y-4">
             <LlamaCppModelPanel
               llamaCppRunning={llamaCppRunning}
               llamaCppInstalled={llamaCppInstalled}
-              llamaCppIsActive={normalizedCurrentProvider === "llamacpp"}
+              llamaCppIsActive={localAiIsActive ?? normalizedCurrentProvider === "llamacpp"}
               llamaCppSaving={llamaCppSaving}
               llamaCppProgress={llamaCppProgress}
               selectedLlamaCppModel={selectedLlamaCppModel}
@@ -1822,9 +1842,9 @@ export default function AIModelsStep({
         )}
 
         {selected && selected.id !== "ollama" && selected.id !== "llamacpp" && selected.id !== "clawai" && activeAuth && (
-          <div className="mt-5">
+          <div className="mt-3">
             {effectiveAuthOptions.length > 1 && (
-              <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-lg">
+              <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-[var(--r-1)]">
                 {effectiveAuthOptions.map((opt) => (
                   <button
                     type="button"
@@ -1841,9 +1861,9 @@ export default function AIModelsStep({
                       setDeviceCode(null);
                       setDeviceUrl(null);
                     }}
-                    className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
+                    className={`flex-1 min-h-[40px] px-2 rounded-[var(--r-1)] text-[length:var(--t-4)] font-semibold transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer border-none ${
                       authMode === opt.mode
-                        ? "bg-[var(--bg-surface)] text-gray-200"
+                        ? "bg-[var(--fill-3)] text-[var(--text-primary)]"
                         : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
                     }`}
                   >
@@ -1863,16 +1883,16 @@ export default function AIModelsStep({
                     href={activeAuth.tokenUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-[var(--coral-bright)] hover:text-orange-300 transition-colors"
+                    className="inline-flex items-center gap-1.5 mb-3 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     {activeAuth.tokenUrlLabel === "Get API Key" ? t("ai.getApiKey") : t("ai.getToken")}
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>open_in_new</span>
                   </a>
                 )}
 
                 <label
                   htmlFor="ai-api-key"
-                  className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5"
+                  className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
                 >
                   {selected.name} API Key
                 </label>
@@ -1888,135 +1908,54 @@ export default function AIModelsStep({
                     placeholder={activeAuth.placeholder}
                     spellCheck={false}
                     autoComplete="off"
-                    className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
+                    className="w-full min-h-[48px] px-4 py-3 pr-12 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
                     aria-label={showKey ? "Hide key" : "Show key"}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-9 h-9 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>{showKey ? "visibility_off" : "visibility"}</span>
                   </button>
                 </div>
-                <p className="mt-1.5 text-xs text-[var(--text-muted)]">{activeAuth.hint}</p>
+                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">{activeAuth.hint}</p>
               </div>
             )}
             {renderProviderModelPicker()}
           </div>
         )}
 
+        {/* Stays an inset well rather than the coral accent panel the rest of
+            this system gives a first-party surface: the plan card inside it
+            is shared with the Hermes panel and already paints itself in
+            coral-wash on a coral edge, so a coral ground here would erase
+            it. Radius joins the ladder (12 → 8); the surface does not move
+            until the shared card can move with it. */}
         {selected?.id === "clawai" && (
-          <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
-            <p className="text-xs leading-relaxed text-orange-200/90">
-              Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
-            </p>
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
-                Tier
-              </span>
-              <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-0.5">
-                {CLAWAI_TIER_ORDER.map((tier) => {
-                  const info = CLAWAI_TIER_INFO[tier];
-                  const isActive = clawaiTier === tier;
-                  const showPickerTrial = info.hasTrial;
-                  const ariaLabel = showPickerTrial ? `${info.pillLabel} tier, Trial` : `${info.pillLabel} tier`;
-                  return (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={isActive}
-                      aria-label={ariaLabel}
-                      key={tier}
-                      onClick={() => persistClawaiTier(tier)}
-                      className={`relative px-3 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
-                        isActive
-                          ? info.pillActiveClass
-                          : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-                      }`}
-                    >
-                      {info.pillLabel}
-                      {showPickerTrial && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_2px_8px_rgba(217,70,239,0.45)] whitespace-nowrap leading-none"
-                        >
-                          Trial
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {/* Plan-tier card mirrors the portal's Subscription Plans block:
-                same name/price/feature data so the in-Settings preview and
-                the portal billing page never disagree. */}
-            {(() => {
-              const info = CLAWAI_TIER_INFO[clawaiTier];
-              return (
-                <div className={`mt-3 rounded-lg border px-3.5 py-3 ${info.cardClass}`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-baseline gap-1.5">
-                      <span className={`text-sm font-bold ${info.cardHeadlineClass}`}>
-                        {info.planName}
-                      </span>
-                      <span className="text-xs font-semibold text-[var(--text-secondary)]">
-                        €{info.priceEuro}
-                      </span>
-                      <span className="text-[11px] text-[var(--text-muted)]">{info.pricePeriod}</span>
-                    </div>
-                    {info.hasTrial && (
-                      <a
-                        href={`${PORTAL_LOGIN_URL}/dashboard`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] hover:from-fuchsia-400 hover:to-pink-400 transition-colors whitespace-nowrap"
-                      >
-                        Start 30-day free trial
-                        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
-                      </a>
-                    )}
-                  </div>
-                  <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
-                    {info.features.map((feature) => (
-                      <li key={feature} className="flex items-start gap-1.5">
-                        <span
-                          aria-hidden="true"
-                          className={`material-symbols-rounded shrink-0 ${info.cardCheckClass}`}
-                          style={{ fontSize: 12, marginTop: 2 }}
-                        >
-                          check_circle
-                        </span>
-                        <span>{feature}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              );
-            })()}
+          <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+            <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow
                 vs paste a key". */}
             {effectiveAuthOptions.length > 1 && (
-              <div className="mt-4 flex gap-1 p-1 bg-[var(--bg-deep)] rounded-lg">
+              <div className="mt-4 flex gap-1 p-1 bg-[var(--bg-deep)] rounded-[var(--r-1)]">
                 {effectiveAuthOptions.map((opt) => (
                   <button
                     type="button"
                     key={opt.mode}
                     onClick={() => {
-                      stopClawAiPolling();
+                      stopClawaiLogin();
+                      resetClawaiLogin();
                       setAuthMode(opt.mode);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
-                      setClawaiDeviceCode(null);
-                      setClawaiVerificationUrl(null);
                     }}
-                    className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none ${
+                    className={`flex-1 min-h-[40px] px-2 rounded-[var(--r-1)] text-[length:var(--t-4)] font-semibold transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer border-none ${
                       authMode === opt.mode
-                        ? "bg-[var(--bg-surface)] text-gray-200"
+                        ? "bg-[var(--fill-3)] text-[var(--text-primary)]"
                         : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
                     }`}
                   >
@@ -2030,75 +1969,13 @@ export default function AIModelsStep({
                 Render either the kick-off button (no code yet) or the
                 code + Open authorization page + polling indicator. */}
             {currentAuthMode === "subscription" && (
-              <div className="mt-4">
-                <p className="text-xs text-[var(--text-muted)] leading-relaxed mb-3">
-                  Open the ClawBox portal and enter the device code shown below. Your device finishes the handoff once you confirm on the portal.
-                </p>
-                {!clawaiDeviceCode ? (
-                  <button
-                    type="button"
-                    onClick={() => { void startClawaiDeviceAuth(); }}
-                    disabled={saving}
-                    className="w-full px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
-                  >
-                    {saving && ButtonSpinner}
-                    {saving ? t("connecting") : "Get device code"}
-                  </button>
-                ) : (
-                  <div>
-                    <div className="mb-3 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
-                      <a
-                        href={clawaiVerificationUrl ?? PORTAL_LOGIN_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
-                      >
-                        Open authorization page
-                        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>open_in_new</span>
-                      </a>
-                      <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">Then enter this code:</p>
-                      <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-                        <span className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all">
-                          {clawaiDeviceCode}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const code = clawaiDeviceCode;
-                            if (!code) return;
-                            const ok = await copyToClipboard(code);
-                            if (!ok) return;
-                            setClawaiCodeCopied(true);
-                            if (clawaiCopyTimerRef.current) clearTimeout(clawaiCopyTimerRef.current);
-                            clawaiCopyTimerRef.current = setTimeout(() => setClawaiCodeCopied(false), 1500);
-                          }}
-                          className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
-                        >
-                          {clawaiCodeCopied ? t("copied") : t("copy")}
-                        </button>
-                      </div>
-                      <p className="mt-2 text-xs text-[var(--text-muted)]">
-                        Code expires in 15 minutes
-                      </p>
-                    </div>
-
-                    {clawaiDevicePolling && (
-                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                        <span className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
-                        Waiting for authorization…
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => { void startClawaiDeviceAuth(); }}
-                      className="mt-2 bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0"
-                    >
-                      Get a new code
-                    </button>
-                  </div>
-                )}
-              </div>
+              <ClawboxAiDeviceLogin
+                deviceCode={clawaiLogin.deviceCode}
+                verificationUrl={clawaiLogin.verificationUrl}
+                polling={clawaiLogin.polling}
+                busy={saving}
+                onStart={() => { void startClawaiLogin(); }}
+              />
             )}
 
             {/* API Key tab — direct token paste, same UX as other providers.
@@ -2107,7 +1984,7 @@ export default function AIModelsStep({
                 stays available for users who already have one. */}
             {currentAuthMode === "token" && (
               <div className="mt-4">
-                <label htmlFor="clawai-portal-token" className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
+                <label htmlFor="clawai-portal-token" className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2">
                   Portal token
                 </label>
                 <div className="relative">
@@ -2128,20 +2005,20 @@ export default function AIModelsStep({
                     placeholder="Paste your portal token"
                     spellCheck={false}
                     autoComplete="off"
-                    className="w-full px-3.5 py-2.5 pr-11 text-sm bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-gray-100 outline-none transition focus:border-[var(--coral-bright)] placeholder:text-[var(--text-muted)]"
+                    className="w-full min-h-[48px] px-4 py-3 pr-12 text-[length:var(--t-4)] bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[var(--text-primary)] outline-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--coral-bright)] placeholder:text-[var(--text-muted)]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
                     aria-label={showKey ? "Hide token" : "Show token"}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-1"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
                       {showKey ? "visibility_off" : "visibility"}
                     </span>
                   </button>
                 </div>
-                <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
                   Issue a token in the <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">ClawBox portal</a> and paste it here.
                 </p>
               </div>
@@ -2160,7 +2037,7 @@ export default function AIModelsStep({
                 type="button"
                 onClick={saveModel}
                 disabled={saving || !apiKey.trim()}
-                className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+                className={PRIMARY_ACTION_CLASS}
               >
                 {saving && ButtonSpinner}
                 {saving ? (embedded ? t("connecting") : t("ai.configuring")) : embedded ? embeddedConnectLabel : selectedConnectLabel}
@@ -2184,7 +2061,7 @@ export default function AIModelsStep({
                   type="button"
                   onClick={exchangeCode}
                   disabled={exchanging || !authCode.trim()}
-                  className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
+                  className={PRIMARY_ACTION_CLASS}
                 >
                   {exchanging && ButtonSpinner}
                   {exchanging ? t("connecting") : embedded ? embeddedConnectLabel : selectedConnectLabel}
@@ -2196,8 +2073,9 @@ export default function AIModelsStep({
               type="button"
               onClick={saveModel}
               disabled={saving || !selectedProvider}
-              className="w-full py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100"
+              className={PRIMARY_ACTION_CLASS}
             >
+              {saving && ButtonSpinner}
               {saving ? t("connecting") : embedded ? embeddedConnectLabel : selectedConnectLabel}
             </button>
           )}
@@ -2208,7 +2086,7 @@ export default function AIModelsStep({
               type="button"
               onClick={handleSkipAction}
               disabled={saving}
-              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer underline transition-colors"
+              className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:cursor-not-allowed"
             >
               {configureScope === "local" ? t("skip") : t("ai.skipUseLocalOnly")}
             </button>

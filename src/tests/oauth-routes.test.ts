@@ -12,6 +12,7 @@ const TEST_ROOT = path.join(
 const DATA_DIR = path.join(TEST_ROOT, "data");
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
 const ORG_PATH = path.join(DATA_DIR, "oauth-org.json");
+const TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");
 
 let startPost: RoutePost;
 let exchangePost: RoutePost;
@@ -323,11 +324,14 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "anthropic_access",
-      refresh_token: "anthropic_refresh",
-      expires_in: 1800,
-    });
+    // Tokens are now persisted server-side and NOT returned to the browser —
+    // the response is just a status, and the tokens land in the 0600 handoff
+    // file the configure route reads.
+    expect(body).toEqual({ status: "complete" });
+    const persisted = JSON.parse(await fs.readFile(TOKENS_PATH, "utf-8"));
+    expect(persisted.provider).toBe("anthropic");
+    expect(persisted.access_token).toBe("anthropic_access");
+    expect(persisted.refresh_token).toBe("anthropic_refresh");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const firstCall = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -368,7 +372,10 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.access_token).toBe("anthropic_access");
+    expect(body.status).toBe("complete");
+    const persisted = JSON.parse(await fs.readFile(TOKENS_PATH, "utf-8"));
+    expect(persisted.provider).toBe("anthropic");
+    expect(persisted.access_token).toBe("anthropic_access");
     const firstCall = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(firstCall[0]).toBe("https://console.anthropic.com/v1/oauth/token");
   });
@@ -399,7 +406,7 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.access_token).toBe("anthropic_access");
+    expect(body.status).toBe("complete");
   });
 
   it("returns 504 when token exchange times out", async () => {
@@ -487,12 +494,13 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body).toEqual({
-      access_token: "oauth_access_token",
-      id_token: "id-token-123",
-      refresh_token: "oauth_refresh_token",
-      expires_in: 3600,
-    });
+    // Tokens persist server-side; the browser only sees a status.
+    expect(body).toEqual({ status: "complete" });
+    const persisted = JSON.parse(await fs.readFile(TOKENS_PATH, "utf-8"));
+    expect(persisted.provider).toBe("openai");
+    expect(persisted.access_token).toBe("oauth_access_token");
+    expect(persisted.id_token).toBe("id-token-123");
+    expect(persisted.refresh_token).toBe("oauth_refresh_token");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const firstCall = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -652,7 +660,9 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.access_token).toBe("oauth_access_token");
+    expect(body.status).toBe("complete");
+    const persisted = JSON.parse(await fs.readFile(TOKENS_PATH, "utf-8"));
+    expect(persisted.access_token).toBe("oauth_access_token");
   });
 
   it("continues when post-success state cleanup unlink fails", async () => {
@@ -676,7 +686,7 @@ describe("OAuth exchange route", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.access_token).toBe("oauth_access_token");
+    expect(body.status).toBe("complete");
   });
 });
 

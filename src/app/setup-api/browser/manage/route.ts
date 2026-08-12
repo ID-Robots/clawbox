@@ -6,8 +6,10 @@ import { promisify } from "util";
 import { constants as fsConstants } from "fs";
 import fs from "fs/promises";
 import path from "path";
-import { readConfig, findOpenclawBin } from "@/lib/openclaw-config";
+import type { OpenClawConfig } from "@/lib/openclaw-config";
+import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { findClawboxBrowserPids, terminateClawboxBrowser } from "@/lib/process-match";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -16,6 +18,37 @@ const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
 const PLAYWRIGHT_BROWSERS_DIR = path.join(HOME, ".cache", "ms-playwright");
 const CDP_PORT = 18800;
 const BROWSER_ENABLED_KEY = "browser:integration-enabled";
+
+/**
+ * Is the browser↔agent link a switch the owner flips, or is it simply always on?
+ *
+ * On OpenClaw it is a switch. "Enable" writes `tools.profile: full` and
+ * `tools.web.search.enabled: true` into ~/.openclaw/openclaw.json and bounces
+ * the gateway, because the agent ships with a restricted `coding` tool profile
+ * that has no browsing in it.
+ *
+ * On Hermes there is no switch, because there is nothing to switch. The four
+ * ClawBox browser tools (browser_open / browser_navigate / browser_screenshot /
+ * browser_close in mcp/tools/browser.ts) are registered on this edition
+ * unconditionally, scripts/register-mcp.sh wires the ClawBox MCP server into
+ * ~/.hermes/config.yaml at every web-server boot, and that same script turns the
+ * harness's own browser toolset off so browsing goes through those tools and
+ * therefore through the Chromium window on the desktop. Hermes has no
+ * `tools.profile` to flip and no separate web-search tool to arm.
+ *
+ * So the panel previously offered an Activate button here that could only ever
+ * fail: the action reached for the `openclaw` CLI, which this edition does not
+ * ship, and the owner got "The OpenClaw CLI is not available on this edition."
+ * for a capability that was already working. `alwaysOn` is how the route tells
+ * the client which of the two worlds it is in, so the panel can state the truth
+ * instead of offering a switch.
+ *
+ * Keyed on the EDITION, not the active harness: a `dual` box still has the
+ * OpenClaw CLI and its gateway, so it keeps the switch exactly as before.
+ */
+function integrationIsAlwaysOn(): boolean {
+  return openclawIsAbsent();
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -112,26 +145,25 @@ async function cleanBrowserLocks() {
 
 /** Check if browser is running and CDP is accessible */
 async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean }> {
-  // Check CDP endpoint first (most reliable)
+  // Identify the browser by its executable + our profile dir / CDP port, never
+  // by a regex over whole command lines — see src/lib/process-match.ts. The
+  // harness runs each chat turn as `hermes chat -q <user's message>`, so a
+  // command-line pattern is matchable from a chat message.
+  const browserMatch = { profileDir: PROFILE_DIR, cdpPort: CDP_PORT };
+
+  // CDP answering is the authoritative "it is up and usable" signal; the pid
+  // is only a label for the UI. One scan serves both answers — this route is
+  // polled every 5s while the Browser panel is open, and the scan reads /proc.
+  let cdpReady = false;
   try {
     const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) {
-      // Find the main process PID
-      try {
-        const { stdout } = await exec("pgrep", ["-f", `remote-debugging-port=${CDP_PORT}`], { timeout: 3000 });
-        const pid = parseInt(stdout.trim().split("\n")[0]);
-        return { running: true, pid: isNaN(pid) ? undefined : pid, cdpReady: true };
-      } catch {
-        return { running: true, cdpReady: true };
-      }
-    }
+    cdpReady = res.ok;
   } catch {}
-  // Fallback: check process
-  try {
-    const { stdout } = await exec("pgrep", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 3000 });
-    const pids = stdout.trim().split("\n").map(s => parseInt(s)).filter(n => !isNaN(n) && n > 0);
-    if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
-  } catch {}
+
+  // findClawboxBrowserPids handles its own I/O failures and returns [].
+  const pids = await findClawboxBrowserPids(browserMatch);
+  if (cdpReady) return { running: true, pid: pids[0], cdpReady: true };
+  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
   return { running: false, cdpReady: false };
 }
 
@@ -157,19 +189,26 @@ async function persistBrowserEnabled(enabled: boolean): Promise<void> {
 
 export async function GET() {
   try {
+    const alwaysOn = integrationIsAlwaysOn();
+
+    // On an always-on edition neither of the last two reads means anything:
+    // there is no ~/.openclaw/openclaw.json to hold a tools profile, and the
+    // sqlite flag only ever recorded the OpenClaw switch. Skip them rather than
+    // derive a "disabled" answer from files this edition does not keep.
     const [chromium, browser, config, persistedEnabled] = await Promise.all([
       checkChromium(),
       getBrowserStatus(),
-      readOpenClawConfig(),
-      getPersistedBrowserEnabled(),
+      alwaysOn ? Promise.resolve({} as OpenClawConfig) : readOpenClawConfig(),
+      alwaysOn ? Promise.resolve(null) : getPersistedBrowserEnabled(),
     ]);
 
-    const enabled = persistedEnabled ?? (config.tools?.profile === "full");
+    const enabled = alwaysOn || (persistedEnabled ?? (config.tools?.profile === "full"));
 
     return NextResponse.json({
       chromium,
       browser,
       enabled,
+      alwaysOn,
       cdpPort: CDP_PORT,
     });
   } catch (err) {
@@ -230,10 +269,18 @@ export async function POST(req: Request) {
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
 
-        const openclawBin = findOpenclawBin();
+        // Always-on edition: the profile dir above is the only preparation this
+        // action can usefully do. Report the state as it already is instead of
+        // reaching for a CLI that isn't installed here — see
+        // integrationIsAlwaysOn(). The client hides the button on this edition;
+        // this guard is what keeps a stale page or a direct call honest too.
+        if (integrationIsAlwaysOn()) {
+          return NextResponse.json({ ok: true, enabled: true, alwaysOn: true, profileDir: PROFILE_DIR });
+        }
+
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "full"], { timeout: 30000 });
-          await exec(openclawBin, ["config", "set", "tools.web.search.enabled", "true", "--json"], { timeout: 30000 });
+          await runOpenclawConfigSet(["tools.profile", "full"]);
+          await runOpenclawConfigSet(["tools.web.search.enabled", "true", "--json"]);
           await persistBrowserEnabled(true);
         } catch (err) {
           console.error("[browser] Failed to set tools config:", err);
@@ -245,7 +292,7 @@ export async function POST(req: Request) {
 
         let enableRestartOk = true;
         try {
-          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await restartGateway();
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           enableRestartOk = false;
@@ -255,9 +302,23 @@ export async function POST(req: Request) {
       }
 
       case "disable": {
-        const openclawBin = findOpenclawBin();
+        // Nothing to take away on an always-on edition: the browser tools are
+        // part of the tool set the harness is given at boot, not a stored
+        // preference. Say so plainly rather than report a success that changed
+        // nothing.
+        if (integrationIsAlwaysOn()) {
+          return NextResponse.json(
+            {
+              error: "Browser integration is built into this edition and cannot be turned off.",
+              enabled: true,
+              alwaysOn: true,
+            },
+            { status: 400 },
+          );
+        }
+
         try {
-          await exec(openclawBin, ["config", "set", "tools.profile", "coding"], { timeout: 30000 });
+          await runOpenclawConfigSet(["tools.profile", "coding"]);
           await persistBrowserEnabled(false);
         } catch (err) {
           console.error("[browser] Failed to unset tools config:", err);
@@ -269,7 +330,7 @@ export async function POST(req: Request) {
 
         let disableRestartOk = true;
         try {
-          await exec("/usr/bin/sudo", ["systemctl", "restart", "clawbox-gateway"], { timeout: 15000 });
+          await restartGateway();
         } catch (err) {
           console.error("[browser] Gateway restart failed:", err);
           disableRestartOk = false;
@@ -339,15 +400,20 @@ export async function POST(req: Request) {
           // browser down. Log so ops can see if systemctl itself is wedged.
           console.warn("[browser] systemctl stop clawbox-browser.service failed:", err);
         }
-        try {
-          await exec("pkill", ["-f", "chrom.*--user-data-dir.*clawbox-browser"], { timeout: 5000 });
-        } catch (err) {
-          // pkill exits non-zero when it finds no matching processes — that's
-          // the happy path after systemctl already stopped the service, not a
-          // real failure. Log at debug volume only.
-          if (err instanceof Error && !/Command failed/.test(err.message)) {
-            console.warn("[browser] pkill clawbox-browser failed:", err);
-          }
+        // Was `pkill -f "chrom.*--user-data-dir.*clawbox-browser"`. That matches
+        // the regex against every process's full argv, and a chat turn runs as
+        // `hermes chat -q <the user's message>` — so a message containing that
+        // pattern made this call SIGTERM the turn answering it. Select by
+        // executable + profile dir instead, which a message cannot forge.
+        // Finding nothing is the happy path: the unit's KillMode=control-group
+        // has usually already reaped the tree. Signal failures are swallowed by
+        // terminateClawboxBrowser, so there is nothing here to catch.
+        const signalled = await terminateClawboxBrowser({
+          profileDir: PROFILE_DIR,
+          cdpPort: CDP_PORT,
+        });
+        if (signalled > 0) {
+          console.log(`[browser] terminated ${signalled} leftover browser process(es)`);
         }
         await new Promise(r => setTimeout(r, 1000));
         await cleanBrowserLocks();

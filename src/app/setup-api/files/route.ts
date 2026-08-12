@@ -5,6 +5,7 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
+import { isProtectedFilePath } from "@/lib/file-guard";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,6 +33,10 @@ function safePath(rel: string): string | null {
   // Require either an exact base match or a path inside base (with separator),
   // otherwise sibling dirs like "/home/clawboxmalicious" would slip through.
   if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
+  // The browse root is $HOME, so secret stores (.ssh, .openclaw, the data/
+  // tokens) sit inside the sandbox — deny them at the single resolve chokepoint
+  // that every read/write/rename/download path funnels through.
+  if (isProtectedFilePath(resolved)) return null;
   return resolved;
 }
 
@@ -71,6 +76,8 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
       if (!includeHidden && name.startsWith(".")) continue;
       const isDir = dirent.isDirectory();
       const full = path.join(dir, name);
+      // Never surface or descend into secret stores, even with ?hidden=1.
+      if (isProtectedFilePath(full)) continue;
       if (name.toLowerCase().includes(query)) {
         let size: number | null = null;
         let modified = "";
@@ -123,7 +130,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const stat = fs.statSync(abs);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EACCES" || code === "EPERM") {
+      return NextResponse.json({ error: "Permission denied" }, { status: 403 });
+    }
+    return NextResponse.json({ error: "Failed to read directory" }, { status: 500 });
+  }
   if (!stat.isDirectory()) return NextResponse.json({ error: "Not a directory" }, { status: 400 });
 
   // Recursive search mode: walk the tree from `abs` and return matches with
@@ -139,11 +155,24 @@ export async function GET(req: NextRequest) {
   // Return everything including dotfiles. The client (FilesApp) hides
   // them by default and toggles visibility via the visibility/visibility_off
   // button — filtering server-side would defeat that toggle.
-  const entries = fs.readdirSync(abs);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(abs);
+  } catch (err) {
+    // A 700 / root-owned directory yields EACCES from scandir — return a clean
+    // 403 instead of a 500 that leaks the absolute path in the syscall string.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EACCES" || code === "EPERM") {
+      return NextResponse.json({ error: "Permission denied" }, { status: 403 });
+    }
+    return NextResponse.json({ error: "Failed to read directory" }, { status: 500 });
+  }
   const files = entries
     .map((name) => {
       try {
         const fullPath = path.join(abs, name);
+        // Keep secret stores out of the listing entirely (not just un-openable).
+        if (isProtectedFilePath(fullPath)) return null;
         const s = fs.statSync(fullPath);
         return {
           name,

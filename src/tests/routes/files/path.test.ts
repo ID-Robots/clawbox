@@ -24,8 +24,14 @@ function createParams(pathSegments: string[]): { params: Promise<{ path: string[
   return { params: Promise.resolve({ path: pathSegments }) };
 }
 
+// Point CLAWBOX_ROOT at the same temp tree as FILES_ROOT so the ClawBox data
+// dir lands *inside* the browse root — which is the real arrangement on the
+// device, where the browse root is $HOME and the data dir sits under it.
+const DATA_DIR = path.join(TEST_ROOT, "data");
+
 beforeAll(async () => {
   process.env.FILES_ROOT = TEST_ROOT;
+  process.env.CLAWBOX_ROOT = TEST_ROOT;
   await fsp.mkdir(TEST_ROOT, { recursive: true });
   vi.resetModules();
   ({ GET: filesPathGet, PUT: filesPathPut, DELETE: filesPathDelete } = await import("@/app/setup-api/files/[...path]/route"));
@@ -38,6 +44,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   delete process.env.FILES_ROOT;
+  delete process.env.CLAWBOX_ROOT;
   await fsp.rm(TEST_ROOT, { recursive: true, force: true });
 });
 
@@ -187,6 +194,82 @@ describe("PUT /setup-api/files/[...path]", () => {
 
     expect(res.status).toBe(400);
     expect(body.error).toBe("Invalid destination");
+  });
+});
+
+describe("the ClawBox data directory through the files route", () => {
+  // file-guard's own suite owns the inventory; these rows exist to pin that the
+  // route is wired to it — a long-standing store, a name an atomic write
+  // generates at runtime, a name that does not exist yet, and a nested one.
+  const serverState = [
+    ["a long-standing store", ["data", "config.json"]],
+    ["a runtime-named sidecar", ["data", "oauth-device-tokens.json.tmp.deadbeef"]],
+    ["a name added after this test was written", ["data", "some-future-store.json"]],
+    ["a nested file", ["data", "cloudflared", "cert.pem"]],
+  ] as const;
+
+  beforeEach(async () => {
+    for (const [, segments] of serverState) {
+      const abs = path.join(TEST_ROOT, ...segments);
+      await fsp.mkdir(path.dirname(abs), { recursive: true });
+      await fsp.writeFile(abs, "server state");
+    }
+  });
+
+  it.each(serverState)("does not download %s", async (_label, segments) => {
+    const res = await filesPathGet(
+      createRequest(`/setup-api/files/${segments.join("/")}`),
+      createParams([...segments]),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Invalid path");
+  });
+
+  it.each(serverState)("does not delete %s", async (_label, segments) => {
+    const res = await filesPathDelete(
+      createRequest(`/setup-api/files/${segments.join("/")}`, { method: "DELETE" }),
+      createParams([...segments]),
+    );
+    expect(res.status).toBe(400);
+    expect(fs.existsSync(path.join(TEST_ROOT, ...segments))).toBe(true);
+  });
+
+  it("does not rename a data-dir file out of the way", async () => {
+    const res = await filesPathPut(
+      createRequest("/setup-api/files/data/config.json", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newName: "config.txt" }),
+      }),
+      createParams(["data", "config.json"]),
+    );
+    expect(res.status).toBe(400);
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+  });
+
+  it.each([
+    ["webapps", ["data", "webapps", "demo", "index.html"]],
+    ["code-projects", ["data", "code-projects", "my-app", "app.js"]],
+  ] as const)("still downloads from the public subtree %s", async (_label, segments) => {
+    const abs = path.join(TEST_ROOT, ...segments);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, "public content");
+
+    const res = await filesPathGet(
+      createRequest(`/setup-api/files/${segments.join("/")}`),
+      createParams([...segments]),
+    );
+    expect(res.status).toBe(200);
+    expect(new TextDecoder().decode(await res.arrayBuffer())).toBe("public content");
+  });
+
+  it("still reaches an ordinary file elsewhere under the browse root", async () => {
+    fs.writeFileSync(path.join(TEST_ROOT, "notes.txt"), "mine");
+    const res = await filesPathGet(
+      createRequest("/setup-api/files/notes.txt"),
+      createParams(["notes.txt"]),
+    );
+    expect(res.status).toBe(200);
   });
 });
 

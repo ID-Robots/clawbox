@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 interface TelegramConfiguringOverlayProps {
   onDone: () => void;
@@ -15,7 +16,7 @@ interface TelegramConfiguringOverlayProps {
    */
   waitFor?: Promise<void>;
   /**
-   * Max ms to poll gateway health before giving up. When the poll times
+   * Max ms to poll for readiness before giving up. When the poll times
    * out, the overlay calls onDone() without transitioning to phase 4 so
    * the parent can surface its own error instead of falsely reporting
    * "ready". Default: 60_000.
@@ -30,11 +31,22 @@ export default function TelegramConfiguringOverlay({
 }: TelegramConfiguringOverlayProps) {
   const { t } = useT();
 
+  // Device edition. Seeded from the process-wide cache (immutable for the life
+  // of the document) and otherwise resolved by the effect below, well before
+  // phase 2 — the step whose label differs — becomes visible.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  const isHermes = edition === "hermes";
+
+  // A Hermes device has no OpenClaw gateway to restart or wait for: the unit is
+  // masked and restartGateway() is a documented no-op there. What the configure
+  // route actually brings up on this edition is Hermes' own messaging gateway —
+  // the process that receives Telegram messages — so that is what the middle
+  // two steps name.
   const CONFIGURING_STEPS = [
     { label: t("telegram.tokenVerified") },
     { label: t("telegram.connectingTelegram") },
-    { label: t("telegram.restartingGateway") },
-    { label: t("telegram.waitingGateway") },
+    { label: isHermes ? t("telegram.hermesStartingService") : t("telegram.restartingGateway") },
+    { label: isHermes ? t("telegram.hermesWaitingService") : t("telegram.waitingGateway") },
     { label: t("telegram.readyToChat") },
   ];
 
@@ -54,9 +66,10 @@ export default function TelegramConfiguringOverlay({
       });
     }
 
+    const POLL_INTERVAL_MS = 2000;
+    const maxAttempts = Math.ceil(healthTimeoutMs / POLL_INTERVAL_MS);
+
     async function pollGatewayHealth(): Promise<boolean> {
-      const pollIntervalMs = 2000;
-      const maxAttempts = Math.ceil(healthTimeoutMs / pollIntervalMs);
       for (let i = 0; i < maxAttempts; i++) {
         if (cancelledRef.current) return false;
         try {
@@ -66,12 +79,58 @@ export default function TelegramConfiguringOverlay({
             if (data.available) return true;
           }
         } catch { /* gateway not ready yet */ }
-        await delay(pollIntervalMs);
+        await delay(POLL_INTERVAL_MS);
+      }
+      return false;
+    }
+
+    /**
+     * Readiness on a Hermes-edition device.
+     *
+     * /setup-api/gateway/health is meaningless here — the OpenClaw gateway is
+     * not installed and its unit is masked, so polling it burned the whole
+     * healthTimeoutMs budget and then called onDone() having never reached the
+     * "ready to chat" phase. The owner saw a minute of spinner and no green
+     * check on a save that had actually succeeded.
+     *
+     * The equivalent signal on this edition is Hermes' messaging gateway, which
+     * is what the configure route brings up (ensureHermesGateway) and what
+     * decides whether the bot answers at all. /setup-api/telegram/status already
+     * reports it: `receiving` is true only when the token is registered with
+     * Hermes AND that gateway is running — the same "something is listening"
+     * meaning `available` carries on the OpenClaw side.
+     *
+     * The route caches its Hermes probe for 15 s, so polling every 2 s costs at
+     * most one real CLI round-trip per window rather than one per attempt.
+     */
+    async function pollHermesTelegramReady(): Promise<boolean> {
+      for (let i = 0; i < maxAttempts; i++) {
+        if (cancelledRef.current) return false;
+        try {
+          const res = await fetch("/setup-api/telegram/status", {
+            cache: "no-store",
+            // The probe shells out to the Hermes CLI; a request that stalls
+            // must not eat more of the budget than one attempt is worth.
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.receiving === true) return true;
+          }
+        } catch { /* messaging gateway not up yet */ }
+        await delay(POLL_INTERVAL_MS);
       }
       return false;
     }
 
     async function run() {
+      // Resolve before the phase machine reaches the steps whose meaning
+      // depends on it. Cached, so this is a no-op read in the normal case.
+      const activeEdition = await resolveEdition();
+      if (cancelledRef.current) return;
+      setEdition(activeEdition);
+      const hermes = activeEdition === "hermes";
+
       await delay(1500);
       if (cancelledRef.current) return;
       setPhase(1);
@@ -86,18 +145,18 @@ export default function TelegramConfiguringOverlay({
 
       // Wait for BOTH signals before declaring ready:
       //   1. the caller's configure request has succeeded (waitFor)
-      //   2. gateway health reports available again after the restart
-      // Running them concurrently matches the phase-3 "waiting gateway"
-      // spinner the user already sees — we don't want to add more delay,
-      // just make sure neither completes prematurely.
+      //   2. the harness's own messaging path reports it is listening again
+      // Running them concurrently matches the phase-3 spinner the user already
+      // sees — we don't want to add more delay, just make sure neither
+      // completes prematurely.
       const [ready] = await Promise.all([
-        pollGatewayHealth(),
+        hermes ? pollHermesTelegramReady() : pollGatewayHealth(),
         waitFor ?? Promise.resolve(),
       ]);
       if (cancelledRef.current) return;
       if (!ready) {
-        // Gateway never came back within healthTimeoutMs — hand control
-        // back to the parent without pretending we finished.
+        // Nothing reported itself listening within healthTimeoutMs — hand
+        // control back to the parent without pretending we finished.
         onDone();
         return;
       }
@@ -211,7 +270,7 @@ export default function TelegramConfiguringOverlay({
 
       {phase >= 1 && phase < 4 && (
         <p className="text-xs text-[var(--text-muted)] text-center mt-2 tg-step-enter">
-          {t("telegram.pleaseWait")}{dots}
+          {isHermes ? t("telegram.hermesPleaseWait") : t("telegram.pleaseWait")}{dots}
         </p>
       )}
     </div>

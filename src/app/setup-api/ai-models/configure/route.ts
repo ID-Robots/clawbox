@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { getAll, setMany } from "@/lib/config-store";
+import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
   findOpenclawBin,
@@ -15,7 +16,13 @@ import {
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
+  openclawIsAbsent,
+  OpenclawUnavailableError,
 } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
+import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
+import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
+import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
   getDefaultLlamaCppModel,
   getLlamaCppContextWindow,
@@ -39,6 +46,12 @@ import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/op
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
+// The model name on this route arrives in the request body. For a local
+// provider it is the whole of `apiKey`, which nothing further constrains, and
+// it reaches the lines below both directly and inside a subprocess error that
+// quotes the command it ran. Bound every such field before logging it — see
+// src/lib/log-safe.ts.
+import { logSafe } from "@/lib/log-safe";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -188,8 +201,17 @@ async function readAuthProfiles(): Promise<AuthProfilesFile> {
   try {
     const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
     return JSON.parse(raw) as AuthProfilesFile;
-  } catch {
-    return { version: 1, profiles: {} };
+  } catch (err) {
+    // Only a genuinely absent file means "no profiles yet" (first run). Any
+    // other failure — EACCES on a root-owned file, a partial/corrupt JSON, an
+    // I/O error — must NOT be treated as empty: the caller does a
+    // read-modify-write, so defaulting to {} here would overwrite the file with
+    // a single profile and silently destroy every other provider's stored
+    // credentials (there is no backup for this file). Fail closed instead.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 1, profiles: {} };
+    }
+    throw err;
   }
 }
 
@@ -362,7 +384,7 @@ async function ensureFallbackModel(
 
   if (fallbackCandidates.length > 0) {
     await setFallbackModels([fallbackCandidates[0]]);
-    console.log(`[AI Config] Configured local fallback model: ${fallbackCandidates[0]}`);
+    console.log(`[AI Config] Configured local fallback model: ${logSafe(fallbackCandidates[0])}`);
     return;
   }
 
@@ -425,6 +447,11 @@ async function writeOpenAICompatProvider(opts: {
 }
 
 export async function POST(request: Request) {
+  // Hoisted so the catch can classify the failure without re-parsing the body —
+  // a local-model or wrong-edition failure must not be reported as a credential
+  // problem (there is no credential to check).
+  let requestProvider: string | undefined;
+  let requestScope: ConfigureScope = "primary";
   try {
     let body: {
       provider?: string;
@@ -437,6 +464,16 @@ export async function POST(request: Request) {
       scope?: ConfigureScope;
       clawaiTier?: string;
       model?: string;
+      oauthHandoff?: boolean;
+      /**
+       * Explicit "make this the model that answers", as distinct from "install
+       * it and keep it available". Enabling a local model deliberately does NOT
+       * take over from the provider the customer chose, so the Settings panel's
+       * "Switch to Gemma 4" button had no way to actually switch — it ran the
+       * same enable flow and silently left the harness where it was. This flag
+       * is that missing intent; omitted, the promote policy is unchanged.
+       */
+      activate?: boolean;
     };
     try {
       body = await request.json();
@@ -444,7 +481,94 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
+    // Server-side OAuth token handoff: on the subscription handoff path the
+    // browser posts no provider tokens — device-poll persisted them to a
+    // server-only file. Read them here and splice them into the body so
+    // everything downstream (validation + persistence) is unchanged. The file
+    // is only consumed (unlinked) on the happy path, right before success, so a
+    // transient failure downstream leaves it readable for a retry within its
+    // 15-minute TTL rather than forcing a full re-auth.
+    let pendingHandoffTokensPath: string | null = null;
+    if (body.authMode === "subscription" && body.oauthHandoff) {
+      let handoff: {
+        provider?: string;
+        access_token?: string;
+        id_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        createdAt?: number;
+      };
+      let rawHandoff: string;
+      try {
+        rawHandoff = await fs.readFile(HANDOFF_TOKENS_PATH, "utf-8");
+      } catch {
+        return NextResponse.json(
+          { error: "No pending OAuth tokens. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      try {
+        const parsed = JSON.parse(rawHandoff);
+        if (!parsed || typeof parsed !== "object") throw new Error("not an object");
+        handoff = parsed;
+      } catch {
+        // Content a retry cannot fix. Remove it rather than leave every later
+        // attempt to fail on the same file until something else clears it.
+        await fs.unlink(HANDOFF_TOKENS_PATH).catch(() => {});
+        return NextResponse.json(
+          { error: "No pending OAuth tokens. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      // Age the file by its own timestamp, and only when that timestamp is one
+      // we can actually compare: a missing, non-numeric, non-finite or future
+      // `createdAt` yields no age, so the file cannot be shown to be inside the
+      // TTL and is treated exactly like one past it. (A bare
+      // `Date.now() - createdAt` comparison would pass for all of them — NaN
+      // and a negative age each fail a `> TTL` test.)
+      const createdAt = handoff.createdAt;
+      const ageMs =
+        typeof createdAt === "number" && Number.isFinite(createdAt)
+          ? Date.now() - createdAt
+          : null;
+      // These routes write the file, and they write strings. A field of another
+      // shape means the file is not one of ours to use, so it goes down the
+      // same path rather than being spliced into the body for a later check to
+      // reject — which would leave it on disk for every retry to trip over.
+      // Trimmed, because the token is trimmed before it is used: a blank string
+      // is as unusable as a missing one, and would otherwise be refused further
+      // down with the file still on disk.
+      const wellFormed =
+        typeof handoff.access_token === "string" &&
+        handoff.access_token.trim().length > 0 &&
+        (handoff.provider === undefined || typeof handoff.provider === "string");
+      if (
+        !wellFormed ||
+        ageMs === null ||
+        ageMs < 0 ||
+        ageMs > HANDOFF_TTL_MS
+      ) {
+        // Stale/invalid credential material — consume it so it can't linger.
+        await fs.unlink(HANDOFF_TOKENS_PATH).catch(() => {});
+        return NextResponse.json(
+          { error: "OAuth tokens missing or expired. Restart the sign-in flow." },
+          { status: 400 },
+        );
+      }
+      // Trust the provider recorded alongside the tokens over the request body:
+      // the tokens were minted for that provider, so binding them to a
+      // different profile (from a mismatched body) would be wrong.
+      if (handoff.provider) body.provider = handoff.provider;
+      body.apiKey = handoff.access_token;
+      body.idToken = handoff.id_token;
+      body.refreshToken = handoff.refresh_token;
+      body.expiresIn = handoff.expires_in;
+      pendingHandoffTokensPath = HANDOFF_TOKENS_PATH;
+    }
+
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    requestProvider = provider;
+    requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     const isOllama = provider === "ollama";
@@ -536,7 +660,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const shouldPromoteLocalToPrimary = isLocalScope && !configStore.ai_model_configured;
+    // A fresh device promotes its first local model automatically; an existing
+    // device only promotes when the user explicitly asked to switch to it.
+    const shouldPromoteLocalToPrimary =
+      isLocalScope && (!configStore.ai_model_configured || body.activate === true);
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
     // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
@@ -618,6 +745,73 @@ export async function POST(request: Request) {
           );
         }
         config.defaultModel = `${targetProvider}/${requestedModel}`;
+      }
+    }
+
+    // ── Hermes edition: no openclaw binary exists here ──────────────────────
+    // Everything below configures OpenClaw — it writes ~/.openclaw, runs
+    // `openclaw config set …`, and restarts the gateway. On the Hermes SKU there
+    // is no openclaw binary, so the API-key path used to fail with `spawn
+    // openclaw ENOENT` and then blame the user's credentials, while the local
+    // (Gemma) switch failed the same way. Route to Hermes' own config store
+    // instead — the same one the OAuth/token path already writes.
+    if (openclawIsAbsent()) {
+      try {
+        if (isLocalScope && (isLlamaCpp || isOllama)) {
+          // On-device model (Gemma via llama.cpp, or Ollama): persist the same
+          // config-store keys the OpenClaw path would, then register it with
+          // Hermes as an available provider (activating it only on a fresh
+          // device, matching shouldPromoteLocalToPrimary). No gateway restart.
+          await setMany({
+            local_ai_configured: true,
+            local_ai_provider: ocProvider,
+            local_ai_model: config.defaultModel,
+            local_ai_configured_at: new Date().toISOString(),
+          });
+          await applyLocalAiToHermes({
+            provider: ocProvider as "llamacpp" | "ollama",
+            // Hermes wants the bare model id, not the `llamacpp/…` qualified form.
+            model: config.defaultModel.replace(/^(?:llamacpp|ollama)\//, ""),
+            makeDefault: shouldPromoteLocalToPrimary,
+          });
+          return NextResponse.json({ success: true });
+        }
+        if (isClawAI) {
+          await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          return NextResponse.json({ success: true });
+        }
+        if (authMode !== "subscription" && normalizedApiKey) {
+          // Cloud API-key providers Hermes supports (anthropic, google→gemini,
+          // openrouter). The credential lands in Hermes' own store and the
+          // provider is activated through Hermes' catalog.
+          const result = await applyCloudProviderKeyToHermes({
+            openclawProvider: provider,
+            apiKey: normalizedApiKey,
+          });
+          if (result.activated) {
+            return NextResponse.json({ success: true });
+          }
+          return NextResponse.json(
+            { error: "Key saved. Open the Hermes provider panel to pick a model for it." },
+            { status: 409 },
+          );
+        }
+        // OAuth / subscription providers (and OpenAI, which is OAuth-only on
+        // Hermes) sign in through the Hermes provider panel, not this route.
+        return NextResponse.json(
+          { error: "This provider is set up through the Hermes provider panel on this edition." },
+          { status: 400 },
+        );
+      } catch (err) {
+        if (
+          err instanceof HermesCloudApplyError
+          || err instanceof HermesLocalApplyError
+          || err instanceof ClawaiApplyError
+        ) {
+          // Author-controlled, non-credential message — safe to echo.
+          return NextResponse.json({ error: err.message }, { status: 502 });
+        }
+        throw err; // unexpected — fall to the outer catch, which classifies it
       }
     }
 
@@ -749,7 +943,7 @@ export async function POST(request: Request) {
         config.defaultModel,
       ]);
       if (shouldPromoteLocalToPrimary) {
-        console.log(`[AI Config] Promoted local model to active primary: ${config.defaultModel}`);
+        console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
     }
     // Reserve sized to the active model's context window. Local models run on
@@ -817,6 +1011,32 @@ export async function POST(request: Request) {
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
+      // Everything above configures OpenClaw. On a Hermes device that left the
+      // model running and unreachable: Settings said "configured" while the
+      // chat's provider picker had never heard of it, because Hermes keeps its
+      // own providers block. Register it there too — as an available provider,
+      // not as the new default, since enabling a private fallback shouldn't
+      // quietly take the device off the provider the customer chose.
+      if ((ocProvider === "llamacpp" || ocProvider === "ollama") && (await getActiveHarness()) === "hermes") {
+        try {
+          await applyLocalAiToHermes({
+            provider: ocProvider,
+            // Hermes wants the bare model id, not the `llamacpp/…` qualified
+            // form — matching the openclaw-absent branch above.
+            model: config.defaultModel.replace(/^(?:llamacpp|ollama)\//, ""),
+            // This branch runs on the `dual` SKU, where OpenClaw exists but
+            // Hermes is the harness actually answering. Without carrying the
+            // promotion through, "Switch to Gemma 4" moved OpenClaw's primary
+            // and left Hermes pointed at its old provider — the same
+            // configured-but-not-active split this change exists to remove,
+            // reproduced on the one SKU that has both.
+            makeDefault: shouldPromoteLocalToPrimary,
+          });
+        } catch (err) {
+          // Non-fatal: the local model is configured and running either way.
+          console.error("[ai-models/configure] Hermes local provider registration failed:", err);
+        }
+      }
     } else {
       await setMany({
         ai_model_configured: true,
@@ -885,7 +1105,7 @@ export async function POST(request: Request) {
         // Non-fatal: Ollama will still work, just use more memory
         console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
       }
-      console.log(`[AI Config] Set ollama provider in openclaw.json: ${modelName} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
+      console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
       const providerDef = JSON.stringify({
@@ -909,7 +1129,7 @@ export async function POST(request: Request) {
         "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
-      console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${modelName} (context=${llamaCppContextWindow}, mode=replace)`);
+      console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
       // provider entry the chat turn silently returns usage 0/0/0.
@@ -920,7 +1140,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set openrouter provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
@@ -932,7 +1152,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set google provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
       // Native anthropic plugin reads a per-agent sqlite auth store that
       // ClawBox's file auth profile doesn't populate, so it fails with
@@ -945,7 +1165,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (openai-compat): ${config.defaultModel}`);
+      console.log(`[AI Config] Set anthropic provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
@@ -1041,14 +1261,36 @@ export async function POST(request: Request) {
       );
     }
 
+    // Configuration fully applied — now consume the OAuth handoff file (if any).
+    // Deferring the unlink to here means a transient failure above returned
+    // early with the file intact, so the client can retry within the TTL.
+    if (pendingHandoffTokensPath) {
+      await fs.unlink(pendingHandoffTokensPath).catch(() => {});
+    }
+
     return NextResponse.json({ success: true });
   } catch (err) {
-    return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Failed to configure AI model",
-      },
-      { status: 500 }
+    // Never surface the raw error: it can carry CLI internals and filesystem
+    // paths. Log it server-side for diagnosis and return a generic, actionable
+    // message (mirrors the sanitized gateway-restart branch above).
+    console.error(
+      "[configure] Failed to configure AI model:",
+      err instanceof Error ? logSafe(err.message) : err,
     );
+    // Classify so the message matches the cause. A local on-device model has no
+    // credentials, and an edition without the openclaw binary is not something
+    // the user can fix by re-checking a key — "check your credentials" is wrong
+    // and un-actionable for both.
+    const isLocalRequest =
+      requestScope === "local" || requestProvider === "ollama" || requestProvider === "llamacpp";
+    let message: string;
+    if (err instanceof OpenclawUnavailableError) {
+      message = "This action isn't available on this edition.";
+    } else if (isLocalRequest) {
+      message = "Couldn't set up the on-device model. Please try again.";
+    } else {
+      message = "Failed to configure AI model. Please check your credentials and try again.";
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

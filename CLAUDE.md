@@ -119,19 +119,41 @@ Handles two concerns:
 
 ### MCP Server (`mcp/`)
 
-The AI agent interface to the OS. Exposes 40+ tools via MCP so the OpenClaw agent can control the device:
+The AI agent interface to the OS. See `mcp/README.md` for the authoritative tool
+list, the safety rules and the layout — that file is kept in step with the code;
+this section is only a map.
 
-- **`clawbox-mcp.ts`** — MCP server with tool categories:
-  - **System**: `system_stats`, `system_info`, `system_power`
-  - **Shell**: `run_command`
-  - **Files**: `file_list`, `file_read`, `file_write`, `file_mkdir`
-  - **Browser**: `browser_launch`, `browser_navigate`, `browser_click`, `browser_type`, `browser_scroll`, `browser_screenshot`, `browser_keypress`, `browser_close`
-  - **Apps**: `app_search`, `app_install`, `app_uninstall`, `webapp_create`, `webapp_update`
-  - **UI control**: `ui_open_app`, `ui_list_apps`, `ui_notify`
-  - **Network**: `wifi_scan`, `wifi_status`, `vnc_status`
-  - **Config**: `preferences_get`, `preferences_set`
-  - **Code assistant**: `code_project_init`, `code_project_list`, `code_project_build`, `code_project_delete`, `code_file_write`, `code_file_read`, `code_file_edit`, `code_file_delete`, `code_file_list`, `code_search`
-- **`clawbox-cli.ts`** — shell-callable CLI wrapper (`clawbox webapp create/update`, `clawbox app open/list`, `clawbox notify`, `clawbox system stats/info`, `clawbox code init/build/files/read/write/edit/search/delete`)
+**The tool set depends on the device edition**, resolved once at startup from the
+root-owned `/etc/clawbox/edition.env` (`src/lib/edition-source.ts`). A tool that
+cannot work on the running edition is not registered at all, because Hermes runs
+a per-server circuit breaker that would take every ClawBox tool offline once one
+of them kept failing.
+
+- **`clawbox-mcp.ts`** — server entry: resolve edition → probe capabilities →
+  register → connect. Tool families live in `mcp/tools/` (`orientation`,
+  `skills`, `ai`, `system`, `desktop`, `browser`, `coding`) and the shared
+  machinery in `mcp/lib/` (`edition`, `guard`, `api`, `errors`, `schema`,
+  `register`, `context`, `jobs`, `web`).
+  - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
+    `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
+    `update_check`, `logs_tail`, `screen_capture`, `backup_*`,
+    `telegram_status`, `wifi_scan`, `wifi_status`, `vnc_status`,
+    `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
+    `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
+    `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`
+  - **Hermes only**: `skill_search`, `skill_list`, `skill_info`, `skill_install`,
+    `skill_uninstall`, `ai_list_models`, `ai_set_provider`, `ai_set_model`
+  - **OpenClaw only**: `app_search`, `app_install`,
+    `browser_click/type/keypress/scroll`, and the coding family — `bash`,
+    `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`,
+    `list_directory`, `glob`, `grep`, `notebook_edit`, `web_fetch`, `web_search`
+- **`clawbox-cli.ts`** — shell-callable CLI wrapper (`clawbox webapp create/update`, `clawbox app open/list`, `clawbox notify`, `clawbox system stats/info`, `clawbox edition`, `clawbox code init/build/files/read/write/edit/search/delete`)
+- **Registration** — the harness spawns this server only if its own config lists
+  it. OpenClaw: `scripts/gateway-pre-start.sh` writes `mcp.servers.clawbox` into
+  `~/.openclaw/openclaw.json`. Hermes: `scripts/register-mcp.sh` writes
+  `mcp_servers.clawbox` into `~/.hermes/config.yaml`, and is run by
+  `production-server.js` at every web-server boot and by
+  `scripts/setup-hermes-edition.sh` at install time.
 
 ### Code Assistant (`src/lib/code-projects.ts`, `src/app/setup-api/code/`)
 

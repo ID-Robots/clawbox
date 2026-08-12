@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
+import HarnessPicker from "./HarnessPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { dispatchOpenApp } from "@/lib/ui-events";
@@ -17,6 +18,9 @@ import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
+import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -24,6 +28,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { DISCORD_INVITE_URL } from "@/lib/community";
 
 /* ── Types ── */
 
@@ -86,6 +91,24 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
 ];
 
 /* ── Helpers ── */
+// Hermes registers the on-device model under this single provider id whichever
+// local runtime backs it (see HERMES_LOCAL_PROVIDER in lib/hermes-local-ai.ts).
+// OpenClaw instead names the runtime directly ("llamacpp" / "ollama"), so
+// "is the local model the active provider" has to accept either spelling.
+const HERMES_LOCAL_PROVIDER_ID = "clawlocal";
+
+// Copy for the four Local AI states, kept as data so the status line and the
+// card below cannot drift apart. "Selected" vs "available" is the distinction
+// that matters: installing the on-device model does not make it the one that
+// answers, and saying "sleeping until needed" when it was never selected read
+// as though it were.
+const LOCAL_AI_STATUS_SUFFIX = {
+  offline: "endpoint not responding",
+  available: "available, not currently selected",
+  standby: "selected · sleeping until needed",
+  running: "selected · running",
+} as const;
+
 function formatBytes(b: number): string {
   if (!b) return "0 B";
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -967,9 +990,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
   useEffect(() => {
-    if (section !== "ai" && !isMobile) return;
+    // The Local AI panel needs this too: it is the only source that knows which
+    // provider the ACTIVE harness is really set to, which is what separates
+    // "the on-device model is installed" from "it is what answers".
+    if (section !== "ai" && section !== "localAi" && !isMobile) return;
     fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
   }, [section, isMobile]);
+  // Which agent consumes the local model. Named the harness outright, and said
+  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
+  useEffect(() => {
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
+    return () => { alive = false; };
+  }, []);
+
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
   const [localAiError, setLocalAiError] = useState<string | null>(null);
@@ -999,6 +1038,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
     }
   }, []);
+  // Is the on-device model the provider the active harness will actually answer
+  // with? `localAiStatus` alone can never say — it is built from the
+  // config-store keys written when the model was installed, and installing one
+  // deliberately does not take over from the provider the customer chose. The
+  // harness's own selection (via /setup-api/ai-models/status) is the only proof.
+  const localAiIsActive = !!localAiStatus?.configured
+    && !!aiProvider?.provider
+    && (aiProvider.provider === HERMES_LOCAL_PROVIDER_ID || aiProvider.provider === localAiStatus.provider);
+
+  /**
+   * The four states the Local AI cards render, resolved once so the status line
+   * and the card copy cannot drift apart:
+   *   offline   — configured, but the endpoint isn't answering and there is no standby
+   *   available — installed and healthy, but something else is answering
+   *   standby   — selected, asleep to free RAM until it is needed
+   *   running   — selected and resident
+   */
+  const localAiState: "offline" | "available" | "standby" | "running" | null = !localAiStatus?.configured
+    ? null
+    : localAiStatus.running === false && !localAiStatus.standbyEnabled
+      ? "offline"
+      : !localAiIsActive
+        ? "available"
+        : localAiStatus.running === false
+          ? "standby"
+          : "running";
+  const localAiOffline = localAiState === "offline";
+
   const disableLocalAi = useCallback(async () => {
     setLocalAiDisabling(true);
     setLocalAiError(null);
@@ -1140,7 +1207,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const onApproved = (e: Event) => {
       const code = (e as CustomEvent<{ code?: string }>).detail?.code;
       refreshPairing();
-      if (code) setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code.toUpperCase()) : prev));
+      if (code) setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
     };
     window.addEventListener("clawbox:telegram-approved", onApproved);
     return () => window.removeEventListener("clawbox:telegram-approved", onApproved);
@@ -1188,8 +1255,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [t]);
 
   const approvePairingCode = useCallback(async (rawCode: string) => {
-    const code = rawCode.trim().toUpperCase();
-    if (!/^[A-Z0-9]{8}$/.test(code)) {
+    // Either the 8-char code the bot DM'd, or a Hermes request id from the
+    // pending list — see src/lib/telegram-pairing-token.ts.
+    const code = normalizePairingToken(rawCode);
+    if (!isPairingToken(code)) {
       setTgPairingStatus({ type: "error", message: t("settings.pairingInvalidCode") });
       return;
     }
@@ -1205,7 +1274,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (r.ok && d.success) {
         if (Array.isArray(d.approved)) setTgApproved(d.approved);
         setTgPairingCode("");
-        setTgPending((prev) => (prev ? prev.filter((req) => (req.code || "").toUpperCase() !== code) : prev));
+        setTgPending((prev) => (prev ? prev.filter((req) => !samePairingToken(req.code, code)) : prev));
         window.dispatchEvent(new CustomEvent("clawbox:telegram-approved", { detail: { code } }));
         setTgPairingStatus({ type: "success", message: t("settings.pairingApproveSuccess") });
       } else {
@@ -2203,25 +2272,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               ) : localAiStatus.configured ? (
                 <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
-                  localAiStatus.running === false && !localAiStatus.standbyEnabled
+                  localAiOffline
                     ? "bg-amber-500/[0.06] border-amber-500/15"
                     : "bg-cyan-500/[0.06] border-cyan-500/15"
                 }`}>
                   <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
-                    localAiStatus.running === false && !localAiStatus.standbyEnabled
+                    localAiOffline
                       ? "bg-amber-500/10 border-amber-400/10"
                       : "bg-cyan-500/10 border-cyan-400/10"
                   }`}>
                     <AIProviderIcon provider={localAiStatus.provider} size={24} />
                     <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
-                      localAiStatus.running === false && !localAiStatus.standbyEnabled
+                      localAiOffline
                         ? "bg-[#2a1d10] border-amber-500/25"
                         : "bg-[#10212a] border-cyan-500/25"
                     }`}>
                       <span className={`material-symbols-rounded ${
-                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "text-amber-300" : "text-cyan-300"
+                        localAiOffline ? "text-amber-300" : "text-cyan-300"
                       }`} style={{ fontSize: 14 }}>
-                        {localAiStatus.running === false && !localAiStatus.standbyEnabled ? "warning" : "check"}
+                        {localAiOffline ? "warning" : "check"}
                       </span>
                     </span>
                   </div>
@@ -2231,16 +2300,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "bg-amber-300" : "bg-cyan-300"
+                        localAiOffline ? "bg-amber-300" : "bg-cyan-300"
                       }`} />
                       <span className={`text-xs ${
-                        localAiStatus.running === false && !localAiStatus.standbyEnabled ? "text-amber-300/80" : "text-cyan-300/80"
+                        localAiOffline ? "text-amber-300/80" : "text-cyan-300/80"
                       }`}>
-                        {localAiStatus.running === false && !localAiStatus.standbyEnabled
-                          ? `${localAiStatus.model ? localAiStatus.model.split("/").pop() : "Configured"} · endpoint not responding`
-                          : localAiStatus.running === false
-                            ? `${localAiStatus.model ? localAiStatus.model.split("/").pop() : "Configured"} · sleeping until needed`
-                            : (localAiStatus.model ? localAiStatus.model.split("/").pop() : "Ready as fallback")}
+                        {`${localAiStatus.model ? lastModelSegment(localAiStatus.model) : "Configured"} · ${
+                          localAiState ? LOCAL_AI_STATUS_SUFFIX[localAiState] : ""
+                        }`}
                       </span>
                     </div>
                   </div>
@@ -2310,11 +2377,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
                     </div>
                     <p className="text-sm text-[var(--text-secondary)] mt-1">
-                      {localAiStatus.running === false && !localAiStatus.standbyEnabled
+                      {localAiState === "offline"
                         ? "Configured, but currently offline."
-                        : localAiStatus.running === false
-                          ? "Enabled with on-demand standby to free RAM until OpenClaw needs it."
-                        : "Enabled and ready as your local backup model."}
+                        : localAiState === "available"
+                          // Installed and ready, but the harness is pointed
+                          // elsewhere — name what IS answering so the state is
+                          // unambiguous. The label comes from the same endpoint
+                          // that reports the active provider, so it can't drift.
+                          ? `Installed and ready, but ${harnessLabel} is currently set to ${aiProvider?.providerLabel || aiProvider?.provider || "another provider"}.`
+                          : localAiState === "standby"
+                            ? `Selected. Kept in on-demand standby to free RAM until ${harnessLabel} needs it.`
+                            : "Selected and running as your on-device model."}
                     </p>
                   </div>
                   <button
@@ -2338,9 +2411,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               defaultProviderId="llamacpp"
               currentProviderId={localAiStatus?.provider ?? null}
               currentModel={localAiStatus?.model ?? null}
+              // Installed is not selected. Without this the panel rendered the
+              // green "already configured" pill and hid its own switch button,
+              // so a device that had Gemma installed but unselected offered no
+              // way to actually start using it.
+              localAiIsActive={localAiIsActive}
               title="Set Up Local AI"
               description={localAiStatus?.configured
-                ? "Gemma 4 is configured as your private on-device fallback."
+                ? "Gemma 4 is installed as your private on-device model."
                 : "Turn on a local model so ClawBox always has a private on-device backup."}
               configureScope="local"
               testId="settings-local-ai-step"
@@ -2677,6 +2755,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
 
+            <HarnessPicker />
+
             {stats ? (
               <>
                 {/* Device info card */}
@@ -2980,7 +3060,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </a>
 
             <a
-              href="https://discord.gg/FbKmnxYnpq"
+              href={DISCORD_INVITE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"

@@ -4,6 +4,7 @@ import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { readEdition } from "@/lib/edition-source";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -130,7 +131,18 @@ async function removeDirectoryContents(dir: string): Promise<string[]> {
 // recreates plugin-runtime-deps mid-`fs.rm` and the wipe leaves stragglers.
 // Mask blocks the auto-restart for the rest of this boot. Unmasked before
 // reboot so the next boot brings the gateway back cleanly.
+// The Hermes SKU ships no OpenClaw gateway at all: install.sh stops, disables
+// and (persistently) masks it, and ~/.openclaw is empty, so there is no
+// Restart=always race to protect the wipe from. Running the mask/unmask dance
+// there is pure noise — and the unmask on the way out would be actively wrong,
+// since it would clear the persistent mask that keeps an unauthenticated agent
+// gateway off the LAN on that SKU.
+function gatewayIsPartOfThisEdition(): boolean {
+  return readEdition() !== "hermes";
+}
+
 async function maskAndStopGateway(): Promise<void> {
+  if (!gatewayIsPartOfThisEdition()) return;
   // `--runtime` writes the mask symlink to /run/systemd/system/, which takes
   // precedence over the real unit file at /etc/systemd/system/. Plain `mask`
   // would refuse with "File … already exists." for /etc/-installed units.
@@ -147,6 +159,7 @@ async function maskAndStopGateway(): Promise<void> {
 }
 
 async function unmaskGateway(): Promise<void> {
+  if (!gatewayIsPartOfThisEdition()) return;
   try {
     await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
   } catch (err) {
@@ -189,6 +202,22 @@ const HOME_REMOVE_PATHS = [
   ".cache/huggingface/stored_tokens",
   // VS Code server state/extensions from the VSCode app.
   ".local/share/code-server",
+  // Hermes edition state — the Hermes equivalent of ~/.openclaw, and the single
+  // biggest thing a resold box used to hand its next owner. It holds
+  // config.yaml (the providers.clawai billing token, the dashboard's session
+  // SIGNING SECRET and the scrypt password_hash, and a pointer to the chat DB),
+  // config.yaml.bak-* (full prior copies of the same), .env (~24 KB of provider
+  // keys), auth.json (OAuth tokens), plus memories/, logs/, cron/ and pairing/.
+  // The whole directory goes, not a per-file list: the .bak-* copies alone show
+  // how easily a surgical list misses a full duplicate of every secret.
+  //
+  // Nothing preserved. Re-provisioning is automatic — the dashboard unit runs
+  // scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which recreates
+  // config.yaml and a fresh password/hash/signing-secret on the next boot.
+  // (Before that ExecStartPre existed, wiping this would have left the
+  // dashboard with no auth provider on its non-loopback bind and crash-looped
+  // it forever, which is why the wipe had to land together with it.)
+  ".hermes",
 ];
 // User-visible folders the Files app exposes (and recreates empty on demand):
 // wipe the contents, keep the directories.
@@ -353,6 +382,23 @@ export async function POST() {
       console.error("[Reset] Ollama cleanup failed:", err instanceof Error ? err.message : err);
     });
 
+    // Always unmask before either reboot or returning a failure — leaving the
+    // unit masked would block the gateway from coming back on the next boot.
+    await unmaskGateway();
+
+    // Surface partial-wipe failures BEFORE any connectivity-destructive step.
+    // Deleting the WiFi profile / resetting the login password without the
+    // reboot that follows (the AP only returns on reboot, and the abort path
+    // does NOT reboot) would strand a WiFi-only device offline with no way to
+    // retry. Gate first so an incomplete wipe leaves the box reachable.
+    if (allFailures.length > 0) {
+      console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
+      return NextResponse.json(
+        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
+        { status: 500 },
+      );
+    }
+
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
@@ -372,22 +418,6 @@ export async function POST() {
       ], { timeout: 10_000 });
     } catch (err) {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
-    }
-
-    // Always unmask before either reboot or returning a failure — leaving the
-    // unit masked would block the gateway from coming back on the next boot.
-    await unmaskGateway();
-
-    // Surface partial-wipe failures explicitly: returning an error here
-    // (instead of rebooting silently) keeps the user on the reset screen so
-    // they can retry or escalate. The masked-then-unmasked gateway is fine
-    // either way; mask only persists until the next reboot.
-    if (allFailures.length > 0) {
-      console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
-      return NextResponse.json(
-        { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
-        { status: 500 },
-      );
     }
 
     scheduleReboot();

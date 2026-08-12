@@ -11,10 +11,9 @@
  */
 import { test, expect } from "@playwright/test";
 import { BASE_URL } from "./helpers/container";
-import { getStatus } from "./helpers/setup-api";
-
-// Same password the wizard sets in 10-setup-wizard.spec.ts.
-const SETUP_PASSWORD = "clawbox-e2e-pass";
+// SETUP_PASSWORD is the password the wizard sets in 10-setup-wizard.spec.ts,
+// shared from the helper so the specs that need it can't drift apart.
+import { getStatus, SETUP_PASSWORD } from "./helpers/setup-api";
 
 test.describe("login round-trip", () => {
   test.beforeAll(async () => {

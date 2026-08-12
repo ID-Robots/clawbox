@@ -44,9 +44,10 @@ export default function VNCApp() {
   const [error, setError] = useState<string | null>(null);
   const [vncInfo, setVncInfo] = useState<{ host: string; wsPort: number } | null>(null);
   // Install/repair flow: when the VNC API is unreachable or reports VNC as
-  // missing, the user can trigger `install.sh --step vnc_install` through
-  // /setup-api/vnc/repair. On success we reboot to make sure the freshly
-  // installed clawbox-vnc / websockify services come up cleanly.
+  // missing, the user can trigger `install.sh --step vnc_install` by POSTing
+  // { step: "vnc_install" } to /setup-api/install/run-step (there is no
+  // dedicated /setup-api/vnc/repair route). On success we reboot to make sure
+  // the freshly installed clawbox-vnc / websockify services come up cleanly.
   const [repairState, setRepairState] = useState<"idle" | "repairing" | "rebooting" | "failed">("idle");
   const [repairError, setRepairError] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);

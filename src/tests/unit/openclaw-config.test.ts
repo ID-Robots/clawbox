@@ -101,6 +101,33 @@ describe("openclaw-config", () => {
     vi.clearAllMocks();
   });
 
+  describe("edition guard (openclawIsAbsent / spawn chokepoint)", () => {
+    const savedEdition = process.env.CLAWBOX_EDITION;
+    afterEach(() => {
+      if (savedEdition === undefined) delete process.env.CLAWBOX_EDITION;
+      else process.env.CLAWBOX_EDITION = savedEdition;
+    });
+
+    it("reports the openclaw binary as absent on the hermes edition", () => {
+      process.env.CLAWBOX_EDITION = "hermes";
+      expect(openclawConfig.openclawIsAbsent()).toBe(true);
+    });
+
+    it("reports the openclaw binary as present on the openclaw and dual editions", () => {
+      process.env.CLAWBOX_EDITION = "openclaw";
+      expect(openclawConfig.openclawIsAbsent()).toBe(false);
+      process.env.CLAWBOX_EDITION = "dual";
+      expect(openclawConfig.openclawIsAbsent()).toBe(false);
+    });
+
+    it("refuses `openclaw config set` with a typed error on hermes instead of spawning", async () => {
+      process.env.CLAWBOX_EDITION = "hermes";
+      await expect(
+        openclawConfig.runOpenclawConfigSet(["model.provider", "clawai"]),
+      ).rejects.toBeInstanceOf(openclawConfig.OpenclawUnavailableError);
+    });
+  });
+
   describe("ensureCompactionReserveFloor", () => {
     it("writes the default reserve floor when compaction config is missing", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);
@@ -485,127 +512,6 @@ describe("openclaw-config", () => {
         "not an Error object"
       );
       errorSpy.mockRestore();
-    });
-  });
-
-  describe("reloadGateway", () => {
-    let originalKill: typeof process.kill;
-
-    beforeEach(() => {
-      originalKill = process.kill;
-      process.kill = vi.fn() as unknown as typeof process.kill;
-    });
-
-    afterEach(() => {
-      process.kill = originalKill;
-    });
-
-    it("sends SIGUSR1 to the gateway PID resolved from systemd", async () => {
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "12345\n", stderr: "" },
-      });
-
-      await openclawConfig.reloadGateway();
-
-      expect(process.kill).toHaveBeenCalledWith(12345, "SIGUSR1");
-    });
-
-    it("falls back to pgrep -x and uses the first PID when systemd MainPID is unavailable", async () => {
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
-        "pgrep -x openclaw": { stdout: "12345\n67890\n", stderr: "" },
-      });
-
-      await openclawConfig.reloadGateway();
-
-      expect(process.kill).toHaveBeenCalledWith(12345, "SIGUSR1");
-    });
-
-    it("does not throw when the gateway process is not found (ESRCH)", async () => {
-      const error = new Error("No process found") as NodeJS.ErrnoException;
-      error.code = "ESRCH";
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
-        pgrep: error,
-      });
-
-      // Should not throw - ESRCH is silently ignored
-      await expect(openclawConfig.reloadGateway()).resolves.toBeUndefined();
-    });
-
-    it("does not call process.kill when no PID is found", async () => {
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
-        "pgrep -x openclaw": { stdout: "", stderr: "" },
-      });
-
-      await openclawConfig.reloadGateway();
-
-      expect(process.kill).not.toHaveBeenCalled();
-    });
-
-    it("does not call process.kill when the resolved PID is NaN", async () => {
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "not-a-number\n", stderr: "" },
-        "pgrep -x openclaw": { stdout: "still-not-a-number\n", stderr: "" },
-      });
-
-      await openclawConfig.reloadGateway();
-
-      expect(process.kill).not.toHaveBeenCalled();
-    });
-
-    it("warns on non-ESRCH errors", async () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const error = new Error("Unexpected error") as NodeJS.ErrnoException;
-      error.code = "EPERM";
-      setupExecFileMock({
-        "systemctl show clawbox-gateway.service -p MainPID --value": { stdout: "0\n", stderr: "" },
-        pgrep: error,
-      });
-
-      await openclawConfig.reloadGateway();
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("reloadGateway failed"),
-        expect.any(String)
-      );
-      warnSpy.mockRestore();
-    });
-
-    it("warns with raw value when non-Error is thrown", async () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      // Simulate a non-Error rejection with a code property (not ESRCH)
-      mockExecFile.mockImplementation(((
-        _cmd: string,
-        _args: string[],
-        _opts: object,
-        callback?: (error: Error | null, result: { stdout: string; stderr: string }) => void
-      ) => {
-        const nonError = { code: "EPERM", message: "not an Error" };
-        if (callback) {
-          callback(nonError as unknown as Error, { stdout: "", stderr: "" });
-        }
-        return {
-          then: (_resolve: unknown, reject: (err: unknown) => void) => {
-            reject(nonError);
-            return { catch: () => ({}) };
-          },
-          catch: (reject: (err: unknown) => void) => {
-            reject(nonError);
-            return {};
-          },
-        } as unknown as ReturnType<typeof childProcess.execFile>;
-      }) as unknown as typeof childProcess.execFile);
-
-      await openclawConfig.reloadGateway();
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        "[openclaw-config] reloadGateway failed:",
-        expect.objectContaining({ code: "EPERM" })
-      );
-      warnSpy.mockRestore();
     });
   });
 

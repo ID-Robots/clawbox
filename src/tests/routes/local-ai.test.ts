@@ -14,6 +14,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  // Default to "openclaw present". The Hermes-edition disable path is asserted
+  // in its own test below by flipping this to true.
+  openclawIsAbsent: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({

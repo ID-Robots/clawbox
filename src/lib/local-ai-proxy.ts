@@ -8,6 +8,49 @@ import {
   getOllamaBaseUrl,
   type LocalAiProvider,
 } from "@/lib/local-ai-runtime";
+import {
+  applyThinkingToChatBody,
+  isChatCompletionsPath,
+  MAX_REWRITABLE_BODY_BYTES,
+} from "@/lib/local-ai-thinking";
+
+/** True when Content-Length already says the body is too big to buffer. */
+function declaredOverCap(request: Request, maxBytes: number): boolean {
+  const declared = Number(request.headers.get("content-length") || "");
+  return Number.isFinite(declared) && declared > maxBytes;
+}
+
+/**
+ * Read a request body, giving up past `maxBytes` rather than holding an
+ * unbounded buffer on a device that has ~3.7 GB free with the model loaded.
+ * Returns null when the cap is exceeded mid-stream — at which point the body
+ * has been partly consumed and can no longer be forwarded either.
+ *
+ * Callers check `declaredOverCap` first, so a body that announces its size gets
+ * streamed through untouched instead of reaching here at all.
+ */
+async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  // A loopback POST usually arrives whole; skip the concat copy when it did.
+  // `total` is already known, so the multi-chunk path doesn't re-walk either.
+  if (chunks.length === 1) return Buffer.from(chunks[0]).toString("utf-8");
+  return Buffer.concat(chunks, total).toString("utf-8");
+}
 
 function buildUpstreamUrl(provider: LocalAiProvider, pathSegments: string[], search: string): string {
   const baseUrl = provider === "llamacpp" ? getLlamaCppBaseUrl() : getOllamaBaseUrl();
@@ -103,8 +146,38 @@ export async function proxyLocalAiRequest(
     };
 
     if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
-      init.body = request.body;
-      init.duplex = "half";
+      // Chat completions are the only path with a chat template to influence,
+      // so they are the only one we buffer — everything else keeps streaming.
+      // See src/lib/local-ai-thinking.ts for why the rewrite exists at all
+      // (llama.cpp ignores `reasoning_effort`; `chat_template_kwargs` is the
+      // field it actually reads).
+      // An oversized body is forwarded untouched rather than refused: a turn
+      // that runs with the server's default thinking setting beats no turn.
+      const rewritable = provider === "llamacpp"
+        && request.method === "POST"
+        && isChatCompletionsPath(pathSegments)
+        && !declaredOverCap(request, MAX_REWRITABLE_BODY_BYTES);
+
+      if (rewritable) {
+        const raw = await readBoundedBody(request, MAX_REWRITABLE_BODY_BYTES);
+        if (raw === null) {
+          // Only reachable when the body lied about (or omitted) its length and
+          // then ran past the cap. The stream is already partly consumed, so it
+          // cannot be forwarded — fail explicitly rather than send the model a
+          // truncated request.
+          endLocalAiUse(provider);
+          return NextResponse.json(
+            { error: "Request body too large for the on-device model" },
+            { status: 413 },
+          );
+        }
+        // A string body — fetch sets Content-Length from it, replacing the
+        // client's header that forwardHeaders stripped.
+        init.body = applyThinkingToChatBody(raw);
+      } else {
+        init.body = request.body;
+        init.duplex = "half";
+      }
     }
 
     const upstreamResponse = await fetch(buildUpstreamUrl(provider, pathSegments, search), init);

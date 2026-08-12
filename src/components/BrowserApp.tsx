@@ -1,13 +1,20 @@
 "use client";
 
 /**
- * BrowserApp — Real desktop browser integration for OpenClaw.
- * Installs Chromium if needed, configures OpenClaw computer-use,
- * and provides open/close controls for the real desktop browser.
+ * BrowserApp — the desktop browser, and the agent's access to it.
+ *
+ * Three steps: install Chromium, link it to the agent, open/close the real
+ * window. Step 2 is the one that differs by edition, and the route says which
+ * shape it takes via `alwaysOn`: OpenClaw needs the link switched on (it writes
+ * the agent's tool profile), Hermes has it permanently because the ClawBox
+ * browser_* tools are part of the tool set it is given at boot. The panel never
+ * decides this itself — see integrationIsAlwaysOn() in
+ * src/app/setup-api/browser/manage/route.ts.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import ErrorWithFix from "./ErrorWithFix";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -17,6 +24,14 @@ interface BrowserStatus {
   chromium: { installed: boolean; path?: string; version?: string };
   browser: { running: boolean; pid?: number; cdpReady?: boolean };
   enabled: boolean;
+  /**
+   * True when this edition has no integration switch because the link is
+   * permanent — Hermes drives the desktop browser through the ClawBox
+   * browser_* tools, which it is given at every boot. The route decides this
+   * (see integrationIsAlwaysOn there); the panel only renders it, so a device
+   * and its UI can never disagree about whether a button should exist.
+   */
+  alwaysOn?: boolean;
   cdpPort?: number;
 }
 
@@ -27,6 +42,21 @@ interface BrowserAppProps {
 export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const { t } = useT();
   const [status, setStatus] = useState<BrowserStatus | null>(null);
+  // Which agent actually drives this browser. The copy used to say "OpenClaw"
+  // on every device — wrong, and confusing, on a Hermes box where the OpenClaw
+  // gateway isn't even installed. Defaults to OpenClaw (the native SKU) and is
+  // corrected as soon as the device answers.
+  const [harnessLabel, setHarnessLabel] = useState(
+    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
+  );
+
+  useEffect(() => {
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+    });
+    return () => { alive = false; };
+  }, []);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +155,13 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const chromiumInstalled = status?.chromium?.installed ?? false;
   const browserRunning = status?.browser?.running ?? false;
   const isEnabled = status?.enabled ?? false;
+  const alwaysOn = status?.alwaysOn ?? false;
+  // Step 3 drives the Chromium that step 1 installs. Enabled-but-no-Chromium is
+  // unreachable on the switch editions (you cannot enable without it), but on an
+  // always-on edition step 2 is satisfied from the moment the device boots — so
+  // the browser controls have to check for the binary themselves rather than
+  // inherit that check from step 2.
+  const canRunBrowser = isEnabled && chromiumInstalled;
 
   return (
     <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto">
@@ -142,7 +179,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           </div>
           <div>
             <h1 className="text-lg font-semibold">{t("browser.title")}</h1>
-            <p className="text-xs text-white/50">{t("browser.subtitle")}</p>
+            <p className="text-xs text-white/50">{t("browser.subtitle", { harness: harnessLabel })}</p>
           </div>
         </div>
       </div>
@@ -201,7 +238,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           </div>
         </div>
 
-        {/* Step 2: OpenClaw Integration */}
+        {/* Step 2: agent integration — a switch on OpenClaw, permanent on Hermes */}
         <div className={`rounded-xl border overflow-hidden ${chromiumInstalled ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
           <div className="p-4 flex items-start gap-4">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${isEnabled ? "text-white" : "bg-white/10 text-white/40"}`}
@@ -211,17 +248,25 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               ) : "2"}
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">{t("browser.openclawIntegration")}</h3>
+              <h3 className="font-medium text-sm">{t("browser.openclawIntegration", { harness: harnessLabel })}</h3>
               <p className="text-xs text-white/50 mt-1">
-                {isEnabled
-                  ? t("browser.enabledMessage")
-                  : t("browser.disabledMessage")}
+                {alwaysOn
+                  ? t("browser.builtInMessage", { harness: harnessLabel })
+                  : isEnabled
+                    ? t("browser.enabledMessage", { harness: harnessLabel })
+                    : t("browser.disabledMessage", { harness: harnessLabel })}
               </p>
               {isEnabled && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
-                    <span className="text-xs text-white/40">tools profile: full</span>
+                    {/* Name the actual mechanism. "tools profile: full" is the
+                        OpenClaw config key the switch writes; on an always-on
+                        edition there is no such key, and the honest detail is
+                        which tools the agent holds. */}
+                    <span className={`text-xs text-white/40${alwaysOn ? " font-mono" : ""}`}>
+                      {alwaysOn ? "browser_open · browser_navigate · browser_screenshot" : "tools profile: full"}
+                    </span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>bug_report</span>
@@ -234,29 +279,34 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 </div>
               )}
             </div>
-            <button
-              onClick={() => isEnabled
-                ? doAction("disable", "Disabling...", "Browser disconnected from OpenClaw")
-                : doAction("enable", "Enabling...", "Browser connected to OpenClaw")
-              }
-              disabled={!!actionLoading}
-              className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-                isEnabled ? "bg-white/10 text-white/60 hover:bg-white/15" : "text-white"
-              }`}
-              style={!isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}
-            >
-              {actionLoading === "Enabling..." || actionLoading === "Disabling..." ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                  {actionLoading === "Enabling..." ? t("browser.enabling") : t("browser.disabling")}
-                </span>
-              ) : isEnabled ? t("browser.disable") : t("browser.enable")}
-            </button>
+            {/* No button where there is no choice: the link is part of the
+                edition, so anything offered here would be a control that does
+                nothing — or, as it did before, one that only ever errored. */}
+            {!alwaysOn && (
+              <button
+                onClick={() => isEnabled
+                  ? doAction("disable", "Disabling...", `Browser disconnected from ${harnessLabel}`)
+                  : doAction("enable", "Enabling...", `Browser connected to ${harnessLabel}`)
+                }
+                disabled={!!actionLoading}
+                className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+                  isEnabled ? "bg-white/10 text-white/60 hover:bg-white/15" : "text-white"
+                }`}
+                style={!isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}
+              >
+                {actionLoading === "Enabling..." || actionLoading === "Disabling..." ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                    {actionLoading === "Enabling..." ? t("browser.enabling") : t("browser.disabling")}
+                  </span>
+                ) : isEnabled ? t("browser.disable") : t("browser.enable")}
+              </button>
+            )}
           </div>
         </div>
 
         {/* Step 3: Browser Controls */}
-        <div className={`rounded-xl border overflow-hidden ${isEnabled ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
+        <div className={`rounded-xl border overflow-hidden ${canRunBrowser ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
           <div className="p-4 flex items-start gap-4">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${browserRunning ? "text-white" : "bg-white/10 text-white/40"}`}
               style={browserRunning ? { backgroundColor: BRAND_ORANGE } : undefined}>
@@ -268,8 +318,8 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               <h3 className="font-medium text-sm">{t("browser.desktopBrowser")}</h3>
               <p className="text-xs text-white/50 mt-1">
                 {browserRunning
-                  ? t("browser.runningMessage")
-                  : t("browser.launchMessage")}
+                  ? t("browser.runningMessage", { harness: harnessLabel })
+                  : t("browser.launchMessage", { harness: harnessLabel })}
               </p>
               {browserRunning && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">

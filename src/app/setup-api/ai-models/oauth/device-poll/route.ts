@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import {
+  HANDOFF_TOKENS_PATH,
+  HANDOFF_TTL_MS,
+  sweepStaleHandoffTokens,
+} from "@/lib/oauth-handoff";
 import {
   OPENAI_CLIENT_ID,
   OPENAI_DEVICE_TOKEN_URL,
@@ -12,6 +18,47 @@ import {
 export const dynamic = "force-dynamic";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
+
+/**
+ * Drop the in-flight state of a sign-in the provider ended without completing.
+ *
+ * Deliberately does NOT touch the handoff file. Tokens are only ever written
+ * after this route has removed the state, so no branch that reaches here has
+ * written any — whatever handoff exists at this moment belongs to some other
+ * flow, quite possibly a finished authorization-code one still waiting for
+ * /configure. Clearing it here would end that sign-in too. Handoff material is
+ * cleared where a flow starts, and swept by age in POST below.
+ */
+async function discardFlow(): Promise<void> {
+  await fs.unlink(STATE_PATH).catch(() => {});
+}
+
+interface DeviceTokens {
+  access_token?: string;
+  id_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+// Persist the freshly-issued provider tokens to a server-only file (0600) and
+// acknowledge the browser with just a status. The provider credentials never
+// leave the device: the configure route reads this file server-side on the
+// handoff path. This keeps access/refresh/id tokens off the plain-HTTP setup
+// AP hop the browser would otherwise relay them across.
+async function persistTokensAndAck(
+  provider: string,
+  tokens: DeviceTokens,
+): Promise<NextResponse> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  await fs.writeFile(
+    tmpPath,
+    JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),
+    { mode: 0o600 },
+  );
+  await fs.rename(tmpPath, HANDOFF_TOKENS_PATH);
+  return NextResponse.json({ status: "complete" });
+}
 
 interface StoredState {
   provider?: string;
@@ -65,8 +112,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
   // If polling returns tokens directly
   if (pollData.access_token) {
     await fs.unlink(STATE_PATH).catch(() => {});
-    return NextResponse.json({
-      status: "complete",
+    return persistTokensAndAck(stored.provider ?? "openai", {
       access_token: pollData.access_token,
       id_token: pollData.id_token,
       refresh_token: pollData.refresh_token,
@@ -80,7 +126,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
     const verifier = pollData.code_verifier;
     if (!verifier) {
       console.error("[device-poll/openai] No code_verifier in poll response:", pollData);
-      await fs.unlink(STATE_PATH).catch(() => {});
+      await discardFlow();
       return NextResponse.json(
         { error: "OpenAI did not return code_verifier" },
         { status: 502 }
@@ -113,7 +159,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
         exchangeRes.status,
         errText
       );
-      await fs.unlink(STATE_PATH).catch(() => {});
+      await discardFlow();
       return NextResponse.json(
         { error: `Token exchange failed (${exchangeRes.status})` },
         { status: 502 }
@@ -130,8 +176,7 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
     // format" on every message — and poisoning even the API-key OpenAI path,
     // since ~/.codex/auth.json is shared and rebuilt on every gateway start.
     await fs.unlink(STATE_PATH).catch(() => {});
-    return NextResponse.json({
-      status: "complete",
+    return persistTokensAndAck(stored.provider ?? "openai", {
       access_token: tokenData.access_token,
       id_token: tokenData.id_token,
       refresh_token: tokenData.refresh_token,
@@ -146,6 +191,8 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
 
 export async function POST() {
   try {
+    await sweepStaleHandoffTokens();
+
     let stored: StoredState;
     try {
       const raw = await fs.readFile(STATE_PATH, "utf-8");
@@ -162,7 +209,7 @@ export async function POST() {
     if (!stored.device_id && stored.device_auth_id) stored.device_id = stored.device_auth_id;
 
     // 15-minute expiry
-    if (Date.now() - stored.createdAt > 15 * 60 * 1000) {
+    if (Date.now() - stored.createdAt > HANDOFF_TTL_MS) {
       await fs.unlink(STATE_PATH).catch(() => {});
       return NextResponse.json(
         { error: "Device auth session expired. Please start again." },

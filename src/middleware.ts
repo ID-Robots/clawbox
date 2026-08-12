@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
+import { readEdition } from "@/lib/edition-source";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -16,25 +17,37 @@ const CONFIG_ROOT = process.env.CLAWBOX_ROOT
   || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
 
-let setupCompleteCache: { mtimeMs: number; value: boolean } | null = null;
+let configCache: { mtimeMs: number; setupComplete: boolean; sessionGen: number } | null = null;
 
-function isSetupComplete(): boolean {
+function readConfigCached(): { setupComplete: boolean; sessionGen: number } {
   try {
     const stat = fs.statSync(CONFIG_PATH);
-    if (setupCompleteCache && setupCompleteCache.mtimeMs === stat.mtimeMs) {
-      return setupCompleteCache.value;
-    }
+    if (configCache && configCache.mtimeMs === stat.mtimeMs) return configCache;
     const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { setup_complete?: unknown };
-    const value = parsed.setup_complete === true;
-    setupCompleteCache = { mtimeMs: stat.mtimeMs, value };
-    return value;
+    const parsed = JSON.parse(raw) as { setup_complete?: unknown; session_generation?: unknown };
+    const setupComplete = parsed.setup_complete === true;
+    const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
+      ? parsed.session_generation
+      : 0;
+    configCache = { mtimeMs: stat.mtimeMs, setupComplete, sessionGen };
+    return configCache;
   } catch {
     // Missing/unreadable config = pre-setup. Cache the negative answer so we
     // don't statSync on every request before config.json is first written.
-    setupCompleteCache = { mtimeMs: -1, value: false };
-    return false;
+    configCache = { mtimeMs: -1, setupComplete: false, sessionGen: 0 };
+    return configCache;
   }
+}
+
+function isSetupComplete(): boolean {
+  return readConfigCached().setupComplete;
+}
+
+// Current session generation — bumped on password change to revoke every cookie
+// minted earlier (see src/lib/auth.ts). Defaults to 0, so cookies are only ever
+// rejected here once a password change has actually happened.
+function currentSessionGeneration(): number {
+  return readConfigCached().sessionGen;
 }
 
 // ─── Captive Portal ──────────────────────────────────────────────────────────
@@ -107,6 +120,83 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/ollama",
 ];
 
+// Sensitive /setup-api/* surfaces that must NEVER be reachable without a session
+// (or the MCP bearer) — not even during the pre-setup wizard window. These are
+// desktop-app / agent backends (file access, browser automation, the code
+// workspace, the remote-desktop bridge, and the gateway-token endpoints) with
+// no role in first-boot onboarding. The blanket pre-setup pass below used to
+// expose them unauthenticated while the open `ClawBox-Setup` AP was up, turning
+// otherwise-local issues into network-adjacent, pre-auth ones.
+const PRE_AUTH_SENSITIVE_PREFIXES = [
+  "/setup-api/files",
+  "/setup-api/browser",
+  "/setup-api/code",        // code workspace file ops / build (also /code/*)
+  "/setup-api/code-server",
+  "/setup-api/webapps",
+  "/setup-api/vnc",
+  "/setup-api/terminal",
+  "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
+  "/setup-api/tunnel",      // enabling remote tunnel access
+  "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
+  "/setup-api/apps/install",
+  "/setup-api/apps/uninstall",
+  "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
+  "/setup-api/gateway/ws-config", // hands back the live gateway auth token
+  // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
+  // AP, so anything left pre-auth is reachable by anyone in radio range.
+  //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
+  //   - /hermes/skills/* installs & uninstalls agent skills (code execution).
+  //   - /harness/select rewrites which agent the device runs.
+  // None of the three has any onboarding role: chat is only called from
+  // ChatPopup, the skills store only from HermesSkillsStore (both desktop-only,
+  // mounted from page.tsx), and the harness picker only from SettingsApp.
+  //
+  // Deliberately NOT listed — the wizard calls these BEFORE setup completes, so
+  // gating them would make the Hermes SKU unprovisionable:
+  //   /setup-api/harness/active         (AIModelsStep.tsx — the ONLY harness
+  //                                      route the wizard touches; /status is
+  //                                      HarnessPicker-only, so it is gated)
+  //   /setup-api/hermes/models          (HermesProviderConfig + useHermesModelOptions)
+  //   /setup-api/hermes/clawai          (ClawBox AI sign-in during onboarding)
+  //   /setup-api/hermes/oauth           (provider OAuth status during onboarding)
+  //   /setup-api/hermes/provider-key    (writes the provider key the wizard collects)
+  // That is exactly the same pre-auth exposure the OpenClaw SKU already accepts
+  // for /setup-api/ai-models/* on the same AP, and the read paths return status
+  // booleans (hasToken/loggedIn), never the stored secrets.
+  "/setup-api/hermes/chat",
+  "/setup-api/hermes/skills",
+  "/setup-api/harness/select",
+  "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
+];
+// Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
+// `/setup-api/gateway/health`, which the wizard's readiness check legitimately
+// polls before setup completes. The SPA proxy at the bare path injects the
+// gateway token into HTML, so it stays gated.
+const PRE_AUTH_SENSITIVE_EXACT = new Set([
+  "/setup-api/gateway",
+]);
+
+function isSensitiveSetupApi(pathname: string): boolean {
+  // Normalize a trailing slash so `/setup-api/gateway/` can't dodge the exact
+  // match (Next.js may not always redirect it before middleware runs).
+  const p0 = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+  if (PRE_AUTH_SENSITIVE_EXACT.has(p0)) return true;
+  for (const p of PRE_AUTH_SENSITIVE_PREFIXES) {
+    if (p0 === p || p0.startsWith(p + "/")) return true;
+  }
+  return false;
+}
+
+// Paths that exist ONLY because next.config.ts rewrites them to the OpenClaw
+// gateway (see the edition check in the middleware body).
+const GATEWAY_ONLY_EXACT = new Set(["/favicon.svg", "/favicon-32.png"]);
+const GATEWAY_ONLY_PREFIXES = ["/api", "/assets"];
+
+function isGatewayOnlyPath(pathname: string): boolean {
+  if (GATEWAY_ONLY_EXACT.has(pathname)) return true;
+  return GATEWAY_ONLY_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
+}
+
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
   "/favicon.ico",
@@ -142,7 +232,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 /** Verify HMAC-SHA256 session cookie using Web Crypto API (available in Node 22+). */
-async function verifySessionCookie(cookie: string): Promise<boolean> {
+async function verifySessionCookie(cookie: string, expectedGen: number): Promise<boolean> {
   const secret = process.env.SESSION_SECRET;
   if (!secret) return false;
 
@@ -174,7 +264,10 @@ async function verifySessionCookie(cookie: string): Promise<boolean> {
     // Check expiration
     const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
     const data = JSON.parse(decoded);
-    return typeof data.exp === "number" && data.exp > Math.floor(Date.now() / 1000);
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    // Reject cookies from before the last password change (session revocation).
+    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return false;
+    return true;
   } catch {
     return false;
   }
@@ -196,6 +289,27 @@ export async function middleware(request: NextRequest) {
     );
   }
 
+  // 1b. Gateway paths on a Hermes device.
+  //
+  // next.config.ts rewrites /api/*, /assets/* and the two gateway favicons to
+  // the OpenClaw gateway at 127.0.0.1:18789. On the Hermes SKU that gateway is
+  // disabled+masked, so every one of those requests 502s. The rewrites can't be
+  // made conditional there: they are compiled into routes-manifest.json at
+  // BUILD time, install.sh builds via `su - clawbox` (which drops
+  // CLAWBOX_EDITION) and before the edition lock is baked — a build-time gate
+  // would evaluate on the wrong value. Middleware runs before beforeFiles
+  // rewrites (verified on-device: /api/zzz answered 401 from here, never the
+  // gateway), always sees the current edition, and survives a stale build.
+  //
+  // Nothing on the ClawBox side owns these paths: there is no src/app/api, no
+  // /assets route, and public/ has neither favicon.svg nor favicon-32.png.
+  if (isGatewayOnlyPath(pathname) && readEdition() === "hermes") {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    return new NextResponse("Not found", { status: 404, headers: { "Content-Type": "text/plain" } });
+  }
+
   // 2. Public paths — no auth needed
   if (isPublicPath(pathname)) {
     return NextResponse.next();
@@ -213,7 +327,12 @@ export async function middleware(request: NextRequest) {
   // run the updater, set the password, etc. Once setup completes the gate
   // closes and every /setup-api/* request requires a valid session.
   if (pathname.startsWith("/setup-api/") && !isSetupComplete()) {
-    return NextResponse.next();
+    // ...except the sensitive surfaces above, which stay gated even pre-setup
+    // (they play no part in onboarding). They fall through to the session /
+    // MCP-bearer checks below, so an authenticated caller still reaches them.
+    if (!isSensitiveSetupApi(pathname)) {
+      return NextResponse.next();
+    }
   }
 
   // 3b. Trusted-test-environment escape hatch for the e2e-install harness.
@@ -243,7 +362,7 @@ export async function middleware(request: NextRequest) {
 
   // 4. Check session cookie
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
-  if (sessionCookie && await verifySessionCookie(sessionCookie)) {
+  if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
     return NextResponse.next();
   }
 

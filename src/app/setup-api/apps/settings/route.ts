@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -27,6 +28,11 @@ const CONFIG_WRITERS: Record<string, (settings: Record<string, string | boolean>
 };
 
 export async function POST(req: Request) {
+  // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
+  // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
+  const blocked = await openclawAppsGuard();
+  if (blocked) return blocked;
+
   try {
     const { appId, settings } = await req.json();
     if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
@@ -44,7 +50,7 @@ export async function POST(req: Request) {
           "config", "set",
           `skills.entries.${appId}.enabled`,
           enabled ? "true" : "false",
-          "--strict-json",
+          "--json",
         ], {
           timeout: 10_000,
           env: { ...process.env, PATH: `${path.dirname(OPENCLAW_BIN)}:${process.env.PATH}` },
@@ -61,6 +67,8 @@ export async function POST(req: Request) {
     if (writer) {
       const sanitized: Record<string, string | boolean> = {};
       for (const [k, v] of Object.entries(settings)) {
+        // Never let a caller-supplied key touch the prototype chain.
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
         if (typeof v === "string" || typeof v === "boolean") sanitized[k] = v;
         else if (typeof v === "number") sanitized[k] = String(v);
         else return NextResponse.json({ error: `Invalid value type for key "${k}"` }, { status: 400 });

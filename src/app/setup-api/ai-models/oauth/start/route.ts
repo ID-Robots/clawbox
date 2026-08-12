@@ -5,6 +5,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
@@ -29,7 +30,10 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    const config = OAUTH_PROVIDERS[provider];
+    // Own-property check: a bare index would let inherited keys like
+    // "__proto__"/"constructor" resolve to Object.prototype (truthy) and slip
+    // past the `!config` guard, yielding a junk 200 instead of this 400.
+    const config = Object.hasOwn(OAUTH_PROVIDERS, provider) ? OAUTH_PROVIDERS[provider] : undefined;
     if (!config) {
       return NextResponse.json(
         { error: `OAuth not supported for provider: ${provider}` },
@@ -53,6 +57,12 @@ export async function POST(request: Request) {
       { mode: 0o600 }
     );
     await fs.rename(tmpPath, STATE_PATH);
+
+    // Same rule the device-code entry point applies: this flow supersedes any
+    // prior one, so drop a handoff an abandoned sign-in left behind — but only
+    // now that the replacement state exists, since the validation failures
+    // above return without starting anything.
+    await clearHandoffTokens();
 
     // For OpenAI: check if a previous attempt saved an organization_id.
     // Including `organization` in the authorize URL causes Auth0 to embed

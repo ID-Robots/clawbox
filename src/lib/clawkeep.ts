@@ -21,8 +21,10 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { getEdition } from "@/lib/harness";
 
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
@@ -121,6 +123,12 @@ export interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
+  /** False on an edition that ships no OpenClaw to back up (Hermes). ClawKeep
+   *  archives the OpenClaw agent via the openclaw CLI, which that edition does
+   *  not have — so the feature genuinely cannot run there, and the UI must say
+   *  so honestly rather than print an `npm install -g openclaw` remedy that
+   *  contradicts the SKU. */
+  supportedOnEdition: boolean;
   /** True while a restore is mid-flight (download → verify → swap). */
   restoring: boolean;
   /** Schedule for unattended backups. `enabled=false` disarms the in-process scheduler. */
@@ -642,6 +650,9 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     uploadStartedAtMs: stateRaw.upload_started_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
+    // ClawKeep backs up the OpenClaw agent; the Hermes SKU ships no openclaw, so
+    // the feature has nothing to archive there and is not supported.
+    supportedOnEdition: getEdition() !== "hermes",
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
@@ -685,9 +696,46 @@ export interface CloudSnapshot {
 interface SnapshotsResponse {
   ok: boolean;
   error?: string;
+  /** Coarse failure classification from the daemon so we can map to a
+   * sensible HTTP status instead of collapsing everything into 502. */
+  kind?: string;
   snapshots?: CloudSnapshot[];
   quotaBytes?: number;
   cloudBytes?: number;
+}
+
+/**
+ * Map a failed `snapshots` daemon response to an HTTP status + a friendly
+ * message. We deliberately never surface `resp.error` verbatim — it can be a
+ * raw Python traceback or leak internal paths — so the caller gets a clean,
+ * classified error the UI can act on.
+ */
+function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
+  switch (resp.kind) {
+    case "unpaired":
+    case "no_token":
+    case "not_paired":
+      return new ClawKeepError("ClawKeep is not paired with an account", 409);
+    case "auth":
+    case "unauthorized":
+    case "revoked":
+    case "forbidden":
+      return new ClawKeepError(
+        "ClawKeep authorisation was rejected — re-pair the device",
+        401,
+      );
+    case "network":
+    case "offline":
+    case "timeout":
+      return new ClawKeepError("Could not reach the ClawKeep portal", 504);
+    case "portal":
+    case "server":
+      return new ClawKeepError("The ClawKeep portal returned an error", 502);
+    default:
+      // Covers missing-dependency (e.g. boto3) and any unclassified daemon
+      // failure without leaking the raw internal string.
+      return new ClawKeepError("Could not list cloud backups", 502);
+  }
 }
 
 interface RestoreOk {
@@ -717,6 +765,9 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
 }
 
 const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+// Generous cap for a full backup (openclaw backup create + multipart upload).
+// A hung clawkeepd must not hold a Next.js worker open forever.
+const BACKUP_TIMEOUT_MS = 60 * 60 * 1000;
 
 function spawnCliJson<T>(
   bin: string,
@@ -742,22 +793,39 @@ function spawnCliJson<T>(
 
     let stdout = "";
     let stderr = "";
+    // Decode through a StringDecoder so a multibyte UTF-8 sequence split across
+    // two 'data' events (e.g. a Cyrillic snapshot label straddling a chunk
+    // boundary) isn't corrupted into U+FFFD — the decoder buffers the partial
+    // trailing bytes until the next chunk (flushed via .end() on close).
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
     const killTimer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
     }, timeoutMs);
 
     child.stdout.on("data", (b: Buffer) => {
-      stdout = appendCapped(stdout, b.toString("utf8"));
+      stdout = appendCapped(stdout, outDecoder.write(b));
     });
     child.stderr.on("data", (b: Buffer) => {
-      stderr = appendCapped(stderr, b.toString("utf8"));
+      stderr = appendCapped(stderr, errDecoder.write(b));
     });
     child.on("error", (err) => {
       clearTimeout(killTimer);
+      // An unresolved binary (clawkeep/clawkeepd not on PATH or the derived
+      // sibling missing) surfaces as ENOENT. Turn it into a friendly 503
+      // instead of a raw "spawn ... ENOENT" 500.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new ClawKeepError("ClawKeep daemon not installed", 503));
+        return;
+      }
       reject(new Error(`spawn ${clawkeepBin} failed: ${err.message}`));
     });
     child.on("close", (code) => {
       clearTimeout(killTimer);
+      // Flush any bytes the decoder is still holding (a trailing partial
+      // multibyte sequence) before parsing.
+      stdout = appendCapped(stdout, outDecoder.end());
+      stderr = appendCapped(stderr, errDecoder.end());
       // Both `clawkeep snapshots` and `clawkeep restore` print a single JSON
       // object on stdout — even on errors. Parse first; fall back to stderr
       // text if parsing fails so the caller still gets a usable message.
@@ -777,10 +845,16 @@ function spawnCliJson<T>(
 }
 
 async function fetchCloudSnapshots(): Promise<SnapshotsResponse> {
+  // Fail fast + friendly on the unpaired case rather than shelling out and
+  // surfacing the daemon's raw "no token" error as a 502.
+  const token = await readToken();
+  if (!token) {
+    throw new ClawKeepError("ClawKeep is not paired with an account", 409);
+  }
   const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
   const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
   if (!resp.ok) {
-    throw new ClawKeepError(resp.error ?? "snapshots failed", 502);
+    throw mapSnapshotsError(resp);
   }
   return resp;
 }
@@ -988,6 +1062,20 @@ export async function runBackup(
     const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const settle = (result: BackupResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      resolve(result);
+    };
+    // Mirror spawnCliJson's kill-timer: SIGKILL a hung daemon and resolve
+    // with a non-zero exit so the caller surfaces "backup timed out" rather
+    // than leaking a worker forever.
+    const killTimer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      settle({ exitCode: 124, stdout, stderr: appendCapped(stderr, "\nbackup timed out") });
+    }, BACKUP_TIMEOUT_MS);
     child.stdout.on("data", (b: Buffer) => {
       stdout = appendCapped(stdout, b.toString("utf8"));
     });
@@ -996,10 +1084,10 @@ export async function runBackup(
     });
     child.on("error", (e) => {
       // ENOENT etc. — synthesize a non-zero exit so callers can surface it.
-      resolve({ exitCode: 127, stdout, stderr: appendCapped(stderr, e.message) });
+      settle({ exitCode: 127, stdout, stderr: appendCapped(stderr, e.message) });
     });
     child.on("close", (code) => {
-      resolve({ exitCode: code ?? -1, stdout, stderr });
+      settle({ exitCode: code ?? -1, stdout, stderr });
     });
   });
 }

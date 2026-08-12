@@ -1,12 +1,22 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import fsp from "fs/promises";
+import path from "path";
 
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),
     unlink: vi.fn(),
+    writeFile: vi.fn(),
+    rename: vi.fn(),
+    mkdir: vi.fn(),
+    stat: vi.fn(),
   },
 }));
+
+// Built the same way the route builds them, so the expectations hold on a
+// developer's machine as well as on the device.
+const STATE_PATH = path.join("/test/data", "oauth-device-state.json");
+const TOKENS_PATH = path.join("/test/data", "oauth-device-tokens.json");
 
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/test/data",
@@ -38,6 +48,11 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     mockFs.readFile.mockResolvedValue(JSON.stringify(validState));
     mockFs.unlink.mockResolvedValue();
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.rename.mockResolvedValue();
+    mockFs.mkdir.mockResolvedValue(undefined);
+    // Default: no handoff file on disk, so the age sweep is a no-op.
+    mockFs.stat.mockRejectedValue(new Error("ENOENT"));
 
     vi.stubGlobal("fetch", vi.fn());
 
@@ -117,7 +132,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(body.error).toContain("Missing device_id");
   });
 
-  it("returns complete with tokens on success", async () => {
+  it("persists tokens server-side and returns complete without tokens in the body", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({
@@ -133,8 +148,16 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
-    expect(body.access_token).toBe("test-access-token");
-    expect(body.refresh_token).toBe("test-refresh-token");
+    // SEC-12: the browser gets only a status — provider tokens never travel
+    // back over the plain-HTTP setup AP.
+    expect(body.access_token).toBeUndefined();
+    expect(body.refresh_token).toBeUndefined();
+    // Tokens are written to the server-only handoff file instead.
+    expect(mockFs.writeFile).toHaveBeenCalled();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("test-access-token");
+    expect(written.refresh_token).toBe("test-refresh-token");
+    expect(written.provider).toBe("openai");
     expect(mockFs.unlink).toHaveBeenCalled();
   });
 
@@ -164,7 +187,9 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
-    expect(body.access_token).toBe("exchanged-token");
+    expect(body.access_token).toBeUndefined();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("exchanged-token");
   });
 
   it("returns 502 when no code_verifier in response", async () => {
@@ -233,9 +258,13 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     expect(res.status).toBe(200);
     expect(body.status).toBe("complete");
     // Codex needs the JWTs, not an exchanged sk- key: id_token is preserved and
-    // there is no third (id_token → api-key) fetch.
-    expect(body.access_token).toBe("first-token");
-    expect(body.id_token).toBe("test-id-token");
+    // there is no third (id_token → api-key) fetch. The tokens are persisted
+    // to the server-only handoff file, not returned to the browser.
+    expect(body.access_token).toBeUndefined();
+    expect(body.id_token).toBeUndefined();
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.access_token).toBe("first-token");
+    expect(written.id_token).toBe("test-id-token");
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
@@ -285,6 +314,68 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
 
     // Should not fail - should use device_auth_id as fallback
     expect(body.status).toBe("pending");
+  });
+
+  // A flow the provider ends without completing drops its own state. It must
+  // NOT drop the handoff file: no branch that fails here has written tokens, so
+  // whatever is there belongs to another flow — possibly a finished
+  // authorization-code one still waiting for /configure.
+  describe("interrupted flow cleanup", () => {
+    it("keeps the handoff tokens when the token exchange fails", async () => {
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            authorization_code: "test-auth-code",
+            code_verifier: "test-verifier",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: () => Promise.resolve("Invalid code"),
+        }));
+
+      const res = await devicePollPost();
+
+      expect(res.status).toBe(502);
+      expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
+    });
+
+    it("keeps the handoff tokens when the provider returns no code_verifier", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ authorization_code: "test-auth-code" }),
+      }));
+
+      const res = await devicePollPost();
+
+      expect(res.status).toBe(502);
+      expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
+    });
+
+    it("sweeps a handoff file that is past the TTL", async () => {
+      mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 20 * 60 * 1000 } as never);
+      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+
+      const res = await devicePollPost();
+
+      // No state file, so the poll itself is a 400 — the sweep runs regardless.
+      expect(res.status).toBe(400);
+      expect(mockFs.unlink).toHaveBeenCalledWith(TOKENS_PATH);
+    });
+
+    it("leaves a handoff file that is still inside the TTL", async () => {
+      mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 60 * 1000 } as never);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
+
+      const res = await devicePollPost();
+
+      expect((await res.json()).status).toBe("pending");
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
+    });
   });
 
   it("returns pending for unknown response format", async () => {

@@ -39,6 +39,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
+    // `lang` is the SERVER-RENDERED default only. The UI ships 10 locales and
+    // the active one is a client-side choice (pref:ui_language, else
+    // navigator.language), so I18nProvider rewrites this attribute after
+    // hydration — see useSyncHtmlLang in src/lib/i18n.tsx. Rendering the real
+    // locale here instead would make the root layout dynamic for every route,
+    // /login and the captive portal included, and risk a hydration mismatch.
     <html lang="en" className="scroll-smooth">
       <body className="font-body flex flex-col bg-stars bg-nebula relative" style={{ minHeight: '100dvh', height: '100dvh', overflow: 'hidden' }}>
         {children}

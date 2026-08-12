@@ -11,7 +11,9 @@ import AIModelsStep from "./AIModelsStep";
 import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
-import { useT, I18nProvider } from "@/lib/i18n";
+import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
+import { DISCORD_INVITE_URL } from "@/lib/community";
+import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
 
@@ -194,20 +196,88 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
   );
 }
 
+/* ── Language menu ──
+   Language is a device setting, not a step of setup. Living inside the card it
+   made the card's first rows chrome instead of content and it only existed on
+   step 1's choice screen — so a customer who realised on step 3 that they were
+   reading the wrong language had nowhere to go. In the header actions it is
+   reachable from every step and the card opens on its headline. */
+
+function LanguageMenu({
+  onClose,
+  locale,
+  setLocale,
+}: {
+  onClose: () => void;
+  locale: Locale;
+  setLocale: (l: Locale) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      className="absolute right-0 top-full mt-1 w-[min(220px,calc(100vw-1rem))] max-h-[280px] overflow-y-auto bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 py-1"
+      role="menu"
+    >
+      {LANGUAGES.map((lang) => (
+        <button
+          key={lang.code}
+          type="button"
+          role="menuitemradio"
+          aria-checked={locale === lang.code}
+          onClick={() => { setLocale(lang.code); onClose(); }}
+          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left border-none cursor-pointer transition-colors text-sm ${
+            locale === lang.code
+              ? "bg-[var(--coral-tint)] text-[var(--text-primary)]"
+              : "bg-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-deep)]"
+          }`}
+        >
+          <span className="text-base leading-none">{lang.flag}</span>
+          <span className="flex-1">{lang.label}</span>
+          {locale === lang.code && (
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function SetupCompletionOverlay({
   phase,
   completed,
+  hermes,
   t,
 }: {
   phase: number;
   completed: boolean;
+  /** Hermes edition: this device ships without the OpenClaw gateway. */
+  hermes: boolean;
   t: (key: string) => string;
 }) {
-  const steps = [
-    t("ai.restartingGateway"),
-    t("telegram.waitingGateway"),
-    t("ai.almostReady"),
-  ];
+  // A Hermes-edition box has no OpenClaw gateway installed at all (the unit is
+  // masked), so gateway copy would name a service that does not exist on the
+  // device — and the customer would be watching a spinner for it.
+  const steps = hermes
+    ? [
+        t("wizard.completionHermesSaving"),
+        t("wizard.completionHermesStarting"),
+        t("ai.almostReady"),
+      ]
+    : [
+        t("ai.restartingGateway"),
+        t("telegram.waitingGateway"),
+        t("ai.almostReady"),
+      ];
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-completion-overlay">
@@ -257,7 +327,11 @@ function SetupCompletionOverlay({
 
           <div className="text-center setup-finish-fade-in" style={{ animationDelay: "0.2s" }}>
             <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
-              {completed ? t("connected") : t("openclaw.connecting")}
+              {completed
+                ? t("connected")
+                : hermes
+                  ? t("wizard.completionHermesTitle")
+                  : t("openclaw.connecting")}
             </h2>
             <p className="text-sm text-[var(--text-muted)]">
               {completed ? t("ai.almostReady") : t("ai.pleaseDontClose")}
@@ -274,7 +348,7 @@ function SetupCompletionOverlay({
               >
                 {completed || index < phase ? (
                   <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check</span>
                   </span>
                 ) : index === phase ? (
                   <span className="flex items-center justify-center w-5 h-5 shrink-0">
@@ -294,7 +368,7 @@ function SetupCompletionOverlay({
 
           {!completed && (
             <p className="text-xs text-[var(--text-muted)] text-center mt-2 setup-finish-fade-in" style={{ animationDelay: "0.3s" }}>
-              {t("telegram.pleaseWait")}
+              {hermes ? t("wizard.completionHermesWait") : t("telegram.pleaseWait")}
             </p>
           )}
         </div>
@@ -310,7 +384,7 @@ interface SetupWizardProps {
 }
 
 function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
-  const { t } = useT();
+  const { t, locale, setLocale } = useT();
   // Hold a live reference to t so the completion effect can translate without
   // re-running (and re-POSTing) on every locale change.
   const tRef = useRef(t);
@@ -325,7 +399,24 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [retryCount, setRetryCount] = useState(0);
   const [showPower, setShowPower] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showLang, setShowLang] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // Device edition. Seeded from the process-wide cache (the edition is baked
+  // into a root-owned env file and cannot change under a live page), so on a
+  // resume it is already known and the completion overlay never paints the
+  // wrong product's copy for a frame.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  const isHermesEdition = edition === "hermes";
+
+  useEffect(() => {
+    if (edition !== null) return;
+    let alive = true;
+    void resolveEdition().then((value) => { if (alive) setEdition(value); });
+    return () => { alive = false; };
+    // Runs once: `edition` is only read to skip a redundant fetch and it never
+    // returns to null.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const persistSetupProgress = useCallback(async (step: number) => {
     try {
@@ -406,6 +497,43 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
       return false;
     }
 
+    /**
+     * Readiness on a Hermes-edition device.
+     *
+     * There is no OpenClaw gateway to poll here — it is not installed and its
+     * unit is masked, so /setup-api/gateway/health could only ever run out its
+     * attempts. What DOES have to come up is the Hermes dashboard
+     * (clawbox-hermes-dashboard.service, which the proxy unit fronts), and the
+     * models route reports exactly that: `stale` is false only when the live
+     * dashboard answered — every fallback source (the on-disk catalog, a cold
+     * start) is flagged stale. See src/lib/hermes-model-options.ts.
+     *
+     * The route is one the wizard already calls from the AI-models step, and by
+     * this point /setup/complete has issued the session cookie — so this adds no
+     * new surface and needs no new carve-out.
+     */
+    async function pollHermesReady() {
+      for (let attempt = 0; attempt < SETUP_COMPLETION_MAX_HEALTH_CHECKS; attempt += 1) {
+        if (cancelled) return false;
+        try {
+          // Unlike the gateway's TCP probe this route talks to the dashboard,
+          // so it gets its own deadline: a socket that accepts and then hangs
+          // must not stall the loop past the attempt budget.
+          const res = await fetch("/setup-api/hermes/models", {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.stale === false) return true;
+          }
+        } catch {
+          // The agent's dashboard is still coming up.
+        }
+        await delay(2000);
+      }
+      return false;
+    }
+
     async function postCompleteWithRetry(): Promise<Response> {
       // The POST can fail transiently if the gateway restart from the AI
       // step is still settling, or the browser's connection is briefly
@@ -447,9 +575,20 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         if (cancelled) return;
         setCompletionPhase(1);
 
-        const gatewayAvailable = await pollGatewayHealth();
-        if (!gatewayAvailable) {
-          console.warn("[SetupWizard] Gateway health did not become available during setup completion; continuing offline.");
+        // Resolve the edition inside the run rather than reading the state
+        // above it: the completion effect must never poll a harness this
+        // device does not ship, even on the resume path where the overlay is
+        // mounted before the mount effect has landed. The lookup is cached, so
+        // this costs nothing on the normal path.
+        const activeEdition = await resolveEdition();
+        if (cancelled) return;
+        setEdition(activeEdition);
+
+        const agentAvailable = activeEdition === "hermes"
+          ? await pollHermesReady()
+          : await pollGatewayHealth();
+        if (!agentAvailable) {
+          console.warn("[SetupWizard] The agent did not report ready during setup completion; continuing offline.");
         }
         if (cancelled) return;
 
@@ -509,67 +648,110 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   return (
     <>
       {restarting && <ReconnectingOverlay redirectTo="/setup" />}
-      <header className="px-4 py-2.5 sm:px-6 sm:py-4 flex items-center justify-between gap-3 sticky top-0 z-50">
-        <Link href="/" className="flex items-center gap-2 shrink-0">
-          <Image
-            src="/clawbox-icon.png"
-            alt="ClawBox"
-            width={36}
-            height={36}
-            className="w-8 h-8 sm:w-9 sm:h-9 object-contain"
-            priority
-          />
-          <div className="hidden sm:flex items-baseline gap-1.5">
-            <span className="text-xl font-bold font-display title-gradient">
-              ClawBox
+      {/* The SURFACE is full-bleed and the MEASURE is a child. Capping the
+          element that also paints the scrim is what turns a header into an
+          opaque slab with two hard vertical edges on the wallpaper. This bar
+          carries no border either: its bottom boundary is the progress rail,
+          so the edge states where the customer is instead of drawing a line. */}
+      <header className="setup-chrome">
+        <div className="setup-chrome-inner">
+          <Link href="/" className="setup-brand" aria-label="ClawBox">
+            <Image
+              src="/clawbox-icon.png"
+              alt=""
+              width={28}
+              height={28}
+              className="setup-brand-mark"
+              priority
+            />
+            <span className="setup-brand-word title-gradient">ClawBox</span>
+            {/* Hermes is a byline in the metadata slot, never a second lockup.
+                Lit by [data-agent="hermes"] on an ancestor. */}
+            <span className="setup-cobrand">
+              <span className="setup-caduceus" aria-hidden="true">&#9877;</span>
+              <span className="setup-cobrand-name">Hermes Agent</span>
             </span>
-            <span className="font-mono text-xs text-[var(--text-secondary)] tabular-nums">
-              <span className="text-[var(--text-muted)] opacity-60 mx-1">/</span>{process.env.NEXT_PUBLIC_APP_VERSION}
-            </span>
-          </div>
-        </Link>
-        <ProgressBar currentStep={currentStep} />
-        <div className="flex items-center gap-1 shrink-0">
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => { setShowHelp((v) => !v); setShowPower(false); }}
-              aria-label="Need help?"
-              className="flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help_outline</span>
-            </button>
-            {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} t={t} />}
-          </div>
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => { setShowPower((v) => !v); setShowHelp(false); }}
-              aria-label="Power options"
-              className="flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] bg-transparent border-none cursor-pointer transition-colors"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
-            </button>
-            {showPower && (
-              <PowerMenu
-                onClose={() => setShowPower(false)}
-                onRestart={() => { setShowPower(false); setRestarting(true); }}
-                t={t}
-              />
-            )}
+          </Link>
+
+          <ProgressBar currentStep={currentStep} />
+
+          <div className="setup-actions">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowHelp((v) => !v); setShowPower(false); setShowLang(false); }}
+                aria-label="Need help?"
+                aria-expanded={showHelp}
+                className="setup-icon-btn"
+              >
+                {/* `help_outline` is not in the subset the device actually
+                    ships (public/fonts/material-symbols-rounded.ttf is a
+                    static font with no FILL axis and no outline aliases), so
+                    it rendered as its own name. `help` is the real glyph. */}
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
+              </button>
+              {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} t={t} />}
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowPower((v) => !v); setShowHelp(false); setShowLang(false); }}
+                aria-label="Power options"
+                aria-expanded={showPower}
+                className="setup-icon-btn"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>power_settings_new</span>
+              </button>
+              {showPower && (
+                <PowerMenu
+                  onClose={() => setShowPower(false)}
+                  onRestart={() => { setShowPower(false); setRestarting(true); }}
+                  t={t}
+                />
+              )}
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowLang((v) => !v); setShowHelp(false); setShowPower(false); }}
+                aria-label={t("wifi.language")}
+                aria-expanded={showLang}
+                aria-haspopup="menu"
+                className="setup-icon-btn"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>language</span>
+              </button>
+              {showLang && (
+                <LanguageMenu
+                  onClose={() => setShowLang(false)}
+                  locale={locale}
+                  setLocale={setLocale}
+                />
+              )}
+            </div>
           </div>
         </div>
       </header>
 
-      <main
-        className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-4 pt-2 pb-24 sm:p-6"
-      >
-        <div className="w-full flex flex-col items-center my-auto">
+      {/* Top-anchored, not centred: the steps range from ~430px to ~700px
+          tall, so a centred card slides its own H1 up and down on every
+          advance. Anchored, all five screens share one horizon. */}
+      <main className="setup-main">
+        <div className="w-full flex flex-col items-center">
         {completionStarted ? (
-          <SetupCompletionOverlay phase={completionPhase} completed={completionComplete} t={t} />
+          <SetupCompletionOverlay
+            phase={completionPhase}
+            completed={completionComplete}
+            hermes={isHermesEdition}
+            t={t}
+          />
         ) : (
           <>
-            {completionError && currentStep === 5 && (
+            {/* Completion failed and is no longer in flight (we're in the
+                !completionStarted branch). Show it regardless of step — the
+                resume path lands on step 6, which has no body, so gating on
+                step 5 would leave a blank card. */}
+            {completionError && (
               <div className="w-full max-w-[520px] mb-4">
                 <StatusMessage type="error" message={completionError} />
                 <button
@@ -611,26 +793,22 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         </div>
       </main>
 
-      <footer className="px-4 py-3 flex items-center justify-center gap-3">
+      {/* The ClawBox logo link is gone: it was the same mark as the header at
+          20px, pointing at a website the box cannot reach at steps 1–2 because
+          it is serving a captive portal. Discord keeps its place and gains a
+          label — a bare 18px glyph is not a recognisable affordance for
+          someone unboxing their first AI appliance. */}
+      <footer className="setup-footer">
         <a
-          href="https://openclawhardware.dev/"
+          href={DISCORD_INVITE_URL}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="ClawBox website"
-          className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] transition transform hover:scale-105"
-        >
-          <Image src="/clawbox-logo.png" alt="ClawBox" width={28} height={28} className="w-7 h-7 object-contain" />
-        </a>
-        <a
-          href="https://discord.gg/FbKmnxYnpq"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Join our Discord"
-          className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[#5865F2] transition transform hover:scale-105"
+          className="flex items-center justify-center gap-2 h-9 px-3 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] text-xs font-semibold hover:text-[var(--text-primary)] transition-colors"
         >
           <svg width="18" height="14" viewBox="0 0 71 55" fill="currentColor" aria-hidden="true">
             <path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A37.4 37.4 0 0 0 25.4.3a.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.6 4.9a.2.2 0 0 0-.1.1C1.5 18.7-.9 32.2.3 45.5v.2a58.9 58.9 0 0 0 17.7 9a.2.2 0 0 0 .3-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.8 38.8 0 0 1-5.5-2.6.2.2 0 0 1 0-.4l1.1-.9a.2.2 0 0 1 .2 0 42 42 0 0 0 35.8 0 .2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4 36.4 36.4 0 0 1-5.5 2.6.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.6 5.9.2.2 0 0 0 .3.1 58.7 58.7 0 0 0 17.7-9 .2.2 0 0 0 .1-.2c1.4-15-2.3-28-9.8-39.6a.2.2 0 0 0-.1 0ZM23.7 37.3c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Zm23.3 0c-3.4 0-6.3-3.2-6.3-7s2.8-7 6.3-7 6.4 3.2 6.3 7-2.8 7-6.3 7Z"/>
           </svg>
+          <span>{t("settings.discordCommunity")}</span>
         </a>
       </footer>
     </>

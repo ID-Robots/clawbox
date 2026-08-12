@@ -87,6 +87,28 @@ describe("/setup-api/wifi/update", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects an SSID longer than the 32 octets 802.11 allows", async () => {
+    const mod = await import("@/app/setup-api/wifi/update/route");
+    const res = await mod.POST(makeRequest({ action: "forget", ssid: "a".repeat(33) }));
+    expect(res.status).toBe(400);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("counts SSID length in octets, not code points", async () => {
+    const mod = await import("@/app/setup-api/wifi/update/route");
+    // 17 Cyrillic characters = 34 octets in UTF-8: under the limit counted by
+    // code point, over it counted the way 802.11 counts.
+    const res = await mod.POST(makeRequest({ action: "forget", ssid: "мрежа".repeat(3) + "аб" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts an SSID of exactly 32 octets", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    const mod = await import("@/app/setup-api/wifi/update/route");
+    const res = await mod.POST(makeRequest({ action: "forget", ssid: "a".repeat(32) }));
+    expect(res.status).toBe(200);
+  });
+
   it("refuses to modify the hotspot profile", async () => {
     const mod = await import("@/app/setup-api/wifi/update/route");
     const res = await mod.POST(makeRequest({ action: "forget", ssid: "ClawBox-Setup" }));

@@ -1,0 +1,426 @@
+// Shared types + input validators for the Hermes Skills Store. This module is
+// pure (no node/fs imports) so it can be imported from BOTH the setup-api route
+// handlers and the client component. All fs-based work lives in
+// `hermes-skills-server.ts` / `hermes-skill-index.ts`.
+//
+// Every value here is eventually handed to `runHermesCli` as an argv element
+// (spawn with an array, NEVER a shell), so injection is impossible — but a value
+// that starts with "-" could still be misread by hermes as a FLAG, and a value
+// with ".." / "/" could escape the skills tree. The validators below reject both.
+
+export type TrustLevel = 'builtin' | 'official' | 'trusted' | 'community' | 'unknown';
+
+/** Card payload for the Browse grid — everything comes from the catalog index. */
+export interface HermesSkill {
+  /** Install identifier — pass this verbatim to `hermes skills install`. */
+  id: string;
+  name: string;
+  description?: string;
+  /**
+   * Shown instead of a description when the registry only had the skills.sh
+   * "Indexed by skills.sh from <repo>" placeholder — that string says nothing
+   * about the skill, so we surface the provenance and drop the filler.
+   */
+  provenanceNote?: string;
+  /** Registry source: official | skills.sh | github | clawhub | ... */
+  source?: string;
+  trust?: string;
+  /** github only: the publishing org (`extra.provider`). */
+  provider?: string;
+  category?: string;
+  tags?: string[];
+  /** browse-sh only: install counter from the catalog. */
+  installCount?: number;
+  /** browse-sh only: the site the skill automates. */
+  hostname?: string;
+  /** Computed client-side against the installed set. */
+  installed?: boolean;
+}
+
+export type SkillOrigin = 'builtin' | 'hub' | 'local';
+
+/** Card payload for the Installed grid — everything comes from disk. */
+export interface InstalledHermesSkill {
+  /** Skill name — the lock.json key and the `uninstall` positional argument. */
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+  /** How it got here: builtin | official | clawhub | skills.sh | ... */
+  source: string;
+  /** Full registry identifier when known (hub-installed skills carry one). */
+  identifier?: string;
+  trust?: string;
+  /** Installer security scan verdict (hub-installed only): safe | ... */
+  scanVerdict?: string;
+  scanFindingCount?: number;
+  /**
+   * builtin = shipped with the device (in .bundled_manifest);
+   * hub     = installed from the store (present in lock.json);
+   * local   = created on the device by the agent itself.
+   */
+  origin: SkillOrigin;
+  installedAt?: string;
+  updatedAt?: string;
+  fileCount?: number;
+  bytes?: number;
+  platforms?: string[];
+  tags?: string[];
+  /** platforms declared and `linux` not among them — it can't run here. */
+  incompatible?: boolean;
+  enabled?: boolean;
+}
+
+export interface ScanFinding {
+  patternId?: string;
+  severity?: string;
+  category?: string;
+  file?: string;
+  line?: number;
+  description?: string;
+}
+
+export interface SkillRequirements {
+  /** `present: null` = not probed (we only probe for installed skills). */
+  commands: { name: string; present: boolean | null }[];
+  envVars: string[];
+  dependencies: string[];
+  credentialFiles: { path: string; description?: string }[];
+  compatibility?: string;
+  setupHelp?: string;
+  setupHelpUrl?: string;
+  secrets: { label: string; envVar?: string; providerUrl?: string }[];
+}
+
+export interface SkillProvenance {
+  sourceUrl?: string;
+  /** false when the URL was DERIVED from the identifier rather than published. */
+  sourceUrlVerified: boolean;
+  repoUrl?: string;
+  detailUrl?: string;
+  homepage?: string;
+  installCommand?: string;
+  installCount?: number;
+  hostname?: string;
+  revision?: string;
+}
+
+export interface SkillSecurity {
+  verdict?: string;
+  scannerVersion?: string;
+  scannedAt?: string;
+  summary?: string;
+  contentHashShort?: string;
+  findings: ScanFinding[];
+}
+
+export interface SkillInstallInfo {
+  origin: SkillOrigin;
+  installedAt?: string;
+  updatedAt?: string;
+  fileCount?: number;
+  bytes?: number;
+  supportDirs: string[];
+  installPath?: string;
+}
+
+/** Where a detail view's markdown body came from. */
+export type SkillBodySource = 'disk' | 'official-disk' | 'cli-preview' | 'none';
+
+/**
+ * Deep detail for a single skill (from the `inspect` route). Phase 1 is served
+ * without ever touching the CLI; phase 2 (`&docs=1`) adds the remote preview.
+ */
+export interface HermesSkillDetail {
+  id: string;
+  name: string;
+  description?: string;
+  provenanceNote?: string;
+  source?: string;
+  trust?: string;
+  provider?: string;
+  category?: string;
+  tags?: string[];
+  version?: string;
+  author?: string;
+  license?: string;
+  platforms?: string[];
+  relatedSkills?: string[];
+  incompatible?: boolean;
+  requirements?: SkillRequirements;
+  provenance?: SkillProvenance;
+  security?: SkillSecurity;
+  install?: SkillInstallInfo;
+  /** SKILL.md markdown below the frontmatter — rendered via chat-markdown. */
+  body?: string;
+  bodySource: SkillBodySource;
+  bodyTruncated: boolean;
+  /** True when a `&docs=1` fetch would add documentation we don't have yet. */
+  needsRemoteDocs: boolean;
+  headings?: { level: 2 | 3; text: string; slug: string }[];
+}
+
+/** `inspect` printed a disambiguation table instead of a skill panel. */
+export interface AmbiguousSkillResponse {
+  ambiguous: true;
+  query: string;
+  candidates: HermesSkill[];
+}
+
+export interface CatalogFacet {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface CatalogMeta {
+  /** index = offline catalog; cli = CLI fallback; warming = index being built. */
+  origin: 'index' | 'cli' | 'warming';
+  /** When the REGISTRY built the catalog — baked in upstream, not a device fact. */
+  generatedAt?: string;
+  /** When THIS device last downloaded it — the only date staleness can key on. */
+  fetchedAt?: string;
+  skillCount?: number;
+  stale?: boolean;
+}
+
+export interface BrowseResponse {
+  skills: HermesSkill[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasMore: boolean;
+  facets: { sources: CatalogFacet[]; providers: CatalogFacet[] };
+  catalog: CatalogMeta;
+  /** True when the answer came from the CLI fallback (no paging, top-N only). */
+  degraded: boolean;
+}
+
+// The fixed set of discovery sources Hermes' `--source` flag accepts. `all` is
+// the (default) firehose; the rest narrow to one registry. Anything outside
+// this set is rejected so a request can't smuggle an arbitrary value.
+export const HERMES_SKILL_SOURCES = [
+  'all',
+  'official',
+  'skills-sh',
+  'well-known',
+  'github',
+  'clawhub',
+  'lobehub',
+  'browse-sh',
+  'nvidia',
+  'openai',
+  'anthropic',
+  'huggingface',
+  'voltagent',
+  'gstack',
+  'minimax',
+] as const;
+
+const SOURCE_SET = new Set<string>(HERMES_SKILL_SOURCES);
+
+export function isValidSource(source: string): boolean {
+  return SOURCE_SET.has(source);
+}
+
+// Sources that exist in the offline catalog but have NO `--source` flag: the
+// index spells skills.sh with a dot, ships a one-entry `claude-marketplace`, and
+// leaves `unknown` on rows with no source at all. They're valid to FILTER on
+// (that happens in memory) but must never be handed to the CLI, so they live in
+// their own set rather than being bolted onto the flag allowlist.
+const CATALOG_ONLY_SOURCES = new Set(['skills.sh', 'claude-marketplace', 'unknown']);
+
+export function isBrowsableSource(source: string): boolean {
+  return SOURCE_SET.has(source) || CATALOG_ONLY_SOURCES.has(source);
+}
+
+// The index writes `skills.sh` where the CLI flag is `skills-sh`; both spellings
+// reach the UI, so the label map covers each.
+export const SOURCE_LABELS: Record<string, string> = {
+  all: 'All sources',
+  official: 'Official',
+  'skills-sh': 'skills.sh',
+  'skills.sh': 'skills.sh',
+  'well-known': 'Well-known',
+  github: 'GitHub',
+  clawhub: 'ClawHub',
+  lobehub: 'LobeHub',
+  'browse-sh': 'browse.sh',
+  'claude-marketplace': 'Claude marketplace',
+  builtin: 'Built-in',
+  hub: 'Installed',
+  nvidia: 'NVIDIA',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  huggingface: 'Hugging Face',
+  voltagent: 'VoltAgent',
+  gstack: 'gstack',
+  minimax: 'MiniMax',
+};
+
+export function sourceLabel(source?: string): string {
+  if (!source) return 'Unknown source';
+  return SOURCE_LABELS[source] || source;
+}
+
+/** Normalise an index/CLI source string to the `--source` flag spelling. */
+export function sourceFlagValue(source: string): string {
+  return source === 'skills.sh' ? 'skills-sh' : source;
+}
+
+export interface TrustMeta {
+  label: string;
+  icon: string;
+  tone: 'brand' | 'good' | 'warn' | 'muted';
+  help: string;
+}
+
+// One vocabulary for trust across cards, detail and dialogs. `builtin` and
+// `official` are the same story to a customer; `community` is deliberately amber
+// (NOT grey) — grey reads as "no information", which is a different risk.
+export const TRUST_META: Record<TrustLevel, TrustMeta> = {
+  builtin: {
+    label: 'Official',
+    icon: 'verified',
+    tone: 'brand',
+    help: 'Published by Hermes and shipped with your device.',
+  },
+  official: {
+    label: 'Official',
+    icon: 'verified',
+    tone: 'brand',
+    help: 'Published by Hermes and shipped with your device.',
+  },
+  trusted: {
+    label: 'Trusted',
+    icon: 'verified_user',
+    tone: 'good',
+    help: 'From a reviewed publisher.',
+  },
+  community: {
+    label: 'Community',
+    icon: 'groups',
+    tone: 'warn',
+    help: 'Anyone can publish here. Review the skill before installing.',
+  },
+  unknown: {
+    label: 'Unknown',
+    icon: 'help',
+    tone: 'muted',
+    help: 'No trust information for this skill.',
+  },
+};
+
+export function trustMeta(trust?: string): TrustMeta {
+  const key = (trust || '').toLowerCase();
+  if (key === 'builtin' || key === 'official' || key === 'trusted' || key === 'community') {
+    return TRUST_META[key];
+  }
+  return TRUST_META.unknown;
+}
+
+export const SORT_OPTIONS = ['relevance', 'name', 'trust', 'popular'] as const;
+export type SortOption = (typeof SORT_OPTIONS)[number];
+
+export function isValidSort(value: string): value is SortOption {
+  return (SORT_OPTIONS as readonly string[]).includes(value);
+}
+
+/** True when the string contains any ASCII control char (0x00-0x1f or 0x7f). */
+function hasControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return true;
+  }
+  return false;
+}
+
+// Registry identifier for `install`. Real ids contain dots
+// (`browse-sh/github.com/...`), slashes, and 4+ segments
+// (`skills-sh/anthropics/skills/pdf`), so the charset is deliberately wide —
+// but we still reject flag-smuggling, traversal, and control chars.
+const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+export interface IdCheck {
+  ok: boolean;
+  /**
+   * Always false — direct-URL installs are disabled (see below). Kept on the
+   * interface so callers that branch on it stay valid.
+   */
+  isUrl?: boolean;
+}
+
+/**
+ * Validate an install identifier. ONLY registry identifiers (`source/skill/...`
+ * from the fixed source allowlist) are accepted.
+ *
+ * Direct-URL installs are DELIBERATELY rejected. `hermes skills install <URL>`
+ * makes the CLI fetch an arbitrary endpoint server-side — an SSRF vector
+ * (hostname allow/deny lists are bypassable via DNS rebinding) and a
+ * supply-chain risk (unvetted code onto the device). A customer store only
+ * needs the curated registries, so URL installs have no place here.
+ */
+export function checkInstallIdentifier(id: string): IdCheck {
+  if (typeof id !== 'string') return { ok: false };
+  const v = id.trim();
+  if (!v || v.length > 256) return { ok: false };
+  if (v.startsWith('-')) return { ok: false }; // flag injection
+  // Reject anything scheme-like (http:, https:, file:, data:, //host, ...):
+  // no direct-URL installs.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v) || v.startsWith('//')) return { ok: false };
+  if (!IDENTIFIER_RE.test(v)) return { ok: false };
+  if (v.startsWith('/') || v.endsWith('/')) return { ok: false };
+  if (v.includes('//')) return { ok: false }; // empty segment / traversal
+  if (v.split('/').includes('..')) return { ok: false }; // path traversal
+  return { ok: true, isUrl: false };
+}
+
+// Skill NAME for `uninstall` — a single lock.json key, no slashes.
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export function isValidSkillName(name: string): boolean {
+  if (typeof name !== 'string') return false;
+  const v = name.trim();
+  if (!v || v.length > 128) return false;
+  if (v.startsWith('-')) return false;
+  return NAME_RE.test(v);
+}
+
+// `--category` / `--name` override values, and the `provider` facet value.
+const META_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
+
+export function isValidMeta(value: string, maxLen = 64): boolean {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (!v || v.length > maxLen) return false;
+  if (v.startsWith('-')) return false;
+  if (v.includes('..')) return false;
+  return META_RE.test(v);
+}
+
+// A query is POSITIONAL (never read as a flag), but we still cap length, reject
+// a leading "-" defensively, and forbid control chars. Spaces/printable text OK.
+export function isValidQuery(q: string): boolean {
+  if (typeof q !== 'string') return false;
+  const v = q.trim();
+  if (!v || v.length > 128) return false;
+  if (v.startsWith('-')) return false;
+  return !hasControlChar(v);
+}
+
+export function clampInt(raw: string | null, min: number, max: number, fallback: number): number | null {
+  if (raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return null;
+  if (n < min || n > max) return null;
+  return n;
+}
+
+/** Human file size for a skill directory. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

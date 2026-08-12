@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
 import path from "path";
-import { findOpenclawBin } from "@/lib/openclaw-config";
+import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
 import { CATALOG_PROVIDERS, isCatalogProvider, PROVIDER_CATALOGS } from "@/lib/provider-models";
 
@@ -431,6 +431,18 @@ async function fetchOpenRouterCatalog(): Promise<CatalogModel[]> {
 // next service restart.
 export function refreshInBackground(provider: string): void {
   if (refreshing.has(provider)) return;
+
+  // OpenRouter (REST) and ClawBox AI (static) never touch the CLI; every other
+  // provider's catalog comes from `openclaw models list`. On an edition without
+  // the binary (Hermes) that spawn is a guaranteed ENOENT, so skip it cleanly
+  // rather than fork a missing binary for each provider on every boot warmup.
+  // Hermes surfaces its own model list through the Hermes dashboard, not here.
+  const usesOpenclawCli = provider !== "openrouter" && provider !== "clawai";
+  if (usesOpenclawCli && openclawIsAbsent()) {
+    console.log(`[catalog] skipping ${provider}: the openclaw CLI is not present on this edition`);
+    return;
+  }
+
   refreshing.add(provider);
 
   let fetcher: Promise<CatalogModel[]>;

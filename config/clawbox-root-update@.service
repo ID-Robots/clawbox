@@ -4,6 +4,13 @@ Description=ClawBox Root Update Step (%i)
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/clawbox/network.env
+# The device SKU. Without it every updater-run step evaluated
+# is_hermes_edition() as false — and UPDATE_STEPS includes openclaw_install,
+# openclaw_patch and gateway_setup, so an in-app update reinstalled and STARTED
+# the OpenClaw gateway on a Hermes appliance. install.sh also reads this file
+# directly (it is the authority, not this environment), but exporting it here
+# keeps anything the steps shell out to consistent with the resolved edition.
+EnvironmentFile=-/etc/clawbox/edition.env
 ExecStart=/bin/bash /home/clawbox/clawbox/install.sh --step %i
 # 30 min was not enough for llamacpp_install on a cold box: that step builds
 # llama.cpp from source with CUDA on a 6-core Jetson Orin AND downloads the

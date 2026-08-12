@@ -1,4 +1,6 @@
-import { getAll, setMany } from "@/lib/config-store";
+import { getAll } from "@/lib/config-store";
+import { boundPreferenceText } from "@/lib/preference-schema";
+import { setPreferences } from "@/lib/preference-store";
 
 interface InstalledMeta {
   name: string;
@@ -33,12 +35,15 @@ export async function registerWebappInPreferences(
   const installedMeta = (prefs["pref:installed_meta"] as Record<string, InstalledMeta> | undefined) ?? {};
   const hiddenInstalled = (prefs["pref:hidden_installed"] as string[] | undefined) ?? [];
 
-  await setMany({
+  // setPreferences applies the preference rules — this does not go through
+  // POST /setup-api/preferences, and the update carries over every entry read
+  // above alongside the one being added.
+  await setPreferences({
     "pref:installed_apps": installedApps.includes(appId) ? installedApps : [...installedApps, appId],
     "pref:installed_meta": {
       ...installedMeta,
       [appId]: {
-        name,
+        name: boundPreferenceText(name, appId),
         color: opts.color || "#f97316",
         iconUrl: opts.iconUrl || "",
         webappUrl: opts.webappUrl || `/setup-api/webapps?app=${appId}`,

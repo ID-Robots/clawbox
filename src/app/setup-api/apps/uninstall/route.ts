@@ -1,17 +1,16 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
-import { reloadGateway, getSkillsDir } from "@/lib/openclaw-config";
+import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { setPreferences } from "@/lib/preference-store";
+import { getSkillsDir } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
-
-const HOME = process.env.HOME || "/home/clawbox";
 
 export async function POST(req: Request) {
   try {
     const { appId } = await req.json();
-    if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
+    if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 
@@ -23,8 +22,10 @@ export async function POST(req: Request) {
     }
     await fs.rm(skillDir, { recursive: true, force: true });
 
-    // Remove cached icon
-    const iconPath = path.join(HOME, "clawbox", "data", "icons", `${appId}.png`);
+    // Remove cached icon from the same location the install/icon routes use
+    // (DATA_DIR/icons). The old hardcoded ~/clawbox/data/icons path diverged
+    // whenever CLAWBOX_ROOT != $HOME/clawbox, orphaning the PNG on disk.
+    const iconPath = path.join(DATA_DIR, "icons", `${appId}.png`);
     await fs.rm(iconPath, { force: true }).catch(() => {});
 
     // Keep the desktop's `installed_apps` and `installed_meta` preferences
@@ -48,20 +49,16 @@ export async function POST(req: Request) {
         delete metaMap[appId];
         updates["pref:installed_meta"] = metaMap;
       }
-      if (Object.keys(updates).length > 0) {
-        await configSetMany(updates);
-      }
+      // setPreferences applies the preference rules — this does not go through
+      // POST /setup-api/preferences, and removing one entry writes the rest of
+      // the collection back out with it.
+      await setPreferences(updates);
     } catch (err) {
       console.warn("[uninstall] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
     }
 
-    // Reload gateway so agent drops the skill
-    try {
-      await reloadGateway();
-    } catch (err) {
-      console.warn("[uninstall] reloadGateway failed:", err instanceof Error ? err.message : err);
-    }
-
+    // No gateway bounce: removing the skill directory is a change under a
+    // watched skill root, so the agent drops the skill on its next turn.
     return NextResponse.json({ ok: true, appId });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);
