@@ -61,6 +61,37 @@ PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
 
+# ── Provisioning-status signal (read by the flash host) ──────────────────────
+# A full install keeps some steps NON-FATAL on purpose — a half-provisioned box
+# should still finish and come up reachable rather than abort mid-run. But
+# "non-fatal" must never become "invisible": a step that reported errors has to
+# reach the operator's summary AND the caller's exit status, or a flash host
+# prints "Setup: 1/1 succeeded" over an install that told itself it was broken.
+# So every non-fatal failure is recorded here, the summary lists them, install.sh
+# exits non-zero, and a machine-readable marker is left for the flash host.
+PROVISION_FAILURES=()
+PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-status}"
+
+record_provision_failure() {
+  PROVISION_FAILURES+=("$1")
+}
+
+# Persist the final provisioning verdict where the flash host (or an operator,
+# or the next update) can read it without re-parsing install.sh's stdout.
+write_provision_status() {
+  local status="$1"; shift
+  local dir
+  dir="$(dirname "$PROVISION_STATUS_FILE")"
+  mkdir -p "$dir" 2>/dev/null || true
+  {
+    echo "# Written by install.sh at the end of a full install. Machine-readable."
+    echo "STATUS=$status"
+    echo "FAILED_STEPS=$*"
+    echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  } > "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+}
+
 # ── Edition (single-harness lock) ────────────────────────────────────────────
 # openclaw | hermes | dual. "openclaw" is the native product (single, locked),
 # "hermes" is its own SKU, "dual" is premium (both harnesses + the runtime
@@ -3038,15 +3069,49 @@ step_validate_services() {
       fi
       # Probe 4 (hermes only): the dashboard auth proxy actually answers. The
       # unit being "active" only means node started; without this, a proxy that
-      # crashed on its first request (or a dashboard with no auth provider)
-      # counted as a healthy install. Unauthenticated, so 401/403/3xx are the
-      # expected healthy answers — anything is fine except "no answer".
+      # crashed on its first request counted as a healthy install. An
+      # unauthenticated request (no clawbox_session) is answered by a healthy
+      # proxy with a 302 to /login, or a 403 from its origin/rebind guard — so
+      # 3xx/403 are healthy and "no answer" is not. 401 is NOT whitelisted:
+      # a browserless request never earns one from a healthy proxy, and the one
+      # place the proxy DOES emit 401 is when the SSO login desynced (see
+      # hermes-dashboard-proxy.js) — the exact failure this SKU must not hide.
       local proxy_code
       proxy_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
         http://127.0.0.1:"${HERMES_DASH_PROXY_PORT:-8090}"/ 2>/dev/null) || proxy_code="000"
       case "$proxy_code" in
-        2*|3*|401|403) ;;
+        2*|3*|403) ;;
         *) failed_probe+=("Hermes: dashboard proxy on :${HERMES_DASH_PROXY_PORT:-8090} returned HTTP $proxy_code") ;;
+      esac
+    fi
+
+    # Probe (hermes + dual): the dashboard auth PROVIDER is genuinely usable —
+    # the stored password actually verifies against the stored password_hash.
+    # This is the check that was missing when a Hermes provision printed
+    # "dashboard auth setup returned non-zero" and the validator, seconds later,
+    # reported every check healthy: the proxy liveness probe above returns 3xx
+    # whether or not the provider works, so it can see a dead node but never a
+    # desynced or absent auth provider. Runs the auth script's OWN classifier
+    # (`--check`), so there is a single source of truth for the invariant and no
+    # duplicated scrypt logic here. Runs as root, which can read the clawbox-owned
+    # 0600 config + password file. A self-healed box (the dashboard's
+    # ExecStartPre re-mints a coherent pair within this loop's retry window)
+    # passes honestly, because by then the invariant genuinely holds.
+    if has_hermes_harness; then
+      local auth_script="$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh"
+      local auth_rc=0
+      if [ -f "$auth_script" ]; then
+        HERMES_CONFIG="$CLAWBOX_HOME/.hermes/config.yaml" CLAWBOX_ROOT="$PROJECT_DIR" \
+          bash "$auth_script" --check >/dev/null 2>&1 || auth_rc=$?
+      else
+        auth_rc=99
+      fi
+      case "$auth_rc" in
+        0) ;;
+        3) failed_probe+=("Hermes: dashboard auth is DESYNCED — the stored password does not verify against the stored password_hash (setup-hermes-dashboard-auth.sh --check == 3); the dashboard SSO will 401. Fix: sudo bash $PROJECT_DIR/install.sh --step hermes_edition") ;;
+        4) failed_probe+=("Hermes: no usable dashboard auth provider in $CLAWBOX_HOME/.hermes/config.yaml (--check == 4) — the dashboard refuses to start on its non-loopback bind without one. Fix: sudo bash $PROJECT_DIR/install.sh --step hermes_edition") ;;
+        5) failed_probe+=("Hermes: the dashboard password file is missing or empty (--check == 5). Fix: sudo bash $PROJECT_DIR/install.sh --step hermes_edition") ;;
+        *) failed_probe+=("Hermes: could not verify the dashboard auth provider (setup-hermes-dashboard-auth.sh --check == $auth_rc, environment error — not a confirmed-healthy state)") ;;
       esac
     fi
 
@@ -3087,6 +3152,8 @@ step_validate_services() {
   if is_test_mode; then probe_count=1; fi
   # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
   if is_hermes_edition; then probe_count=$(( probe_count + 3 )); fi
+  # +1 (hermes AND dual): the dashboard auth provider actually verifies.
+  if has_hermes_harness; then probe_count=$(( probe_count + 1 )); fi
   # One per foreign unit. Counted even when the unit is absent: "the other
   # harness is not here" is a check that ran and passed, and folding it into the
   # total is what stops the healthy line from being printable on a box that is
@@ -3276,11 +3343,18 @@ if has_hermes_harness; then
     echo "  # WARNING: Hermes provisioning FAILED."
     echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
     echo "  ############################################################"
+    # Record it so the final summary + exit status + status marker report the
+    # failure even though the run continues. Without this the box could still
+    # print "Setup Complete", exit 0, and be shipped as healthy.
+    record_provision_failure hermes_edition
   }
 fi
 
 log "Validating services..."
-step_validate_services
+# Capture rather than let set -e abort here: we still want to print the summary
+# AND fold this into the single honest exit status at the very end.
+VALIDATE_RC=0
+step_validate_services || VALIDATE_RC=$?
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
@@ -3301,3 +3375,36 @@ echo "    systemctl status clawbox-ap"
 echo "    systemctl status clawbox-setup"
 echo "    systemctl status clawbox-gateway"
 echo ""
+
+# ── Honest final status ──────────────────────────────────────────────────────
+# One exit code that reflects the WHOLE run: a non-fatal provisioning step that
+# reported errors, or a failed service validation, must not be reportable as
+# success by the caller (the flash host's "Setup: N/N succeeded"). The marker
+# file carries the same verdict for a caller that reads a file instead of the
+# exit code, and the sentinel line ([provision-status] ...) for one that greps
+# stdout. Keep all three in agreement.
+FINAL_RC=0
+if [ "${#PROVISION_FAILURES[@]}" -gt 0 ] || [ "${VALIDATE_RC:-0}" -ne 0 ]; then
+  FINAL_RC=1
+fi
+
+if [ "$FINAL_RC" -ne 0 ]; then
+  echo "  ############################################################"
+  echo "  # PROVISIONING INCOMPLETE — the box came up but the install"
+  echo "  # reported errors. Do NOT ship this box as healthy."
+  if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
+    echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
+    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+  fi
+  if [ "${VALIDATE_RC:-0}" -ne 0 ]; then
+    echo "  # Service validation FAILED (see the checks listed above)."
+  fi
+  echo "  ############################################################"
+  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}"
+  echo "[provision-status] INCOMPLETE${PROVISION_FAILURES[*]:+ (${PROVISION_FAILURES[*]})}"
+else
+  write_provision_status ok ""
+  echo "[provision-status] OK"
+fi
+
+exit "$FINAL_RC"
