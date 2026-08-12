@@ -127,6 +127,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "browser.openclawIntegration": "{harness} Integration",
     "browser.enabledMessage": "Browser is connected to {harness}. Your AI can browse the web, fill forms, and interact with pages using a persistent profile.",
     "browser.disabledMessage": "Connect the browser to {harness} so your AI assistant can use it for web browsing, research, and automation.",
+    "browser.builtInMessage": "Browsing is built into this edition. {harness} drives this desktop browser through ClawBox's own browser tools, so there is nothing to switch on.",
     "browser.disable": "Disable",
     "browser.enable": "Enable",
     "browser.disabling": "Disabling...",
