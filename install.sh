@@ -980,7 +980,14 @@ is_safe_git_ref() {
   case "$ref" in
     -*|/*|*[!A-Za-z0-9._/-]*) return 1 ;;
   esac
-  git check-ref-format --branch "$ref" >/dev/null 2>&1
+  # `-C /` so the answer depends on the ref and nothing else. check-ref-format
+  # needs no repository, but git still runs repository discovery from the
+  # working directory first, and a broken .git there (a moved worktree, a
+  # half-restored backup) makes it exit 128 for EVERY ref — which would look
+  # exactly like "no valid branch": no pin written, and the device falls back to
+  # main. install.sh is run from whatever directory the operator happened to be
+  # in, so that must not be able to decide this.
+  git -C / check-ref-format --branch "$ref" >/dev/null 2>&1
 }
 
 resolve_update_branch() {
@@ -1075,11 +1082,12 @@ persist_update_branch_pin() {
 
   local pin_file="$PROJECT_DIR/.update-branch"
 
-  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so the
-  # pin path is writable by an account the writer outranks. A symlink left here
-  # would redirect the write, the chown and the chmod onto whatever it points
-  # at. Refuse rather than follow it; the write itself then goes through a temp
-  # file and `mv`, which replaces the directory entry instead of following it.
+  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so
+  # every path under it is writable by an account the writer outranks. A symlink
+  # left at the pin path would redirect the write, the chown and the chmod onto
+  # whatever it points at, and `[ -f ]` follows one. Refuse instead. The write
+  # goes through a temp file whose name mktemp chooses (see below), and `mv`
+  # replaces the pin's directory entry rather than following it.
   if [ -L "$pin_file" ]; then
     echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
     return 0
@@ -1110,13 +1118,26 @@ persist_update_branch_pin() {
     else
       echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    # Own and mode the temp file before it becomes the pin, so the pin is never
-    # momentarily readable-but-root-owned, and so neither call can be aimed at a
-    # symlink target planted between the check above and the write.
-    printf '%s\n' "$branch" > "$pin_file.tmp"
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file.tmp"
-    chmod 644 "$pin_file.tmp"
-    mv -f "$pin_file.tmp" "$pin_file"
+    # mktemp, not a fixed "$pin_file.tmp": it creates the file itself with
+    # O_EXCL and a name nobody can predict, so — unlike a fixed name, which the
+    # app user could pre-create as a symlink — the write, the chown and the
+    # chmod are guaranteed to land on a file this function just made. Owning and
+    # moding it before the rename also means the pin is never briefly live while
+    # still root-owned. Same shape as write_env_file above.
+    local tmp_pin
+    tmp_pin=$(mktemp "$pin_file.XXXXXX") || {
+      echo "  WARN: could not create a temp file to write the update-branch pin" >&2
+      return 0
+    }
+    if printf '%s\n' "$branch" > "$tmp_pin" \
+      && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
+      && chmod 644 "$tmp_pin" \
+      && mv -f "$tmp_pin" "$pin_file"; then
+      return 0
+    fi
+    # Never leave the device's working tree holding a stray temp file.
+    rm -f "$tmp_pin"
+    echo "  WARN: failed to write the update-branch pin" >&2
     return 0
   fi
 

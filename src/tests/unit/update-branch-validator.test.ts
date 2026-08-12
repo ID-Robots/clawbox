@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { isSafeBranch } from "@/lib/update-branch";
 
@@ -32,8 +33,8 @@ function extractShellFunction(name: string): string {
   return `${INSTALL_SH.slice(start, end)}\n}`;
 }
 
-/** Run install.sh's real is_safe_git_ref against a candidate ref. */
-function installShAccepts(ref: string): boolean {
+/** Run install.sh's real is_safe_git_ref against a candidate ref, from `cwd`. */
+function installShAccepts(ref: string, cwd: string = path.parse(REPO).root): boolean {
   const script = [
     "set -uo pipefail",
     extractShellFunction("is_safe_git_ref"),
@@ -46,13 +47,9 @@ function installShAccepts(ref: string): boolean {
     // the bug hides as a passing test.
     'is_safe_git_ref "$1"',
   ].join("\n");
-  // cwd is deliberately outside any git repo: install.sh runs from wherever the
+  // cwd defaults outside any git repo: install.sh runs from wherever the
   // operator invoked it, so the answer must not depend on being inside one.
-  return (
-    spawnSync("bash", ["-c", script, "is_safe_git_ref", ref], {
-      cwd: path.parse(REPO).root,
-    }).status === 0
-  );
+  return spawnSync("bash", ["-c", script, "is_safe_git_ref", ref], { cwd }).status === 0;
 }
 
 // Real branch names, near-misses, and the values that historically resolved
@@ -129,6 +126,30 @@ d("install.sh and update-branch.ts agree on what a branch is", () => {
     for (const ref of ["main", "beta", "fix/persist-update-branch", "release/v1.0.0"]) {
       expect(isSafeBranch(ref), ref).toBe(true);
       expect(installShAccepts(ref), ref).toBe(true);
+    }
+  });
+
+  it("gives the same answer from a directory holding a broken .git", () => {
+    // `git check-ref-format` needs no repository, but git still runs repository
+    // discovery from the working directory first, and a broken .git there makes
+    // it exit 128 for EVERY ref. That reads as "no valid branch": no pin gets
+    // written and the device falls back to main — this PR's failure mode,
+    // triggered by nothing but the directory the operator happened to be in.
+    // install.sh pins this by calling `git -C /`.
+    const broken = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-brokengit-"));
+    try {
+      fs.writeFileSync(
+        path.join(broken, ".git"),
+        "gitdir: /nonexistent/path/worktrees/gone\n",
+      );
+
+      expect(installShAccepts("beta", broken)).toBe(true);
+      expect(installShAccepts("fix/persist-update-branch", broken)).toBe(true);
+      // and still rejects, rather than passing everything for the same reason
+      expect(installShAccepts("HEAD", broken)).toBe(false);
+      expect(installShAccepts("a..b", broken)).toBe(false);
+    } finally {
+      fs.rmSync(broken, { recursive: true, force: true });
     }
   });
 });

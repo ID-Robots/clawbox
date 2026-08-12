@@ -113,6 +113,13 @@ function runPersist(env: Record<string, string> = {}): {
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}`, chowns };
 }
 
+/** Temp files left next to the pin — on a device these dirty `git status`. */
+function strayTempFiles(): string[] {
+  return fs
+    .readdirSync(projectDir)
+    .filter((name) => name.startsWith(".update-branch."));
+}
+
 d("persist_update_branch_pin records the branch the device was built with", () => {
   it("writes the pin when the installer is given an explicit branch", () => {
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
@@ -137,21 +144,45 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     // root-owned pin turns that POST into an EACCES — the same failure a
     // root-owned data/ produced in the config store.
     //
-    // Owner and mode are applied to the temp file, which is then renamed into
+    // Owner and mode are applied to the mktemp file, which is then renamed into
     // place: the pin is never momentarily live while still root-owned, and
-    // neither call can be aimed at a symlink target.
+    // neither call can be aimed at a path someone else chose. The temp name is
+    // unpredictable by design, so match its shape rather than a literal.
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
 
-    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.tmp`]);
+    expect(r.chowns).toHaveLength(1);
+    expect(r.chowns[0]).toMatch(
+      new RegExp(`^clawbox:clawbox ${pinFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\w{6}$`),
+    );
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
   });
 
   it("leaves no temp file behind in the working tree", () => {
-    // The pin is gitignored; a stranded `.update-branch.tmp` next to it would
-    // show up in `git status` on the device forever.
+    // The pin is gitignored; a stranded temp file next to it would show up in
+    // `git status` on the device forever.
     runPersist({ CLAWBOX_BRANCH: "beta" });
 
-    expect(fs.existsSync(`${pinFile}.tmp`)).toBe(false);
+    expect(strayTempFiles()).toEqual([]);
+  });
+
+  it("does not write through a symlink planted at a guessable temp path", () => {
+    // The pin path itself is guarded, but the temp file the write is staged
+    // through lives in the same app-user-writable directory. A fixed name like
+    // `.update-branch.tmp` could be pre-created as a symlink, which would move
+    // the whole problem one path across — `printf >` follows an existing link.
+    // mktemp picks the name and creates the file with O_EXCL, so a decoy at any
+    // guessable path is simply not the file that gets written.
+    const decoy = path.join(tmp, "decoy");
+    fs.writeFileSync(decoy, "untouched\n");
+    fs.symlinkSync(decoy, `${pinFile}.tmp`);
+
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" });
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    // The chown must have gone to the mktemp file, never to the planted path.
+    expect(r.chowns).not.toContain(`clawbox:clawbox ${pinFile}.tmp`);
   });
 
   it("refuses to write through a symlink left in the pin's place", () => {
@@ -437,7 +468,7 @@ describe("the pin is wired into the install", () => {
     // otherwise leave the device dirty forever.
     const lines = GITIGNORE.split("\n").map((l) => l.trim());
     expect(lines).toContain(".update-branch");
-    expect(lines).toContain(".update-branch.tmp");
+    expect(lines).toContain(".update-branch.*");
   });
 });
 

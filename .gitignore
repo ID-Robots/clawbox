@@ -14,10 +14,11 @@ next-env.d.ts
 !.env.template
 !.env.test.example
 .update-branch
-# install.sh writes the pin through this temp file and renames it into place, so
-# the rename cannot follow a symlink. It exists for microseconds, but a failed
-# run must not leave the device's working tree dirty forever.
-.update-branch.tmp
+# install.sh writes the pin through an mktemp file alongside it and renames it
+# into place, so the write cannot follow a symlink. It exists for microseconds
+# and is removed if any step fails, but a run killed mid-write must not leave
+# the device's working tree dirty forever.
+.update-branch.*
 claude-code-source-code/
 code-source-code/
 .omx/
