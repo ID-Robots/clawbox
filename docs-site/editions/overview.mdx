@@ -93,12 +93,24 @@ Re-running the installer with the edition the device already is — or with no
 re-install and update path and is unaffected. `dual` counts as its own edition
 here, so moving to or from it is a change like any other.
 
-The installer does not migrate an edition. It has no step that removes the
-harness the device would be leaving, and each harness keeps its AI provider
-sign-in in its own configuration file, so signing in does not carry across. A
-device installed over the top of another edition ends up running two agents with
-no usable model — which is why the transition is refused rather than half
-performed. Changing a device's edition is a reflash.
+The installer does not migrate an edition. It will stop and disable the harness
+the device is leaving — two agents on one box conflict over shared resources such
+as the Telegram bot token, so that half is not left to chance — but each harness
+keeps its AI provider sign-in in its own configuration file, and signing in does
+not carry across. A device installed over the top of another edition ends up with
+no usable model while still reporting that setup is complete, which is why the
+transition is refused rather than half performed. Changing a device's edition is
+a reflash.
+
+If an edition's units are ever found running on a device that does not belong to
+that edition, the installer reports them and brings them down. To keep them
+exactly as they are — while diagnosing, for instance — run the installer with
+`CLAWBOX_KEEP_FOREIGN_UNITS=1`; the check still reports them, it just does not
+act. To bring them down on demand:
+
+```bash
+sudo bash /home/clawbox/clawbox/install.sh --step edition_foreign_teardown
+```
 
 ## Which edition am I on?
 

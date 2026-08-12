@@ -96,7 +96,8 @@ if [ -n "$RECORDED_EDITION" ] && [ -n "$REQUESTED_EDITION" ] \
    && [ "$RECORDED_EDITION" != "$REQUESTED_EDITION" ]; then
   if [ "${CLAWBOX_ALLOW_EDITION_CHANGE:-0}" = "1" ]; then
     log "WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — provisioning '$REQUESTED_EDITION' over '$RECORDED_EDITION'."
-    log "         The '$RECORDED_EDITION' harness is NOT torn down and credentials are not migrated."
+    log "         This script does not tear the '$RECORDED_EDITION' harness down (install.sh's"
+    log "         edition_foreign_teardown step does), and credentials are not migrated."
   else
     cat >&2 <<EOF
 [hermes-edition] ERROR: this device is already installed as the '$RECORDED_EDITION' edition.
@@ -105,8 +106,9 @@ if [ -n "$RECORDED_EDITION" ] && [ -n "$REQUESTED_EDITION" ] \
          Requested edition: $REQUESTED_EDITION
 
        Provisioning would rewrite the edition lock, and neither this script nor
-       install.sh migrates a device between editions — the harness being left
-       behind keeps running and the AI provider sign-in does not move with it.
+       install.sh migrates a device between editions — the AI provider sign-in
+       lives in each harness's own config and does not move with it, so the
+       device would come up with no usable model.
        Changing a device's edition requires a reflash.
        See https://docs.clawbox.com/editions/overview
 
