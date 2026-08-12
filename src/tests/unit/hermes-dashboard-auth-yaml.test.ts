@@ -89,7 +89,18 @@ function scryptHash(plaintext: string): string {
     ],
     { encoding: "utf-8" },
   );
-  return proc.stdout.trim();
+  // Assert the FIXTURE built, rather than letting a silent python failure
+  // return "" — that would seed `password_hash: ""`, the classifier would
+  // answer NOT_CONFIGURED, and the mismatch test below would fail pointing at
+  // the classifier instead of at its own broken input.
+  if (proc.status !== 0) {
+    throw new Error(`scryptHash fixture failed (status ${proc.status}): ${proc.stderr}`);
+  }
+  const hash = proc.stdout.trim();
+  if (!hash.startsWith("scrypt$")) {
+    throw new Error(`scryptHash produced an unusable fixture: ${JSON.stringify(hash)}`);
+  }
+  return hash;
 }
 
 /** Write a self-consistent-looking dashboard block for a given hash. */
@@ -309,6 +320,41 @@ describe.runIf(RUNNABLE)("dashboard auth: honest failure classes", () => {
     const all = `${proc.stdout}\n${proc.stderr}`;
     expect(all).not.toMatch(/do not verify|does not match/);
     expect(all).toMatch(/could not generate|environment/i);
+  });
+});
+
+/**
+ * A LOCAL write failure is its own outcome. `mint_credentials` is always called
+ * as `mint_credentials || mint_rc=$?`, which disables `set -e` for its whole
+ * body — so an unchecked write failure returned 0, the verify then classified
+ * PW_MISSING, and the script reported "a concurrent process rewrote the file"
+ * and "another process ... is not honouring $CONFIG_LOCK". That blames a
+ * cooperating writer for a full disk or a bad permission, which is exactly the
+ * dishonest verdict this script exists to remove.
+ */
+describe.runIf(RUNNABLE)("a local write failure is not blamed on another writer", () => {
+  it("reports an unwritable password file as a write failure", () => {
+    const { root, configPath } = makeRoot();
+    // data/ exists but is read-only, so creating data/.hermes-dashboard-pw
+    // fails while everything else about the environment is fine.
+    const dataDir = path.join(root, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.chmodSync(dataDir, 0o500);
+
+    let proc;
+    try {
+      proc = run(root, configPath);
+    } finally {
+      fs.chmodSync(dataDir, 0o700);
+    }
+
+    expect(proc.status).not.toBe(0);
+    const all = `${proc.stdout}\n${proc.stderr}`;
+    expect(all).toMatch(/could not write the dashboard password file/i);
+    expect(all).toMatch(/NOT a concurrent writer/i);
+    // The two verdicts it must NOT reach.
+    expect(all).not.toMatch(/concurrent process rewrote/i);
+    expect(all).not.toMatch(/not honouring/i);
   });
 });
 

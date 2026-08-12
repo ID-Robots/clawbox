@@ -44,39 +44,22 @@ MCP_ENTRY="$PROJECT_DIR/mcp/clawbox-mcp.ts"
 MCP_TOKEN_FILE="$PROJECT_DIR/data/.mcp-token"
 EDITION_FILE="${CLAWBOX_EDITION_FILE:-/etc/clawbox/edition.env}"
 API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:80}"
-# Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
-# ~/.hermes/config.yaml, and at install time they run seconds apart
-# (production-server.js fire-and-forgets this script on the clawbox-setup
-# restart in step_start_services; setup-hermes-edition.sh runs the auth script
-# right after). Without a shared lock, whichever one snapshotted the file first
-# and wrote last silently erased the other's block — the auth script's dashboard
-# block vanished and its verify failed, blaming credentials that were correct.
-# Same path derivation on both sides (HERMES_CONFIG + ".lock") so they collide.
-CONFIG_LOCK="${HERMES_CONFIG}.lock"
-
 log() { echo "[register-mcp] $*"; }
 
-# Take the exclusive config lock for the rest of the run (fd 9, released on
-# exit). Covers BOTH the PyYAML reconcile below AND the `hermes tools disable`
-# call — the Hermes CLI does its own wide load→save_config on the same file, so
-# it has to be inside the same critical section. Best-effort: proceed without
-# the lock rather than skip registering the device's tools if flock is missing.
-acquire_config_lock() {
-  command -v flock >/dev/null 2>&1 || {
-    log "flock unavailable — proceeding without the config lock"
-    return 0
-  }
-  mkdir -p "$(dirname "$CONFIG_LOCK")" 2>/dev/null || true
-  # Probe writability in a scoped subshell before opening fd 9; keep the `exec`
-  # redirect CLEAN (a `2>/dev/null` on it would silence the whole script,
-  # because redirections on exec are permanent).
-  if ! ( : > "$CONFIG_LOCK" ) 2>/dev/null; then
-    log "could not create $CONFIG_LOCK — proceeding without the config lock"
-    return 0
-  fi
-  exec 9>"$CONFIG_LOCK"
-  flock -w 120 9 || log "could not acquire $CONFIG_LOCK within 120s — proceeding without it"
-}
+# ── Serialise all writers of config.yaml ────────────────────────────────────
+# ONE definition of the lock, shared with setup-hermes-dashboard-auth.sh, which
+# read-modify-writes this same file seconds away from us at install time.
+# scripts/lib/hermes-config-lock.sh explains why a lock rather than step
+# ordering, and why holding it across the `hermes` CLI call below is what makes
+# the writer we do not control participate. Sourced AFTER HERMES_CONFIG is set,
+# because the lock path is derived from it.
+LOCK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/hermes-config-lock.sh"
+if [ ! -f "$LOCK_LIB" ]; then
+  log "ERROR: $LOCK_LIB is missing — cannot serialise writers of $HERMES_CONFIG. This is a broken deploy." >&2
+  exit 1
+fi
+# shellcheck source=lib/hermes-config-lock.sh
+. "$LOCK_LIB"
 
 # ── 1. Which edition is this? ───────────────────────────────────────────────
 # Root-owned lock first, environment second, "openclaw" last — the same order
@@ -145,8 +128,11 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 # wider blast radius for a boot-time provisioning step, and it is slow.
 #
 # Everything from here to the end of the script touches config.yaml, so take the
-# shared lock now and hold it until exit.
-acquire_config_lock
+# shared lock now and hold it until exit. That deliberately spans the
+# `hermes tools disable` call at the end: the Hermes CLI does its own wide
+# load→save_config on this file and cannot be made to take our lock, so the only
+# way to serialise it is to never let it run outside our critical section.
+acquire_config_lock register-mcp
 
 export CLAWBOX_MCP_HERMES_CONFIG="$HERMES_CONFIG"
 export CLAWBOX_MCP_BUN_BIN="$BUN_BIN"

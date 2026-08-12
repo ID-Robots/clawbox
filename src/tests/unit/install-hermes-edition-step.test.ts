@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 /**
@@ -156,6 +158,63 @@ describe("a failed provisioning step is not reportable as success", () => {
     expect(INSTALL_SH).toContain("write_provision_status()");
     expect(INSTALL_SH).toContain("PROVISION_FAILURES=()");
   });
+
+  /**
+   * The exit code, the [provision-status] line and the marker file are three
+   * signals that must agree. If the marker cannot be rewritten, the PREVIOUS
+   * run's content survives — so a box that installed cleanly once and fails
+   * later would keep STATUS=ok on disk while the other two report the failure,
+   * and a flash host reading the file would ship it. A marker that cannot be
+   * refreshed must not be left behind pretending to describe this run.
+   */
+  describe.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
+    "a marker that cannot be written is not left stale",
+    () => {
+      // Run install.sh's own function body, so the test exercises the shipped
+      // code rather than a paraphrase of it.
+      const runWriter = (statusFile: string, status: string) => {
+        const body = `${extractShellFunction("write_provision_status")}\n}`;
+        const script = `
+          PROVISION_STATUS_FILE="${statusFile}"
+          ${body}
+          write_provision_status ${status} ""
+        `;
+        return spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+      };
+
+      it("removes a stale STATUS=ok rather than let it contradict the exit code", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-marker-"));
+        const marker = path.join(dir, "provision-status");
+        fs.writeFileSync(marker, "STATUS=ok\nFAILED_STEPS=\n");
+        // Unwritable FILE inside a writable dir: the rewrite fails, the removal
+        // succeeds.
+        fs.chmodSync(marker, 0o400);
+
+        const proc = runWriter(marker, "incomplete");
+
+        expect(proc.stdout).toMatch(/could not write/i);
+        expect(fs.existsSync(marker), "the stale marker must not survive").toBe(false);
+      });
+
+      it("says the marker is stale when it can be neither written nor removed", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-marker-ro-"));
+        const marker = path.join(dir, "provision-status");
+        fs.writeFileSync(marker, "STATUS=ok\nFAILED_STEPS=\n");
+        fs.chmodSync(marker, 0o400);
+        fs.chmodSync(dir, 0o500); // removal needs write on the DIRECTORY
+
+        let proc;
+        try {
+          proc = runWriter(marker, "incomplete");
+        } finally {
+          fs.chmodSync(dir, 0o700);
+        }
+
+        expect(proc.stdout).toMatch(/STALE/);
+        expect(proc.stdout).toMatch(/does NOT describe this run/i);
+      });
+    },
+  );
 });
 
 /**
@@ -171,8 +230,14 @@ describe("service validation checks the dashboard auth provider", () => {
     const fn = extractShellFunction("step_validate_services");
     expect(fn).toContain('bash "$auth_script" --check');
     // Guarded by has_hermes_harness (hermes + dual), not is_hermes_edition.
-    const probe = fn.slice(fn.indexOf("dashboard auth PROVIDER"));
-    expect(probe.slice(0, probe.indexOf("case"))).toContain("has_hermes_harness");
+    // Both markers are located before slicing: a missing one would otherwise
+    // slice from -1 and quietly assert against the wrong region.
+    const probeAt = fn.indexOf("dashboard auth PROVIDER");
+    expect(probeAt, "the auth-provider probe comment must be present").toBeGreaterThan(-1);
+    const probe = fn.slice(probeAt);
+    const caseAt = probe.indexOf("case");
+    expect(caseAt, "the probe must classify --check's exit code").toBeGreaterThan(-1);
+    expect(probe.slice(0, caseAt)).toContain("has_hermes_harness");
   });
 
   it("counts the new probe in the healthy total", () => {

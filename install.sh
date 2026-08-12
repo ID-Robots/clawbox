@@ -83,13 +83,41 @@ write_provision_status() {
   local dir
   dir="$(dirname "$PROVISION_STATUS_FILE")"
   mkdir -p "$dir" 2>/dev/null || true
-  {
-    echo "# Written by install.sh at the end of a full install. Machine-readable."
-    echo "STATUS=$status"
-    echo "FAILED_STEPS=$*"
-    echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  } > "$PROVISION_STATUS_FILE" 2>/dev/null || true
-  chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  # The write is a SUBSHELL used as the `if` condition. Two bash details force
+  # that shape, both verified on bash 5.1 rather than assumed:
+  #   * a redirection failure on a COMPOUND command does not propagate through
+  #     `if ! { ...; } > file; then` — the branch is simply never taken, so the
+  #     failure would be swallowed and this whole guard would be inert;
+  #   * `> file` is opened BEFORE `2>/dev/null` takes effect, so the shell's own
+  #     "Permission denied" still reaches the operator's terminal unless the
+  #     redirect and its error are wrapped together.
+  if (
+    {
+      echo "# Written by install.sh at the end of a full install. Machine-readable."
+      echo "STATUS=$status"
+      echo "FAILED_STEPS=$*"
+      echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    } > "$PROVISION_STATUS_FILE"
+  ) 2>/dev/null; then
+    chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  # The marker could not be refreshed — a read-only /etc, no permission, a full
+  # disk. Whatever is on disk now describes an EARLIER run, so a reader would
+  # take a stale STATUS=ok as this run's verdict while the exit code and the
+  # [provision-status] line say the opposite. Three signals that disagree are
+  # worse than two, so delete the stale marker rather than leave it lying, and
+  # say so loudly either way.
+  if rm -f "$PROVISION_STATUS_FILE" 2>/dev/null; then
+    echo "  Warning: could not write $PROVISION_STATUS_FILE (this run: STATUS=$status)."
+    echo "  Removed the stale marker — use the exit status or the [provision-status] line."
+  else
+    echo "  Warning: could not write OR remove $PROVISION_STATUS_FILE."
+    echo "  Any marker there is STALE and does NOT describe this run (STATUS=$status)."
+    echo "  Trust the exit status and the [provision-status] line instead."
+  fi
+  return 0
 }
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────

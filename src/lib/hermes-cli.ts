@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import fs from "fs";
 import path from "path";
 import { HERMES_BIN } from "@/lib/harness";
 
@@ -20,6 +21,63 @@ export interface HermesCliResult {
   code: number | null;
   stdout: string;
   stderr: string;
+}
+
+// ── Serialise config writes with the shell writers ──────────────────────────
+// ~/.hermes/config.yaml has several writers, and each does a read-modify-write:
+// scripts/setup-hermes-dashboard-auth.sh, scripts/register-mcp.sh, and the
+// Hermes CLI itself — which is what `hermes config set` runs here. A writer that
+// snapshotted the file before another wrote, and saves after, silently erases
+// the other's block. That is how the dashboard auth block disappeared between
+// being written and being verified; a Settings save landing on the same window
+// can drop it the same way.
+//
+// The two shell writers take an flock over `<config>.lock`
+// (scripts/lib/hermes-config-lock.sh). This is the third participant: run the
+// mutating CLI call under the SAME lock, via flock(1) so there is no new
+// dependency and no second lock implementation. Read-only calls (`config get`,
+// `models list`) are deliberately NOT wrapped — they cannot lose an update, and
+// serialising them behind a provisioning run would stall the UI for no gain.
+const FLOCK_BIN = "/usr/bin/flock";
+// Fail the request rather than hang it. A UI action must not block for the
+// 120s the provisioning scripts are willing to wait.
+const CONFIG_LOCK_WAIT_S = 30;
+// flock's own exit status when the lock could not be acquired. Chosen (rather
+// than the default 1) so "the device was busy" is distinguishable from "the
+// hermes command itself failed" — two different outcomes deserve two messages.
+export const HERMES_CONFIG_LOCK_BUSY = 75;
+
+let flockPresent: boolean | undefined;
+function hasFlock(): boolean {
+  if (flockPresent === undefined) {
+    try {
+      flockPresent = fs.existsSync(FLOCK_BIN);
+    } catch {
+      flockPresent = false;
+    }
+  }
+  return flockPresent;
+}
+
+/** The same lock file the shell writers derive, resolved the same way. */
+function hermesConfigLockPath(): string {
+  const dir = path.join(HOME_DIR, ".hermes");
+  let resolved = dir;
+  try {
+    // Match scripts/lib/hermes-config-lock.sh, which canonicalises the config's
+    // directory before appending ".lock" — two spellings of the same directory
+    // must not produce two different lock files.
+    resolved = fs.realpathSync(dir);
+  } catch {
+    // Not created yet (fresh flash). The raw path is what the scripts fall back
+    // to as well.
+  }
+  return path.join(resolved, "config.yaml.lock");
+}
+
+/** Only the subcommands that rewrite the config file need the lock. */
+function mutatesConfig(args: string[]): boolean {
+  return args[0] === "config" && (args[1] === "set" || args[1] === "unset");
 }
 
 export function runHermesCli(
@@ -45,8 +103,25 @@ export function runHermesCli(
   } = {},
 ): Promise<HermesCliResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const bin = opts.sudo ? SUDO_BIN : HERMES_BIN;
-  const argv = opts.sudo ? ["-n", HERMES_BIN, ...args] : args;
+  let bin = opts.sudo ? SUDO_BIN : HERMES_BIN;
+  let argv = opts.sudo ? ["-n", HERMES_BIN, ...args] : args;
+  // A config write goes through the shared lock so it cannot interleave with the
+  // provisioning scripts' read-modify-write. `sudo` calls are excluded: the only
+  // one is `gateway install --system`, which writes a systemd unit, not this
+  // config.
+  const serialised = !opts.sudo && mutatesConfig(args) && hasFlock();
+  if (serialised) {
+    argv = [
+      "-w",
+      String(CONFIG_LOCK_WAIT_S),
+      "-E",
+      String(HERMES_CONFIG_LOCK_BUSY),
+      hermesConfigLockPath(),
+      bin,
+      ...argv,
+    ];
+    bin = FLOCK_BIN;
+  }
   return new Promise<HermesCliResult>((resolve, reject) => {
     const child = spawn(bin, argv, {
       stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
@@ -114,7 +189,22 @@ export function runHermesCli(
       });
     });
     child.on("close", (code) => {
-      finish(() => resolve({ code, stdout: out.trim(), stderr: err.trim() }));
+      finish(() => {
+        // flock reports the lock conflict itself and never ran hermes, so there
+        // is no child output to explain the failure. Say which of the two it
+        // was — "the device was busy" and "the command failed" send the caller
+        // to different places.
+        if (serialised && code === HERMES_CONFIG_LOCK_BUSY) {
+          resolve({
+            code,
+            stdout: "",
+            stderr:
+              "The device is busy writing its configuration (provisioning or a restart is in progress). Nothing was changed — try again in a moment.",
+          });
+          return;
+        }
+        resolve({ code, stdout: out.trim(), stderr: err.trim() });
+      });
     });
 
     if (opts.input !== undefined && child.stdin) {

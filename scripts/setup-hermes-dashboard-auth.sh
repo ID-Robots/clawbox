@@ -37,7 +37,16 @@
 #      no dashboard block and fails, and the OLD message blamed the credentials,
 #      which were never wrong. So this script now takes an flock over
 #      $CONFIG_LOCK across its whole critical section, and register-mcp.sh takes
-#      the SAME lock. Cooperating writers serialise; the block survives.
+#      the SAME lock — one definition, in scripts/lib/hermes-config-lock.sh.
+#      Cooperating writers serialise; the block survives.
+#
+#      That race has a SECOND, worse phase. A writer landing between our write
+#      and our verify makes the verify fail — loud, and retried. A writer landing
+#      AFTER the verify used to leave this script printing "done" and exiting 0
+#      over a device whose config had no dashboard block at all: a clean success
+#      reported over a box with no auth provider. Holding the lock until exit
+#      closes it for cooperating writers, and exit_verified() refuses to report
+#      success at all when the lock could not be taken — see $CREDS_UNSERIALISED.
 #
 #   2. Even with the cause fixed, the CHECK must be honest. "I could not run the
 #      check" (python/scrypt missing, config unreadable) and "another process
@@ -53,41 +62,26 @@ PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 HERMES_CONFIG="${HERMES_CONFIG:-$HOME/.hermes/config.yaml}"
 PWFILE="$PROJECT_DIR/data/.hermes-dashboard-pw"
 USERNAME="${HERMES_DASH_USERNAME:-clawbox}"
-# One lock file, next to the config, shared by every ClawBox writer of
-# ~/.hermes/config.yaml (this script + register-mcp.sh). A writer computes it
-# from the SAME HERMES_CONFIG path it is about to touch, so both land on the
-# same file without a hard-coded absolute path.
-CONFIG_LOCK="${HERMES_CONFIG}.lock"
 
 log() { echo "[hermes-dash-auth] $*"; }
 
 # ── Serialise all writers of config.yaml ────────────────────────────────────
-# Hold an exclusive flock for the LIFE of the script (fd 9, released on exit),
-# so the early read, the mint, and the verify are one atomic critical section
-# against the other cooperating writer (register-mcp.sh, same lock file).
-# Best-effort: if flock is unavailable, or we can't get it inside the window, we
-# proceed WITHOUT it rather than leave the dashboard with no auth provider — the
-# honest classification below then still describes a lost write correctly if one
-# happens. `flock` is util-linux and present on the Jetson image and on CI.
-acquire_config_lock() {
-  command -v flock >/dev/null 2>&1 || {
-    log "flock unavailable — proceeding without the config lock"
-    return 0
-  }
-  mkdir -p "$(dirname "$CONFIG_LOCK")" 2>/dev/null || true
-  # Probe writability in a SUBSHELL first (its redirect is scoped, so a failure
-  # can't abort the install and can't leak past this line). Only then open fd 9.
-  if ! ( : > "$CONFIG_LOCK" ) 2>/dev/null; then
-    log "could not create $CONFIG_LOCK — proceeding without the config lock"
-    return 0
-  fi
-  # Open fd 9 for the LIFE of the script (that permanence is the point — the lock
-  # must outlive this function). Redirections on `exec` are permanent, so this
-  # line must carry NO other redirect: `exec 9>file 2>/dev/null` would silence
-  # the whole script's stderr, hiding every error message below.
-  exec 9>"$CONFIG_LOCK"
-  flock -w 120 9 || log "could not acquire $CONFIG_LOCK within 120s — proceeding without it"
-}
+# ONE definition of the lock, shared with register-mcp.sh — see the file for why
+# a lock (and not step ordering) is the mechanism, and how the Hermes CLI is
+# covered without cooperating. Provides CONFIG_LOCK, CONFIG_LOCK_HELD and
+# acquire_config_lock. Sourced AFTER HERMES_CONFIG is set, because the lock path
+# is derived from it.
+LOCK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/hermes-config-lock.sh"
+if [ ! -f "$LOCK_LIB" ]; then
+  # Refuse rather than run unserialised: without this file the two writers of
+  # config.yaml do not exclude each other, and a lost update is exactly what
+  # this script exists to survive. A missing library is a broken deploy, not a
+  # condition to paper over.
+  echo "[hermes-dash-auth] ERROR: $LOCK_LIB is missing — cannot serialise writers of $HERMES_CONFIG. This is a broken deploy, NOT a credential problem." >&2
+  exit 4
+fi
+# shellcheck source=lib/hermes-config-lock.sh
+. "$LOCK_LIB"
 
 # ── Classify the stored (password, hash) pair ───────────────────────────────
 # Returns a code that names WHICH kind of not-consistent, never a bare 1:
@@ -104,6 +98,38 @@ CREDS_NOT_CONFIGURED=4
 CREDS_PW_MISSING=5
 CREDS_CONFIG_UNREADABLE=6
 CREDS_COMPUTE_ERROR=7
+
+# ── Exit 8: verified, but NOT under mutual exclusion ────────────────────────
+# Distinct from every class above, because it says nothing about the
+# credentials: they verified. It says this run could not serialise itself
+# against the other writers of config.yaml, so the verdict it reached is a
+# point-in-time observation rather than a guarantee.
+#
+# This is the ONLY thing that closes the second, worse phase of the lost-update
+# race. Phase one (a writer landing between our write and our verify) makes the
+# verify fail loudly and is handled by the retry loop. Phase two is a writer
+# landing AFTER the verify: the script would print "done" and exit 0 over a
+# device whose config has no dashboard block at all — a clean success reported
+# over a box with no auth provider. Holding the lock until exit makes that
+# impossible for a cooperating writer. When the lock could NOT be taken, nothing
+# makes it impossible, so the run must not report success.
+#
+# Note the ordering that keeps this safe: the work is done FIRST and only the
+# CERTIFICATION is withheld. The dashboard still gets its auth provider (its
+# ExecStartPre ignores our exit status via the `-` prefix), so refusing to
+# certify never leaves a box unable to start — it only stops a box being
+# reported healthy when nothing could vouch for it.
+CREDS_UNSERIALISED=8
+
+# Every success path goes through here, so "exit 0" has exactly one meaning:
+# the invariant was verified AND the verification was serialised.
+exit_verified() {
+  if [ "$CONFIG_LOCK_HELD" = "yes" ]; then
+    exit 0
+  fi
+  log "ERROR: the credentials verify, but this run never held $CONFIG_LOCK, so nothing stopped another writer of $HERMES_CONFIG from erasing the block after the check. Refusing to report success for a state no lock can vouch for. This is NOT a credential problem — the password and hash are correct." >&2
+  exit "$CREDS_UNSERIALISED"
+}
 
 classify_creds() {
   [ -f "$HERMES_CONFIG" ] || return "$CREDS_NOT_CONFIGURED"
@@ -176,8 +202,21 @@ PY
 # stopped generation (scrypt/python), 1 for a write failure. Does NOT verify —
 # the caller does that so a lost write can be told apart from a bad one.
 mint_credentials() {
-  mkdir -p "$(dirname "$PWFILE")"
-  mkdir -p "$(dirname "$HERMES_CONFIG")"
+  # Checked explicitly. mint_credentials is always called as
+  # `mint_credentials || mint_rc=$?`, which disables `set -e` for this whole
+  # function body — so an unchecked mkdir/write failure here would return 0, the
+  # verify would then classify PW_MISSING, and the caller would report "another
+  # process rewrote the file". A local write failure must never be blamed on a
+  # cooperating writer; that is the same dishonest verdict this script removes
+  # everywhere else.
+  if ! mkdir -p "$(dirname "$PWFILE")" 2>/dev/null; then
+    log "ERROR: could not create the directory for $PWFILE — a local write failure, NOT a concurrent writer and NOT a credential problem." >&2
+    return 1
+  fi
+  if ! mkdir -p "$(dirname "$HERMES_CONFIG")" 2>/dev/null; then
+    log "ERROR: could not create the directory for $HERMES_CONFIG — a local write failure, NOT a concurrent writer and NOT a credential problem." >&2
+    return 1
+  fi
 
   # A missing config is the NORMAL state on a fresh flash (config.yaml only
   # appears on the first `hermes` run) and after a factory reset (which wipes
@@ -287,8 +326,13 @@ PY
   done
 
   # Store the plaintext password for the proxy ONLY (clawbox-owned, 0600).
-  ( umask 077; printf '%s' "$pw" > "$PWFILE" )
-  chmod 600 "$PWFILE"
+  # Checked for the same reason as the mkdir calls above: an unwritable $PWFILE
+  # would otherwise surface as "a concurrent process rewrote the file".
+  if ! ( umask 077; printf '%s' "$pw" > "$PWFILE" ) 2>/dev/null; then
+    log "ERROR: could not write the dashboard password file $PWFILE — a local write failure, NOT a concurrent writer and NOT a credential problem." >&2
+    return 1
+  fi
+  chmod 600 "$PWFILE" 2>/dev/null || true
   return 0
 }
 
@@ -309,8 +353,9 @@ reassert_modes() {
 # by install.sh's step_validate_services so the validator and the provisioner
 # agree on what "healthy" means. Exit code IS the classification (see the table
 # above): 0 usable, 3 desynced, 4 not configured, 5 no password, 6/7/127 the
-# check could not run. No write lock — a point-in-time read is enough, and the
-# caller retries in its own loop.
+# check could not run. Never 8 — that code reports on a WRITE this mode does not
+# perform. No write lock: a point-in-time read is exactly what this mode
+# promises, and the caller retries in its own loop.
 if [ "${1:-}" = "--check" ] || [ "${1:-}" = "--verify" ]; then
   check_rc=0
   classify_creds || check_rc=$?
@@ -327,7 +372,7 @@ if [ "${1:-}" = "--check" ] || [ "${1:-}" = "--verify" ]; then
 fi
 
 # ── Main ────────────────────────────────────────────────────────────────────
-acquire_config_lock
+acquire_config_lock hermes-dash-auth
 
 gate_rc=0
 classify_creds || gate_rc=$?
@@ -335,7 +380,10 @@ case "$gate_rc" in
   "$CREDS_MATCH")
     log "already configured (stored hash verifies the stored password) — skipping"
     reassert_modes
-    exit 0
+    # Nothing was written, but the claim being made is still "this box's
+    # dashboard auth is good", and that claim is only as good as the exclusion
+    # behind it.
+    exit_verified
     ;;
   "$CREDS_CONFIG_UNREADABLE")
     log "ERROR: $HERMES_CONFIG exists but could not be read (environment/permission error) — cannot safely (re)configure. This is NOT a credential problem." >&2
@@ -376,7 +424,7 @@ while :; do
   case "$verify_rc" in
     "$CREDS_MATCH")
       log "done"
-      exit 0
+      exit_verified
       ;;
     "$CREDS_MISMATCH")
       log "ERROR: the password we just wrote does not verify against the password_hash we just wrote. This is a hashing fault in this script, NOT an environment problem and NOT a lost write." >&2
