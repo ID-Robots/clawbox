@@ -207,6 +207,18 @@ const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
  * 1. `.update-branch` file in project root (survives factory reset + git reset)
  * 2. Current branch if it tracks a remote
  * 3. "main" as the default fallback
+ *
+ * Rule 1 survives a factory reset because the reset route wipes `data/`,
+ * `~/.openclaw`, `~/.clawkeep` and a list of home dotfiles — never the project
+ * root itself — and survives `git reset --hard` because the file is gitignored.
+ * Both are pinned by src/tests/unit/install-update-branch-pin.test.ts.
+ *
+ * The pin is written by install.sh (persist_update_branch_pin, whenever the
+ * installer is given an explicit CLAWBOX_BRANCH — i.e. every flashed device
+ * records the branch it was built with) and by the operator through
+ * /setup-api/system/update-branch. Rule 2 is only a fallback: a branch's
+ * upstream link does not survive a re-clone, so an unpinned device can silently
+ * fall through to `main`.
  */
 interface ResolvedBranch {
   /** Local branch to checkout */

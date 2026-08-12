@@ -7,7 +7,10 @@
 #   sudo bash install.sh --step NAME  — run a single step (used by systemd)
 #
 # Environment variables:
-#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
+#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main). When
+#                          set explicitly it is also persisted to
+#                          $PROJECT_DIR/.update-branch, so the device keeps
+#                          updating on the branch it was built with.
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
 set -euo pipefail
 
@@ -999,6 +1002,62 @@ resolve_update_branch() {
   fi
 }
 
+# Record the branch this device was built with, so its own pin matches.
+#
+# resolve_update_branch() has always READ $PROJECT_DIR/.update-branch and never
+# written it, so the pin existed only if a human created it. Without one, a box
+# falls through to rule 2 — the current branch, and only if that branch tracks a
+# remote. That upstream link does not survive a re-clone, so a device flashed
+# with CLAWBOX_BRANCH=<x> could later resolve to `main` and update itself onto a
+# branch it was never built for. Two freshly provisioned devices reached an
+# operator with no pin at all.
+#
+# Written ONLY for an explicit CLAWBOX_BRANCH, and both directions matter:
+#   - explicit CLAWBOX_BRANCH → write the pin, including OVER a different
+#     existing one. This is the precedence already documented in
+#     resolve_update_branch (CLAWBOX_BRANCH > .update-branch > current > main),
+#     and by the time we get here the repo has been hard-reset onto that branch;
+#     a pin still naming the old branch would make the very next unattended
+#     update pull the device straight back off it.
+#   - no CLAWBOX_BRANCH → never write and never delete. A bare
+#     `sudo bash install.sh`, or an updater-triggered `--step`, must not
+#     silently repin a device the operator did not ask to move.
+persist_update_branch_pin() {
+  local branch="${CLAWBOX_BRANCH:-}"
+  [ -n "$branch" ] || return 0
+  [ -d "$PROJECT_DIR" ] || return 0
+  if ! is_safe_git_ref "$branch"; then
+    echo "  WARN: not pinning update branch — '$branch' is not a valid git ref" >&2
+    return 0
+  fi
+
+  local pin_file="$PROJECT_DIR/.update-branch"
+  local existing=""
+  if [ -f "$pin_file" ]; then
+    existing=$(head -n 1 "$pin_file" | tr -d '[:space:]')
+  fi
+
+  if [ "$existing" = "$branch" ]; then
+    echo "  Update branch already pinned to '$branch'"
+  elif [ -n "$existing" ]; then
+    echo "  Re-pinning update branch '$existing' -> '$branch' (explicit CLAWBOX_BRANCH)"
+    printf '%s\n' "$branch" > "$pin_file"
+  else
+    echo "  Pinning update branch to '$branch'"
+    printf '%s\n' "$branch" > "$pin_file"
+  fi
+
+  # The web app runs as $CLAWBOX_USER and rewrites this file itself, through
+  # /setup-api/system/update-branch (Settings → Update branch). A root-owned pin
+  # would make that POST fail with EACCES — the same class of bug a root-owned
+  # data/ caused in the config store. Re-assert owner and mode on every run so a
+  # pin left root-owned by a hand-written `sudo` redirect is repaired too. 0644,
+  # not 0600: this is a build record, not a secret, and root reads it during the
+  # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
+  chmod 644 "$pin_file"
+}
+
 sync_repo_to_update_target() {
   local target_branch="$1"
   local upstream_branch="$2"
@@ -1052,6 +1111,10 @@ step_git_pull() {
     echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
     sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
   fi
+  # Both arms above put the repo on a branch; record it while PROJECT_DIR is
+  # known-good, and before any later step can fail the install. No-op unless
+  # CLAWBOX_BRANCH was given explicitly — see persist_update_branch_pin.
+  persist_update_branch_pin
 }
 
 step_install_bun() {
