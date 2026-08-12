@@ -121,6 +121,25 @@ describe.runIf(RUNNABLE)("the lock is really taken at runtime", () => {
     }
   });
 
+  it("--check creates nothing, because install.sh runs it as ROOT", () => {
+    // The validator probes the provider with `--check` as root. If deriving the
+    // lock path created ~/.hermes, root would own it and the clawbox user could
+    // no longer write the 0600 config it owns — the failure the auth script's
+    // own header warns about. A read-only mode must stay read-only.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-checkro-"));
+    const configPath = path.join(root, "hermes", "config.yaml");
+
+    const proc = spawnSync("bash", [AUTH, "--check"], {
+      encoding: "utf-8",
+      env: { ...process.env, CLAWBOX_ROOT: root, HERMES_CONFIG: configPath },
+    });
+
+    expect(proc.status).toBe(4); // NOT_CONFIGURED — nothing is there
+    expect(fs.existsSync(path.dirname(configPath)), "--check must not mkdir").toBe(false);
+    expect(fs.existsSync(`${configPath}.lock`), "--check must not take a lock").toBe(false);
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
   it.runIf(FLOCK)("derives ONE lock file from two spellings of the same config", () => {
     // A symlinked home is enough to give two writers two different lock paths
     // from the same file — at which point both believe they are locked and

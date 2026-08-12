@@ -54,17 +54,21 @@
 # Resolve the config path to ONE canonical spelling before deriving the lock
 # from it. Two writers naming the same file differently (a symlinked home, a
 # doubled slash, a `..`) would otherwise compute two different lock files and
-# stop excluding each other while appearing to be locked. The directory is
-# created first so readlink has something to resolve — the config itself often
-# does not exist yet on a fresh flash.
+# stop excluding each other while appearing to be locked.
+#
+# `readlink -m` (canonicalise-missing), NOT `-f`: this must create NOTHING and
+# must not require the path to exist. On a fresh flash ~/.hermes does not exist
+# yet, and `--check` — a read-only mode — is run BY ROOT from install.sh's
+# validator. A mkdir here would leave /home/clawbox/.hermes owned by root, and
+# the clawbox user could no longer write the 0600 config it owns, which is the
+# exact failure the header of setup-hermes-dashboard-auth.sh warns about.
+# The directory is created by acquire_config_lock instead, which only the
+# writers call, and they run as the clawbox user.
 _hermes_canonical_config() {
-  local raw="$1" dir base resolved
-  dir="$(dirname "$raw")"
-  base="$(basename "$raw")"
-  mkdir -p "$dir" 2>/dev/null || true
-  resolved="$(readlink -f "$dir" 2>/dev/null || true)"
-  [ -n "$resolved" ] && dir="$resolved"
-  printf '%s/%s\n' "$dir" "$base"
+  local raw="$1" resolved
+  resolved="$(readlink -m "$raw" 2>/dev/null || true)"
+  [ -n "$resolved" ] && raw="$resolved"
+  printf '%s\n' "$raw"
 }
 
 HERMES_CONFIG_CANONICAL="$(_hermes_canonical_config "$HERMES_CONFIG")"
@@ -82,6 +86,10 @@ acquire_config_lock() {
     echo "[$label] flock unavailable — proceeding WITHOUT the config lock (writes are not serialised)" >&2
     return 0
   }
+  # Only a WRITER gets here, and writers run as the clawbox user, so creating
+  # the directory is safe at this point (see _hermes_canonical_config for why it
+  # must not happen at source time).
+  mkdir -p "$(dirname "$CONFIG_LOCK")" 2>/dev/null || true
   # Probe writability in a SUBSHELL first (its redirect is scoped, so a failure
   # can't abort the caller and can't leak past this line). Only then open fd 9.
   if ! ( : > "$CONFIG_LOCK" ) 2>/dev/null; then
