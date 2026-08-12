@@ -967,6 +967,19 @@ step_set_hostname() {
 is_safe_git_ref() {
   local ref="${1:-}"
   [ -n "$ref" ] || return 1
+  # Two gates, and both are load-bearing.
+  #
+  # The character class mirrors src/lib/update-branch.ts. It is not redundant
+  # with git's check below: git happily accepts `feat/a+b`, the runtime updater
+  # refuses it, and a pin the updater refuses does not fail the update — it
+  # falls through to `main`. So install.sh must never write a ref the runtime
+  # would reject, or the device drifts while its pin still reads correct.
+  #
+  # git's own grammar check then rejects the names that are spelled with legal
+  # characters but are not branches: `HEAD`, `a..b`, `x/`, `a.lock`.
+  case "$ref" in
+    -*|/*|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
   git check-ref-format --branch "$ref" >/dev/null 2>&1
 }
 
@@ -1002,61 +1015,126 @@ resolve_update_branch() {
   fi
 }
 
-# Record the branch this device was built with, so its own pin matches.
+# The branch this checkout is already sitting on, when that is worth recording.
+# Prints nothing (and succeeds) when it is not.
+#
+# Deliberately narrow, because this runs without anyone having asked for a
+# branch. Every condition below is a case where writing a pin would be a guess
+# rather than a record:
+#   - not a repo, or HEAD is detached → there is no branch name to record. A
+#     detached device still falls through to `main`; see step_git_pull.
+#   - `main` → rule 3's fallback is already main, so a pin changes nothing today
+#     and would only freeze a device an operator later moves by hand.
+#   - not a ref both resolvers accept → a pin the updater refuses resolves to
+#     `main`, which is the very drift this function exists to prevent.
+#   - origin does not carry the branch → today such a device falls back to main
+#     and keeps updating. Pinning it would turn that into a hard failure at
+#     `reset --hard origin/<branch>` on every future update.
+adoptable_checkout_branch() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+  local git_cmd current
+  git_cmd="git -c safe.directory=$PROJECT_DIR -C $PROJECT_DIR"
+  current=$($git_cmd symbolic-ref --short HEAD 2>/dev/null || true)
+  [ -n "$current" ] || return 0
+  [ "$current" != "main" ] || return 0
+  is_safe_git_ref "$current" || return 0
+  $git_cmd rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$current"
+}
+
+# Record the branch this device updates from, so the answer survives.
 #
 # resolve_update_branch() has always READ $PROJECT_DIR/.update-branch and never
 # written it, so the pin existed only if a human created it. Without one, a box
 # falls through to rule 2 — the current branch, and only if that branch tracks a
-# remote. That upstream link does not survive a re-clone, so a device flashed
-# with CLAWBOX_BRANCH=<x> could later resolve to `main` and update itself onto a
-# branch it was never built for. Two freshly provisioned devices reached an
-# operator with no pin at all.
+# remote. That upstream *link* does not survive a re-clone even though the
+# branch does, so a device built from CLAWBOX_BRANCH=<x> could later resolve to
+# `main` and update itself onto a branch it was never built for. Two freshly
+# provisioned devices reached an operator with no pin at all.
 #
-# Written ONLY for an explicit CLAWBOX_BRANCH, and both directions matter:
+# Three cases, in precedence order:
 #   - explicit CLAWBOX_BRANCH → write the pin, including OVER a different
 #     existing one. This is the precedence already documented in
 #     resolve_update_branch (CLAWBOX_BRANCH > .update-branch > current > main),
-#     and by the time we get here the repo has been hard-reset onto that branch;
-#     a pin still naming the old branch would make the very next unattended
-#     update pull the device straight back off it.
-#   - no CLAWBOX_BRANCH → never write and never delete. A bare
-#     `sudo bash install.sh`, or an updater-triggered `--step`, must not
-#     silently repin a device the operator did not ask to move.
+#     and the repo is about to be hard-reset onto that branch; a pin still
+#     naming the old branch would make the very next unattended update pull the
+#     device straight back off it.
+#   - no CLAWBOX_BRANCH and NO pin at all → adopt the checked-out branch, if
+#     adoptable_checkout_branch vouches for it. This does not move the device;
+#     it records where it already is, before sync_repo_to_update_target
+#     overwrites the only evidence. It also settles a disagreement inside a
+#     single install run: the bootstrap block at the top of this file follows
+#     the checked-out branch with no upstream requirement and resets to it,
+#     while resolve_update_branch's rule 2 would then send the same box to main.
+#   - no CLAWBOX_BRANCH and a pin already present → never rewrite, never delete.
+#     An existing pin is somebody's explicit choice (operator, Settings UI, an
+#     earlier flash); a bare `sudo bash install.sh` and every updater-triggered
+#     `--step` must leave it exactly as found.
 persist_update_branch_pin() {
-  local branch="${CLAWBOX_BRANCH:-}"
-  [ -n "$branch" ] || return 0
   [ -d "$PROJECT_DIR" ] || return 0
-  if ! is_safe_git_ref "$branch"; then
-    echo "  WARN: not pinning update branch — '$branch' is not a valid git ref" >&2
+
+  local pin_file="$PROJECT_DIR/.update-branch"
+
+  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so the
+  # pin path is writable by an account the writer outranks. A symlink left here
+  # would redirect the write, the chown and the chmod onto whatever it points
+  # at. Refuse rather than follow it; the write itself then goes through a temp
+  # file and `mv`, which replaces the directory entry instead of following it.
+  if [ -L "$pin_file" ]; then
+    echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
     return 0
   fi
 
-  local pin_file="$PROJECT_DIR/.update-branch"
   local existing=""
   if [ -f "$pin_file" ]; then
     existing=$(head -n 1 "$pin_file" | tr -d '[:space:]')
   fi
 
-  if [ "$existing" = "$branch" ]; then
-    echo "  Update branch already pinned to '$branch'"
-  else
+  local branch="${CLAWBOX_BRANCH:-}"
+  local pin_source="explicit CLAWBOX_BRANCH"
+  if [ -n "$branch" ]; then
+    if ! is_safe_git_ref "$branch"; then
+      echo "  WARN: not pinning update branch — '$branch' is not a valid git ref" >&2
+      branch=""
+    fi
+  elif [ -z "$existing" ]; then
+    branch="$(adoptable_checkout_branch)"
+    pin_source="the branch this checkout is on"
+  fi
+
+  if [ -n "$branch" ] && [ "$branch" != "$existing" ]; then
     if [ -n "$existing" ]; then
       # Repinning a device is never silent — an operator watching this run has
       # to be able to see the branch it will follow from here on.
-      echo "  Re-pinning update branch '$existing' -> '$branch' (explicit CLAWBOX_BRANCH)"
+      echo "  Re-pinning update branch '$existing' -> '$branch' ($pin_source)"
     else
-      echo "  Pinning update branch to '$branch'"
+      echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    printf '%s\n' "$branch" > "$pin_file"
+    # Own and mode the temp file before it becomes the pin, so the pin is never
+    # momentarily readable-but-root-owned, and so neither call can be aimed at a
+    # symlink target planted between the check above and the write.
+    printf '%s\n' "$branch" > "$pin_file.tmp"
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file.tmp"
+    chmod 644 "$pin_file.tmp"
+    mv -f "$pin_file.tmp" "$pin_file"
+    return 0
   fi
 
-  # The web app runs as $CLAWBOX_USER and rewrites this file itself, through
-  # /setup-api/system/update-branch (Settings → Update branch). A root-owned pin
-  # would make that POST fail with EACCES — the same class of bug a root-owned
-  # data/ caused in the config store. Re-assert owner and mode on every run so a
-  # pin left root-owned by a hand-written `sudo` redirect is repaired too. 0644,
-  # not 0600: this is a build record, not a secret, and root reads it during the
+  # Nothing to write. Still re-assert owner and mode on an existing pin, and do
+  # it whether or not a branch was given: the web app runs as $CLAWBOX_USER and
+  # rewrites this file itself through /setup-api/system/update-branch, so a
+  # root-owned pin turns that POST into an EACCES — the same class of bug a
+  # root-owned data/ caused in the config store. Worse, a pin the app user
+  # cannot READ is invisible to the updater, which then resolves to `main` while
+  # this script (running as root) still reads the pin and disagrees. Repairing
+  # it unconditionally is what makes a pin left behind by a hand-written
+  # `sudo sh -c 'echo beta > .update-branch'` heal on the next run. 0644, not
+  # 0600: this is a build record, not a secret, and root reads it during the
   # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  [ -n "$existing" ] || return 0
+  if [ -n "$branch" ]; then
+    echo "  Update branch already pinned to '$branch'"
+  fi
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
   chmod 644 "$pin_file"
 }
@@ -1098,26 +1176,35 @@ step_bootstrap_updater() {
 }
 
 step_git_pull() {
+  local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
-  else
-    # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
-    # current branch > main) instead of a fast-forward-only merge. The old
-    # `merge --ff-only ... || echo continuing` silently kept stale code whenever
-    # the box had any local divergence, which then pinned config/openclaw-target.txt,
-    # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
-    # robust path the in-app updater takes: fetch, drop local changes, checkout,
-    # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
-    resolve_update_branch
-    echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
-    sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+    fresh_clone=1
   fi
-  # Both arms above put the repo on a branch; record it while PROJECT_DIR is
-  # known-good, and before any later step can fail the install. No-op unless
-  # CLAWBOX_BRANCH was given explicitly — see persist_update_branch_pin.
+
+  # Record the pin BEFORE anything moves the repo. sync_repo_to_update_target
+  # below checks out and hard-resets, so on an unpinned device the checked-out
+  # branch — the only surviving record of what this unit was built from — is
+  # gone by the time it returns. Writing the pin here also feeds
+  # resolve_update_branch's rule 1 on this very run, so the branch the device
+  # keeps is the branch this run installs. Early enough, too, that a later
+  # failed step still leaves a correctly pinned device.
   persist_update_branch_pin
+
+  [ "$fresh_clone" -eq 0 ] || return 0
+
+  # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
+  # current branch > main) instead of a fast-forward-only merge. The old
+  # `merge --ff-only ... || echo continuing` silently kept stale code whenever
+  # the box had any local divergence, which then pinned config/openclaw-target.txt,
+  # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
+  # robust path the in-app updater takes: fetch, drop local changes, checkout,
+  # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
+  resolve_update_branch
+  echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+  sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
 step_install_bun() {

@@ -20,6 +20,14 @@ import path from "path";
 // persist_update_branch_pin closes the gap: an explicit CLAWBOX_BRANCH is
 // recorded on disk, owned by the app user so the Settings UI can still rewrite
 // it, and an installer run WITHOUT the env var leaves an existing pin alone.
+//
+// A device carrying NO pin is the remaining hole, and the branch it is checked
+// out on is the only record of what it was built from — a record
+// sync_repo_to_update_target destroys moments later. So an unpinned device
+// adopts that branch, under the narrow conditions adoptable_checkout_branch
+// enforces. A device on `main` is unaffected either way: rule 2 returns main
+// when the current branch is main, and rule 3's fallback IS main, so main-built
+// units resolve to main through every path with or without a pin.
 
 const REPO = path.resolve(__dirname, "../../..");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
@@ -33,7 +41,9 @@ const UPDATER_TS = fs.readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+const HAS_GIT = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
 const d = CAN_RUN ? describe : describe.skip;
+const dg = CAN_RUN && HAS_GIT ? describe : describe.skip;
 
 function extractShellFunction(name: string): string {
   const start = INSTALL_SH.indexOf(`${name}() {`);
@@ -46,6 +56,7 @@ function extractShellFunction(name: string): string {
 // Sourced verbatim so the tests exercise the code that ships, not a copy.
 const PERSIST_FN = extractShellFunction("persist_update_branch_pin");
 const IS_SAFE_REF_FN = extractShellFunction("is_safe_git_ref");
+const ADOPT_FN = extractShellFunction("adoptable_checkout_branch");
 
 let tmp: string;
 let projectDir: string;
@@ -83,6 +94,7 @@ function runPersist(env: Record<string, string> = {}): {
     "CLAWBOX_USER=clawbox",
     `chown() { printf '%s\\n' "$*" >> ${JSON.stringify(chownLog)}; }`,
     IS_SAFE_REF_FN,
+    ADOPT_FN,
     PERSIST_FN,
     "persist_update_branch_pin",
   ].join("\n");
@@ -124,10 +136,39 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     // rewrites this file itself via /setup-api/system/update-branch, so a
     // root-owned pin turns that POST into an EACCES — the same failure a
     // root-owned data/ produced in the config store.
+    //
+    // Owner and mode are applied to the temp file, which is then renamed into
+    // place: the pin is never momentarily live while still root-owned, and
+    // neither call can be aimed at a symlink target.
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
 
-    expect(r.chowns).toEqual(["clawbox:clawbox " + pinFile]);
+    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.tmp`]);
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+  });
+
+  it("leaves no temp file behind in the working tree", () => {
+    // The pin is gitignored; a stranded `.update-branch.tmp` next to it would
+    // show up in `git status` on the device forever.
+    runPersist({ CLAWBOX_BRANCH: "beta" });
+
+    expect(fs.existsSync(`${pinFile}.tmp`)).toBe(false);
+  });
+
+  it("refuses to write through a symlink left in the pin's place", () => {
+    // The project dir belongs to the app user; install.sh runs as root. A
+    // symlink planted here would redirect the write, the chown and the chmod
+    // onto its target. `[ -f ]` alone follows it, so the check has to be -L.
+    const decoy = path.join(tmp, "decoy");
+    fs.writeFileSync(decoy, "untouched\n");
+    fs.symlinkSync(decoy, pinFile);
+
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("is a symlink");
+    expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
+    expect(r.chowns).toEqual([]);
+    expect(fs.lstatSync(pinFile).isSymbolicLink()).toBe(true);
   });
 
   it("repairs ownership of a pin that already names the right branch", () => {
@@ -169,7 +210,26 @@ d("persist_update_branch_pin records the branch the device was built with", () =
 
     expect(r.status).toBe(0);
     expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
-    expect(r.chowns).toEqual([]);
+    // Contents untouched, but the pin is NOT left as found: see below.
+  });
+
+  it("repairs an unreadable pin even with no branch given", () => {
+    // A pin the app user cannot read is worse than no pin. The updater runs as
+    // the app user, so rule 1 is swallowed and it resolves `main`, while
+    // install.sh — running as root — still reads the pin and disagrees. The
+    // device then updates to a branch its own pin denies.
+    //
+    // The repair therefore cannot sit behind an explicit CLAWBOX_BRANCH: the
+    // run that has to heal this is precisely the bare one.
+    fs.writeFileSync(pinFile, "beta\n");
+    fs.chmodSync(pinFile, 0o600);
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}`]);
+    expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
   });
 
   it("does not invent a pin when no branch is given", () => {
@@ -207,12 +267,157 @@ d("persist_update_branch_pin records the branch the device was built with", () =
   });
 });
 
+function git(cwd: string, ...args: string[]): string {
+  const r = spawnSync("git", args, { cwd, encoding: "utf-8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+  return (r.stdout ?? "").trim();
+}
+
+/**
+ * Make `projectDir` a clone of a throwaway origin that carries `main` and
+ * `beta`, checked out on `branch`. A real clone, not a fixture: what
+ * adoptable_checkout_branch inspects is remote-tracking refs and HEAD, and a
+ * hand-built .git would let the test pass while the device failed.
+ */
+function makeRepo(branch: string): void {
+  const seed = path.join(tmp, "seed");
+  const origin = path.join(tmp, "origin.git");
+  fs.mkdirSync(seed);
+  git(seed, "init", "--quiet");
+  // Not `init -b main`: that flag postdates git 2.28 and this has to run on
+  // whatever the CI image ships.
+  git(seed, "symbolic-ref", "HEAD", "refs/heads/main");
+  git(seed, "config", "user.email", "test@example.com");
+  git(seed, "config", "user.name", "test");
+  fs.writeFileSync(path.join(seed, "f"), "x\n");
+  git(seed, "add", "f");
+  git(seed, "commit", "--quiet", "-m", "seed");
+  git(seed, "branch", "beta");
+  git(tmp, "clone", "--quiet", "--bare", seed, origin);
+  fs.rmSync(projectDir, { recursive: true, force: true });
+  git(tmp, "clone", "--quiet", origin, projectDir);
+  if (branch !== "main") git(projectDir, "checkout", "--quiet", branch);
+}
+
+dg("an unpinned device adopts the branch it is checked out on", () => {
+  it("records the checked-out branch", () => {
+    makeRepo("beta");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(r.stdout).toContain("Pinning update branch to 'beta'");
+    // Adoption is not a silent act either — the log says where the value came
+    // from, so an operator can tell it apart from a flash-time choice.
+    expect(r.stdout).toContain("the branch this checkout is on");
+  });
+
+  it("records a branch whose upstream link is gone — the case rule 2 misses", () => {
+    // This is the whole bug. `git clone` sets the upstream link; a re-clone or
+    // a hand-rebuilt checkout does not, and rule 2 requires it. Measured on a
+    // device: an unpinned box on beta with no upstream resolves `main` in both
+    // resolvers, even though install.sh's own bootstrap block reset it to
+    // origin/beta minutes earlier in the same run.
+    makeRepo("beta");
+    git(projectDir, "branch", "--unset-upstream", "beta");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+  });
+
+  it("does not adopt main", () => {
+    // Rule 2 returns main when the current branch is main, and rule 3's
+    // fallback IS main, so a main device already resolves to main through every
+    // path. Writing the pin anyway would gain nothing and would freeze a box an
+    // operator later moves by hand.
+    makeRepo("main");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(pinFile)).toBe(false);
+  });
+
+  it("does not adopt a detached HEAD", () => {
+    // Deliberately NOT closed: a detached HEAD has no branch name to record.
+    // Inferring one from the commit is a guess — on the real repo main and beta
+    // sit on the same commit, so `--points-at HEAD` is ambiguous exactly when
+    // it would matter. Such a device still falls through to main; the fix is
+    // for the flasher to pass CLAWBOX_BRANCH.
+    makeRepo("beta");
+    git(projectDir, "checkout", "--quiet", "--detach", "HEAD");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(pinFile)).toBe(false);
+  });
+
+  it("does not adopt a branch origin does not carry", () => {
+    // Without this guard a pin would be written for a branch that cannot be
+    // fetched, turning today's silent fallback to main into a hard failure at
+    // `reset --hard origin/<branch>` on every future update.
+    makeRepo("beta");
+    git(projectDir, "checkout", "--quiet", "-b", "local-only");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(pinFile)).toBe(false);
+  });
+
+  it("leaves an existing pin alone rather than adopting over it", () => {
+    // An existing pin is somebody's explicit choice — the Settings UI, an
+    // earlier flash, an operator. Adoption only fills a vacuum.
+    makeRepo("beta");
+    fs.writeFileSync(pinFile, "main\n");
+
+    const r = runPersist();
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("main\n");
+  });
+
+  it("still lets an explicit branch win over the checkout", () => {
+    makeRepo("beta");
+
+    const r = runPersist({ CLAWBOX_BRANCH: "fix/qa-build" });
+
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("fix/qa-build\n");
+    expect(r.stdout).toContain("explicit CLAWBOX_BRANCH");
+  });
+});
+
 describe("the pin is wired into the install", () => {
   it("step_git_pull persists the pin", () => {
     // Without this call site the function is dead code. git_pull is the step
     // that puts the repo on a branch, and it runs early enough that a later
     // failed step still leaves a correctly pinned device.
     expect(extractShellFunction("step_git_pull")).toContain("persist_update_branch_pin");
+  });
+
+  it("step_git_pull pins BEFORE it syncs", () => {
+    // Order is the whole of the adoption fix. sync_repo_to_update_target checks
+    // out and hard-resets, so the checked-out branch — the only record of what
+    // an unpinned device was built from — is gone once it returns. Pinning
+    // first also feeds resolve_update_branch's rule 1 on this same run, so the
+    // branch the device keeps is the branch this run installs.
+    // Comment lines are stripped first: the comment explaining the ordering
+    // names both functions, so matching raw text would assert on prose.
+    const step = extractShellFunction("step_git_pull")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"))
+      .join("\n");
+    const pinAt = step.indexOf("persist_update_branch_pin");
+    const resolveAt = step.indexOf("resolve_update_branch");
+    const syncAt = step.indexOf("sync_repo_to_update_target");
+
+    expect(pinAt).toBeGreaterThan(-1);
+    expect(resolveAt).toBeGreaterThan(pinAt);
+    expect(syncAt).toBeGreaterThan(pinAt);
   });
 
   it("git_pull is dispatchable, so the pin can be repaired without a full install", () => {
@@ -226,8 +431,13 @@ describe("the pin is wired into the install", () => {
   it("the pin never dirties the git tree", () => {
     // install.sh writes this file into the repo working tree. If it were
     // tracked, sync_repo_to_update_target's `git reset --hard` would fight it
-    // and `git status` would be permanently dirty on every device.
-    expect(GITIGNORE.split("\n").map((l) => l.trim())).toContain(".update-branch");
+    // and `git status` would be permanently dirty on every device. The temp
+    // file the write is staged through needs the same treatment: it is renamed
+    // into place immediately, but a run that dies between the two would
+    // otherwise leave the device dirty forever.
+    const lines = GITIGNORE.split("\n").map((l) => l.trim());
+    expect(lines).toContain(".update-branch");
+    expect(lines).toContain(".update-branch.tmp");
   });
 });
 
