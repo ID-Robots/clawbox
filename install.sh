@@ -1039,11 +1039,14 @@ persist_update_branch_pin() {
 
   if [ "$existing" = "$branch" ]; then
     echo "  Update branch already pinned to '$branch'"
-  elif [ -n "$existing" ]; then
-    echo "  Re-pinning update branch '$existing' -> '$branch' (explicit CLAWBOX_BRANCH)"
-    printf '%s\n' "$branch" > "$pin_file"
   else
-    echo "  Pinning update branch to '$branch'"
+    if [ -n "$existing" ]; then
+      # Repinning a device is never silent — an operator watching this run has
+      # to be able to see the branch it will follow from here on.
+      echo "  Re-pinning update branch '$existing' -> '$branch' (explicit CLAWBOX_BRANCH)"
+    else
+      echo "  Pinning update branch to '$branch'"
+    fi
     printf '%s\n' "$branch" > "$pin_file"
   fi
 
