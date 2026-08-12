@@ -34,6 +34,82 @@ function run(root: string, configPath: string, username?: string) {
   return spawnSync("bash", [SCRIPT], { encoding: "utf-8", env });
 }
 
+/** Run the read-only classifier (`--check`) against a given root + config. */
+function check(root: string, configPath: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAWBOX_ROOT: root,
+    HERMES_CONFIG: configPath,
+    ...extraEnv,
+  };
+  return spawnSync("bash", [SCRIPT, "--check"], { encoding: "utf-8", env });
+}
+
+const REAL_PYTHON =
+  spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" }).stdout.trim() ||
+  "/usr/bin/python3";
+
+/**
+ * A dir holding a `python3` whose `hashlib.scrypt` always raises — the "the
+ * check could not run in THIS interpreter" case the diagnosis worried about
+ * (a uv-managed python without OpenSSL scrypt). Absolute shebang so the stub
+ * never re-resolves to itself on PATH. Returns the dir to prepend to PATH.
+ */
+function scryptBrokenPythonDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-nopy-"));
+  fs.writeFileSync(
+    path.join(dir, "python3"),
+    [
+      `#!${REAL_PYTHON}`,
+      "import hashlib, sys",
+      'def boom(*a, **k): raise ValueError("scrypt unavailable in this interpreter")',
+      "hashlib.scrypt = boom",
+      "src = sys.stdin.read()",
+      'exec(compile(src, "<stub>", "exec"), {"__name__": "__main__"})',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return dir;
+}
+
+/** A valid scrypt password_hash for a chosen plaintext, via the real python. */
+function scryptHash(plaintext: string): string {
+  const proc = spawnSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import base64,hashlib,sys",
+        "pw=sys.argv[1].encode(); salt=bytes(range(16))",
+        "dk=hashlib.scrypt(pw,salt=salt,n=2**14,r=8,p=1,dklen=32,maxmem=0)",
+        "print('scrypt$%d$%d$%d$%s$%s'%(2**14,8,1,base64.b64encode(salt).decode(),base64.b64encode(dk).decode()))",
+      ].join("\n"),
+      plaintext,
+    ],
+    { encoding: "utf-8" },
+  );
+  return proc.stdout.trim();
+}
+
+/** Write a self-consistent-looking dashboard block for a given hash. */
+function seedBlock(configPath: string, passwordHash: string) {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(
+    configPath,
+    [
+      "dashboard:",
+      "  basic_auth:",
+      '    username: "clawbox"',
+      `    password_hash: "${passwordHash}"`,
+      '    secret: "deadbeef"',
+      "    session_ttl_seconds: 604800",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+}
+
 /** Provision a throwaway root once and return what the script wrote. */
 function provision(username: string) {
   const { root, configPath } = makeRoot();
@@ -146,3 +222,103 @@ describe.runIf(RUNNABLE)("hermes dashboard auth block", () => {
     expect(check.stdout.trim()).toBe("match");
   });
 });
+
+/**
+ * Honest failure classes. Two Hermes provisions in a row printed
+ * "freshly written password and hash do not verify" and blamed the credentials
+ * — which were provably correct — because the check returned a bare exit 1 for
+ * every kind of failure: a genuine mismatch, a block a racing writer had erased,
+ * a config it couldn't read, and an interpreter where scrypt couldn't run. The
+ * fix is a classifier: "could not run the check" and "the password does not
+ * match the hash" must be DIFFERENT outcomes with different exit codes, and an
+ * environment failure must never be reported as a credential problem. `--check`
+ * exposes the classifier as its own exit code (0 ok, 3 mismatch, 4 not
+ * configured, 5 no password, 6/7 environment).
+ */
+describe.runIf(RUNNABLE)("dashboard auth: honest failure classes", () => {
+  it("reports a good pair as usable (exit 0)", () => {
+    const { root, configPath } = makeRoot();
+    expect(run(root, configPath, "clawbox").status).toBe(0);
+    const proc = check(root, configPath);
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(proc.stdout).toContain("OK");
+  });
+
+  it("catches a GENUINE mismatch (exit 3), distinctly from an environment error", () => {
+    // A valid, well-formed block for password "AAA", but the stored plaintext
+    // is "BBB": the hash genuinely does not verify the password.
+    const { root, configPath } = makeRoot();
+    seedBlock(configPath, scryptHash("AAA"));
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    fs.writeFileSync(path.join(root, "data", ".hermes-dashboard-pw"), "BBB", { mode: 0o600 });
+
+    const proc = check(root, configPath);
+    expect(proc.status).toBe(3);
+    expect(proc.stderr).toContain("DESYNCED");
+    // And it must NOT masquerade as one of the environment codes.
+    expect([6, 7]).not.toContain(proc.status);
+  });
+
+  it("does NOT report a vanished block as a credential mismatch", () => {
+    // The lost-update artefact: another writer's config (mcp_servers only, no
+    // dashboard block) with a password file still present. The block is simply
+    // gone — there is no credential to compare — so this is NOT_CONFIGURED (4),
+    // never MISMATCH (3). This is the exact state the racing writer leaves, and
+    // blaming the credentials for it is what hid the real bug for two provisions.
+    const { root, configPath } = makeRoot();
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, "mcp_servers:\n  clawbox:\n    enabled: true\n");
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    fs.writeFileSync(path.join(root, "data", ".hermes-dashboard-pw"), "leftover-password", {
+      mode: 0o600,
+    });
+
+    const proc = check(root, configPath);
+    expect(proc.status).toBe(4);
+    expect(proc.stdout + proc.stderr).toContain("NOT CONFIGURED");
+    expect(proc.status).not.toBe(3);
+  });
+
+  it("classifies a scrypt-less interpreter as an environment error, NOT a mismatch", () => {
+    // First provision a genuinely-correct pair with the real python.
+    const { root, configPath } = makeRoot();
+    expect(run(root, configPath, "clawbox").status).toBe(0);
+
+    // Now verify it with an interpreter whose scrypt raises. The pair is CORRECT
+    // — the check just cannot run. That must be exit 7 (COULD NOT RUN), never 3.
+    const stubDir = scryptBrokenPythonDir();
+    const proc = check(root, configPath, { PATH: `${stubDir}${path.delimiter}${process.env.PATH}` });
+    expect(proc.status).toBe(7);
+    expect(proc.stderr).toContain("COULD NOT RUN");
+    expect(proc.stderr).not.toContain("does not match");
+  });
+
+  it("a provision that cannot compute a hash fails as ENVIRONMENT, not as a bad credential", () => {
+    // Full provision under a scrypt-less interpreter: the OLD script would still
+    // reach its verify and print "do not verify", blaming credentials it never
+    // managed to write. The classifier stops at generation with an environment
+    // exit code and an environment message.
+    const { root, configPath } = makeRoot();
+    const stubDir = scryptBrokenPythonDir();
+    const proc = run2(root, configPath, {
+      PATH: `${stubDir}${path.delimiter}${process.env.PATH}`,
+    });
+    // 4 = environment error (could not generate). Definitely not the success 0,
+    // and not the credential-mismatch 2.
+    expect(proc.status).toBe(4);
+    const all = `${proc.stdout}\n${proc.stderr}`;
+    expect(all).not.toMatch(/do not verify|does not match/);
+    expect(all).toMatch(/could not generate|environment/i);
+  });
+});
+
+/** Full provision with extra env (used to inject a broken PATH). */
+function run2(root: string, configPath: string, extraEnv: NodeJS.ProcessEnv) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAWBOX_ROOT: root,
+    HERMES_CONFIG: configPath,
+    ...extraEnv,
+  };
+  return spawnSync("bash", [SCRIPT], { encoding: "utf-8", env });
+}
