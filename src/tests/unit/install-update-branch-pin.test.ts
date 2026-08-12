@@ -153,12 +153,13 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
   });
 
-  it("stages the write in a directory the app user cannot write", () => {
-    // The staging directory is what closes the race: a temp file sitting
-    // directly in the project dir can be unlinked and replaced with a symlink
-    // between its creation and the chown, however unpredictable its name — and
-    // the project dir belongs to the app user. 0700 leaves nobody but root able
-    // to create or unlink inside it.
+  it("stages the write in its own directory and renames the result", () => {
+    // Staging narrows the exposure — a temp file sitting directly beside the
+    // pin, under a name that never changes, can be swapped for a symlink with
+    // no timing at all. It does not eliminate it: unlinking an entry is
+    // governed by the parent directory's write bit, which the app user has.
+    // See the comment on this block for why the residual is accepted rather
+    // than chased further in shell.
     const persistFn = extractShellFunction("persist_update_branch_pin");
 
     expect(persistFn).toContain("umask 077");
@@ -195,13 +196,9 @@ d("persist_update_branch_pin records the branch the device was built with", () =
   it("clears a symlink planted at the staging path instead of following it", () => {
     // `rm -rf` on a symlink removes the link, never the thing it points at, so
     // a pre-planted decoy neither redirects the write nor blocks it: the
-    // staging directory is created fresh and the pin lands normally.
-    //
-    // Only a genuine race — creating the path between that `rm` and the `mkdir`
-    // — can interfere, and then `mkdir` simply fails and the pin is left as
-    // found. Nothing is redirected either way, which is the property that
-    // matters: root's chown must never be steerable onto a path of someone
-    // else's choosing.
+    // staging directory is created fresh and the pin lands normally. This is
+    // the case that needed no timing at all when the staging path was a fixed
+    // name, and it is the one this pins shut.
     const decoy = path.join(tmp, "decoy");
     fs.writeFileSync(decoy, "untouched\n");
     fs.symlinkSync(decoy, `${pinFile}.stage`);

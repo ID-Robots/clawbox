@@ -1118,24 +1118,28 @@ persist_update_branch_pin() {
     else
       echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    # Stage the write inside a directory only root can touch.
+    # Stage the write in a directory of our own rather than beside the pin.
     #
-    # A temp file placed directly in $PROJECT_DIR is not enough, even with an
-    # unpredictable name: $PROJECT_DIR is writable by $CLAWBOX_USER, so that
-    # account can watch the directory, see the name appear, unlink it and leave
-    # a symlink in its place before the printf/chown/chmod land. That would aim
-    # root's chown at a path of its choosing, which is an escalation primitive
-    # rather than a pin problem. A 0700 root-owned directory removes the
-    # opportunity outright — nothing but root can create or unlink inside it —
-    # and keeps the staging file on the same filesystem, so the final step is
-    # still a rename. `mv` replaces the pin's directory entry and never follows
-    # a symlink sitting at it.
+    # A temp file placed directly in $PROJECT_DIR can be swapped for a symlink
+    # before the printf/chown/chmod land, because $PROJECT_DIR is writable by
+    # $CLAWBOX_USER. With a fixed name that needs no timing at all; the staging
+    # directory means an attacker must instead win a race on the directory
+    # entry between the mkdir and the write. The final step is a rename, which
+    # replaces the pin's directory entry and never follows a symlink left at it.
     #
-    # Losing the race for $stage itself only costs us the write: mkdir fails on
-    # an existing path, and we warn and leave the pin alone. Nothing is
-    # redirected. An account that can do that can already write the pin file
-    # directly — the Settings route does exactly that — so pin *contents* were
-    # never protected from it. Root's authority is what has to be.
+    # It does NOT close that race, and 0700 is not what stops it: unlinking an
+    # entry is governed by the parent's write bit, which $CLAWBOX_USER has, so
+    # $stage can still be rmdir'd and replaced between the two lines below.
+    # Closing it needs descriptor-bound openat/renameat with no-follow
+    # semantics, which POSIX shell cannot express.
+    #
+    # That residual is accepted deliberately, and the reason is three lines
+    # further down: sync_repo_to_update_target runs `git reset --hard` as root
+    # inside this same app-writable tree and then `chown -R` over all of it.
+    # Whoever can win the race below already has a far larger version of the
+    # same primitive in the same step. Hardening the pin write past this point
+    # while that stands would be motion, not progress — if this class is worth
+    # closing it has to be closed for the tree, not for one file in it.
     local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
     rm -rf "$stage"
     if ! (umask 077 && mkdir "$stage"); then
