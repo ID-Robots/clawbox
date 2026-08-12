@@ -23,6 +23,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   // enable/disable now route their config writes through this helper instead
   // of shelling out directly; default it to a successful no-op.
   runOpenclawConfigSet: vi.fn().mockResolvedValue({ stdout: "", stderr: "" }),
+  // Default to a device that ships the OpenClaw CLI — the edition where the
+  // integration is a switch. The Hermes block below flips this.
+  openclawIsAbsent: vi.fn().mockReturnValue(false),
+  restartGateway: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/sqlite-store", () => ({
@@ -33,7 +37,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-import { readConfig } from "@/lib/openclaw-config";
+import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import fs from "fs/promises";
 import { promisify } from "util";
@@ -47,6 +51,9 @@ describe("/setup-api/browser/manage", () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.mocked(readConfig).mockResolvedValue({ tools: { profile: "full" } } as never);
+    vi.mocked(openclawIsAbsent).mockReturnValue(false);
+    vi.mocked(restartGateway).mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigSet).mockResolvedValue({ stdout: "", stderr: "" } as never);
     vi.mocked(sqliteGet).mockResolvedValue(null);
     vi.mocked(sqliteSet).mockResolvedValue();
     vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
@@ -77,6 +84,16 @@ describe("/setup-api/browser/manage", () => {
       const res = await GET();
       const body = await res.json();
       expect(body.enabled).toBe(true);
+    });
+
+    it("reports the integration as a switch on an edition that ships the CLI", async () => {
+      vi.mocked(readConfig).mockResolvedValue({ tools: { profile: "coding" } } as never);
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.alwaysOn).toBe(false);
+      expect(body.enabled).toBe(false);
     });
 
     it("detects the Playwright Chromium runtime when it is installed", async () => {
@@ -227,6 +244,128 @@ describe("/setup-api/browser/manage", () => {
       expect(body.ok).toBe(true);
       expect(body.enabled).toBe(true);
       expect(sqliteSet).toHaveBeenCalledWith("browser:integration-enabled", "true");
+    });
+
+    it("bounces the gateway through the shared helper, not a hand-rolled systemctl", async () => {
+      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "disable" }),
+      });
+
+      await POST(req);
+
+      // The helper knows which editions have a clawbox-gateway to restart and
+      // no-ops on the ones that don't; a raw exec here did not.
+      expect(restartGateway).toHaveBeenCalledTimes(1);
+      const systemctlCalls = mockExec.mock.calls.filter(
+        ([, args]) => Array.isArray(args) && args.includes("clawbox-gateway"),
+      );
+      expect(systemctlCalls).toHaveLength(0);
+    });
+  });
+
+  // The Hermes SKU ships no `openclaw` binary, so every one of these actions
+  // used to end in "The OpenClaw CLI is not available on this edition." for a
+  // capability that was already working: the ClawBox browser_* tools are
+  // registered on this edition at every boot. The route must therefore answer
+  // "already on" here and never reach for the CLI.
+  describe("on an edition with no OpenClaw CLI", () => {
+    const chromiumPresent = () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined as never);
+      mockExec.mockImplementation(async (...args: unknown[]) => {
+        const [command, commandArgs] = args as [string, string[]];
+        if (command === "/usr/bin/chromium-browser" && commandArgs[0] === "--version") {
+          return { stdout: "Chromium 146.0.0", stderr: "" };
+        }
+        return { stdout: "", stderr: "" };
+      });
+    };
+
+    beforeEach(() => {
+      vi.mocked(openclawIsAbsent).mockReturnValue(true);
+    });
+
+    it("GET reports the integration as on, and flags that there is no switch", async () => {
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.enabled).toBe(true);
+      expect(body.alwaysOn).toBe(true);
+    });
+
+    it("GET does not read an OpenClaw config this edition never writes", async () => {
+      await GET();
+      expect(readConfig).not.toHaveBeenCalled();
+    });
+
+    it("GET stays on even when the OpenClaw switch was once persisted as off", async () => {
+      vi.mocked(sqliteGet).mockResolvedValue("false");
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.enabled).toBe(true);
+    });
+
+    it("enable succeeds without ever calling the OpenClaw CLI", async () => {
+      chromiumPresent();
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "enable" }),
+      });
+
+      const res = await POST(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.enabled).toBe(true);
+      expect(body.alwaysOn).toBe(true);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("enable still refuses when Chromium is missing", async () => {
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "enable" }),
+      });
+
+      const res = await POST(req);
+
+      expect(res.status).toBe(400);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("disable says plainly that there is nothing to turn off", async () => {
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "disable" }),
+      });
+
+      const res = await POST(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.enabled).toBe(true);
+      expect(body.error).not.toMatch(/OpenClaw CLI/i);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(sqliteSet).not.toHaveBeenCalled();
+    });
+
+    it("leaves the desktop browser controls alone", async () => {
+      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "close-browser" }),
+      });
+
+      const res = await POST(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
     });
   });
 });
