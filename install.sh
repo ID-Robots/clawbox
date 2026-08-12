@@ -163,14 +163,18 @@ esac
 
 # ── Refuse to change the edition of an already-provisioned device ────────────
 #
-# install.sh can INSTALL an edition. It cannot MIGRATE one, and it never
-# pretended to: nothing here stops, disables or masks the harness a device would
-# be LEAVING, and each harness keeps its provider credentials in its own file
-# (~/.hermes/config.yaml vs ~/.openclaw/openclaw.json), so a sign-in does not
-# move. The message below spells out what that costs an operator; the same
-# reasoning is in docs-site/editions/overview.mdx. Changing edition is a
-# reflash. scripts/setup-hermes-edition.sh is the other writer of the lock and
-# carries the same refusal — both writers have to, or neither means anything.
+# install.sh can INSTALL an edition. It cannot MIGRATE one. Two harnesses on one
+# box is only the most visible half of that, and step_edition_foreign_teardown
+# now handles that half — it stops and disables the harness a device is leaving.
+# What it cannot do is move the sign-in: each harness keeps its provider
+# credentials in its own file (~/.hermes/config.yaml vs ~/.openclaw/openclaw.json),
+# and setup_complete carries over, so the wizard step that would populate the
+# incoming harness never runs again. The device comes up quiet instead of
+# conflicted, and still has no usable model. The message below spells out what
+# that costs an operator; the same reasoning is in
+# docs-site/editions/overview.mdx. Changing edition is a reflash.
+# scripts/setup-hermes-edition.sh is the other writer of the lock and carries the
+# same refusal — both writers have to, or neither means anything.
 #
 # ORDERING is load-bearing: this is the first thing after the edition resolves,
 # so it runs before the lock and drop-in are rewritten, before
@@ -199,8 +203,10 @@ if [ -n "$CLAWBOX_RECORDED_EDITION" ] && [ "$CLAWBOX_RECORDED_EDITION" != "$CLAW
 
 WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
          '$CLAWBOX_RECORDED_EDITION' on a device that is already provisioned.
-         The installer does NOT migrate an edition: the '$CLAWBOX_RECORDED_EDITION' harness is
-         left running, and the AI provider sign-in is not carried across.
+         The installer does NOT migrate an edition. The '$CLAWBOX_RECORDED_EDITION' harness
+         will be stopped and disabled so two agents do not run at once, but
+         the AI provider sign-in is not carried across and setup still reads
+         as complete — so the device will come up with no usable model.
          You are expected to finish the transition by hand.
 
 EOF
@@ -212,11 +218,11 @@ ERROR: this device is already installed as the '$CLAWBOX_RECORDED_EDITION' editi
          Recorded edition:  $CLAWBOX_RECORDED_EDITION   ($CLAWBOX_EDITION_FILE)
          Requested edition: $CLAWBOX_EDITION
 
-       The installer installs an edition; it does not migrate one. It has no
-       step that removes the harness a device is leaving, and the AI provider
-       sign-in lives in each harness's own config, so it does not move. A
-       device installed this way comes up with two harnesses running and no
-       usable model, while still reporting that setup is complete.
+       The installer installs an edition; it does not migrate one. It will
+       stop and disable the harness a device is leaving, but the AI provider
+       sign-in lives in each harness's own config and does not move with it.
+       A device installed this way comes up with no usable model, while
+       still reporting that setup is complete.
 
        Changing a device's edition requires a REFLASH.
        See https://docs.clawbox.com/editions/overview
@@ -339,10 +345,16 @@ fi
 # EXPECTED_ACTIVE_SERVICES only ever describes what should be UP, which left
 # step_validate_services blind in one direction: it appends the Hermes units
 # inside `if has_hermes_harness`, so on the openclaw edition a fully running
-# Hermes stack was not merely tolerated, it was invisible. Nothing in install.sh
-# brings these down, so anything found here is a device that used to be another
-# edition. Both predicates are negated, so `dual` — the edition that legitimately
-# runs both — accumulates nothing and needs no special case.
+# Hermes stack was not merely tolerated, it was invisible. Anything found here is
+# a device that used to be another edition. Both predicates are negated, so
+# `dual` — the edition that legitimately runs both — accumulates nothing and
+# needs no special case.
+#
+# ONE list, TWO consumers, in this order: step_edition_foreign_teardown stops and
+# disables everything in it early in the run, and step_validate_services asserts
+# at the end that none of it is back. So a unit still reported here is one that
+# returned under its own Restart=, or one the operator kept with
+# CLAWBOX_KEEP_FOREIGN_UNITS=1 — not simply one nobody ever touched.
 FOREIGN_EDITION_UNITS=()
 if ! has_hermes_harness; then
   # The Hermes harness: the two ClawBox-managed dashboard units, plus the
@@ -1137,6 +1149,100 @@ step_edition_gateway_state() {
   return 0
 }
 
+# Bring down the harness this edition does not run.
+#
+# step_edition_gateway_state above already does exactly this, but in ONE
+# direction only: on hermes it stops, disables, removes and masks
+# clawbox-gateway.service. The openclaw/dual direction was never written, so a
+# device that used to be hermes kept its entire Hermes stack —
+# clawbox-hermes-dashboard, its auth proxy, and the hermes-gateway unit the
+# upstream Hermes installer writes. That unit holds the Telegram bot token, so
+# both harnesses then long-poll getUpdates on the same token and terminate each
+# other's request ("Conflict: terminated by other getUpdates request",
+# followed by a stall-detected restart loop): neither side receives a message,
+# indefinitely.
+#
+# step_validate_services REPORTS that state, and reporting is not fixing. An
+# appliance whose install finishes loudly broken still has to be repaired by an
+# operator who knows which units to name, so the installer names them itself.
+#
+# Deliberately conservative:
+#   - stop + disable ONLY. Nothing is masked, no unit file is removed, so every
+#     unit here returns with one `systemctl enable --now`. The mask in
+#     step_edition_gateway_state is NOT copied over: it is there because
+#     config/clawbox-sudoers grants the clawbox user NOPASSWD `systemctl start
+#     clawbox-gateway`, which undoes a plain disable from the in-UI terminal.
+#     No Hermes unit has an equivalent grant, so a mask would buy nothing and
+#     cost reversibility. hermes-gateway.service is not written by this repo
+#     either, so deleting its unit file is not ours to do.
+#   - only FOREIGN_EDITION_UNITS, which is built by negating BOTH harness
+#     predicates. `dual` satisfies both, so its list is empty and this loop has
+#     no body — the edition that legitimately runs both is untouched by
+#     construction rather than by a special case that could rot.
+#   - never silent: every unit is named with the state it was in and the
+#     command that puts it back.
+#   - CLAWBOX_KEEP_FOREIGN_UNITS=1 skips the teardown entirely, for an operator
+#     who is mid-diagnosis and wants the box left exactly as found. Detection is
+#     unaffected either way: step_validate_services still fails the install.
+step_edition_foreign_teardown() {
+  if [ "${#FOREIGN_EDITION_UNITS[@]}" -eq 0 ]; then
+    return 0   # dual — both harnesses belong here
+  fi
+
+  local funit f_active f_enabled needs_stop needs_disable
+  local -a brought_down=()
+
+  for funit in "${FOREIGN_EDITION_UNITS[@]}"; do
+    f_active=$(systemctl is-active "$funit" 2>/dev/null || true)
+    f_enabled=$(systemctl is-enabled "$funit" 2>/dev/null || true)
+
+    # An absent unit answers `inactive`, a masked one answers `masked`, and a
+    # unit already stopped and disabled matches neither arm — so all three cost
+    # nothing and need no `systemctl cat` guard. `enabled but inactive` is still
+    # torn down: it is one reboot away from being the second poller.
+    needs_stop=false
+    needs_disable=false
+    case "$f_active" in
+      active|activating|reloading) needs_stop=true ;;
+    esac
+    case "$f_enabled" in
+      enabled|enabled-runtime) needs_disable=true ;;
+    esac
+    if [ "$needs_stop" = false ] && [ "$needs_disable" = false ]; then
+      continue
+    fi
+
+    if [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" = "1" ]; then
+      echo "  [edition] $funit belongs to another edition (active=$f_active enabled=$f_enabled) — left as-is: CLAWBOX_KEEP_FOREIGN_UNITS=1"
+      continue
+    fi
+
+    if [ "$needs_stop" = true ]; then
+      systemctl stop "$funit" >/dev/null 2>&1 || true
+    fi
+    if [ "$needs_disable" = true ]; then
+      systemctl disable "$funit" >/dev/null 2>&1 || true
+    fi
+    brought_down+=("$funit (was active=$f_active enabled=$f_enabled)")
+  done
+
+  if [ "${#brought_down[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  echo "  Brought down units belonging to another edition (this device is '$CLAWBOX_EDITION'):"
+  local entry
+  for entry in "${brought_down[@]}"; do
+    echo "    - $entry"
+  done
+  echo "    Reason: both harnesses poll the same Telegram bot token, so running"
+  echo "    them together leaves neither able to receive a message."
+  echo "    Stopped and disabled only — nothing was masked and no unit file was"
+  echo "    removed. To put one back:  sudo systemctl enable --now <unit>"
+  echo "    To leave them alone next time: CLAWBOX_KEEP_FOREIGN_UNITS=1"
+  return 0
+}
+
 # Bake the edition lock so a customer can't flip the harness.
 #
 # The record is a ROOT-OWNED file, /etc/clawbox/edition.env. The old drop-in
@@ -1168,6 +1274,13 @@ step_edition_lock() {
   systemctl daemon-reload 2>/dev/null || true
 
   step_edition_gateway_state
+  # After the gateway state, not before: on hermes the step above has already
+  # stopped and masked clawbox-gateway (the only foreign unit on that edition),
+  # so the teardown finds nothing to do and says nothing. On openclaw/dual it is
+  # the step that actually brings the other harness down. Both run inside
+  # step_edition_lock, so both reach the full-install path AND the in-app
+  # updater, which dispatches `--step edition_lock` from step_post_update.
+  step_edition_foreign_teardown
 
   echo "  Baked edition lock: CLAWBOX_EDITION=$CLAWBOX_EDITION ($CLAWBOX_EDITION_FILE)"
 }
@@ -2954,13 +3067,13 @@ step_validate_services() {
       f_enabled=$(systemctl is-enabled "$funit" 2>/dev/null || true)
       case "$f_active" in
         active|activating|reloading)
-          failed_probe+=("Edition: $funit is $f_active but belongs to another edition (this device is '$CLAWBOX_EDITION') — two agent harnesses are running on one box")
+          failed_probe+=("Edition: $funit is $f_active but belongs to another edition (this device is '$CLAWBOX_EDITION') — two agent harnesses are running on one box. Fix: sudo systemctl disable --now $funit")
           continue
           ;;
       esac
       case "$f_enabled" in
         enabled|enabled-runtime)
-          failed_probe+=("Edition: $funit is enabled but belongs to another edition (this device is '$CLAWBOX_EDITION') — it starts again on the next boot")
+          failed_probe+=("Edition: $funit is enabled but belongs to another edition (this device is '$CLAWBOX_EDITION') — it starts again on the next boot. Fix: sudo systemctl disable $funit")
           ;;
       esac
     done
@@ -2994,9 +3107,18 @@ step_validate_services() {
     systemctl status "$unit_name" --no-pager -n 5 2>&1 | sed 's/^/        /' || true
     echo
   done
+  local had_edition_failure=false
   for entry in "${failed_probe[@]}"; do
     echo "    - $entry"
+    case "$entry" in Edition:*) had_edition_failure=true ;; esac
   done
+  # A foreign unit reaching this point means the teardown was skipped or the
+  # unit came back. Name the one command that redoes it rather than leaving the
+  # operator to reconstruct the unit list from the lines above.
+  if [ "$had_edition_failure" = true ]; then
+    echo "    To bring every foreign-edition unit down again, in one command:"
+    echo "      sudo bash $PROJECT_DIR/install.sh --step edition_foreign_teardown"
+  fi
   return 1
 }
 
@@ -3010,7 +3132,7 @@ DISPATCH_STEPS=(
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
-  edition_lock hermes_install hermes_edition
+  edition_lock edition_foreign_teardown hermes_install hermes_edition
   network_setup set_hostname setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
