@@ -1118,25 +1118,40 @@ persist_update_branch_pin() {
     else
       echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    # mktemp, not a fixed "$pin_file.tmp": it creates the file itself with
-    # O_EXCL and a name nobody can predict, so — unlike a fixed name, which the
-    # app user could pre-create as a symlink — the write, the chown and the
-    # chmod are guaranteed to land on a file this function just made. Owning and
-    # moding it before the rename also means the pin is never briefly live while
-    # still root-owned. Same shape as write_env_file above.
-    local tmp_pin
-    tmp_pin=$(mktemp "$pin_file.XXXXXX") || {
-      echo "  WARN: could not create a temp file to write the update-branch pin" >&2
+    # Stage the write inside a directory only root can touch.
+    #
+    # A temp file placed directly in $PROJECT_DIR is not enough, even with an
+    # unpredictable name: $PROJECT_DIR is writable by $CLAWBOX_USER, so that
+    # account can watch the directory, see the name appear, unlink it and leave
+    # a symlink in its place before the printf/chown/chmod land. That would aim
+    # root's chown at a path of its choosing, which is an escalation primitive
+    # rather than a pin problem. A 0700 root-owned directory removes the
+    # opportunity outright — nothing but root can create or unlink inside it —
+    # and keeps the staging file on the same filesystem, so the final step is
+    # still a rename. `mv` replaces the pin's directory entry and never follows
+    # a symlink sitting at it.
+    #
+    # Losing the race for $stage itself only costs us the write: mkdir fails on
+    # an existing path, and we warn and leave the pin alone. Nothing is
+    # redirected. An account that can do that can already write the pin file
+    # directly — the Settings route does exactly that — so pin *contents* were
+    # never protected from it. Root's authority is what has to be.
+    local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
+    rm -rf "$stage"
+    if ! (umask 077 && mkdir "$stage"); then
+      echo "  WARN: could not stage the update-branch pin write" >&2
       return 0
-    }
+    fi
+    tmp_pin="$stage/pin"
     if printf '%s\n' "$branch" > "$tmp_pin" \
       && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
       && chmod 644 "$tmp_pin" \
       && mv -f "$tmp_pin" "$pin_file"; then
+      rm -rf "$stage"
       return 0
     fi
-    # Never leave the device's working tree holding a stray temp file.
-    rm -f "$tmp_pin"
+    # Never leave the device's working tree holding staging litter.
+    rm -rf "$stage"
     echo "  WARN: failed to write the update-branch pin" >&2
     return 0
   fi

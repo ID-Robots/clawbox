@@ -144,17 +144,28 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     // root-owned pin turns that POST into an EACCES — the same failure a
     // root-owned data/ produced in the config store.
     //
-    // Owner and mode are applied to the mktemp file, which is then renamed into
-    // place: the pin is never momentarily live while still root-owned, and
-    // neither call can be aimed at a path someone else chose. The temp name is
-    // unpredictable by design, so match its shape rather than a literal.
+    // Owner and mode are applied to the staged file, which is then renamed into
+    // place: the pin is never momentarily live while still root-owned, and the
+    // chown can only ever name a path inside the root-owned staging directory.
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
 
-    expect(r.chowns).toHaveLength(1);
-    expect(r.chowns[0]).toMatch(
-      new RegExp(`^clawbox:clawbox ${pinFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\w{6}$`),
-    );
+    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.stage/pin`]);
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+  });
+
+  it("stages the write in a directory the app user cannot write", () => {
+    // The staging directory is what closes the race: a temp file sitting
+    // directly in the project dir can be unlinked and replaced with a symlink
+    // between its creation and the chown, however unpredictable its name — and
+    // the project dir belongs to the app user. 0700 leaves nobody but root able
+    // to create or unlink inside it.
+    const persistFn = extractShellFunction("persist_update_branch_pin");
+
+    expect(persistFn).toContain("umask 077");
+    expect(persistFn).toMatch(/mkdir "\$stage"/);
+    // The staged file must be renamed, not copied: rename replaces the pin's
+    // directory entry instead of following a symlink left at it.
+    expect(persistFn).toMatch(/mv -f "\$tmp_pin" "\$pin_file"/);
   });
 
   it("leaves no temp file behind in the working tree", () => {
@@ -166,12 +177,9 @@ d("persist_update_branch_pin records the branch the device was built with", () =
   });
 
   it("does not write through a symlink planted at a guessable temp path", () => {
-    // The pin path itself is guarded, but the temp file the write is staged
-    // through lives in the same app-user-writable directory. A fixed name like
-    // `.update-branch.tmp` could be pre-created as a symlink, which would move
-    // the whole problem one path across — `printf >` follows an existing link.
-    // mktemp picks the name and creates the file with O_EXCL, so a decoy at any
-    // guessable path is simply not the file that gets written.
+    // Guarding only the pin path moved the problem one path across: the file
+    // the write is staged through lives in the same app-user-writable
+    // directory, and `printf >` follows an existing link there too.
     const decoy = path.join(tmp, "decoy");
     fs.writeFileSync(decoy, "untouched\n");
     fs.symlinkSync(decoy, `${pinFile}.tmp`);
@@ -181,8 +189,30 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     expect(r.status).toBe(0);
     expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
     expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
-    // The chown must have gone to the mktemp file, never to the planted path.
     expect(r.chowns).not.toContain(`clawbox:clawbox ${pinFile}.tmp`);
+  });
+
+  it("clears a symlink planted at the staging path instead of following it", () => {
+    // `rm -rf` on a symlink removes the link, never the thing it points at, so
+    // a pre-planted decoy neither redirects the write nor blocks it: the
+    // staging directory is created fresh and the pin lands normally.
+    //
+    // Only a genuine race — creating the path between that `rm` and the `mkdir`
+    // — can interfere, and then `mkdir` simply fails and the pin is left as
+    // found. Nothing is redirected either way, which is the property that
+    // matters: root's chown must never be steerable onto a path of someone
+    // else's choosing.
+    const decoy = path.join(tmp, "decoy");
+    fs.writeFileSync(decoy, "untouched\n");
+    fs.symlinkSync(decoy, `${pinFile}.stage`);
+
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" });
+
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.stage/pin`]);
+    expect(strayTempFiles()).toEqual([]);
   });
 
   it("refuses to write through a symlink left in the pin's place", () => {
