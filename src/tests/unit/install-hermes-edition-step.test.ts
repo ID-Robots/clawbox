@@ -23,12 +23,30 @@ const HERMES_SETUP = readFileSync(
   "utf-8",
 );
 
-function extractShellFunction(name: string): string {
+/**
+ * Slice one shell function out of install.sh.
+ *
+ * The end of the slice is the first line that is exactly `}` — a heuristic, and
+ * one that truncates silently the day an embedded program (an awk/jq/python
+ * heredoc) puts a `}` at column 0. A truncated slice makes every `not.toContain`
+ * over it pass for the wrong reason, so any caller making a negative assertion
+ * must pass `endsWith`: a fragment of the function's LAST statement, which the
+ * slice has to reach for the extraction to count as complete.
+ */
+function extractShellFunction(name: string, endsWith?: string): string {
   const start = INSTALL_SH.indexOf(`${name}() {`);
   if (start < 0) throw new Error(`${name} not found in install.sh`);
   const end = INSTALL_SH.indexOf("\n}", start);
   if (end < 0) throw new Error(`${name} has no closing brace`);
-  return INSTALL_SH.slice(start, end);
+  const body = INSTALL_SH.slice(start, end);
+  if (endsWith !== undefined && !body.includes(endsWith)) {
+    throw new Error(
+      `${name} was extracted TRUNCATED — the slice never reached ${JSON.stringify(endsWith)}. ` +
+        `A '}' at column 0 inside the function (an embedded heredoc?) ends the slice early, ` +
+        `and assertions over the short slice would silently stop testing.`,
+    );
+  }
+  return body;
 }
 
 // `hermes_edition` being in DISPATCH_STEPS is already pinned by
@@ -43,9 +61,11 @@ describe("hermes_edition is the updater's own step", () => {
   it("post_update no longer calls it — that would run provisioning twice", () => {
     // Two dashboard/proxy restarts per update, and the swallowed copy would
     // still be the one that ran first.
-    expect(extractShellFunction("step_post_update")).not.toMatch(
-      /^\s*step_hermes_edition\b/m,
-    );
+    // Negative assertion → the slice has to cover the whole function, so name
+    // its last statement.
+    expect(
+      extractShellFunction("step_post_update", "step_update_smoke ||"),
+    ).not.toMatch(/^\s*step_hermes_edition\b/m);
   });
 
   it("the full install still provisions directly, not via post_update", () => {
@@ -185,7 +205,11 @@ describe("service validation checks the dashboard auth provider", () => {
     // browserless probe gets a 302/403, so a 401 must fail the check. Assert the
     // case pattern precisely — the word "401" still appears in the DESYNCED
     // message, and that is correct.
-    const fn = extractShellFunction("step_validate_services");
+    //
+    // The negative assertion is only worth anything over the WHOLE function, so
+    // require the slice to reach the last statement: a `401` re-added past a
+    // truncation point would otherwise go unnoticed.
+    const fn = extractShellFunction("step_validate_services", "--step edition_foreign_teardown");
     expect(fn).toContain("2*|3*|403) ;;");
     expect(fn).not.toContain("2*|3*|401|403");
   });

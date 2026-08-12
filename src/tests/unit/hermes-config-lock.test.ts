@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -43,11 +43,27 @@ describe("both writers share ONE lock file", () => {
     // its PyYAML reconcile AND holds it across the `hermes tools disable` CLI
     // call (which does its own wide load->save_config on the same file).
     expect(AUTH_SRC).toMatch(/acquire_config_lock[\s\S]*mint_credentials/);
-    const regTail = REGISTER_SRC.slice(REGISTER_SRC.indexOf("acquire_config_lock\n\nexport"));
-    expect(regTail).toContain("acquire_config_lock");
-    expect(REGISTER_SRC.indexOf("acquire_config_lock\n\nexport")).toBeLessThan(
-      REGISTER_SRC.indexOf("tools disable browser"),
-    );
+
+    // Locate the registrar's CALL SITE with an anchored regex: a bare
+    // `acquire_config_lock` line at column 0. That cannot match the DEFINITION
+    // (`acquire_config_lock() {`) and does not depend on what happens to follow
+    // it, unlike the old "acquire_config_lock\n\nexport" formatting marker.
+    const call = REGISTER_SRC.search(/^acquire_config_lock[ \t]*$/m);
+    // The registrar's two writes of config.yaml: the PyYAML reconcile, and the
+    // Hermes CLI call that does its own load->save_config. The lock has to come
+    // before BOTH — "before the CLI call" alone was satisfied by taking it one
+    // line above, leaving the reconcile unprotected.
+    const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
+    const cliCall = REGISTER_SRC.search(/^if "\$HERMES_BIN" tools disable browser/m);
+    // Every marker must have been FOUND before their order means anything: a
+    // `search` miss returns -1, and -1 < anything, so an ordering assertion over
+    // a moved marker passes while checking nothing.
+    expect(call, "register-mcp.sh: no top-level acquire_config_lock call").toBeGreaterThan(-1);
+    expect(reconcile, "register-mcp.sh: no PyYAML reconcile block").toBeGreaterThan(-1);
+    expect(cliCall, "register-mcp.sh: no `hermes tools disable browser` call").toBeGreaterThan(-1);
+    expect(call).toBeLessThan(reconcile);
+    expect(call).toBeLessThan(cliCall);
+
     expect(AUTH_SRC).toContain("flock -w 120 9");
     expect(REGISTER_SRC).toContain("flock -w 120 9");
   });
@@ -78,10 +94,38 @@ describe.runIf(RUNNABLE)("the lock is really taken at runtime", () => {
   });
 
   it.runIf(FLOCK)("waits for a held lock instead of racing through it", () => {
-    // Hold the shared lock for ~800ms in the background, then run the auth
-    // script. If it honours the lock it blocks until release (elapsed ≳ hold);
-    // if it ignored it, it would finish in well under 300ms. This is the mutual
-    // exclusion that stops the lost update.
+    // Timed in THIS process, not in the shell: `date +%s.%N` is a GNU coreutils
+    // extension, and on BSD/macOS date `%N` is emitted literally, so the old
+    // driver parsed "1770000000.N" and failed for a reason that had nothing to
+    // do with the lock. The suite gates only on platform !== "win32", so it runs
+    // there. And only the auth script's OWN duration is measured — timing the
+    // whole driver, including `wait` on the holder, would report ≈ the hold
+    // time whether or not the script honoured the lock.
+    const HOLD_S = 1.5;
+
+    // Calibrate: what one UNCONTENDED run of this script costs on this machine.
+    // The assertion below is "honouring the lock adds most of the hold ON TOP of
+    // that", so it cannot be satisfied by a slow interpreter. Twice, keeping the
+    // faster: the first run in a fresh process pays cold-start costs (bash,
+    // python, page cache) that the contended run no longer pays, and a cold
+    // baseline would eat the margin and fail for the wrong reason.
+    const timeUncontendedRun = () => {
+      const baseRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-lockbase-"));
+      const baseConfig = path.join(baseRoot, "hermes", "config.yaml");
+      fs.mkdirSync(path.dirname(baseConfig), { recursive: true });
+      fs.writeFileSync(baseConfig, "mcp_servers:\n  clawbox:\n    enabled: true\n");
+      const baseStart = Date.now();
+      const baseProc = spawnSync("bash", [AUTH], {
+        encoding: "utf-8",
+        timeout: 20000,
+        env: { ...process.env, CLAWBOX_ROOT: baseRoot, HERMES_CONFIG: baseConfig },
+      });
+      const ms = Date.now() - baseStart;
+      expect(baseProc.status, baseProc.stderr).toBe(0);
+      return ms;
+    };
+    const uncontendedMs = Math.min(timeUncontendedRun(), timeUncontendedRun());
+
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-lockwait-"));
     const configPath = path.join(root, "hermes", "config.yaml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -90,25 +134,43 @@ describe.runIf(RUNNABLE)("the lock is really taken at runtime", () => {
     fs.writeFileSync(configPath, "mcp_servers:\n  clawbox:\n    enabled: true\n");
     const lockFile = `${configPath}.lock`;
 
-    // One bash driver so the holder and the auth script actually overlap: launch
-    // a background holder that takes the lock for ~0.8s, wait 0.15s so it wins
-    // the lock first, then run the auth script and time how long it blocks.
-    const script = `
-      set -e
-      LOCK="${lockFile}"
-      ( exec 9>"$LOCK"; flock 9; sleep 0.8 ) &
-      hold=$!
-      sleep 0.15                       # ensure the holder has the lock first
-      start=$(date +%s.%N)
-      CLAWBOX_ROOT="${root}" HERMES_CONFIG="${configPath}" bash "${AUTH}" >/dev/null 2>&1
-      end=$(date +%s.%N)
-      wait $hold
-      awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", e - s}'
-    `;
-    const proc = spawnSync("bash", ["-c", script], { encoding: "utf-8", timeout: 20000 });
-    const elapsed = parseFloat(proc.stdout.trim() || "0");
-    // Held ~0.8s, started ~0.15s in, so the auth script should wait ≳0.5s.
-    expect(elapsed).toBeGreaterThan(0.5);
+    // Background holder: takes the shared lock and keeps it for HOLD_S.
+    const holder = spawn("bash", ["-c", `exec 9>"${lockFile}"; flock 9; sleep ${HOLD_S}`], {
+      stdio: "ignore",
+    });
+    holder.on("error", () => {});
+    try {
+      // Do not GUESS that the holder has the lock — prove it, by probing with a
+      // non-blocking flock until the probe is refused. A sleep-and-hope here is
+      // how this test would start measuring nothing on a loaded machine.
+      const deadline = Date.now() + 5000;
+      let held = false;
+      while (Date.now() < deadline) {
+        const probe = spawnSync("bash", ["-c", `exec 9>"${lockFile}"; flock -n 9`], {
+          encoding: "utf-8",
+        });
+        if (probe.status !== 0) {
+          held = true;
+          break;
+        }
+      }
+      expect(held, "the background holder never took the lock").toBe(true);
+
+      const start = Date.now();
+      const proc = spawnSync("bash", [AUTH], {
+        encoding: "utf-8",
+        timeout: 20000,
+        env: { ...process.env, CLAWBOX_ROOT: root, HERMES_CONFIG: configPath },
+      });
+      const contendedMs = Date.now() - start;
+      expect(proc.status, proc.stderr).toBe(0);
+      // Held 1.5s and the script started while it was held, so honouring the
+      // lock costs ≳1.4s more than the uncontended run. Ignoring it would cost
+      // about the same as the uncontended run. 500ms separates those cleanly.
+      expect(contendedMs - uncontendedMs).toBeGreaterThan(500);
+    } finally {
+      holder.kill();
+    }
 
     // And the foreign writer's key survived alongside the new dashboard block.
     const config = fs.readFileSync(configPath, "utf-8");

@@ -71,25 +71,88 @@ CLAWBOX_HOME="/home/clawbox"
 # exits non-zero, and a machine-readable marker is left for the flash host.
 PROVISION_FAILURES=()
 PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-status}"
+# Identifies THIS run. Stamped into the marker and printed on stdout, so a
+# reader holding both can tell whose verdict it is looking at.
+PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
+# Set when the marker channel could not be made to describe this run. The final
+# verdict folds this in: a verdict we cannot publish is not a success.
+PROVISION_STATUS_UNPUBLISHED=0
 
 record_provision_failure() {
   PROVISION_FAILURES+=("$1")
+}
+
+# ── The marker must never speak for a run other than this one ────────────────
+# The flash host reads $PROVISION_STATUS_FILE INSTEAD of parsing stdout, so the
+# file has to satisfy two properties, neither of which "write it at the end and
+# hope" provides:
+#
+#   1. Never stale. A run that cannot write the marker (read-only /etc, a file
+#      owned by another user, a full disk) used to leave the PREVIOUS run's
+#      STATUS=ok sitting there, and the flash host read it as this run's verdict
+#      — the same false-healthy result this whole block exists to prevent. So
+#      the marker is DELETED before provisioning starts: if the file exists at
+#      the end, this run wrote it.
+#   2. Never half-written. Temp file + rename in the same directory, so a reader
+#      sees the whole old marker or the whole new one, and a truncated write
+#      cannot leave "STATUS=ok" with the rest of the record missing.
+#
+# When either cannot be guaranteed, that is itself a reason not to ship the box:
+# the run says so on stdout and its verdict becomes "incomplete". Staying quiet
+# is what produced the false "ok".
+
+# Drop any marker left behind by an earlier run. Called once, before the first
+# provisioning step of a full install.
+invalidate_provision_status() {
+  rm -f "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  # `rm -f` reports success for an already-absent file and failure for one it
+  # could not remove, so test the outcome rather than its exit status.
+  if [ -e "$PROVISION_STATUS_FILE" ]; then
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not clear the previous provisioning marker"
+    echo "           $PROVISION_STATUS_FILE — its contents describe an EARLIER"
+    echo "           run and must not be read as this one's verdict."
+    return 1
+  fi
+  return 0
 }
 
 # Persist the final provisioning verdict where the flash host (or an operator,
 # or the next update) can read it without re-parsing install.sh's stdout.
 write_provision_status() {
   local status="$1"; shift
-  local dir
+  local dir tmp failed=0
   dir="$(dirname "$PROVISION_STATUS_FILE")"
+  tmp="$PROVISION_STATUS_FILE.tmp.$$"
   mkdir -p "$dir" 2>/dev/null || true
-  {
+  if ! {
     echo "# Written by install.sh at the end of a full install. Machine-readable."
+    echo "# One marker per run: the previous one is removed before provisioning"
+    echo "# starts, so this file always describes the run named by RUN_ID."
+    echo "RUN_ID=$PROVISION_RUN_ID"
     echo "STATUS=$status"
     echo "FAILED_STEPS=$*"
     echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  } > "$PROVISION_STATUS_FILE" 2>/dev/null || true
-  chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  } > "$tmp" 2>/dev/null; then
+    failed=1
+  else
+    chmod 644 "$tmp" 2>/dev/null || true
+    # Rename last: until this succeeds the live path holds nothing (it was
+    # cleared at the start), never a partial record.
+    mv -f "$tmp" "$PROVISION_STATUS_FILE" 2>/dev/null || failed=1
+  fi
+  # Either half failing means the same thing to the caller and wants the same
+  # answer, so there is one branch for both rather than two that must be kept
+  # saying the same thing.
+  if [ "$failed" -ne 0 ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not publish $PROVISION_STATUS_FILE (status=$status)."
+    echo "           This run has no marker. Use install.sh's exit code or the"
+    echo "           [provision-status] line on stdout instead."
+    return 1
+  fi
+  return 0
 }
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────
@@ -3241,6 +3304,12 @@ log() {
 
 echo "=== ClawBox Installer ==="
 
+# Clear the previous run's verdict BEFORE provisioning anything. From here until
+# the summary at the bottom there is deliberately no marker on disk, so a run
+# that dies mid-way (or cannot write its own marker at the end) leaves the flash
+# host with "no verdict" rather than with the last run's "ok".
+invalidate_provision_status || true
+
 log "Ensuring clawbox user exists..."
 step_ensure_user
 
@@ -3382,7 +3451,9 @@ echo ""
 # success by the caller (the flash host's "Setup: N/N succeeded"). The marker
 # file carries the same verdict for a caller that reads a file instead of the
 # exit code, and the sentinel line ([provision-status] ...) for one that greps
-# stdout. Keep all three in agreement.
+# stdout. Keep all three in agreement — including when the marker cannot be
+# written at all, in which case the other two must report "incomplete" rather
+# than a success no reader of the file can see.
 FINAL_RC=0
 if [ "${#PROVISION_FAILURES[@]}" -gt 0 ] || [ "${VALIDATE_RC:-0}" -ne 0 ]; then
   FINAL_RC=1
@@ -3400,11 +3471,29 @@ if [ "$FINAL_RC" -ne 0 ]; then
     echo "  # Service validation FAILED (see the checks listed above)."
   fi
   echo "  ############################################################"
-  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}"
+  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}" || true
+  # The sentinel lines below are a stdout contract with the flash host: keep the
+  # prefix and the verdict word byte-identical. The run id goes on its own line.
   echo "[provision-status] INCOMPLETE${PROVISION_FAILURES[*]:+ (${PROVISION_FAILURES[*]})}"
+  echo "[provision-run] $PROVISION_RUN_ID"
 else
-  write_provision_status ok ""
-  echo "[provision-status] OK"
+  write_provision_status ok "" || true
+  if [ "$PROVISION_STATUS_UNPUBLISHED" -ne 0 ]; then
+    # Every step passed, but the channel the flash host reads cannot be made to
+    # say so for THIS run. Reporting success here is how a stale marker gets
+    # read as a fresh verdict, so downgrade instead: an install whose result
+    # cannot be published is not an install anyone should ship.
+    FINAL_RC=1
+    echo "  ############################################################"
+    echo "  # PROVISIONING INCOMPLETE — every step passed, but this run"
+    echo "  # could not publish its verdict to $PROVISION_STATUS_FILE."
+    echo "  # Do NOT ship this box as healthy; fix the path and re-run."
+    echo "  ############################################################"
+    echo "[provision-status] INCOMPLETE (marker unwritable)"
+  else
+    echo "[provision-status] OK"
+  fi
+  echo "[provision-run] $PROVISION_RUN_ID"
 fi
 
 exit "$FINAL_RC"

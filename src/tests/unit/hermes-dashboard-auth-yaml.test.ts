@@ -16,12 +16,15 @@ import path from "node:path";
  */
 
 const SCRIPT = path.join(process.cwd(), "scripts", "setup-hermes-dashboard-auth.sh");
+const SCRIPT_SRC = fs.readFileSync(SCRIPT, "utf-8");
 
 // The script needs bash and a python3 with hashlib.scrypt. Both are present on
 // the device and on CI; skip rather than fail anywhere else.
 const RUNNABLE =
   process.platform !== "win32" &&
   spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" }).status === 0;
+// Permission-denied cases need a uid that permissions actually apply to.
+const NON_ROOT = typeof process.getuid === "function" && process.getuid() !== 0;
 
 function makeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-dashauth-"));
@@ -312,8 +315,15 @@ describe.runIf(RUNNABLE)("dashboard auth: honest failure classes", () => {
   });
 });
 
-/** Full provision with extra env (used to inject a broken PATH). */
-function run2(root: string, configPath: string, extraEnv: NodeJS.ProcessEnv) {
+/**
+ * Full provision with extra env (used to inject a broken PATH).
+ *
+ * `extraEnv` is a plain record, not NodeJS.ProcessEnv: callers pass only the
+ * variables they are overriding, and spreading process.env in at the call site
+ * to satisfy the wider type would let a stray CLAWBOX_ROOT in the developer's
+ * own environment silently override the root under test.
+ */
+function run2(root: string, configPath: string, extraEnv: Record<string, string>) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CLAWBOX_ROOT: root,
@@ -322,3 +332,138 @@ function run2(root: string, configPath: string, extraEnv: NodeJS.ProcessEnv) {
   };
   return spawnSync("bash", [SCRIPT], { encoding: "utf-8", env });
 }
+
+/**
+ * The plaintext password file has one reader that matters: the dashboard proxy,
+ * which re-reads it on every session renewal. `printf '%s' "$pw" > "$PWFILE"`
+ * truncates the file before it writes it, so that reader can observe an empty
+ * or partial password — which the proxy turns into the HTTP 401 that
+ * install.sh's validator now (correctly) treats as unhealthy — and a crash
+ * between the truncate and the write leaves it empty permanently, which
+ * classify_creds then reports as PW_MISSING. The config write already avoided
+ * all of that with a temp file and a rename; the password file now does too.
+ */
+describe.runIf(RUNNABLE)("the password file is replaced, never truncated in place", () => {
+  it("never targets the password file with a truncating redirect", () => {
+    // Pinned as source shape as well as behaviour: a redirect reintroduced here
+    // reopens a window no functional test can reliably catch, because it is a
+    // few microseconds wide. Comment lines are stripped first — the comment
+    // explaining the bug quotes the very redirect being banned.
+    const code = SCRIPT_SRC.split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .join("\n");
+    expect(code).not.toMatch(/[^0-9&|]>\s*"\$PWFILE"/);
+    // Temp file in the SAME directory — a rename is only atomic within one
+    // filesystem, and a temp under /tmp would silently degrade to copy+unlink.
+    expect(SCRIPT_SRC).toMatch(/pwtmp="\$PWFILE\./);
+    expect(SCRIPT_SRC).toContain('mv -f "$pwtmp" "$PWFILE"');
+  });
+
+  it("re-mints onto a NEW file, so no reader ever holds an empty one", () => {
+    const { root, configPath } = makeRoot();
+    const pwPath = path.join(root, "data", ".hermes-dashboard-pw");
+    expect(run(root, configPath, "clawbox").status).toBe(0);
+    const before = fs.statSync(pwPath);
+    const passwordBefore = fs.readFileSync(pwPath, "utf-8");
+
+    // Desync the pair so the next run re-mints (classify_creds -> MISMATCH).
+    // Node's write truncates in place, so the inode is unchanged going in — the
+    // comparison below is against the file the first provision created.
+    fs.writeFileSync(pwPath, "not-the-stored-password");
+    expect(fs.statSync(pwPath).ino).toBe(before.ino);
+
+    expect(run(root, configPath, "clawbox").status).toBe(0);
+
+    const after = fs.statSync(pwPath);
+    // A DIFFERENT inode is the observable difference between truncating the
+    // same file and renaming a finished one over it: a reader that opened the
+    // old file keeps reading the old password, whole, until it closes it.
+    expect(after.ino).not.toBe(before.ino);
+    expect(fs.readFileSync(pwPath, "utf-8")).not.toBe(passwordBefore);
+    // Still 0600, and never briefly wider than that (umask 077 on the temp).
+    expect(after.mode & 0o777).toBe(0o600);
+    // And the temp file did not survive the rename.
+    expect(fs.readdirSync(path.dirname(pwPath))).toEqual([".hermes-dashboard-pw"]);
+  });
+
+  // A read-only directory does not stop root, and this suite may run as root on
+  // the device. Say so in the skip rather than letting the test pass vacuously.
+  it.runIf(NON_ROOT)("fails loudly when the replacement cannot be written", () => {
+    // The temp write is the first thing that can fail. It must surface as a
+    // write failure with the old password file left untouched — not as a
+    // truncated file, and not as a credential verdict.
+    const { root, configPath } = makeRoot();
+    const dataDir = path.join(root, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.chmodSync(dataDir, 0o500);
+    try {
+      const proc = run(root, configPath, "clawbox");
+      expect(proc.status).toBe(1);
+      expect(proc.stderr).toContain("failed to write");
+      expect(`${proc.stdout}${proc.stderr}`).not.toMatch(/does not match|do not verify/);
+      // Nothing landed in data/ — no password, no orphaned temp.
+      expect(fs.readdirSync(dataDir)).toEqual([]);
+    } finally {
+      fs.chmodSync(dataDir, 0o700);
+    }
+  });
+});
+
+/**
+ * A `python3` that runs the real program and then, if that program was the one
+ * writing config.yaml, erases the block it just wrote — the competing writer
+ * (register-mcp.sh, the Hermes CLI, /setup-api/hermes/*) landing an os.replace
+ * built from a snapshot taken before our write. Deterministic, so the retry
+ * path is exercised on every attempt instead of occasionally.
+ */
+function blockErasingPythonDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-clobber-"));
+  fs.writeFileSync(
+    path.join(dir, "python3"),
+    [
+      `#!${REAL_PYTHON}`,
+      "import os, sys",
+      "src = sys.stdin.read()",
+      'is_writer = "os.replace(tmp, cfg_path)" in src',
+      "code = 0",
+      "try:",
+      '    exec(compile(src, "<stub>", "exec"), {"__name__": "__main__"})',
+      "except SystemExit as exc:",
+      "    code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)",
+      "if is_writer and code == 0:",
+      '    with open(os.environ["CFG"], "w", encoding="utf-8") as fh:',
+      '        fh.write("mcp_servers:\\n  clawbox:\\n    enabled: true\\n")',
+      "sys.exit(code)",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return dir;
+}
+
+describe.runIf(RUNNABLE)("lost-write retries back off", () => {
+  it("waits between attempts instead of re-losing the same race", () => {
+    const { root, configPath } = makeRoot();
+    const stubDir = blockErasingPythonDir();
+
+    const started = Date.now();
+    const proc = run2(root, configPath, {
+      PATH: `${stubDir}${path.delimiter}${process.env.PATH}`,
+    });
+    const elapsedMs = Date.now() - started;
+
+    // 3 = the write kept being lost. NOT 2 (a real hash mismatch) and not 4 (an
+    // environment error): the credentials were correct on every attempt.
+    expect(proc.status, proc.stderr).toBe(3);
+    expect(proc.stderr).toMatch(/Retrying under/);
+    // Attempts 1 and 2 retry; attempt 3 gives up. Two retries, two backoffs.
+    expect(proc.stderr.match(/Retrying under/g)?.length).toBe(2);
+
+    // The retry branch only runs while the competing writer is still inside its
+    // own read-modify-write window, so retrying immediately loses again — all
+    // three attempts used to finish in well under a second, before the other
+    // writer had landed anything. 1s then 2s of backoff puts a floor well above
+    // that, whatever this machine's scrypt costs.
+    expect(elapsedMs).toBeGreaterThan(2500);
+  });
+});
