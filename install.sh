@@ -1032,13 +1032,13 @@ resolve_update_branch() {
 #     `reset --hard origin/<branch>` on every future update.
 adoptable_checkout_branch() {
   [ -d "$PROJECT_DIR/.git" ] || return 0
-  local git_cmd current
-  git_cmd="git -c safe.directory=$PROJECT_DIR -C $PROJECT_DIR"
-  current=$($git_cmd symbolic-ref --short HEAD 2>/dev/null || true)
+  local current
+  current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
   [ -n "$current" ] || return 0
   [ "$current" != "main" ] || return 0
   is_safe_git_ref "$current" || return 0
-  $git_cmd rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1 || return 0
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1 || return 0
   printf '%s\n' "$current"
 }
 
