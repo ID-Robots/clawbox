@@ -110,6 +110,93 @@ describe("the TS and shell harness predicates agree", () => {
  * through its own update. `install.sh --step gateway_setup` by hand is the same
  * hole. These pin both ends so the trap fails loudly instead of shipping.
  */
+/**
+ * Propagation. A full install keeps `step_hermes_edition` NON-FATAL — a
+ * half-provisioned box should still finish and come up reachable — but two real
+ * provisions proved that "non-fatal" had become "invisible": install.sh printed
+ * "Hermes provisioning FAILED", then "All 20 checks healthy", then the flash
+ * host printed "Setup: 1/1 succeeded". A failed step must reach the operator's
+ * summary AND the exit status, or a broken box ships as healthy.
+ */
+describe("a failed provisioning step is not reportable as success", () => {
+  it("records the hermes_edition failure instead of only warning", () => {
+    // The non-fatal `|| { ... }` block must record the failure, not just echo a
+    // banner that scrolls off screen.
+    const tail = INSTALL_SH.slice(INSTALL_SH.indexOf("Provisioning Hermes"));
+    const block = tail.slice(0, tail.indexOf("\nfi\n"));
+    expect(block).toContain("record_provision_failure hermes_edition");
+  });
+
+  it("folds provisioning failures AND a failed validation into one honest exit", () => {
+    // Validation is captured (not left to abort via set -e) so the summary still
+    // prints, then a single FINAL_RC reflects BOTH signals, and the script exits
+    // with it. Without this, install.sh exited 0 whenever validation self-healed.
+    expect(INSTALL_SH).toContain("VALIDATE_RC=0");
+    expect(INSTALL_SH).toContain("step_validate_services || VALIDATE_RC=$?");
+    expect(INSTALL_SH).toContain("FINAL_RC=1");
+    // FINAL_RC rises from EITHER a recorded provisioning failure OR a failed
+    // validation — both signals feed the one exit code.
+    expect(INSTALL_SH).toContain('"${#PROVISION_FAILURES[@]}" -gt 0');
+    expect(INSTALL_SH).toContain('"${VALIDATE_RC:-0}" -ne 0');
+    expect(INSTALL_SH).toContain('exit "$FINAL_RC"');
+  });
+
+  it("prints an INCOMPLETE summary and a machine-readable status for the flash host", () => {
+    expect(INSTALL_SH).toContain("PROVISIONING INCOMPLETE");
+    // A sentinel line for a caller that greps stdout, and a marker file for one
+    // that reads a file — both must agree with the exit code.
+    expect(INSTALL_SH).toContain("[provision-status] INCOMPLETE");
+    expect(INSTALL_SH).toContain("[provision-status] OK");
+    expect(INSTALL_SH).toContain("write_provision_status incomplete");
+    expect(INSTALL_SH).toContain("write_provision_status ok");
+  });
+
+  it("defines the accumulator and marker writer", () => {
+    expect(INSTALL_SH).toContain("record_provision_failure()");
+    expect(INSTALL_SH).toContain("write_provision_status()");
+    expect(INSTALL_SH).toContain("PROVISION_FAILURES=()");
+  });
+});
+
+/**
+ * Validation must include the thing that failed. Right after dashboard auth
+ * failed, the 26/26 step reported every check healthy — because its only Hermes
+ * auth probe hit the proxy and whitelisted the failure (a 401 was "healthy"),
+ * and the proxy answers an un-cookied request with a 302 whether or not the auth
+ * provider works. The validator now verifies the provider directly, reusing the
+ * auth script's own `--check` classifier so both agree on "healthy".
+ */
+describe("service validation checks the dashboard auth provider", () => {
+  it("runs the auth script's --check on hermes AND dual", () => {
+    const fn = extractShellFunction("step_validate_services");
+    expect(fn).toContain('bash "$auth_script" --check');
+    // Guarded by has_hermes_harness (hermes + dual), not is_hermes_edition.
+    const probe = fn.slice(fn.indexOf("dashboard auth PROVIDER"));
+    expect(probe.slice(0, probe.indexOf("case"))).toContain("has_hermes_harness");
+  });
+
+  it("counts the new probe in the healthy total", () => {
+    const fn = extractShellFunction("step_validate_services");
+    expect(fn).toMatch(/has_hermes_harness; then probe_count=\$\(\( probe_count \+ 1 \)\)/);
+  });
+
+  it("no longer counts a proxy 401 as healthy on hermes", () => {
+    // 401 is the desynced-SSO symptom (see hermes-dashboard-proxy.js); a healthy
+    // browserless probe gets a 302/403, so a 401 must fail the check. Assert the
+    // case pattern precisely — the word "401" still appears in the DESYNCED
+    // message, and that is correct.
+    const fn = extractShellFunction("step_validate_services");
+    expect(fn).toContain("2*|3*|403) ;;");
+    expect(fn).not.toContain("2*|3*|401|403");
+  });
+
+  it("maps --check's classes to distinct operator messages", () => {
+    const fn = extractShellFunction("step_validate_services");
+    expect(fn).toContain("DESYNCED");
+    expect(fn).toContain("no usable dashboard auth provider");
+  });
+});
+
 describe("install.sh keeps its own edition guards", () => {
   it("post_update still calls gateway_setup on every edition", () => {
     expect(extractShellFunction("step_post_update")).toContain("step_gateway_setup");
