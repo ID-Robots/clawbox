@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -1509,18 +1509,44 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               50% { opacity: 0.1; transform: scale(1.18); }
             }
           `}</style>
-          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
+          {/* `px-[24px]` and a 384px cap: at 360px the ring, the copy and the
+              checklist all fit without a horizontal scrollbar, and the
+              checklist rows wrap rather than push the overlay sideways. */}
+          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-[24px]">
             {resetPhase === "done" ? (
               <div className="relative w-28 h-28 flex items-center justify-center">
-                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
-                <div className="w-16 h-16 rounded-full flex items-center justify-center bg-[#f97316] shadow-[0_0_40px_rgba(249,115,22,0.28)]">
-                  <span className="material-symbols-rounded text-white" style={{ fontSize: 32 }} aria-hidden="true">check</span>
+                {/* DONE is cyan on every box — the ring and the disc read the
+                    success role, not a green literal. */}
+                <div
+                  className="absolute inset-0 rounded-full"
+                  style={{ border: "2px solid color-mix(in srgb, var(--set-success) 20%, transparent)" }}
+                />
+                <div
+                  className="w-16 h-16 rounded-full flex items-center justify-center"
+                  style={{
+                    backgroundColor: "var(--set-success)",
+                    boxShadow: "0 0 40px color-mix(in srgb, var(--set-success) 28%, transparent)",
+                  }}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 32, color: "var(--set-surface)" }} aria-hidden="true">check</span>
                 </div>
               </div>
             ) : (
               <div className="relative w-32 h-32 flex items-center justify-center">
-                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
-                <div className="absolute inset-3 rounded-full border border-[#f97316]/15" style={{ animation: "factory-reset-pulse 2.5s ease-in-out infinite" }} />
+                {/* The spinner keeps its `animate-spin` and the pulse keeps its
+                    `@keyframes factory-reset-pulse` — both are inside the
+                    portalled overlay, never on an ancestor of the pane. */}
+                <div
+                  className="absolute inset-0 rounded-full border-[3px] animate-spin"
+                  style={{ borderColor: "var(--set-outline-variant)", borderTopColor: "var(--set-primary)" }}
+                />
+                <div
+                  className="absolute inset-3 rounded-full"
+                  style={{
+                    border: "1px solid color-mix(in srgb, var(--set-primary) 15%, transparent)",
+                    animation: "factory-reset-pulse 2.5s ease-in-out infinite",
+                  }}
+                />
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
@@ -1531,30 +1557,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
-            <div>
-              <h2 className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
-              <p className="text-sm text-white/45">{resetOverlayDescription}</p>
+            <div className="min-w-0 w-full">
+              <h2 className="text-2xl font-medium text-[var(--set-on-surface)] mb-2 break-words">{resetOverlayTitle}</h2>
+              <p className="text-sm text-[var(--set-on-surface-variant)] break-words">{resetOverlayDescription}</p>
             </div>
 
-            <div className="w-full max-w-sm space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
+            {/* The checklist was a `bg-white/[0.03]` + `border-white/[0.06]`
+                box. It is the same borderless tonal group the pane uses now —
+                the surface tone is the elevation, so the outline goes. */}
+            <div className="w-full max-w-sm space-y-3 text-left rounded-[16px] p-4 bg-[var(--set-surface-container)]">
               {resetProgressSteps.map((step) => (
                 <div key={step.id} className="flex items-start gap-3 text-sm">
                   {step.status === "completed" ? (
-                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                    <span
+                      className="flex items-center justify-center w-5 h-5 rounded-full shrink-0 text-[var(--set-success)]"
+                      style={{ backgroundColor: "color-mix(in srgb, var(--set-success) 20%, transparent)" }}
+                    >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden="true">
                         <path d="M5 12l5 5L19 7" />
                       </svg>
                     </span>
                   ) : step.status === "running" ? (
                     <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" aria-hidden="true" />
+                      <span className="w-4 h-4 rounded-full border-2 border-[var(--set-primary)] border-t-transparent animate-spin" aria-hidden="true" />
                     </span>
                   ) : (
-                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-white/20" aria-hidden="true" />
+                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--set-state-hover)] shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[var(--set-outline)]" aria-hidden="true" />
                     </span>
                   )}
-                  <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : "text-white/25"}>
+                  <span className={`min-w-0 break-words ${step.status === "running" ? "text-[var(--set-on-surface)] font-medium" : step.status === "completed" ? "text-[var(--set-success)] opacity-70" : "text-[var(--set-outline)]"}`}>
                     {step.label}
                   </span>
                 </div>
@@ -3492,154 +3524,271 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── About ─── */}
         {activeSection === "about" && (<>
-          <div className="max-w-xl space-y-6">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
+          {/* About. Five `bg-white/5 rounded-xl` tiles became four borderless
+              tonal groups. There are no `SettingsGroupHeader`s here because
+              About never shipped an uppercase label to promote — inventing one
+              would be a new string, and the section's only heading is the h2
+              that already exists. Every group therefore leans on the surface
+              tone alone, which is exactly what the borderless idiom is for.
 
-            <div className="bg-white/5 rounded-xl p-5 space-y-4">
-              <div className="flex items-center gap-4">
-                <img src="/icon-512.png" alt="ClawBox" className="w-14 h-14 rounded-2xl" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                <div>
-                  <div className="text-lg font-bold text-[var(--text-primary)]">ClawBox</div>
-                  <div className="text-xs text-[var(--text-muted)]">{t("settings.personalAI")}</div>
+              Nothing here fetches or gates differently: the Platform row still
+              renders the literal `"..."` forever when the stats fetch keeps
+              failing (no spinner, no error branch), the version is still shown
+              RAW in the Version row and `cleanVersion()`d in the update tile,
+              the icon still hides itself imperatively on `onError`, Beta still
+              only opens the dialog on the way ON and POSTs `{branch:null}`
+              immediately on the way OFF, and both beta POSTs still fail
+              silently.
+
+              The three link rows stay `<a>` elements. They are `role=link` with
+              their visible i18n text as the accessible name, and the e2e suite
+              finds "Documentation" and "Discord Community" that way — routing
+              them through `SettingsRow`'s `onClick` would turn them into
+              buttons and make them unreachable. They get the row's metrics and
+              its state layer by hand instead.
+
+              Gutters are the pane's (24px desktop / 16px mobile). Every long
+              value — the raw version string with its git hash, the platform
+              pair, the cleaned current → target pair — is `min-w-0 break-all`
+              inside its own column, so it wraps instead of pushing the group
+              sideways at 360px. */}
+          <div className="max-w-xl space-y-[16px]">
+            <h2 className="text-[16px] font-medium text-[var(--set-on-surface)]">{t("settings.aboutClawBox")}</h2>
+
+            {/* Product identity + the three version facts. The old card drew a
+                `border-t` between the two halves; the group's own 16px-inset
+                divider is that line now. */}
+            <SettingsGroup>
+              <div className="flex items-center gap-[16px] px-[16px] py-[12px]">
+                {/* `onError` still hides the image imperatively — the header
+                    collapses onto the remaining text, exactly as today. */}
+                <img src="/icon-512.png" alt="ClawBox" className="h-[56px] w-[56px] shrink-0 rounded-[16px]" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                <div className="min-w-0">
+                  <div className="text-[16px] font-medium text-[var(--set-on-surface)]">ClawBox</div>
+                  <div className="text-[12px] text-[var(--set-on-surface-variant)]">{t("settings.personalAI")}</div>
                 </div>
               </div>
 
-              <div className="space-y-2 pt-2 border-t border-[var(--border-subtle)]">
-                <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">{t("settings.version")}</span>
-                  <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
-                  <span className="text-[var(--text-primary)]">Next.js + Bun</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">{t("settings.platform")}</span>
-                  <span className="text-[var(--text-primary)]">{stats ? `${stats.overview.arch} ${stats.overview.platform}` : "..."}</span>
-                </div>
-              </div>
-            </div>
+              {/* The three fact rows STACK label-over-value when the width
+                  demands it. `flex-wrap` on the row plus a 120px basis on the
+                  value means the pair stays on one line at 414/640 and at 360
+                  for the strings that ship, and a long translated label (or a
+                  long git-hash version) pushes the value onto its own
+                  full-width line instead of squeezing it. `break-all` then
+                  wraps the string itself, so a mono value can never widen the
+                  group past the viewport. */}
+              {/* RAW version, git hash and all. The tile below and the nav
+                  subtitle show the `cleanVersion()`d one; the three renderings
+                  are deliberately distinct. */}
+              <SettingsRow
+                className="flex-wrap"
+                label={t("settings.version")}
+                trailing={<span className="min-w-0 flex-1 basis-[120px] break-all text-right font-mono text-[12px] text-[var(--set-on-surface)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>}
+              />
+              <SettingsRow
+                className="flex-wrap"
+                label={t("settings.runtime")}
+                trailing={<span className="min-w-0 flex-1 basis-[120px] break-all text-right font-mono text-[12px] text-[var(--set-on-surface)]">Next.js + Bun</span>}
+              />
+              {/* Still the literal `"..."` while `stats` is null — which is both
+                  "loading" and "permanently failed", because there is no error
+                  branch and never was. */}
+              <SettingsRow
+                className="flex-wrap"
+                label={t("settings.platform")}
+                trailing={<span className="min-w-0 flex-1 basis-[120px] break-all text-right font-mono text-[12px] text-[var(--set-on-surface)]">{stats ? `${stats.overview.arch} ${stats.overview.platform}` : "..."}</span>}
+              />
+            </SettingsGroup>
 
-            <a
-              href="https://openclawhardware.dev/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
-              {t("settings.documentation")}
-              <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
-            </a>
+            {/* Three outbound links, one group. The glyph spans are NOT
+                `aria-hidden` — Material Symbols renders from a ligature, so the
+                node's text is the glyph name and it is already part of each
+                link's accessible name today. Hiding them here would silently
+                rewrite three names in a file whose suite has no data-testid. */}
+            <SettingsGroup>
+              <a
+                href="https://openclawhardware.dev/docs"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-[48px] w-full items-center gap-[12px] px-[16px] py-[12px] text-[14px] text-[var(--set-on-surface-variant)] no-underline transition-colors hover:bg-[var(--set-state-hover)] hover:text-[var(--set-on-surface)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)]"
+              >
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>help</span>
+                <span className="min-w-0 flex-1">{t("settings.documentation")}</span>
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }}>open_in_new</span>
+              </a>
 
-            <a
-              href="https://t.me/ClawBoxSupportBot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>support_agent</span>
-              {t("settings.support")}
-              <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
-            </a>
+              <a
+                href="https://t.me/ClawBoxSupportBot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-[48px] w-full items-center gap-[12px] px-[16px] py-[12px] text-[14px] text-[var(--set-on-surface-variant)] no-underline transition-colors hover:bg-[var(--set-state-hover)] hover:text-[var(--set-on-surface)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)]"
+              >
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>support_agent</span>
+                <span className="min-w-0 flex-1">{t("settings.support")}</span>
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }}>open_in_new</span>
+              </a>
 
-            <a
-              href={DISCORD_INVITE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
-            >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
-              {t("settings.discordCommunity")}
-              <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
-            </a>
+              <a
+                href={DISCORD_INVITE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-[48px] w-full items-center gap-[12px] px-[16px] py-[12px] text-[14px] text-[var(--set-on-surface-variant)] no-underline transition-colors hover:bg-[var(--set-state-hover)] hover:text-[var(--set-on-surface)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)]"
+              >
+                {/* Third-party brand glyph. `fill="currentColor"` and the path
+                    are untouched. */}
+                <svg className="h-[20px] w-[20px] shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+                <span className="min-w-0 flex-1">{t("settings.discordCommunity")}</span>
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }}>open_in_new</span>
+              </a>
+            </SettingsGroup>
 
-            {/* Beta toggle */}
-            <div className="bg-white/5 rounded-xl px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>science</span>
-                  <div>
-                    <span className="text-sm text-[var(--text-primary)]">{t("settings.betaChannel")}</span>
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">{t("settings.betaDesc")}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleBeta(!betaEnabled)}
-                  disabled={betaSaving}
-                  className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${betaEnabled ? "bg-amber-500" : "bg-white/15"} ${betaSaving ? "opacity-50" : ""}`}
-                >
+            {/* Beta channel */}
+            <SettingsGroup divided={false}>
+              <SettingsRow
+                label={
+                  <span className="flex items-center gap-[12px]">
+                    <span className="material-symbols-rounded shrink-0 text-[var(--set-warning)]" style={{ fontSize: 20 }}>science</span>
+                    <span className="flex min-w-0 flex-col gap-[2px]">
+                      <span className="text-[14px] leading-[1.3] text-[var(--set-on-surface)]">{t("settings.betaChannel")}</span>
+                      <span className="text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("settings.betaDesc")}</span>
+                    </span>
+                  </span>
+                }
+                trailing={
+                  /* The bespoke 40×20 amber toggle becomes the M3 switch — but
+                     it keeps its AMBER, which is the one thing that separated
+                     it from every other (orange) toggle in the pane: beta is a
+                     caution, not the pane's normal action. Rather than teach
+                     the primitive a colour prop, the role is re-pointed for
+                     this one subtree, so the switch still paints from
+                     `--set-*` and still follows the Hermes edition. */
                   <span
-                    className="absolute w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200"
-                    style={{ left: 2, transform: betaEnabled ? "translateX(18px)" : "translateX(0)" }}
-                  />
-                </button>
-              </div>
+                    className="flex shrink-0 items-center"
+                    style={{ "--set-primary": "var(--set-warning)" } as CSSProperties}
+                  >
+                    <SettingsSwitch
+                      label={t("settings.betaChannel")}
+                      /* NOT optimistic: `betaEnabled` only moves after the POST
+                         resolves, so a failed pin never animates as success. */
+                      checked={betaEnabled}
+                      disabled={betaSaving}
+                      /* Same handler, same asymmetry: ON opens the dialog and
+                         nothing else, OFF POSTs `{branch:null}` immediately. */
+                      onChange={next => { void toggleBeta(next); }}
+                    />
+                  </span>
+                }
+              />
               {betaEnabled && (
-                <p className="text-xs text-amber-400/60 mt-2">{t("settings.betaInstallNote")}</p>
+                <p className="px-[16px] pb-[12px] text-[12px] text-[var(--set-warning)]">{t("settings.betaInstallNote")}</p>
               )}
-            </div>
+            </SettingsGroup>
 
             {/* Only the ClawBox System Update tile is exposed. OpenClaw is
                 pinned by ClawBox (config/openclaw-target.txt) and travels
                 with the full release, so a standalone "OpenClaw Update"
                 button would just confuse customers and let them bypass
                 the pin. The current OpenClaw version is still displayed
-                in the version-info section above. */}
-            <div className="flex gap-2">
-              <button
-                onClick={() => dispatchOpenApp("system_update")}
-                className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer text-left"
-              >
-                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>system_update</span>
-                <div className="flex flex-col min-w-0">
-                  <span>{t("settings.systemUpdate")}</span>
-                  {cleanVersion(versionInfo?.clawbox.current) && (
-                    <span className="text-[11px] text-green-400/60 font-mono truncate">
-                      {cleanVersion(versionInfo?.clawbox.current)}
-                      {versionInfo?.clawbox.target && <> → <span className="text-green-300">{cleanVersion(versionInfo.clawbox.target)}</span></>}
-                    </span>
-                  )}
-                </div>
-              </button>
-            </div>
+                in the version-info section above.
 
-            <button
-              onClick={() => setResetConfirm(true)}
-              className="flex items-center gap-3 w-full bg-red-500/5 rounded-xl px-4 py-3 text-sm text-red-400/60 hover:text-red-400 transition-colors cursor-pointer"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>restart_alt</span>
-              {t("settings.factoryReset")}
-            </button>
+                Still `dispatchOpenApp("system_update")` — it opens the separate
+                SystemUpdateApp window and does NOT run `triggerUpdate`. The
+                sub-line is still conditional on `cleanVersion(current)` being
+                truthy, so the row keeps changing height when the version is
+                unknown. The green tile becomes a row on the group surface with
+                the glyph carrying `--set-success`; the chevron is new and is
+                therefore `aria-hidden`, so the button's accessible name is the
+                one that ships today. */}
+            <SettingsGroup divided={false}>
+              <SettingsRow
+                onClick={() => dispatchOpenApp("system_update")}
+                label={
+                  <span className="flex items-center gap-[12px]">
+                    <span className="material-symbols-rounded shrink-0 text-[var(--set-success)]" style={{ fontSize: 20 }}>system_update</span>
+                    <span className="flex min-w-0 flex-col gap-[2px]">
+                      <span className="text-[14px] leading-[1.3] text-[var(--set-on-surface)]">{t("settings.systemUpdate")}</span>
+                      {cleanVersion(versionInfo?.clawbox.current) && (
+                        <span className="min-w-0 break-all font-mono text-[11px] text-[var(--set-on-surface-variant)]">
+                          {cleanVersion(versionInfo?.clawbox.current)}
+                          {versionInfo?.clawbox.target && <> → <span className="text-[var(--set-success)]">{cleanVersion(versionInfo.clawbox.target)}</span></>}
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                }
+                trailing={<span aria-hidden="true" className="material-symbols-rounded shrink-0 text-[var(--set-on-surface-variant)]" style={{ fontSize: 20 }}>chevron_right</span>}
+              />
+            </SettingsGroup>
+
+            {/* Factory reset. Opens the confirm modal — which is duplicated
+                verbatim in both return trees and edited in both. The row stays
+                unmistakably destructive: it carries `--set-error` at full
+                strength rather than the old 60%-opacity red that only reached
+                full red on hover, because this is the one control in Settings
+                that wipes the device. */}
+            <SettingsGroup divided={false}>
+              <SettingsRow
+                onClick={() => setResetConfirm(true)}
+                label={
+                  <span className="flex items-center gap-[12px] text-[var(--set-error)]">
+                    <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>restart_alt</span>
+                    <span className="min-w-0">{t("settings.factoryReset")}</span>
+                  </span>
+                }
+              />
+            </SettingsGroup>
           </div>
 
-          {/* Beta confirmation dialog */}
+          {/* Beta confirmation dialog. Still the SECOND sibling of a Fragment,
+              never wrapped with the pane above it — a `fixed` dialog inside the
+              scroll container would scroll with it. `z-[9999]` is unchanged;
+              the ladder in this file is deliberately unequal. It still has no
+              `role=dialog`, no focus trap, no Escape and no backdrop dismiss:
+              adding any of those is a behaviour change, not a restyle. */}
           {betaConfirm && (
-            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-              <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
-                <div className="flex items-center gap-3 mb-4">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 28 }}>warning</span>
-                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.enableBeta")}</h3>
+            <div
+              className="fixed inset-0 z-[9999] flex items-center justify-center backdrop-blur-sm px-4"
+              style={{ backgroundColor: "color-mix(in srgb, var(--set-surface) 72%, transparent)" }}
+            >
+              <div className="bg-[var(--set-surface-container-high)] rounded-[28px] p-[24px] max-w-sm w-full shadow-2xl">
+                <div className="flex items-center gap-[12px] mb-[16px]">
+                  <span className="material-symbols-rounded shrink-0 text-[var(--set-warning)]" style={{ fontSize: 28 }}>warning</span>
+                  <h3 className="text-[16px] font-medium text-[var(--set-on-surface)]">{t("settings.enableBeta")}</h3>
                 </div>
-                <div className="space-y-3 mb-6">
-                  <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+                <div className="space-y-[12px] mb-[24px]">
+                  <p className="text-[14px] leading-relaxed text-[var(--set-on-surface-variant)]">
                     {t("settings.betaWarning")}
                   </p>
-                  <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
-                    <p className="text-xs text-red-400 leading-relaxed">
+                  {/* The liability waiver keeps its own weight — error, not
+                      caution: it is the one paragraph that says "you may brick
+                      this". */}
+                  <div
+                    className="rounded-[12px] px-[12px] py-[10px]"
+                    style={{
+                      backgroundColor: "color-mix(in srgb, var(--set-error) 10%, transparent)",
+                      boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--set-error) 25%, transparent)",
+                    }}
+                  >
+                    <p className="text-[12px] leading-relaxed text-[var(--set-error)]">
                       {t("settings.betaDisclaimer")}
                     </p>
                   </div>
                 </div>
-                <div className="flex gap-3">
+                {/* `flex-wrap` + a 120px basis: at 360px the two buttons stay
+                    side by side, and if the translated labels are long they
+                    stack instead of squeezing below the 44px target. */}
+                <div className="flex flex-wrap gap-[12px]">
                   <button
                     onClick={() => setBetaConfirm(false)}
-                    className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/15 text-[var(--text-secondary)] rounded-lg text-sm font-medium cursor-pointer transition-colors"
+                    className="flex-1 basis-[120px] min-h-[44px] bg-transparent text-[var(--set-on-surface)] rounded-[28px] text-[14px] font-medium cursor-pointer transition-colors hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-primary)]"
+                    style={{ border: "1px solid var(--set-outline)" }}
                   >
                     {t("cancel")}
                   </button>
                   <button
                     onClick={confirmBeta}
-                    className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors"
+                    className="flex-1 basis-[120px] min-h-[44px] rounded-[28px] text-[14px] font-medium cursor-pointer border-none transition-opacity hover:opacity-90 active:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-warning)]"
+                    style={{ backgroundColor: "var(--set-warning)", color: "var(--set-surface)" }}
                   >
                     {t("settings.enableBetaBtn")}
                   </button>
@@ -3832,17 +3981,35 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
-      {/* Factory Reset confirmation modal */}
+      {/* Factory Reset confirmation modal.
+          Duplicated VERBATIM in the mobile and the desktop return tree — both
+          copies are edited together, which is why the two blocks stay
+          byte-identical. `z-[200]` is unchanged: the ladder in this file is
+          deliberately unequal and normalising it can bury the un-dismissible
+          reset overlay. The scrim is the palette's own ground at 72% rather
+          than `black/60`, so it darkens the Hermes edition in Hermes' colour.
+          `resetSetup` is still wired to the same button and is still
+          irreversible — no confirmation step is added or removed. */}
       {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center backdrop-blur-sm px-4"
+          style={{ backgroundColor: "color-mix(in srgb, var(--set-surface) 72%, transparent)" }}
+        >
+          <div className="bg-[var(--set-surface-container-high)] rounded-[28px] p-[24px] max-w-sm w-full shadow-2xl">
+            <h3 className="text-[16px] font-medium text-[var(--set-on-surface)] mb-[8px]">{t("settings.factoryResetTitle")}</h3>
+            <p className="text-[14px] text-[var(--set-on-surface-variant)] mb-[20px] leading-relaxed">{t("settings.factoryResetDesc")}</p>
+            {/* `flex-wrap` + a 120px basis: at 360px the two buttons stay side
+                by side, and a long translated label stacks them instead of
+                squeezing either below the 44px target. */}
+            <div className="flex flex-wrap gap-[12px]">
+              <button onClick={() => setResetConfirm(false)} className="flex-1 basis-[120px] min-h-[44px] bg-transparent text-[var(--set-on-surface)] rounded-[28px] text-[14px] font-medium cursor-pointer transition-colors hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-primary)]" style={{ border: "1px solid var(--set-outline)" }}>
                 {t("cancel")}
               </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
+              {/* The confirm stays a FILLED destructive button. This is the one
+                  control in Settings that wipes the device, so it carries
+                  `--set-error` at full strength — not the pane's action
+                  colour, and not a quiet outlined variant. */}
+              <button onClick={resetSetup} className="flex-1 basis-[120px] min-h-[44px] rounded-[28px] text-[14px] font-medium cursor-pointer border-none transition-opacity hover:opacity-90 active:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-error)]" style={{ backgroundColor: "var(--set-error)", color: "var(--set-surface)" }}>
                 {t("settings.reset")}
               </button>
             </div>
@@ -4042,17 +4209,35 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         </div>
       )}
 
-      {/* Factory Reset confirmation modal */}
+      {/* Factory Reset confirmation modal.
+          Duplicated VERBATIM in the mobile and the desktop return tree — both
+          copies are edited together, which is why the two blocks stay
+          byte-identical. `z-[200]` is unchanged: the ladder in this file is
+          deliberately unequal and normalising it can bury the un-dismissible
+          reset overlay. The scrim is the palette's own ground at 72% rather
+          than `black/60`, so it darkens the Hermes edition in Hermes' colour.
+          `resetSetup` is still wired to the same button and is still
+          irreversible — no confirmation step is added or removed. */}
       {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center backdrop-blur-sm px-4"
+          style={{ backgroundColor: "color-mix(in srgb, var(--set-surface) 72%, transparent)" }}
+        >
+          <div className="bg-[var(--set-surface-container-high)] rounded-[28px] p-[24px] max-w-sm w-full shadow-2xl">
+            <h3 className="text-[16px] font-medium text-[var(--set-on-surface)] mb-[8px]">{t("settings.factoryResetTitle")}</h3>
+            <p className="text-[14px] text-[var(--set-on-surface-variant)] mb-[20px] leading-relaxed">{t("settings.factoryResetDesc")}</p>
+            {/* `flex-wrap` + a 120px basis: at 360px the two buttons stay side
+                by side, and a long translated label stacks them instead of
+                squeezing either below the 44px target. */}
+            <div className="flex flex-wrap gap-[12px]">
+              <button onClick={() => setResetConfirm(false)} className="flex-1 basis-[120px] min-h-[44px] bg-transparent text-[var(--set-on-surface)] rounded-[28px] text-[14px] font-medium cursor-pointer transition-colors hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-primary)]" style={{ border: "1px solid var(--set-outline)" }}>
                 {t("cancel")}
               </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
+              {/* The confirm stays a FILLED destructive button. This is the one
+                  control in Settings that wipes the device, so it carries
+                  `--set-error` at full strength — not the pane's action
+                  colour, and not a quiet outlined variant. */}
+              <button onClick={resetSetup} className="flex-1 basis-[120px] min-h-[44px] rounded-[28px] text-[14px] font-medium cursor-pointer border-none transition-opacity hover:opacity-90 active:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-error)]" style={{ backgroundColor: "var(--set-error)", color: "var(--set-surface)" }}>
                 {t("settings.reset")}
               </button>
             </div>
