@@ -3,50 +3,64 @@
 import type { CSSProperties, ReactNode } from "react";
 
 /**
- * App icon tiles for the desktop and the dock.
+ * App icon tiles for the desktop, the launcher and anywhere else a bare surface
+ * needs an app to read as an app.
  *
- * A tile is a rounded square carrying either a bitmap asset, a hand-drawn glyph
- * or caller-supplied children. Two rims (a light inner hairline and a dark outer
- * one) keep the silhouette readable against both dark and pale wallpapers, and a
- * layered drop shadow lifts it off the background. Glyphs are hand-drawn rather
- * than an icon-font dependency so each one can be tuned to the 24px grid.
+ * The original of this file was lost with a reflashed device. The palette below
+ * is not invented: it was sampled pixel-by-pixel out of a 2026-08-12 screenshot
+ * of the running desktop, so each tile keeps the colours it actually shipped
+ * with. That is also why the tints live here rather than coming from `app.color`
+ * — several apps deliberately differ from their window colour (ClawKeep is
+ * emerald, not forest green; Skills is bright violet, not near-black; Browser is
+ * a pale tile so the Chrome mark reads against it).
  *
- * Colour comes from the same M3 tokens the dock declares on `.m3dx`, with local
- * fallbacks so a tile is equally correct on the wallpaper, where no `.m3dx`
- * ancestor exists. Nothing below hardcodes a brand colour: `--primary` stays
- * ACTION and is never re-declared here, so a retint remains a token override.
+ * Each tile is a vertical gradient rather than a flat fill. That is the whole
+ * visual signature of the set — a flat `backgroundColor` cannot reproduce it,
+ * and a tile without it looks like an ordinary coloured div.
  */
+
+interface Tint {
+  /** Gradient stops, top then bottom. */
+  from: string;
+  to: string;
+}
+
+/**
+ * Sampled from the shipped desktop. Values are the real gradient endpoints, so
+ * changing one here changes what the user sees — they are not decoration.
+ */
+const TINTS: Record<string, Tint> = {
+  settings: { from: "#b8bdc3", to: "#6c727c" },
+  hermes: { from: "#927bdc", to: "#393644" },
+  clawbox: { from: "#73636b", to: "#101623" },
+  "hermes-skills": { from: "#dcd1f8", to: "#5e2cb3" },
+  terminal: { from: "#767980", to: "#292c31" },
+  files: { from: "#fcc57f", to: "#df7d21" },
+  clawkeep: { from: "#77e2b3", to: "#1a9b67" },
+  system_update: { from: "#7bc8f6", to: "#157bc7" },
+  browser: { from: "#95b9e8", to: "#9eb4d8" },
+  // Not present on the captured desktop; derived from each app's own colour on
+  // the same light-top/saturated-bottom ramp as the sampled ones.
+  openclaw: { from: "#6b7280", to: "#0a0f1a" },
+  store: { from: "#86efac", to: "#16a34a" },
+  vnc: { from: "#c4b5fd", to: "#6d28d9" },
+};
+
+const FALLBACK: Tint = { from: "#4b5563", to: "#253347" };
 
 interface AssetSpec {
   src: string;
-  /** Multiplier on the tile's inner box; >1 lets art bleed to the rim. */
+  /** Multiplier on the tile edge; >1 lets art bleed toward the rim. */
   scale: number;
   fit: "contain" | "cover";
-  /** When set, the art is circle-cropped at this radius (px at size 40). */
+  /** Circle-crops the art at this radius, expressed at a 40px tile. */
   circle?: number;
 }
 
-/** Apps whose identity is a picture, not a glyph. */
+/** Apps whose identity is a picture rather than a glyph. */
 const ASSETS: Record<string, AssetSpec> = {
   clawbox: { src: "/clawbox-crab.png", scale: 1.18, fit: "contain" },
-  openclaw: { src: "/clawbox-icon.png", scale: 0.82, fit: "contain" },
   hermes: { src: "/hermes-agent.png", scale: 0.78, fit: "cover", circle: 30 },
-};
-
-/** Tile background per app id. Falls back to the app's own colour. */
-const TINTS: Record<string, string> = {
-  settings: "#6b7280",
-  clawbox: "#0a0f1a",
-  openclaw: "#0a0f1a",
-  hermes: "#1a1230",
-  "hermes-skills": "#1a1230",
-  terminal: "#1a1a2e",
-  files: "#f97316",
-  clawkeep: "#14532d",
-  system_update: "#0ea5e9",
-  store: "#22c55e",
-  browser: "#4285f4",
-  vnc: "#7c3aed",
 };
 
 type GlyphName =
@@ -63,7 +77,6 @@ type GlyphName =
   | "chat"
   | "generic";
 
-/** Which glyph an app id draws when it has no bitmap asset. */
 const GLYPH_FOR: Record<string, GlyphName> = {
   settings: "settings",
   terminal: "terminal",
@@ -74,102 +87,98 @@ const GLYPH_FOR: Record<string, GlyphName> = {
   vnc: "vnc",
   system_update: "update",
   "hermes-skills": "skills",
+  openclaw: "chat",
 };
 
 /**
- * Hand-drawn glyphs on a 24x24 grid. Every path is stroked, never filled, so a
- * single `currentColor` drives the whole set and the weight stays even when a
- * tile is scaled. Inset to 3px so no stroke is clipped by the rounded corner.
+ * Glyphs on a 24x24 grid. Filled shapes, not strokes: at 28px inside a 56px
+ * tile a stroked glyph reads as thin and washed out against a saturated
+ * gradient, which is why the shipped set used solid marks.
  */
 const GLYPHS: Record<GlyphName, ReactNode> = {
   apps: (
     <>
-      <rect x="3.5" y="3.5" width="7" height="7" rx="2" />
-      <rect x="13.5" y="3.5" width="7" height="7" rx="2" />
-      <rect x="3.5" y="13.5" width="7" height="7" rx="2" />
-      <rect x="13.5" y="13.5" width="7" height="7" rx="2" />
+      <rect x="3" y="3" width="7.5" height="7.5" rx="2.2" />
+      <rect x="13.5" y="3" width="7.5" height="7.5" rx="2.2" />
+      <rect x="3" y="13.5" width="7.5" height="7.5" rx="2.2" />
+      <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2.2" />
     </>
   ),
   settings: (
-    <>
-      <circle cx="12" cy="12" r="3.25" />
-      <path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6" />
-    </>
+    <path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6m0 2a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6M10.6 2l-.5 2.6a8 8 0 0 0-1.7 1L5.9 4.7 3.5 8.8l2 1.7a8 8 0 0 0 0 2l-2 1.7 2.4 4.1 2.5-.9a8 8 0 0 0 1.7 1l.5 2.6h4.8l.5-2.6a8 8 0 0 0 1.7-1l2.5.9 2.4-4.1-2-1.7a8 8 0 0 0 0-2l2-1.7-2.4-4.1-2.5.9a8 8 0 0 0-1.7-1L13.4 2z" />
   ),
   terminal: (
     <>
-      <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
-      <path d="m7.5 10 2.6 2.4-2.6 2.4M13 15.2h4" />
+      <rect x="2.4" y="4.4" width="19.2" height="15.2" rx="2.6" opacity=".28" />
+      <path d="M6.6 9.2 9.8 12l-3.2 2.8a1 1 0 0 1-1.3-1.5L6.9 12 5.3 10.7a1 1 0 0 1 1.3-1.5M12.6 14h5a1 1 0 0 1 0 2h-5a1 1 0 0 1 0-2" />
     </>
   ),
   files: (
-    <path d="M3.5 7.2a1.7 1.7 0 0 1 1.7-1.7h3.4l2 2.4h6.2a1.7 1.7 0 0 1 1.7 1.7v7.6a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z" />
+    <path d="M3 7.4A1.9 1.9 0 0 1 4.9 5.5h3.6l2.1 2.5h6.5A1.9 1.9 0 0 1 19 9.9v.6H3zM3 12h16v6.1a1.9 1.9 0 0 1-1.9 1.9H4.9A1.9 1.9 0 0 1 3 18.1z" />
   ),
   clawkeep: (
-    <>
-      <path d="M12 3.6 19 6.4v5.1c0 4-2.9 7.4-7 8.9-4.1-1.5-7-4.9-7-8.9V6.4z" />
-      <path d="m9 12 2.2 2.2L15.4 10" />
-    </>
+    <path d="M12 2.6 4.6 5.6v6.1c0 4.6 3.2 8.6 7.4 9.7 4.2-1.1 7.4-5.1 7.4-9.7V5.6zm0 5.2a2.4 2.4 0 0 1 1.2 4.5v2.4a1.2 1.2 0 0 1-2.4 0v-2.4A2.4 2.4 0 0 1 12 7.8" />
   ),
   store: (
-    <>
-      <path d="M4.5 8.5h15l-1.1 9.2a1.8 1.8 0 0 1-1.8 1.6H7.4a1.8 1.8 0 0 1-1.8-1.6z" />
-      <path d="M9 8.5V7a3 3 0 0 1 6 0v1.5" />
-    </>
+    <path d="M6 2.5h12a1.5 1.5 0 0 1 1.5 1.4l.5 4.3a3.2 3.2 0 0 1-6.3.9 3.2 3.2 0 0 1-3.4 0 3.2 3.2 0 0 1-6.3-.9L4.5 3.9A1.5 1.5 0 0 1 6 2.5M5 11.6a5 5 0 0 0 1.4.3v7.6A1.5 1.5 0 0 0 7.9 21h8.2a1.5 1.5 0 0 0 1.5-1.5v-7.6a5 5 0 0 0 1.4-.3v7.9A3.5 3.5 0 0 1 15.5 23h-7A3.5 3.5 0 0 1 5 19.5z" />
   ),
   browser: (
     <>
-      <circle cx="12" cy="12" r="8.4" />
-      <path d="M3.6 12h16.8M12 3.6c2.1 2.3 3.2 5.3 3.2 8.4s-1.1 6.1-3.2 8.4c-2.1-2.3-3.2-5.3-3.2-8.4S9.9 5.9 12 3.6Z" />
+      <circle cx="12" cy="12" r="9.2" opacity=".22" />
+      <circle cx="12" cy="12" r="4.1" />
     </>
   ),
   vnc: (
-    <>
-      <rect x="3" y="5" width="18" height="11.5" rx="2" />
-      <path d="M9 20h6M12 16.5V20" />
-    </>
+    <path d="M3.6 5.2A1.8 1.8 0 0 1 5.4 3.4h13.2a1.8 1.8 0 0 1 1.8 1.8v9.6a1.8 1.8 0 0 1-1.8 1.8h-4.7l.5 2h2a1 1 0 0 1 0 2H7.6a1 1 0 0 1 0-2h2l.5-2H5.4a1.8 1.8 0 0 1-1.8-1.8z" />
   ),
   update: (
-    <>
-      <path d="M20 12a8 8 0 1 1-2.6-5.9" />
-      <path d="M20.2 4.6v4.2H16" />
-    </>
+    <path d="M12 2.8a1.2 1.2 0 0 1 1.2 1.2v8.3l2.5-2.5a1.2 1.2 0 0 1 1.7 1.7l-4.5 4.6a1.2 1.2 0 0 1-1.8 0L6.6 11.5a1.2 1.2 0 1 1 1.7-1.7l2.5 2.5V4a1.2 1.2 0 0 1 1.2-1.2M4.6 17.4a1.2 1.2 0 0 1 1.2 1.2v.6h12.4v-.6a1.2 1.2 0 0 1 2.4 0v1a2 2 0 0 1-2 2H5.4a2 2 0 0 1-2-2v-1a1.2 1.2 0 0 1 1.2-1.2" />
   ),
   skills: (
-    <>
-      <path d="m12 3.5 2.5 5.3 5.6.8-4.1 4.1 1 5.8-5-2.7-5 2.7 1-5.8L3.9 9.6l5.6-.8z" />
-    </>
+    <path d="M13.6 2.4 5.2 13.1a.9.9 0 0 0 .7 1.5h4.3l-1.4 7.2a.9.9 0 0 0 1.6.7l8.5-10.7a.9.9 0 0 0-.7-1.5h-4.3l1.4-7.2a.9.9 0 0 0-1.7-.7" />
   ),
   chat: (
-    <path d="M20.5 11.6c0 4-3.8 7.2-8.5 7.2a10 10 0 0 1-2.6-.34L4.5 20.2l1.3-3.6A6.9 6.9 0 0 1 3.5 11.6c0-4 3.8-7.2 8.5-7.2s8.5 3.2 8.5 7.2Z" />
+    <path d="M12 3.4c-5 0-9 3.4-9 7.7 0 2.4 1.3 4.6 3.3 6l-1 3.6a.7.7 0 0 0 1 .8l4-2.1c.5.1 1.1.1 1.7.1 5 0 9-3.4 9-7.7s-4-8.4-9-8.4" />
   ),
   generic: (
     <>
-      <rect x="4" y="4" width="16" height="16" rx="4" />
-      <circle cx="12" cy="12" r="2.6" />
+      <rect x="3.4" y="3.4" width="17.2" height="17.2" rx="4.6" opacity=".24" />
+      <circle cx="12" cy="12" r="3.2" />
     </>
   ),
 };
 
-/** True for hex colours light enough that white art on them would fail AA. */
-function isPale(hex?: string): boolean {
-  if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return false;
+function parseTint(color?: string): Tint | null {
+  if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return null;
+  // Build the same light-top ramp used by the sampled set, so an unknown app
+  // passed only a flat colour still looks like it belongs to the family.
+  const r = parseInt(color.slice(1, 3), 16);
+  const g = parseInt(color.slice(3, 5), 16);
+  const b = parseInt(color.slice(5, 7), 16);
+  const lift = (v: number) => Math.min(255, Math.round(v + (255 - v) * 0.42));
+  return {
+    from: `#${[lift(r), lift(g), lift(b)].map((v) => v.toString(16).padStart(2, "0")).join("")}`,
+    to: color,
+  };
+}
+
+/** True when the tile is pale enough that white art on it would fail contrast. */
+function isPale(t: Tint): boolean {
+  const hex = t.to;
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
-  // Rec. 709 luma — cheaper than a full contrast ratio and enough to pick ink.
-  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.62;
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.58;
 }
 
 interface MacAppIconProps {
-  /** App id — selects the asset, glyph and default tint. */
+  /** App id — selects tint, asset and glyph. */
   id: string;
   /** Edge length of the tile in px. */
   size?: number;
-  /** Tile background; overrides the id's default tint. */
+  /** Only consulted for ids with no entry in TINTS; the sampled palette wins. */
   color?: string;
-  /** "app" when the tile sits on the wallpaper or the dock rather than in a
-   *  list, where the extra lift would read as clutter. */
+  /** "app" when the tile sits on a wallpaper or a bare grid. */
   shadow?: "app" | "none";
   /** Replaces the asset/glyph entirely — used for installed store apps. */
   children?: ReactNode;
@@ -178,24 +187,25 @@ interface MacAppIconProps {
 
 export default function MacAppIcon({
   id,
-  size = 40,
+  size = 56,
   color,
   shadow = "app",
   children,
   className,
 }: MacAppIconProps) {
-  const tint = color || TINTS[id] || "#253347";
+  const tint = TINTS[id] ?? parseTint(color) ?? FALLBACK;
   const asset = ASSETS[id];
   const glyph = GLYPHS[GLYPH_FOR[id] ?? "generic"];
-  const ink = isPale(tint) ? "rgba(10,15,26,.92)" : "rgba(255,255,255,.94)";
-  // The 40px design was drawn against a 10px radius; keep that ratio at any size
-  // so a 24px tile in a list and a 56px tile on the wallpaper look like siblings.
-  const radius = Math.round(size * 0.25);
+  const ink = isPale(tint) ? "rgba(10,15,26,.92)" : "#fff";
+  // macOS squircle proportion. Tracking size keeps a 40px launcher tile and a
+  // 56px desktop tile visibly the same shape.
+  const radius = Math.round(size * 0.28);
 
   const style = {
     "--mai-size": `${size}px`,
     "--mai-radius": `${radius}px`,
-    "--mai-tint": tint,
+    "--mai-from": tint.from,
+    "--mai-to": tint.to,
     "--mai-ink": ink,
   } as CSSProperties;
 
@@ -210,7 +220,7 @@ export default function MacAppIcon({
         <span className="mai-slot">{children}</span>
       ) : asset ? (
         <img
-          className={`mai-art${asset.circle ? " mai-art--circle" : ""}`}
+          className="mai-art"
           src={asset.src}
           alt=""
           draggable={false}
@@ -227,13 +237,9 @@ export default function MacAppIcon({
         <svg
           className="mai-glyph"
           viewBox="0 0 24 24"
-          width={Math.round(size * 0.55)}
-          height={Math.round(size * 0.55)}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.7"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+          width={Math.round(size * 0.52)}
+          height={Math.round(size * 0.52)}
+          fill="currentColor"
         >
           {glyph}
         </svg>
@@ -244,9 +250,8 @@ export default function MacAppIcon({
 }
 
 interface MacGlyphTileProps {
-  /** Which hand-drawn glyph to draw. */
   symbol: GlyphName;
-  /** Tile background. */
+  /** Flat colour; ramped into a gradient like the rest of the set. */
   tint?: string;
   size?: number;
   shadow?: "app" | "none";
@@ -254,22 +259,23 @@ interface MacGlyphTileProps {
 }
 
 /**
- * A tile that is only a glyph — no app identity behind it. The launcher button
- * uses this, which is why it takes a symbol rather than an id.
+ * A tile that is only a glyph — no app behind it. The launcher button uses
+ * this, which is why it takes a symbol rather than an id.
  */
 export function MacGlyphTile({
   symbol,
-  tint = "#253347",
+  tint = "#7C8595",
   size = 40,
   shadow = "app",
   className,
 }: MacGlyphTileProps) {
-  const ink = isPale(tint) ? "rgba(10,15,26,.92)" : "rgba(255,255,255,.94)";
+  const t = parseTint(tint) ?? FALLBACK;
   const style = {
     "--mai-size": `${size}px`,
-    "--mai-radius": `${Math.round(size * 0.25)}px`,
-    "--mai-tint": tint,
-    "--mai-ink": ink,
+    "--mai-radius": `${Math.round(size * 0.28)}px`,
+    "--mai-from": t.from,
+    "--mai-to": t.to,
+    "--mai-ink": isPale(t) ? "rgba(10,15,26,.92)" : "#fff",
   } as CSSProperties;
 
   return (
@@ -282,13 +288,9 @@ export function MacGlyphTile({
       <svg
         className="mai-glyph"
         viewBox="0 0 24 24"
-        width={Math.round(size * 0.55)}
-        height={Math.round(size * 0.55)}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+        width={Math.round(size * 0.52)}
+        height={Math.round(size * 0.52)}
+        fill="currentColor"
       >
         {GLYPHS[symbol] ?? GLYPHS.generic}
       </svg>
@@ -299,13 +301,6 @@ export function MacGlyphTile({
 
 const TILE_CSS = `
 .mai{
-  /* Local fallbacks: a tile on the wallpaper has no .m3dx ancestor to inherit
-     the dock's tokens from, so every var() below has to stand alone. */
-  --mai-rim-light:rgba(255,255,255,.16);
-  --mai-rim-dark:rgba(0,0,0,.42);
-  --mai-ease:var(--m3dx-standard,cubic-bezier(0.2,0,0,1));
-  --mai-dur:var(--m3dx-short4,200ms);
-
   position:relative;
   display:inline-flex;
   align-items:center;
@@ -314,35 +309,34 @@ const TILE_CSS = `
   width:var(--mai-size);
   height:var(--mai-size);
   border-radius:var(--mai-radius);
-  background:var(--mai-tint);
+  /* The signature of the set. Flat fills read as a plain coloured div. */
+  background:linear-gradient(180deg,var(--mai-from) 0%,var(--mai-to) 100%);
   color:var(--mai-ink);
   overflow:hidden;
   isolation:isolate;
-  transition:transform var(--mai-dur) var(--mai-ease);
 }
 .mai *,.mai *::before,.mai *::after{ box-sizing:border-box; }
 
-/* Two rims in one pseudo-element: the inset light hairline reads as a bevel on
-   dark wallpapers, the outer dark one keeps a pale tile from dissolving into a
-   pale wallpaper. Inset slightly so neither stroke is clipped. */
+/* A bright hairline along the top edge and a dark one around the whole tile:
+   the first sells the gradient as a lit surface, the second keeps a pale tile
+   from dissolving into a pale wallpaper. */
 .mai::after{
   content:"";
   position:absolute;
   inset:0;
   border-radius:inherit;
   box-shadow:
-    inset 0 0 0 .5px var(--mai-rim-light),
-    0 0 0 .5px var(--mai-rim-dark);
+    inset 0 1px 0 rgba(255,255,255,.34),
+    inset 0 0 0 .5px rgba(255,255,255,.10),
+    0 0 0 .5px rgba(0,0,0,.34);
   pointer-events:none;
   z-index:2;
 }
 
-/* Layered rather than one big blur: the tight shadow anchors the tile to the
-   surface, the wide one gives it height. */
 .mai--app{
   box-shadow:
-    0 1px 2px rgba(0,0,0,.34),
-    0 6px 14px -4px rgba(0,0,0,.46);
+    0 1px 2px rgba(0,0,0,.30),
+    0 8px 18px -6px rgba(0,0,0,.48);
 }
 .mai--none{ box-shadow:none; }
 
@@ -353,10 +347,12 @@ const TILE_CSS = `
   user-select:none;
   -webkit-user-drag:none;
 }
-.mai-art--circle{ overflow:hidden; }
-
-.mai-glyph{ position:relative; z-index:1; display:block; }
-
+.mai-glyph{
+  position:relative;
+  z-index:1;
+  display:block;
+  filter:drop-shadow(0 1px 1px rgba(0,0,0,.22));
+}
 .mai-slot{
   position:relative;
   z-index:1;
@@ -367,8 +363,4 @@ const TILE_CSS = `
   height:100%;
 }
 .mai-slot > *{ max-width:100%; max-height:100%; }
-
-@media (prefers-reduced-motion:reduce){
-  .mai{ transition:none; }
-}
 `;
