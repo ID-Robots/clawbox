@@ -7,6 +7,7 @@ import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import M3ExpressiveDock from "@/components/M3ExpressiveDock";
+import MacAppIcon from "@/components/MacAppIcon";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
@@ -2306,15 +2307,15 @@ function ChromeDesktopInner() {
             const renderIcon = () => {
               if (app.type === "installed" && app.storeApp) {
                 return (
-                  <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
+                  <MacAppIcon id={app.id} size={40} color={app.color}>
                     <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
-                  </div>
+                  </MacAppIcon>
                 );
               }
               return (
-                <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
+                <MacAppIcon id={app.id} size={40} color={app.color}>
                   <AppIcon id={app.id} />
-                </div>
+                </MacAppIcon>
               );
             };
             return {

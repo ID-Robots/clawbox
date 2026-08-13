@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import DockCalendarPopover from "@/components/DockCalendarPopover";
+import { MenuSurface, MenuItem, MenuLabel, MenuSeparator } from "@/components/Menu";
 
 /**
  * M3 Expressive dock — Hermes tint.
@@ -61,10 +62,19 @@ export default function M3ExpressiveDock({
   onChatClick,
   showChatButton,
   time,
+  onNewWindow,
+  onPinApp,
+  onUnpinApp,
+  onCloseApp,
+  onShelfSettings,
 }: M3ExpressiveDockProps) {
   const { t } = useT();
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
+  // Which app tile owns the open context menu, and whether the dock's own
+  // (empty-area) menu is open. Only one of the two is ever set.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [shelfMenuOpen, setShelfMenuOpen] = useState(false);
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
@@ -87,7 +97,34 @@ export default function M3ExpressiveDock({
         {/* role="group", not "toolbar": the ARIA toolbar pattern requires roving
             tabindex + arrow-key navigation, which this does not implement. Every
             control stays independently tabbable, which is correct for a group. */}
-        <div className="m3dx-dock" role="group" aria-label={t("shelf.appLauncher")}>
+        <div
+          className="m3dx-dock"
+          role="group"
+          aria-label={t("shelf.appLauncher")}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setMenuFor(null);
+            setShelfMenuOpen(true);
+          }}
+        >
+          {onShelfSettings ? (
+            <MenuSurface
+              open={shelfMenuOpen}
+              onClose={() => setShelfMenuOpen(false)}
+              label={t("shelf.shelfSettings")}
+              side="top"
+              align="center"
+            >
+              <MenuItem
+                onSelect={() => {
+                  onShelfSettings();
+                  setShelfMenuOpen(false);
+                }}
+              >
+                {t("shelf.shelfSettings")}
+              </MenuItem>
+            </MenuSurface>
+          ) : null}
           <div className="m3dx-group m3dx-group--main">
             {/* Launcher. Accessible name contains the visible tip ("Apps") so
                 SC 2.5.3 Label in Name holds. */}
@@ -129,13 +166,93 @@ export default function M3ExpressiveDock({
                   type="button"
                   className={`m3dx-btn ${i % 2 === 0 ? "m3dx-btn--round" : "m3dx-btn--xl"} m3dx-tone-app`}
                   aria-label={app.isOpen ? `${app.name}, running` : app.name}
+                  aria-haspopup="menu"
+                  aria-expanded={menuFor === app.id}
                   onClick={() => onAppClick(app.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShelfMenuOpen(false);
+                    setMenuFor(app.id);
+                  }}
                 >
                   <span className="m3dx-state" aria-hidden="true" />
                   <span className="m3dx-appicon" aria-hidden="true">{app.icon}</span>
                 </button>
                 {app.isOpen && <span className="m3dx-ind" aria-hidden="true" />}
-                <span className="m3dx-tip" aria-hidden="true">{app.name}</span>
+                {/* The tip would sit on top of the menu it just opened. */}
+                {menuFor !== app.id && (
+                  <span className="m3dx-tip" aria-hidden="true">{app.name}</span>
+                )}
+                <MenuSurface
+                  open={menuFor === app.id}
+                  onClose={() => setMenuFor(null)}
+                  label={app.name}
+                  side="top"
+                  align="center"
+                >
+                  <MenuLabel>{app.name}</MenuLabel>
+                  <MenuSeparator />
+                  <MenuItem
+                    onSelect={() => {
+                      onAppClick(app.id);
+                      setMenuFor(null);
+                    }}
+                  >
+                    {app.isOpen ? t("shelf.focus") : t("shelf.open")}
+                  </MenuItem>
+                  {app.isOpen && onNewWindow ? (
+                    <MenuItem
+                      onSelect={() => {
+                        onNewWindow(app.id);
+                        setMenuFor(null);
+                      }}
+                    >
+                      {t("shelf.newWindow")}
+                    </MenuItem>
+                  ) : null}
+                  <MenuItem
+                    onSelect={() => {
+                      window.open(`/app/${encodeURIComponent(app.id)}`, "_blank");
+                      setMenuFor(null);
+                    }}
+                  >
+                    {t("shelf.openNewTab")}
+                  </MenuItem>
+                  {app.isPinned ? (
+                    <MenuItem
+                      onSelect={() => {
+                        onUnpinApp?.(app.id);
+                        setMenuFor(null);
+                      }}
+                    >
+                      {t("shelf.unpinFromShelf")}
+                    </MenuItem>
+                  ) : (
+                    <MenuItem
+                      onSelect={() => {
+                        onPinApp?.(app.id);
+                        setMenuFor(null);
+                      }}
+                    >
+                      {t("shelf.pinToShelf")}
+                    </MenuItem>
+                  )}
+                  {app.isOpen && onCloseApp ? (
+                    <>
+                      <MenuSeparator />
+                      <MenuItem
+                        danger
+                        onSelect={() => {
+                          onCloseApp(app.id);
+                          setMenuFor(null);
+                        }}
+                      >
+                        {t("shelf.close")}
+                      </MenuItem>
+                    </>
+                  ) : null}
+                </MenuSurface>
               </span>
             ))}
           </div>
@@ -298,6 +415,7 @@ const DOCK_CSS = `
 .m3dx *,.m3dx *::before,.m3dx *::after{ box-sizing:border-box; }
 
 .m3dx .m3dx-dock{
+  position:relative;
   --m3dx-bar-h:96px; --m3dx-tile:56px; --m3dx-gap:8px; --m3dx-pad:20px;
   --m3dx-flex-min:12px; --m3dx-sep-m:8px; --m3dx-icon:24px;
   --m3dx-morph:var(--m3dx-shape-l);
