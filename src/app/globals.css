@@ -875,6 +875,140 @@ h6 {
   box-shadow: none;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SETTINGS ROLE TOKENS — `--set-*`
+   The Settings window is Material 3: tonal elevation instead of borders,
+   state layers instead of ad-hoc bg-white/[0.0x] overlays, one shape scale,
+   and a colour ROLE per job instead of the 17 loose hexes the pane used to
+   carry. Components under `.settings-pane` reference `--set-*` and nothing
+   else; that indirection is the only reason a second palette is possible.
+
+   The base block is built by POINTING AT the `:root` ladder rather than
+   restating its hexes, so a change to `--bg-deep` or `--text-secondary`
+   still reaches Settings. Two values have no `:root` name and are written
+   out: `#253347` (the M3 "highest" step — it exists today only inside the
+   dock's `.m3dx` scope, which Settings cannot see) and `#0a0f1a` for
+   on-primary, which is `--ground` by value but is a text colour here, not a
+   ground, so it is spelled rather than borrowed.
+   ═══════════════════════════════════════════════════════════════════════ */
+.settings-pane {
+  /* surfaces — tonal elevation ladder */
+  --set-surface: var(--bg-deep);
+  --set-surface-container: var(--bg-surface);
+  --set-surface-container-high: var(--bg-elevated);
+  --set-surface-container-highest: #253347;
+
+  /* ink */
+  --set-on-surface: var(--text-primary);
+  --set-on-surface-variant: var(--text-secondary);
+
+  /* line */
+  --set-outline: var(--text-muted);
+  --set-outline-variant: var(--border-subtle);
+
+  /* accents. coral is ACTION, cyan is DONE — in every edition. */
+  --set-primary: var(--coral-bright);
+  --set-on-primary: #0a0f1a;
+  --set-secondary-container: #253347;
+  --set-on-secondary-container: var(--text-primary);
+  --set-success: var(--cyan-bright);
+  --set-error: #f87171;
+
+  /* M3 state layers: on-surface composited over the container at 8/10/12%.
+     Never a literal white/[0.0x] — an overlay ignores the palette under it,
+     a state layer inherits it, which is the whole point of the second block
+     below. */
+  --set-state-hover: color-mix(in srgb, var(--set-on-surface) 8%, transparent);
+  --set-state-focus: color-mix(in srgb, var(--set-on-surface) 10%, transparent);
+  --set-state-pressed: color-mix(in srgb, var(--set-on-surface) 12%, transparent);
+}
+
+/* The Hermes edition of the same roles. `page.tsx` stamps `data-agent` on
+   `desktop-root`, so this reaches the Settings window; the wizard's
+   `[data-agent="hermes"] .setup-shell` block above does NOT (it is scoped to
+   the wizard), which is why the agent ladder is carried here rather than
+   inherited. Values are the shipped Hermes palette, verbatim.
+
+   DESCENDANT selector, deliberately — `data-agent` sits on an ancestor of
+   the pane, never on the pane itself. A compound `[data-agent="hermes"].settings-pane`
+   would silently never match. `src/tests/unit/setup-skin.test.ts` guards the
+   same shape for the wizard.
+
+   Only ground, surface and ink move. `--set-primary` and `--set-success` are
+   NOT re-pointed here: coral means ACTION and cyan means DONE on every box,
+   under every harness — see the note in the agent block above, where
+   re-pointing them once put two opposed states 1.08:1 apart. */
+[data-agent="hermes"] .settings-pane {
+  /* the agent ladder, carried onto the desktop */
+  --agent-ink: #ffe6cb;
+  --agent-ink-2: rgba(255, 230, 203, 0.8);
+  --agent-ink-3: rgba(255, 230, 203, 0.65);
+  --agent-on-ink: #041c1c;
+  --agent-line: rgba(255, 230, 203, 0.15);
+  --agent-card: #0e2423;
+  --agent-muted: #182c2a;
+
+  /* surfaces */
+  --set-surface: var(--agent-card);
+  --set-surface-container: #132826;
+  --set-surface-container-high: var(--agent-muted);
+  --set-surface-container-highest: #1d3331;
+
+  /* ink */
+  --set-on-surface: var(--agent-ink);
+  --set-on-surface-variant: var(--agent-ink-2);
+
+  /* line — the outline weight is heavier than the hairline `--agent-line`,
+     because it has to read as an edge on a control, not as a divider. */
+  --set-outline: rgba(255, 230, 203, 0.45);
+  --set-outline-variant: var(--agent-line);
+
+  /* accents: on-primary and the secondary container follow the ground */
+  --set-on-primary: var(--agent-on-ink);
+  --set-secondary-container: #1d3331;
+  --set-on-secondary-container: var(--agent-ink);
+}
+
+/* The one piece of `SettingsSlider` that cannot live in the component: a range
+   thumb is only reachable through vendor pseudo-elements, so it cannot be an
+   inline style. The track and the active track ARE painted by the component;
+   the input itself is transparent and rides on top so the native control keeps
+   every keyboard and pointer behaviour it has. M3's handle is a 4×20 rounded
+   BAR, not a circle. Deliberately NOT `.appearance-none`, which the global
+   orange thumb above is keyed to. */
+.settings-slider__input {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 20px;
+  background: transparent;
+}
+.settings-slider__input::-webkit-slider-runnable-track {
+  height: 20px;
+  background: transparent;
+}
+.settings-slider__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 4px;
+  height: 20px;
+  border: none;
+  border-radius: 2px;
+  background: var(--set-primary);
+  cursor: pointer;
+}
+.settings-slider__input::-moz-range-track {
+  height: 20px;
+  background: transparent;
+}
+.settings-slider__input::-moz-range-thumb {
+  width: 4px;
+  height: 20px;
+  border: none;
+  border-radius: 2px;
+  background: var(--set-primary);
+  cursor: pointer;
+}
+
 /* Card surface — matching openclawhardware.dev dark sections */
 .card-surface {
   background: var(--surface-card);
