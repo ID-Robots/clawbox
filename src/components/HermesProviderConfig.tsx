@@ -457,12 +457,18 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     }
   }
 
+  // The same roles `SettingsTextField` draws: a filled `container-highest`
+  // plate, an `--set-outline` resting indicator (the one role that carries a
+  // 3:1 control boundary), `--set-on-surface` for the value and `--set-primary`
+  // on focus.
   const selectCls =
-    "w-full rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]";
-  const labelCls = "block text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-1.5";
+    "w-full rounded-lg bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] px-3 py-2.5 text-sm text-[var(--set-on-surface)] focus:outline-none focus:border-[var(--set-primary)]";
+  const labelCls = "block text-xs font-semibold uppercase tracking-wide text-[var(--set-on-surface-variant)] mb-1.5";
   const rowCls = (isSelected: boolean) =>
-    `flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-      isSelected ? "bg-orange-500/5" : "hover:bg-[var(--surface-card)]"
+    `flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--set-outline-variant)] last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--set-primary)] has-[:focus-visible]:ring-inset ${
+      isSelected
+        ? "bg-[color-mix(in_srgb,var(--set-primary)_8%,transparent)]"
+        : "hover:bg-[var(--set-state-hover)]"
     }`;
 
   function statusLine(s: Status) {
@@ -472,7 +478,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       <p
         role={s.kind === "err" ? "alert" : "status"}
         aria-live="polite"
-        className={`text-xs mt-1.5 ${s.kind === "ok" ? "text-emerald-400" : "text-red-400"}`}
+        className={`text-xs mt-1.5 ${s.kind === "ok" ? "text-[var(--set-success)]" : "text-[var(--set-error)]"}`}
       >
         {s.msg}
       </p>
@@ -482,9 +488,18 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
 
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-2xl p-5 sm:p-8">
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">Hermes models</h1>
-        <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
+      {/* THE bug this pass exists for. `.card-surface` reads `--surface-card` /
+          `--border-subtle`, which are re-pointed to teal ONLY inside
+          `[data-agent="hermes"] .setup-shell` — never under `.settings-pane` —
+          so the identical component was teal in the wizard and navy in
+          Settings. A borderless `--set-surface-container` tonal group is what
+          `SettingsGroup` already draws, and it follows the edition in both
+          places. The class also carried `backdrop-filter: blur(12px)`; dropping
+          it with the class is the safe move, since that property must never be
+          hoisted onto an ancestor of the pane's portalled overlays. */}
+      <div className="rounded-2xl bg-[var(--set-surface-container)] p-5 sm:p-8">
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1 text-[var(--set-on-surface)]">Hermes models</h1>
+        <p id={`${uid}-intro`} className="text-[var(--set-on-surface-variant)] mb-5 leading-relaxed text-sm">
           This device runs on Hermes. Choose an inference provider and default model —
           they switch through Hermes natively, no dashboard needed.
         </p>
@@ -494,7 +509,8 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           role="radiogroup"
           aria-label="AI Provider"
           aria-describedby={`${uid}-intro`}
-          className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden"
+          // Tone, not an edge: a raised element nested inside the group.
+          className="rounded-lg bg-[var(--set-surface-container-high)] overflow-hidden"
         >
           {/* Identical to the OpenClaw wizard's row — same component, not a lookalike. */}
           <ClawboxAiProviderRow
@@ -502,7 +518,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
             selected={isClawaiSelected}
             onSelect={() => pickProvider(CLAWAI_PROVIDER)}
             trailingBadge={clawai?.active ? (
-              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
+              // Cyan is DONE on every edition, so `--set-success` is
+              // deliberately not re-pointed: this badge does not move.
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-[color-mix(in_srgb,var(--set-success)_15%,transparent)] text-[var(--set-success)] leading-none">
                 Active
               </span>
             ) : null}
@@ -522,19 +540,19 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 <span
                   aria-hidden="true"
                   className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
-                    isSelected ? "border-[var(--coral-bright)]" : "border-gray-600"
+                    isSelected ? "border-[var(--set-primary)]" : "border-[var(--set-outline)]"
                   }`}
                 >
-                  {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />}
+                  {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-[var(--set-primary)]" />}
                 </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
+                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--set-surface-container-highest)] shrink-0">
                   <AIProviderIcon provider={provider.id} size={22} />
                 </span>
                 <div className="flex-1 min-w-0">
-                  <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                  <span className="flex items-center gap-2 text-sm font-medium text-[var(--set-on-surface)]">
                     {provider.name}
                   </span>
-                  <span className="block text-xs text-[var(--text-muted)]">{provider.description}</span>
+                  <span className="block text-xs text-[var(--set-on-surface-variant)]">{provider.description}</span>
                 </div>
               </label>
             );
@@ -545,7 +563,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
             from resizing under the cursor while the user arrows down the list. */}
         <div className="mt-5 min-h-[240px]">
           {isClawaiSelected ? (
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+            <div className="rounded-xl bg-[var(--set-surface-container-high)] p-4">
               <ClawboxAiPlanPicker
                 tier={uiTier}
                 onTierChange={changeUiTier}
@@ -557,7 +575,10 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     type="button"
                     onClick={applyClawai}
                     disabled={applyingClawai || !clawaiDirty}
-                    className="mt-4 w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-2.5 hover:opacity-90 transition-opacity disabled:opacity-50"
+                    // `--set-primary` already IS coral in both editions, but
+                    // `text-white` was wrong on Hermes: on-primary is #041c1c
+                    // there, not white.
+                    className="mt-4 w-full rounded-xl bg-[var(--set-primary)] text-[var(--set-on-primary)] font-semibold py-2.5 hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
                     {applyingClawai
                       ? "Switching…"
@@ -566,7 +587,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                         : "ClawBox AI in use"}
                   </button>
                   {clawai.model && (
-                    <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+                    <p className="mt-1.5 text-[11px] text-[var(--set-on-surface-variant)]">
                       Model: <span className="font-mono">{clawai.model}</span>
                     </p>
                   )}
@@ -589,16 +610,16 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 const st = oauth[selectedDef.oauthId];
                 const connected = st?.loggedIn;
                 return (
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
+                  <div className="rounded-lg bg-[var(--set-surface-container-high)] p-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-200">Sign in with {selectedDef.name}</p>
-                        <p className="text-xs text-[var(--text-muted)]">
+                        <p className="text-sm font-medium text-[var(--set-on-surface)]">Sign in with {selectedDef.name}</p>
+                        <p className="text-xs text-[var(--set-on-surface-variant)]">
                           {connected ? "Connected — OAuth credentials active." : "OAuth through Hermes (no API key needed)."}
                         </p>
                       </div>
                       {connected ? (
-                        <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400">
+                        <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-[var(--set-success)]">
                           <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
                           Connected
                         </span>
@@ -606,14 +627,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                         <button
                           type="button"
                           onClick={openHermesOAuth}
-                          className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity"
+                          className="shrink-0 rounded-lg bg-[var(--set-primary)] px-3 py-2 text-sm font-semibold text-[var(--set-on-primary)] hover:opacity-90 transition-opacity"
                         >
                           Sign in ↗
                         </button>
                       )}
                     </div>
                     {selectedDef.keyProvider && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-2">…or paste an API key below instead.</p>
+                      <p className="text-[11px] text-[var(--set-on-surface-variant)] mt-2">…or paste an API key below instead.</p>
                     )}
                   </div>
                 );
@@ -643,14 +664,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   ))}
                 </select>
                 {scope?.warning && (
-                  <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">{scope.warning}</p>
+                  <p className="mt-1.5 text-[11px] text-[var(--set-on-surface-variant)]">{scope.warning}</p>
                 )}
                 {scope?.savedElsewhere && (
                   // The server tells us the device's saved pairing belongs to a
                   // DIFFERENT provider. Say so, so Save is never a surprise.
-                  <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+                  <p className="mt-1.5 text-[11px] text-[var(--set-on-surface-variant)]">
                     This device is currently using{" "}
-                    <span className="text-[var(--text-secondary)]">
+                    <span className="text-[var(--set-on-surface)]">
                       {hermesProviderLabel(scope.savedElsewhere.provider)}
                     </span>
                     {scope.savedElsewhere.model ? (
@@ -660,7 +681,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   </p>
                 )}
                 {scope?.stale && !loading && (
-                  <p className="mt-1.5 text-[11px] text-amber-400/80">
+                  <p className="mt-1.5 text-[11px] text-[color-mix(in_srgb,var(--set-warning)_80%,transparent)]">
                     {scope.source === "cold-start"
                       ? "Hermes hasn't published a model list yet — showing a minimal fallback."
                       : "Showing a cached model list; Hermes' live catalogue is unreachable."}
@@ -697,7 +718,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 // to enable it (the save path stores the key first, then lets
                 // the server pick that provider's own default model).
                 disabled={saving || loading || (!modelInScope && !hasPendingKey)}
-                className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity disabled:opacity-50"
+                className="w-full rounded-xl bg-[var(--set-primary)] text-[var(--set-on-primary)] font-semibold py-3 hover:opacity-90 transition-opacity disabled:opacity-50"
               >
                 {saving ? "Saving…" : "Save model & provider"}
               </button>
@@ -710,7 +731,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           <button
             type="button"
             onClick={() => onNext?.()}
-            className="mt-7 w-full rounded-xl bg-[var(--surface-card)] text-[var(--text-primary)] font-semibold py-3 hover:opacity-90 transition-opacity"
+            // Wizard-only (`!embedded`), and it resolves because the role
+            // layer is declared on `.setup-shell` as well as `.settings-pane`.
+            className="mt-7 w-full rounded-xl bg-[var(--set-secondary-container)] text-[var(--set-on-secondary-container)] font-semibold py-3 hover:opacity-90 transition-opacity"
           >
             Continue
           </button>

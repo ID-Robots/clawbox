@@ -1620,6 +1620,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     type="text"
                     value={userName}
                     maxLength={40}
+                    /* Explicit `off`: this is the local display name the UI
+                       greets you with, not an account identity, and left
+                       undeclared a password manager reads a bare text field
+                       next to a password field as the username half of a login
+                       and offers to autofill it. See the `::backdrop` note in
+                       globals.css for why an extension popover mattered here. */
+                    autoComplete="off"
                     onChange={e => {
                       userNameEditedRef.current = true;
                       setUserName(e.target.value);
@@ -2091,6 +2098,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           onChange={e => { setHotspotSSIDInput(e.target.value); setHotspotSSIDStatus(null); }}
                           maxLength={32}
                           placeholder="ClawBox-Setup"
+                          /* An SSID is a radio network name, not a username.
+                             Declared explicitly so it is not paired with the
+                             passphrase field below as a login form. */
+                          name="hotspot-ssid"
+                          autoComplete="off"
                         />
                         <button
                           onClick={saveHotspotSSID}
@@ -2115,6 +2127,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           value={hotspotPassword}
                           onChange={e => { setHotspotPassword(e.target.value); setHotspotPasswordStatus(null); }}
                           placeholder={hotspotHasPassword ? "••••••••" : "At least 8 characters"}
+                          /* A WPA passphrase for this box's own access point —
+                             it is never a website credential, so it must not be
+                             offered for autofill or capture. `type="password"`
+                             stays for masking; `off` + a passphrase-shaped name
+                             is what says "not a login field". */
+                          name="hotspot-passphrase"
+                          autoComplete="off"
                           maxLength={63}
                           trailing={
                             /* The reveal is a flex sibling of the input now
@@ -2165,6 +2184,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       onChange={e => { setHostnameInput(e.target.value); setHostnameStatus(null); }}
                       maxLength={63}
                       placeholder="clawbox"
+                      /* mDNS host label, not an account name — matches the
+                         `autoComplete="off"` the Setup wizard's hostname field
+                         already carries. */
+                      autoComplete="off"
                       trailing={
                         /* Decorative and still OUTSIDE the value: `.local` is
                            never part of what the input holds or what gets
@@ -2250,6 +2273,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                               placeholder="New password"
                               maxLength={63}
                               aria-label={`New password for ${net.name}`}
+                              /* Wi-Fi passphrase for a saved network. Not a
+                                 website credential — no autofill, no capture,
+                                 and deliberately NOT `new-password`, which
+                                 would invite a manager to generate and save
+                                 one. */
+                              name="wifi-passphrase"
+                              autoComplete="off"
                               trailing={
                                 /* This reveal shipped with no accessible name at
                                    all — only the Material ligature. Adding one is
@@ -2363,6 +2393,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="text" value={ssid} onChange={e => setSsid(e.target.value)}
                         placeholder={t("settings.enterNetworkName")}
                         readOnly={!showManualWifi && wifiNetworks !== null}
+                        /* SSID, not a username — declared so this field and the
+                           passphrase below are not read as a login pair. */
+                        name="wifi-ssid"
+                        autoComplete="off"
                         leading={<span className="material-symbols-rounded" style={{ fontSize: 18 }}>router</span>}
                       />
                     </div>
@@ -2374,6 +2408,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         id="settings-wifi-password"
                         type="password" value={wifiPass} onChange={e => setWifiPass(e.target.value)}
                         placeholder={t("settings.enterPassword")}
+                        /* WPA passphrase for the network being joined. Same
+                           reasoning as the saved-network field above: masked,
+                           but never a website credential. */
+                        name="wifi-passphrase"
+                        autoComplete="off"
                         autoFocus
                         leading={<span className="material-symbols-rounded" style={{ fontSize: 18 }}>lock</span>}
                         onKeyDown={e => e.key === "Enter" && connectWifi()}
@@ -2944,6 +2983,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       aria-label={t("settings.pairingCodePlaceholder")}
                       maxLength={8}
                       spellCheck={false}
+                      /* Single-use pairing code — nothing to remember, nothing
+                         to fill. `one-time-code` would hand it to the OS SMS
+                         autofill, which is not where it comes from. */
+                      autoComplete="off"
                       autoCapitalize="characters"
                       inputClassName="font-mono uppercase tracking-[0.3em] placeholder:font-sans placeholder:tracking-normal"
                     />
@@ -3206,9 +3249,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
              in the desktop return tree — because moving it is a behaviour
              change, not a restyle.
 
-             `HarnessPicker` is deliberately untouched: `harness-picker.test.tsx`
-             asserts its exact class strings (`bg-emerald-400`, `bg-white/25`)
-             and its `data-testid="harness-locked-dot"`.
+             `HarnessPicker` is on the roles now too. It was held back because
+             `harness-picker.test.tsx` pinned its exact class strings
+             (`bg-emerald-400`, `bg-white/25`); that test now asserts the ROLE
+             the dot paints — `--set-success` for up, `--set-outline` for down —
+             which is the same guarantee (the two states stay distinct and
+             follow the health flag) without leaving one navy card at the top of
+             a section of teal groups. Its `data-testid="harness-locked-dot"` is
+             untouched.
 
              The gutters are the pane's (24px desktop / 16px mobile), so every
              group reflows to 360px with no horizontal scrollbar: each key/value
@@ -3902,34 +3950,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* Update confirmation modal */}
       {updateConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
+          <div className="bg-[var(--set-surface-container-high)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold text-[var(--set-on-surface)] mb-2">{t("settings.systemUpdate")}</h3>
+            <p className="text-sm text-[var(--set-on-surface-variant)] mb-4 leading-relaxed">
               {t("settings.updateDesc")}
             </p>
             {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
+              <div className="mb-4 text-xs text-[var(--set-on-surface-variant)] opacity-60">{t("settings.checkingVersions")}</div>
             ) : versionInfo && (
               <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
+                <div className="flex items-center justify-between bg-[var(--set-surface-container-highest)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--set-on-surface-variant)] font-medium">ClawBox</span>
+                  <span className="text-[var(--set-on-surface)]">
                     {versionInfo.clawbox.current}
                     {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
+                      <span className="text-[var(--set-on-surface-variant)] opacity-60">{" → "}<span className="text-[var(--set-success)]">{versionInfo.clawbox.target}</span></span>
                     ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
+                      <span className="text-[var(--set-success)] ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     )}
                   </span>
                 </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
+                <div className="flex items-center justify-between bg-[var(--set-surface-container-highest)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--set-on-surface-variant)] font-medium">OpenClaw</span>
+                  <span className="text-[var(--set-on-surface)]">
                     {versionInfo.openclaw.current ?? t("settings.notInstalled")}
                     {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
+                      <span className="text-[var(--set-on-surface-variant)] opacity-60">{" → "}<span className="text-[var(--set-success)]">{versionInfo.openclaw.target}</span></span>
                     ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
+                      <span className="text-[var(--set-success)] ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     ) : null}
                   </span>
                 </div>
@@ -3938,42 +3986,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             {/* Branch selector */}
             {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
               <div className="mb-4">
-                <label htmlFor="settings-update-branch" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
+                <label htmlFor="settings-update-branch" className="text-xs text-[var(--set-on-surface-variant)] opacity-60 mb-1 block">Update branch</label>
                 <div className="flex gap-2">
                   <input
                     id="settings-update-branch"
                     type="text"
+                    /* A git branch name. Explicit `off` so no manager treats a
+                       lone text field as an identifier to fill. */
+                    autoComplete="off"
                     value={branchInput}
                     onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
                     placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
+                    className="flex-1 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-lg px-3 py-1.5 text-sm text-[var(--set-on-surface)] placeholder:text-[var(--set-on-surface-variant)] opacity-40 outline-none focus:border-[var(--set-primary)]"
                   />
                   <button
                     type="button"
                     disabled={branchSaving || branchInput === (updateBranch ?? "")}
                     onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
+                    className="px-3 py-1.5 text-xs font-semibold text-[var(--set-on-primary)] bg-[var(--set-primary)] rounded-lg cursor-pointer disabled:opacity-40"
                   >
                     {branchSaving ? "..." : "Set"}
                   </button>
                 </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
+                {branchError && <p className="mt-1 text-xs text-[var(--set-error)]">{branchError}</p>}
                 {updateBranch && (
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
+                    <span className="text-xs text-[var(--set-success)]">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
+                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-[var(--set-error)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-error))] cursor-pointer">{t("settings.clearBranch")}</button>
                   </div>
                 )}
                 {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
+                  <p className="mt-1 text-xs text-[var(--set-on-surface-variant)] opacity-40">{t("settings.branchHint")}</p>
                 )}
               </div>
             )}
             <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
+              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-[var(--set-secondary-container)] text-[var(--set-on-secondary-container)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-[color-mix(in_srgb,var(--set-on-secondary-container)_8%,var(--set-secondary-container))] transition-colors">
                 {t("cancel")}
               </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
+              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-[var(--set-primary)] text-[var(--set-on-primary)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-[color-mix(in_srgb,var(--set-on-primary)_8%,var(--set-primary))] hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
                 {t("settings.update")}
               </button>
             </div>
@@ -4131,34 +4182,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {/* Update confirmation modal */}
       {updateConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
+          <div className="bg-[var(--set-surface-container-high)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold text-[var(--set-on-surface)] mb-2">{t("settings.systemUpdate")}</h3>
+            <p className="text-sm text-[var(--set-on-surface-variant)] mb-4 leading-relaxed">
               {t("settings.updateDesc")}
             </p>
             {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
+              <div className="mb-4 text-xs text-[var(--set-on-surface-variant)] opacity-60">{t("settings.checkingVersions")}</div>
             ) : versionInfo && (
               <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
+                <div className="flex items-center justify-between bg-[var(--set-surface-container-highest)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--set-on-surface-variant)] font-medium">ClawBox</span>
+                  <span className="text-[var(--set-on-surface)]">
                     {versionInfo.clawbox.current}
                     {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
+                      <span className="text-[var(--set-on-surface-variant)] opacity-60">{" → "}<span className="text-[var(--set-success)]">{versionInfo.clawbox.target}</span></span>
                     ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
+                      <span className="text-[var(--set-success)] ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     )}
                   </span>
                 </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
+                <div className="flex items-center justify-between bg-[var(--set-surface-container-highest)] rounded-lg px-3 py-2">
+                  <span className="text-[var(--set-on-surface-variant)] font-medium">OpenClaw</span>
+                  <span className="text-[var(--set-on-surface)]">
                     {versionInfo.openclaw.current ?? t("settings.notInstalled")}
                     {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
+                      <span className="text-[var(--set-on-surface-variant)] opacity-60">{" → "}<span className="text-[var(--set-success)]">{versionInfo.openclaw.target}</span></span>
                     ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
+                      <span className="text-[var(--set-success)] ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
                     ) : null}
                   </span>
                 </div>
@@ -4166,42 +4217,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             )}
             {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
               <div className="mb-4">
-                <label htmlFor="settings-update-branch-d" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
+                <label htmlFor="settings-update-branch-d" className="text-xs text-[var(--set-on-surface-variant)] opacity-60 mb-1 block">Update branch</label>
                 <div className="flex gap-2">
                   <input
                     id="settings-update-branch-d"
                     type="text"
+                    /* Desktop twin of the mobile branch field above; same
+                       reasoning, and the two trees stay separate. */
+                    autoComplete="off"
                     value={branchInput}
                     onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
                     placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
+                    className="flex-1 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-lg px-3 py-1.5 text-sm text-[var(--set-on-surface)] placeholder:text-[var(--set-on-surface-variant)] opacity-40 outline-none focus:border-[var(--set-primary)]"
                   />
                   <button
                     type="button"
                     disabled={branchSaving || branchInput === (updateBranch ?? "")}
                     onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
+                    className="px-3 py-1.5 text-xs font-semibold text-[var(--set-on-primary)] bg-[var(--set-primary)] rounded-lg cursor-pointer disabled:opacity-40"
                   >
                     {branchSaving ? "..." : "Set"}
                   </button>
                 </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
+                {branchError && <p className="mt-1 text-xs text-[var(--set-error)]">{branchError}</p>}
                 {updateBranch && (
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
+                    <span className="text-xs text-[var(--set-success)]">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
+                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-[var(--set-error)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-error))] cursor-pointer">{t("settings.clearBranch")}</button>
                   </div>
                 )}
                 {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
+                  <p className="mt-1 text-xs text-[var(--set-on-surface-variant)] opacity-40">{t("settings.branchHint")}</p>
                 )}
               </div>
             )}
             <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
+              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-[var(--set-secondary-container)] text-[var(--set-on-secondary-container)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-[color-mix(in_srgb,var(--set-on-secondary-container)_8%,var(--set-secondary-container))] transition-colors">
                 {t("cancel")}
               </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
+              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-[var(--set-primary)] text-[var(--set-on-primary)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-[color-mix(in_srgb,var(--set-on-primary)_8%,var(--set-primary))] hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
                 {t("settings.update")}
               </button>
             </div>
@@ -4360,19 +4414,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="settings-pane fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "var(--set-surface)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
-              <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] animate-spin" />
+              <div className="absolute inset-0 rounded-full border-2 border-[color-mix(in_srgb,var(--set-primary)_20%,transparent)] animate-pulse" />
+              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[var(--set-primary)] animate-spin" />
             </div>
             <div className="space-y-2">
-              <h2 id="hostname-reboot-title" className="text-xl font-semibold text-white">Restarting device…</h2>
-              <p className="text-sm text-white/60 leading-relaxed">
+              <h2 id="hostname-reboot-title" className="text-xl font-semibold text-[var(--set-on-surface)]">Restarting device…</h2>
+              <p className="text-sm text-[var(--set-on-surface-variant)] leading-relaxed">
                 The Jetson is rebooting with its new name.<br/>You&apos;ll be redirected automatically when it&apos;s back online.
               </p>
             </div>
-            <a href={hostnameRebootTo} className="text-xs text-[#fe6e00] hover:text-[#ff8b1a] font-mono underline-offset-2 hover:underline break-all">
+            <a href={hostnameRebootTo} className="text-xs text-[var(--set-primary)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-primary))] font-mono underline-offset-2 hover:underline break-all">
               {hostnameRebootTo}
             </a>
-            <p className="text-[11px] text-white/30">
+            <p className="text-[11px] text-[var(--set-on-surface-variant)]">
               This usually takes 30–60 seconds. If your browser doesn&apos;t redirect, click the link above.
             </p>
           </div>
@@ -4395,17 +4449,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {/* Pulse rings */}
               {!(updateError || updateState?.phase === "failed") && updateState?.phase !== "completed" && (
                 <>
-                  <div className="absolute inset-0 rounded-full border-2 border-[#f97316]/20" style={{ animation: "update-pulse 2.5s ease-in-out infinite" }} />
-                  <div className="absolute inset-3 rounded-full border border-[#f97316]/10" style={{ animation: "update-pulse 2.5s ease-in-out infinite 0.5s" }} />
+                  <div className="absolute inset-0 rounded-full border-2 border-[color-mix(in_srgb,var(--set-primary)_20%,transparent)]" style={{ animation: "update-pulse 2.5s ease-in-out infinite" }} />
+                  <div className="absolute inset-3 rounded-full border border-[color-mix(in_srgb,var(--set-primary)_10%,transparent)]" style={{ animation: "update-pulse 2.5s ease-in-out infinite 0.5s" }} />
                 </>
               )}
               {/* Completed ring */}
               {updateState?.phase === "completed" && (
-                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/30" />
+                <div className="absolute inset-0 rounded-full border-2 border-[color-mix(in_srgb,var(--set-success)_30%,transparent)]" />
               )}
               {/* Error ring */}
               {(updateError || updateState?.phase === "failed") && (
-                <div className="absolute inset-0 rounded-full border-2 border-red-500/30" />
+                <div className="absolute inset-0 rounded-full border-2 border-[color-mix(in_srgb,var(--set-error)_30%,transparent)]" />
               )}
               {/* Logo — matches the welcome screen in the setup wizard */}
               <img
@@ -4417,10 +4471,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             <div>
-              <h2 className="text-2xl font-bold text-white mb-2">
+              <h2 className="text-2xl font-bold text-[var(--set-on-surface)] mb-2">
                 {updateState?.phase === "completed" ? t("settings.updateComplete") : updateError || updateState?.phase === "failed" ? t("settings.updateFailed") : t("settings.updating")}
               </h2>
-              <p className="text-sm text-white/40">
+              <p className="text-sm text-[var(--set-on-surface-variant)]">
                 {updateState?.phase === "completed"
                   ? (updateState.steps.some(s => s.id === RESTART_STEP_ID) ? t("settings.restartingDevice") : t("settings.updateDone"))
                   : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
@@ -4428,27 +4482,27 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             {updateState && updateState.steps.length > 0 && (
-              <div className="w-full max-w-xs space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
+              <div className="w-full max-w-xs space-y-3 text-left bg-[var(--set-surface-container)] rounded-2xl p-4">
                 {updateState.steps.map((step) => (
                   <div key={step.id} className="flex items-center gap-3 text-sm">
                     {step.status === "completed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[color-mix(in_srgb,var(--set-success)_20%,transparent)] text-[var(--set-success)] shrink-0">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M5 12l5 5L19 7" /></svg>
                       </span>
                     ) : step.status === "running" ? (
                       <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                        <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
+                        <span className="w-4 h-4 rounded-full border-2 border-[var(--set-primary)] border-t-transparent animate-spin" />
                       </span>
                     ) : step.status === "failed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 shrink-0">
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[color-mix(in_srgb,var(--set-error)_20%,transparent)] text-[var(--set-error)] shrink-0">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                       </span>
                     ) : (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-white/20" />
+                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--set-surface-container-highest)] shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--set-outline)]" />
                       </span>
                     )}
-                    <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : step.status === "failed" ? "text-red-400" : "text-white/25"}>
+                    <span className={step.status === "running" ? "text-[var(--set-on-surface)] font-medium" : step.status === "completed" ? "text-[color-mix(in_srgb,var(--set-success)_70%,transparent)]" : step.status === "failed" ? "text-[var(--set-error)]" : "text-[color-mix(in_srgb,var(--set-on-surface-variant)_50%,transparent)]"}>
                       {step.label}
                     </span>
                   </div>
@@ -4457,14 +4511,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             )}
 
             {!updateState && !updateError && (
-              <div className="flex items-center gap-2 text-sm text-white/40">
-                <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
+              <div className="flex items-center gap-2 text-sm text-[var(--set-on-surface-variant)]">
+                <span className="w-4 h-4 rounded-full border-2 border-[var(--set-primary)] border-t-transparent animate-spin" />
                 Connecting...
               </div>
             )}
             {(updateError || updateState?.phase === "failed") && (
               <div className="space-y-4">
-                <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
+                <p className="text-sm text-[color-mix(in_srgb,var(--set-error)_80%,transparent)]">{updateError || updateState?.error || "An error occurred during update"}</p>
                 {updateState?.steps.some((step) => step.status === "failed") && (
                   <div className="w-full max-w-xs space-y-2 text-left">
                     {updateState.steps
@@ -4472,9 +4526,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       .map((step) => (
                         <div
                           key={`${step.id}-error`}
-                          className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs text-red-300/90"
+                          className="rounded-xl border border-[color-mix(in_srgb,var(--set-error)_20%,transparent)] bg-[color-mix(in_srgb,var(--set-error)_8%,transparent)] px-3 py-2 text-xs text-[color-mix(in_srgb,var(--set-error)_90%,transparent)]"
                         >
-                          <span className="font-semibold text-red-300">{step.label}:</span>{" "}
+                          <span className="font-semibold text-[var(--set-error)]">{step.label}:</span>{" "}
                           {step.error || t("unknownError")}
                         </div>
                       ))}
@@ -4482,7 +4536,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 )}
                 <button
                   onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
-                  className="px-6 py-2.5 bg-white/10 text-white rounded-xl text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
+                  className="px-6 py-2.5 bg-[var(--set-secondary-container)] text-[var(--set-on-secondary-container)] rounded-xl text-sm font-medium cursor-pointer hover:bg-[color-mix(in_srgb,var(--set-on-secondary-container)_8%,var(--set-secondary-container))] transition-colors border-none"
                 >
                   Dismiss
                 </button>

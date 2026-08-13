@@ -48,17 +48,20 @@ export default function ClawboxAiPlanPicker({
         disabled={disabled}
         aria-expanded={false}
         aria-controls="clawai-plan-panel"
-        className="flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--fill-1)] border border-[var(--hair-2)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--fill-2)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:opacity-50 disabled:cursor-not-allowed"
+        // `--fill-*` and `--hair-*` are `:root`-only white overlays with no
+        // Hermes arm at all, which is why this plate read navy under a teal
+        // pane. A filled `container-highest` control plate follows the edition.
+        className="flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--set-state-hover)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <span className="flex min-w-0 flex-col">
-          <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
+          <span className="text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)]">
             Plan
           </span>
-          <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+          <span className="truncate text-[length:var(--t-4)] text-[var(--set-on-surface)]">
             {info.planName} · {priceLabel}
           </span>
         </span>
-        <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
+        <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)]">
           Change
         </span>
       </button>
@@ -67,14 +70,14 @@ export default function ClawboxAiPlanPicker({
 
   return (
     <>
-      <p id="clawai-plan-panel" className="text-xs leading-relaxed text-orange-200/90">
+      <p id="clawai-plan-panel" className="text-xs leading-relaxed text-[var(--set-primary)]">
         Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.
       </p>
       <div className="mt-4 flex items-center justify-between gap-3">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--set-on-surface-variant)]">
           Tier
         </span>
-        <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-0.5">
+        <div role="radiogroup" aria-label="ClawBox AI tier" className="relative inline-flex rounded-lg border border-[var(--set-outline)] bg-[var(--set-surface-container-highest)] p-0.5">
           {CLAWAI_TIER_ORDER.map((option) => {
             const optionInfo = CLAWAI_TIER_INFO[option];
             const isActive = tier === option;
@@ -92,7 +95,7 @@ export default function ClawboxAiPlanPicker({
                 className={`relative px-3 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer border-none disabled:opacity-50 ${
                   isActive
                     ? optionInfo.pillActiveClass
-                    : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                    : "bg-transparent text-[var(--set-on-surface-variant)] hover:bg-[var(--set-state-hover)] hover:text-[var(--set-on-surface)]"
                 }`}
               >
                 {optionInfo.pillLabel}
@@ -118,10 +121,10 @@ export default function ClawboxAiPlanPicker({
             <span className={`text-sm font-bold ${info.cardHeadlineClass}`}>
               {info.planName}
             </span>
-            <span className="text-xs font-semibold text-[var(--text-secondary)]">
+            <span className="text-xs font-semibold text-[var(--set-on-surface-variant)]">
               €{info.priceEuro}
             </span>
-            <span className="text-[11px] text-[var(--text-muted)]">{info.pricePeriod}</span>
+            <span className="text-[11px] text-[var(--set-on-surface-variant)]">{info.pricePeriod}</span>
           </div>
           {info.hasTrial && (
             <a
@@ -135,7 +138,7 @@ export default function ClawboxAiPlanPicker({
             </a>
           )}
         </div>
-        <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-secondary)]">
+        <ul className="mt-2 space-y-1 text-[11px] text-[var(--set-on-surface-variant)]">
           {info.features.map((feature) => (
             <li key={feature} className="flex items-start gap-1.5">
               <span

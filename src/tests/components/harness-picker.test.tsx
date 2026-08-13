@@ -7,7 +7,16 @@ import HarnessPicker from "@/components/HarnessPicker";
  * badge is then the only place the user is told whether their one agent engine
  * is actually up, so its dot has to follow the status route rather than being
  * decoration.
+ *
+ * The dot is asserted through the `--set-*` role it paints, not a literal:
+ * `--set-success` (cyan, DONE on every edition) for up, `--set-outline` (the
+ * 3:1 control boundary) for down. What matters here is that the two states stay
+ * distinguishable and follow the health flag — the palette behind the roles is
+ * globals.css's business, and pinning a hue here is what previously kept this
+ * component off the role layer.
  */
+const UP = "bg-[var(--set-success)]";
+const DOWN = "bg-[var(--set-outline)]";
 
 function mockStatus(body: unknown) {
   vi.stubGlobal(
@@ -31,7 +40,7 @@ describe("HarnessPicker locked badge", () => {
     render(<HarnessPicker />);
 
     const dot = await screen.findByTestId("harness-locked-dot");
-    expect(dot.className).toContain("bg-emerald-400");
+    expect(dot.className).toContain(UP);
     expect(screen.getByText("Hermes")).toBeTruthy();
   });
 
@@ -40,9 +49,9 @@ describe("HarnessPicker locked badge", () => {
     render(<HarnessPicker />);
 
     const dot = await screen.findByTestId("harness-locked-dot");
-    expect(dot.className).not.toContain("bg-emerald-400");
+    expect(dot.className).not.toContain(UP);
     // Same muted dot the switcher uses for an unavailable harness.
-    expect(dot.className).toContain("bg-white/25");
+    expect(dot.className).toContain(DOWN);
     expect(dot.getAttribute("title")).toContain("not running");
   });
 
@@ -71,7 +80,7 @@ describe("HarnessPicker locked badge", () => {
     render(<HarnessPicker />);
 
     const dot = await screen.findByTestId("harness-locked-dot");
-    expect(dot.className).toContain("bg-white/25");
+    expect(dot.className).toContain(DOWN);
     expect(screen.getByText("hermes")).toBeTruthy();
   });
 });

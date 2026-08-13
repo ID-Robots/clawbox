@@ -436,7 +436,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                     id="wifi-ssid" type="text" value={ssid}
                     onChange={(e) => setSsid(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") connectWifi(); }}
-                    placeholder={t("wifi.enterNetworkName")} autoComplete="off" autoFocus
+                    /* SSID, not a username: `off` was already here; the name
+                       keeps this field from being read as the identifier half
+                       of a login pair with the passphrase below. */
+                    placeholder={t("wifi.enterNetworkName")} name="wifi-ssid" autoComplete="off" autoFocus
                     className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
                   />
                 </div>
@@ -457,7 +460,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                     id="wifi-password" type={showPassword ? "text" : "password"} value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") connectWifi(); }}
-                    placeholder={t("wifi.enterPassword")} autoComplete="off" autoFocus={!manualMode}
+                    /* WPA passphrase for the network being joined — masked, but
+                       never a website credential, so it stays `off` and carries
+                       a passphrase-shaped name rather than a password one. */
+                    placeholder={t("wifi.enterPassword")} name="wifi-passphrase" autoComplete="off" autoFocus={!manualMode}
                     className="w-full px-3.5 py-2.5 pr-10 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500"
                   />
                   <button

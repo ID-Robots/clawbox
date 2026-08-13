@@ -171,9 +171,12 @@ export default function AIProviderIcon({
   if (normalized === "llamacpp") {
     return (
       <SvgFrame size={size} className={className}>
-        <rect x="3.5" y="4" width="17" height="16" rx="3" fill="#1E293B" stroke="#F97316" strokeWidth="1.3" />
-        <path d="m8 10 2.6 2L8 14" stroke="#FDBA74" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M12.9 14.6h3.1" stroke="#FDBA74" strokeWidth="1.6" strokeLinecap="round" />
+        {/* FIRST-PARTY glyph, not a third-party mark, so it takes roles: a
+            navy-slate plate on a teal ground was the only thing wrong with it.
+            The brand marks above deliberately keep their hexes. */}
+        <rect x="3.5" y="4" width="17" height="16" rx="3" fill="var(--set-surface-container-highest)" stroke="var(--set-primary)" strokeWidth="1.3" />
+        <path d="m8 10 2.6 2L8 14" stroke="var(--set-primary)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M12.9 14.6h3.1" stroke="var(--set-primary)" strokeWidth="1.6" strokeLinecap="round" />
       </SvgFrame>
     );
   }
@@ -223,18 +226,20 @@ export default function AIProviderIcon({
   if (normalized === "auto") {
     return (
       <SvgFrame size={size} className={className}>
-        <path fill="#94A3B8" d="M12 3c.4 4.2 1.4 5.2 5.6 5.6-4.2.4-5.2 1.4-5.6 5.6-.4-4.2-1.4-5.2-5.6-5.6 4.2-.4 5.2-1.4 5.6-5.6z" />
-        <circle cx="18" cy="17" r="1.5" fill="#64748B" />
+        <path fill="var(--set-on-surface-variant)" d="M12 3c.4 4.2 1.4 5.2 5.6 5.6-4.2.4-5.2 1.4-5.6 5.6-.4-4.2-1.4-5.2-5.6-5.6 4.2-.4 5.2-1.4 5.6-5.6z" />
+        <circle cx="18" cy="17" r="1.5" fill="var(--set-outline)" />
       </SvgFrame>
     );
   }
 
   return (
     <SvgFrame size={size} className={className}>
-      <circle cx="12" cy="12" r="9" fill="#334155" />
+      {/* The fallback Settings draws for any provider id it has no mark for,
+          including Hermes ids — generic and first-party, so it takes roles. */}
+      <circle cx="12" cy="12" r="9" fill="var(--set-surface-container-highest)" />
       <path
         d="M8.5 13.5a3.5 3.5 0 1 1 7 0v2.2a1.3 1.3 0 0 1-1.3 1.3H9.8a1.3 1.3 0 0 1-1.3-1.3v-2.2Z"
-        fill="#E2E8F0"
+        fill="var(--set-on-surface-variant)"
       />
     </SvgFrame>
   );

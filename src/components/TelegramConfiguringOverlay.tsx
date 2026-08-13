@@ -204,33 +204,37 @@ export default function TelegramConfiguringOverlay({
       </div>
 
       <div className="relative w-24 h-24 flex items-center justify-center" aria-hidden="true">
-        <div className="absolute inset-0 rounded-full border-2 border-sky-500/20" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite" }} />
-        <div className="absolute inset-2 rounded-full border border-sky-500/10" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite 0.5s" }} />
+        {/* This is the Telegram section, and `--set-brand-telegram` exists for
+            exactly this: the blue identifies someone else's product, so it is a
+            brand token that is NOT re-pointed per edition — but it lives in the
+            role layer rather than as a hex here, like every other colour. */}
+        <div className="absolute inset-0 rounded-full border-2 border-[var(--set-brand-telegram-wash)]" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite" }} />
+        <div className="absolute inset-2 rounded-full border border-[color-mix(in_srgb,var(--set-brand-telegram)_10%,transparent)]" style={{ animation: "tg-pulse-ring 2s ease-in-out infinite 0.5s" }} />
 
         {phase >= 1 && [0, 1, 2].map((i) => (
           <div key={i} className="absolute inset-0 flex items-center justify-center" style={{ animation: `tg-orbit ${3 + i * 0.5}s linear infinite`, animationDelay: `${i * 0.4}s` }}>
-            <div className="w-2 h-2 rounded-full bg-sky-400" style={{ opacity: 0.4 + i * 0.2 }} />
+            <div className="w-2 h-2 rounded-full bg-[var(--set-brand-telegram-ink)]" style={{ opacity: 0.4 + i * 0.2 }} />
           </div>
         ))}
 
         {phase === 0 ? (
           <svg width="48" height="48" viewBox="0 0 56 56" fill="none" className="tg-fade-in">
-            <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "tg-check-circle 0.6s ease-out 0.1s forwards" }} />
-            <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "tg-check-draw 0.4s ease-out 0.5s forwards" }} />
+            <circle cx="28" cy="28" r="25" stroke="var(--set-success)" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "tg-check-circle 0.6s ease-out 0.1s forwards" }} />
+            <path d="M17 28l7 7 15-15" stroke="var(--set-success)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "tg-check-draw 0.4s ease-out 0.5s forwards" }} />
           </svg>
         ) : (
           <svg width="48" height="48" viewBox="0 0 48 48" className="tg-fade-in">
-            <circle cx="24" cy="24" r="22" fill="#2AABEE" />
+            <circle cx="24" cy="24" r="22" fill="var(--set-brand-telegram)" />
             <path d="M12.5 23.5l3.6 3.3 1.3 4.5c.2.5.8.7 1.2.4l2.8-2.3a.8.8 0 0 1 1 0l5 3.6c.4.3 1 .1 1.1-.4l3.7-17.8c.1-.6-.4-1-.9-.8L12.5 22.3c-.7.3-.7 1 0 1.2z" fill="white" />
           </svg>
         )}
       </div>
 
       <div className="text-center tg-fade-in" style={{ animationDelay: "0.3s" }}>
-        <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">
+        <h2 className="text-lg font-bold text-[var(--set-on-surface)] mb-1">
           {phase === 0 ? t("connected") : phase === 4 ? t("telegram.allSet") : t("telegram.settingUpTelegram")}
         </h2>
-        <p className="text-sm text-[var(--text-muted)]">
+        <p className="text-sm text-[var(--set-on-surface-variant)]">
           {phase === 0
             ? t("telegram.botTokenVerified")
             : phase === 4
@@ -249,19 +253,19 @@ export default function TelegramConfiguringOverlay({
             style={i <= phase ? { animation: "tg-fade-in 0.3s ease-out both", animationDelay: `${i * 0.1}s` } : undefined}
           >
             {i < phase ? (
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[color-mix(in_srgb,var(--set-success)_20%,transparent)] text-[var(--set-success)] shrink-0">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
               </span>
             ) : i === phase ? (
               <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                <span className="w-3.5 h-3.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+                <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--set-brand-telegram-ink)] border-t-transparent animate-spin" />
               </span>
             ) : (
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--set-surface-container-highest)] shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--set-outline)]" />
               </span>
             )}
-            <span className={i <= phase ? (i < phase ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+            <span className={i <= phase ? (i < phase ? "text-[var(--set-success)]" : "text-[var(--set-on-surface)]") : "text-[var(--set-on-surface-variant)]"}>
               {step.label}
             </span>
           </div>
@@ -269,7 +273,7 @@ export default function TelegramConfiguringOverlay({
       </div>
 
       {phase >= 1 && phase < 4 && (
-        <p className="text-xs text-[var(--text-muted)] text-center mt-2 tg-step-enter">
+        <p className="text-xs text-[var(--set-on-surface-variant)] text-center mt-2 tg-step-enter">
           {isHermes ? t("telegram.hermesPleaseWait") : t("telegram.pleaseWait")}{dots}
         </p>
       )}

@@ -3,14 +3,18 @@ interface StatusMessageProps {
   message: string;
 }
 
+// Ink, 10% fill and 20% edge, all mixed from ONE role per state. The three
+// roles are deliberately edition-invariant — cyan means DONE, red means
+// FAILED and amber means CAUTION on every box — so this is a literal→role
+// swap that moves no pixel on a ClawBox device while letting the banner sit on
+// a Hermes ground without a hardcoded `#00e5cc` fighting the palette around it.
 const STYLES: Record<StatusMessageProps["type"], string> = {
-  // Cyan is the product's "done" colour, and the fill and text always were —
-  // only the border was green, so a success message was outlined in a hue it
-  // used nowhere else. error and info each keep to a single hue; this now does
-  // too.
-  success: "bg-[#00e5cc]/10 text-[#00e5cc] border border-[#00e5cc]/20",
-  error: "bg-red-500/10 text-red-400 border border-red-500/20",
-  info: "bg-amber-400/10 text-amber-300 border border-amber-400/20",
+  success:
+    "bg-[color-mix(in_srgb,var(--set-success)_10%,transparent)] text-[var(--set-success)] border border-[color-mix(in_srgb,var(--set-success)_20%,transparent)]",
+  error:
+    "bg-[color-mix(in_srgb,var(--set-error)_10%,transparent)] text-[var(--set-error)] border border-[color-mix(in_srgb,var(--set-error)_20%,transparent)]",
+  info:
+    "bg-[color-mix(in_srgb,var(--set-warning)_10%,transparent)] text-[var(--set-warning)] border border-[color-mix(in_srgb,var(--set-warning)_20%,transparent)]",
 };
 
 export default function StatusMessage({ type, message }: StatusMessageProps) {

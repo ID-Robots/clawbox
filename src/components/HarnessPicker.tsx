@@ -69,22 +69,25 @@ export default function HarnessPicker() {
   const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
 
   return (
-    <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+    // Settings-only, and the first thing in Settings → System: a borderless
+    // `--set-surface-container` group, exactly what `SettingsGroup` draws, so
+    // it stops being a navy card among teal ones.
+    <div className="rounded-2xl bg-[var(--set-surface-container)] p-5">
       <div className="flex items-center gap-2 mb-3">
-        <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>
+        <span className="material-symbols-rounded text-[var(--set-primary)]" style={{ fontSize: 18 }}>
           hub
         </span>
-        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest m-0">
+        <h3 className="text-[10px] font-semibold text-[var(--set-on-surface-variant)] uppercase tracking-widest m-0">
           Agent harness
         </h3>
       </div>
-      <p className="text-xs text-[var(--text-muted)] mb-3">
+      <p className="text-xs text-[var(--set-on-surface-variant)] mb-3">
         The engine that runs your agent. One shared identity; each harness keeps its own providers.
       </p>
       {status?.locked ? (
         // Single-harness edition: no switcher, just a read-only badge for the
         // one agent this device runs.
-        <div className="flex items-center justify-between rounded-xl border border-[var(--coral-bright)] bg-orange-500/10 p-3">
+        <div className="flex items-center justify-between rounded-xl border border-[var(--set-primary)] bg-[color-mix(in_srgb,var(--set-primary)_10%,transparent)] p-3">
           <span className="flex items-center gap-2">
             {/* Same dot convention as the switcher below. A fixed green read
                 "online" even when the status route had just reported the one
@@ -93,13 +96,13 @@ export default function HarnessPicker() {
             <span
               data-testid="harness-locked-dot"
               title={activeEntry && !activeEntry.healthy ? `${activeEntry.label} is not running` : undefined}
-              className={`w-2 h-2 rounded-full ${activeEntry?.healthy ? "bg-emerald-400" : "bg-white/25"}`}
+              className={`w-2 h-2 rounded-full ${activeEntry?.healthy ? "bg-[var(--set-success)]" : "bg-[var(--set-outline)]"}`}
             />
-            <span className="text-sm text-[var(--text-primary)] font-medium">
+            <span className="text-sm text-[var(--set-on-surface)] font-medium">
               {activeEntry?.label ?? status.active}
             </span>
           </span>
-          <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+          <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--set-on-surface-variant)]">
             <span className="material-symbols-rounded" style={{ fontSize: 13 }}>lock</span>
             This edition
           </span>
@@ -117,15 +120,15 @@ export default function HarnessPicker() {
               title={!h.healthy ? `${h.label} is not available on this device` : undefined}
               className={`flex items-center justify-between rounded-xl border p-3 text-left transition-colors ${
                 active
-                  ? "border-[var(--coral-bright)] bg-orange-500/10"
-                  : "border-[var(--border-subtle)] hover:border-[var(--coral-bright)]/50"
+                  ? "border-[var(--set-primary)] bg-[color-mix(in_srgb,var(--set-primary)_10%,transparent)]"
+                  : "border-[var(--set-outline-variant)] hover:border-[color-mix(in_srgb,var(--set-primary)_50%,transparent)] hover:bg-[var(--set-state-hover)]"
               }`}
             >
               <span className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${h.healthy ? "bg-emerald-400" : "bg-white/25"}`} />
-                <span className="text-sm text-[var(--text-primary)] font-medium">{h.label}</span>
+                <span className={`w-2 h-2 rounded-full ${h.healthy ? "bg-[var(--set-success)]" : "bg-[var(--set-outline)]"}`} />
+                <span className="text-sm text-[var(--set-on-surface)] font-medium">{h.label}</span>
               </span>
-              <span className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+              <span className="text-[10px] uppercase tracking-wide text-[var(--set-on-surface-variant)]">
                 {busy ? "…" : active ? "Active" : h.healthy ? "Switch" : "Offline"}
               </span>
             </button>
@@ -133,7 +136,7 @@ export default function HarnessPicker() {
         })}
       </div>
       )}
-      {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
+      {error && <p className="text-xs text-[var(--set-error)] mt-3">{error}</p>}
     </div>
   );
 }

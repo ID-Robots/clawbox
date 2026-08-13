@@ -161,14 +161,14 @@ function ConfiguringOverlay({
           instead, and turns cyan (DONE) when the work lands. */}
       <div
         className={`flex h-[72px] w-[72px] items-center justify-center rounded-[var(--r-3)] ${
-          completed ? "bg-[var(--cyan-wash)]" : "bg-[var(--fill-2)]"
+          completed ? "bg-[color-mix(in_srgb,var(--set-success)_20%,transparent)]" : "bg-[var(--set-surface-container-highest)]"
         }`}
         style={{ transition: "background-color var(--d-3) var(--ease-standard)" }}
       >
         {completed ? (
           <svg width="44" height="44" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
-            <circle cx="28" cy="28" r="25" stroke="var(--cyan-bright)" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-draw var(--d-5) var(--ease-emphasis) 100ms forwards" }} />
-            <path d="M17 28l7 7 15-15" stroke="var(--cyan-bright)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw var(--d-3) var(--ease-entrance) var(--d-5) forwards" }} />
+            <circle cx="28" cy="28" r="25" stroke="var(--set-success)" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-draw var(--d-5) var(--ease-emphasis) 100ms forwards" }} />
+            <path d="M17 28l7 7 15-15" stroke="var(--set-success)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw var(--d-3) var(--ease-entrance) var(--d-5) forwards" }} />
           </svg>
         ) : (
           <AIProviderIcon provider={provider} size={44} className="aimodels-fade-in" />
@@ -177,10 +177,10 @@ function ConfiguringOverlay({
 
       {/* Provider name */}
       <div className="text-center aimodels-fade-in" style={{ animationDelay: "var(--stagger)" }}>
-        <h2 className="text-[length:var(--t-6)] leading-[1.15] font-bold text-[var(--text-primary)] mb-2">
+        <h2 className="text-[length:var(--t-6)] leading-[1.15] font-bold text-[var(--set-on-surface)] mb-2">
           {completed ? t("connected") : t("ai.settingUp", { provider: providerName })}
         </h2>
-        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)]">
+        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--set-on-surface-variant)]">
           {completed
             ? detail || t("ai.configured")
             : detail || `${t("ai.configuringAssistant")}${dots}`}
@@ -205,19 +205,19 @@ function ConfiguringOverlay({
               }}
             >
               {stepDone ? (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--cyan-wash)] text-[var(--cyan-bright)] shrink-0">
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[color-mix(in_srgb,var(--set-success)_20%,transparent)] text-[var(--set-success)] shrink-0">
                   <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>check</span>
                 </span>
               ) : stepNow ? (
                 <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                  <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--set-primary)] border-t-transparent animate-spin" />
                 </span>
               ) : (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--fill-1)] shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--fill-4)]" />
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--set-surface-container-highest)] shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--set-outline)]" />
                 </span>
               )}
-              <span className={stepDone ? "text-[var(--cyan-bright)]" : stepNow ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}>
+              <span className={stepDone ? "text-[var(--set-success)]" : stepNow ? "text-[var(--set-on-surface)]" : "text-[var(--set-on-surface-variant)]"}>
                 {step}
               </span>
             </li>
@@ -227,16 +227,16 @@ function ConfiguringOverlay({
 
       {progressPercent !== null && !completed && (
         <div className="w-full max-w-[280px]">
-          <div className="flex items-center justify-between gap-2 text-[length:var(--t-1)] text-[var(--text-muted)] mb-2">
+          <div className="flex items-center justify-between gap-2 text-[length:var(--t-1)] text-[var(--set-on-surface-variant)] mb-2">
             <span className="truncate">{providerName}</span>
             <span className="tabular-nums shrink-0">{progressPercent}%</span>
           </div>
           {/* Linear, because --ease-truth is the only honest curve for a
               bar that reports someone else's progress: an easing curve
               would invent a velocity the box never reported. */}
-          <div className="w-full h-1 bg-[var(--fill-2)] rounded-[var(--r-full)] overflow-hidden">
+          <div className="w-full h-1 bg-[var(--set-surface-container-highest)] rounded-[var(--r-full)] overflow-hidden">
             <div
-              className="h-full bg-[var(--coral-bright)] rounded-[var(--r-full)]"
+              className="h-full bg-[var(--set-primary)] rounded-[var(--r-full)]"
               style={{ width: `${progressPercent}%`, transition: "width var(--d-3) var(--ease-truth)" }}
             />
           </div>
@@ -247,7 +247,7 @@ function ConfiguringOverlay({
          models — can take 10-15 min on Jetson. Cloud providers finish in
          seconds, so they get the shorter generic copy. */}
       {!completed && phase >= 1 && (
-        <p className="text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)] text-center aimodels-fade-in">
+        <p className="text-[length:var(--t-2)] leading-[1.5] text-[var(--set-on-surface-variant)] text-center aimodels-fade-in">
           {provider === "llamacpp" || provider === "ollama"
             ? t("ai.pleaseDontCloseLocal")
             : t("ai.pleaseDontClose")}
@@ -391,14 +391,14 @@ const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
 // from under a thumb that had not lifted yet. Disabled reads as "not yet"
 // (a quiet fill) rather than as a faded version of the live button.
 const PRIMARY_ACTION_CLASS =
-  "w-full min-h-[48px] px-6 btn-gradient text-white rounded-[var(--r-1)] font-semibold text-[length:var(--t-5)] cursor-pointer flex items-center justify-center gap-2 " +
+  "w-full min-h-[48px] px-6 btn-gradient text-[var(--set-on-primary)] rounded-[var(--r-1)] font-semibold text-[length:var(--t-5)] cursor-pointer flex items-center justify-center gap-2 " +
   "transition-transform duration-[var(--d-1)] ease-[var(--ease-standard)] active:scale-[0.98] " +
-  "disabled:bg-none disabled:bg-[var(--fill-2)] disabled:text-[var(--text-muted)] disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100";
+  "disabled:bg-none disabled:bg-[var(--set-surface-container-highest)] disabled:text-[var(--set-on-surface-variant)] disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100";
 
 // The quiet inline link/toggle used for "get a new code", "restart sign-in"
 // and the model-picker escape hatch.
 const QUIET_LINK_CLASS =
-  "bg-transparent border-none p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]";
+  "bg-transparent border-none p-0 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-primary))] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]";
 
 
 export default function AIModelsStep({
@@ -1367,17 +1367,17 @@ export default function AIModelsStep({
           type="button"
           onClick={() => setModelPickerOpen(true)}
           aria-expanded={false}
-          className="mt-4 flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--fill-1)] border border-[var(--hair-2)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--fill-2)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+          className="mt-4 flex w-full min-h-[44px] items-center justify-between gap-3 px-4 py-2 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-1)] text-left cursor-pointer hover:bg-[var(--set-state-hover)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
         >
           <span className="flex min-w-0 flex-col">
-            <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
+            <span className="text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)]">
               Model
             </span>
-            <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+            <span className="truncate text-[length:var(--t-4)] text-[var(--set-on-surface)]">
               {currentModelLabel}
             </span>
           </span>
-          <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
+          <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)]">
             Change
           </span>
         </button>
@@ -1387,7 +1387,7 @@ export default function AIModelsStep({
       <div className="mt-4">
         <label
           htmlFor="ai-provider-model"
-          className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
+          className="block text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)] mb-2"
         >
           Model
         </label>
@@ -1399,7 +1399,7 @@ export default function AIModelsStep({
               setModelTouched(true);
               setSelectedModelId(e.target.value);
             }}
-            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--set-on-surface)] outline-none focus:border-[var(--set-primary)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
           >
             {activeCatalog.models.map((option) => (
               <option key={option.id} value={option.id}>
@@ -1423,7 +1423,7 @@ export default function AIModelsStep({
             }
             spellCheck={false}
             autoComplete="off"
-            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--set-on-surface)] outline-none focus:border-[var(--set-primary)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--set-on-surface-variant)]"
           />
         )}
         {activeCatalog.allowCustom && (
@@ -1433,14 +1433,14 @@ export default function AIModelsStep({
               setModelTouched(true);
               setUseCustomModel((value) => !value);
             }}
-            className="mt-2 bg-transparent p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
+            className="mt-2 bg-transparent p-0 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-primary))] cursor-pointer border-none"
           >
             {useCustomModel
               ? "Pick from curated list"
               : "Enter a custom model ID…"}
           </button>
         )}
-        <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
+        <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--set-on-surface-variant)]">
           {selected.id === "openrouter"
             ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
             : "You can switch between the curated models from the chat window anytime."}
@@ -1451,7 +1451,7 @@ export default function AIModelsStep({
 
   const renderDeviceAuth = () => (
     <div>
-      <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mb-4 leading-[1.6]">
+      <p className="text-[length:var(--t-2)] text-[var(--set-on-surface-variant)] mb-4 leading-[1.6]">
         {currentDevice.description}
       </p>
 
@@ -1465,7 +1465,7 @@ export default function AIModelsStep({
         </button>
       ) : (
         <div>
-          <div className="mb-4 p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] text-center">
+          <div className="mb-4 p-4 bg-[var(--set-surface-container-high)] rounded-[var(--r-1)] text-center">
             <button
               type="button"
               onClick={() => {
@@ -1474,13 +1474,13 @@ export default function AIModelsStep({
                   oauthWindowRef.current = win;
                 }
               }}
-              className="w-full min-h-[48px] px-4 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-semibold rounded-[var(--r-1)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-[length:var(--t-4)] cursor-pointer"
+              className="w-full min-h-[48px] px-4 bg-[var(--set-primary)] hover:bg-[color-mix(in_srgb,var(--set-on-primary)_8%,var(--set-primary))] text-[var(--set-on-primary)] font-semibold rounded-[var(--r-1)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-[length:var(--t-4)] cursor-pointer"
             >
               {t("ai.openAuthPage")}
             </button>
-            <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
-            <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-[var(--r-1)] inline-flex items-center gap-2">
-              <span className="text-[length:var(--t-6)] font-mono font-bold text-[var(--text-primary)] tracking-[0.16em] select-all">
+            <p className="text-[length:var(--t-2)] text-[var(--set-on-surface-variant)] mt-4 mb-2">{t("ai.thenEnterCode")}</p>
+            <div className="px-4 py-3 bg-[var(--set-surface-container-highest)] rounded-[var(--r-1)] inline-flex items-center gap-2">
+              <span className="text-[length:var(--t-6)] font-mono font-bold text-[var(--set-on-surface)] tracking-[0.16em] select-all">
                 {deviceCode}
               </span>
               <button
@@ -1500,19 +1500,19 @@ export default function AIModelsStep({
                   } catch { /* ignore */ }
                 }}
                 id="copy-code-btn"
-                className="ml-1 px-2 py-1 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] hover:bg-[var(--bg-surface)] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+                className="ml-1 px-2 py-1 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)] bg-[var(--set-surface-container-high)] border border-[var(--set-outline)] rounded-[var(--r-1)] hover:bg-[var(--set-state-hover)] cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
               >
                 {t("copy")}
               </button>
             </div>
-            <p className="mt-2 text-[length:var(--t-2)] text-[var(--text-muted)]">
+            <p className="mt-2 text-[length:var(--t-2)] text-[var(--set-on-surface-variant)]">
               {t("ai.codeExpires")}
             </p>
           </div>
 
           {(devicePolling || deviceSaving) && (
-            <div className="flex items-center gap-2 text-[length:var(--t-2)] text-[var(--text-secondary)]">
-              <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
+            <div className="flex items-center gap-2 text-[length:var(--t-2)] text-[var(--set-on-surface-variant)]">
+              <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--set-primary)] border-t-transparent rounded-full animate-spin" />
               {deviceSaving ? t("ai.authorizedConnecting") : t("ai.waitingAuth")}
             </div>
           )}
@@ -1531,7 +1531,7 @@ export default function AIModelsStep({
 
   const renderRedirectOAuth = () => (
     <div>
-      <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mb-4 leading-[1.6]">
+      <p className="text-[length:var(--t-2)] text-[var(--set-on-surface-variant)] mb-4 leading-[1.6]">
         {currentOAuth.description}
       </p>
 
@@ -1548,10 +1548,10 @@ export default function AIModelsStep({
           {/* A numbered list, not three lines separated by <br>: the steps
               are an ordered list, so a screen reader should be told how
               many there are and which one it is on. */}
-          <ol className="mb-4 p-3 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-[var(--r-1)] list-none space-y-1">
+          <ol className="mb-4 p-3 bg-[var(--set-surface-container-high)] rounded-[var(--r-1)] list-none space-y-1">
             {currentOAuth.steps.map((step, i) => (
-              <li key={i} className="flex gap-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-primary)]">
-                <span aria-hidden="true" className="shrink-0 font-semibold text-[var(--coral-bright)] tabular-nums">
+              <li key={i} className="flex gap-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--set-on-surface)]">
+                <span aria-hidden="true" className="shrink-0 font-semibold text-[var(--set-primary)] tabular-nums">
                   {i + 1}.
                 </span>
                 <span className="min-w-0">{step}</span>
@@ -1561,7 +1561,7 @@ export default function AIModelsStep({
 
           <label
             htmlFor="oauth-auth-code"
-            className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
+            className="block text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)] mb-2"
           >
             {currentOAuth.inputLabel}
           </label>
@@ -1576,7 +1576,7 @@ export default function AIModelsStep({
             placeholder={currentOAuth.inputPlaceholder}
             spellCheck={false}
             autoComplete="off"
-            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
+            className="w-full min-h-[48px] px-4 py-3 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--set-on-surface)] outline-none focus:border-[var(--set-primary)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--set-on-surface-variant)]"
           />
 
           <button
@@ -1653,26 +1653,26 @@ export default function AIModelsStep({
   if (edition === null) {
     return (
       <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-        <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8" role="status" aria-busy="true">
+        <div className="rounded-[var(--r-3)] bg-[var(--set-surface-container)] p-5 sm:p-8" role="status" aria-busy="true">
           <span className="sr-only">{t("ai.loadingPanel")}</span>
           <div aria-hidden="true" className="animate-pulse">
-            <div className="h-8 w-2/3 rounded-[var(--r-1)] bg-[var(--fill-3)] mb-2" />
-            <div className="h-4 w-full rounded-[var(--r-1)] bg-[var(--fill-2)] mb-2" />
-            <div className="h-4 w-4/5 rounded-[var(--r-1)] bg-[var(--fill-2)] mb-6" />
-            <div className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+            <div className="h-8 w-2/3 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] mb-2" />
+            <div className="h-4 w-full rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] mb-2" />
+            <div className="h-4 w-4/5 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] mb-6" />
+            <div className="rounded-[var(--r-1)] bg-[var(--set-surface-container-high)] overflow-hidden">
               {Array.from({ length: Math.max(1, displayedProviders.length) }, (_, row) => (
-                <div key={row} className="flex items-center gap-3 px-4 py-3.5 border-b border-[var(--hair)] last:border-b-0">
-                  <span className="w-5 h-5 rounded-full bg-[var(--fill-3)] shrink-0" />
-                  <span className="w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-3)] shrink-0" />
+                <div key={row} className="flex items-center gap-3 px-4 py-3.5 border-b border-[var(--set-outline-variant)] last:border-b-0">
+                  <span className="w-5 h-5 rounded-full bg-[var(--set-surface-container-highest)] shrink-0" />
+                  <span className="w-8 h-8 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] shrink-0" />
                   <span className="flex-1 min-w-0">
-                    <span className="block h-3.5 w-1/3 rounded-[var(--r-1)] bg-[var(--fill-3)] mb-2" />
-                    <span className="block h-3 w-2/3 rounded-[var(--r-1)] bg-[var(--fill-2)]" />
+                    <span className="block h-3.5 w-1/3 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] mb-2" />
+                    <span className="block h-3 w-2/3 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)]" />
                   </span>
                 </div>
               ))}
             </div>
             <div className="mt-5 min-h-[240px]">
-              <div className="h-12 w-full rounded-[var(--r-1)] bg-[var(--fill-2)]" />
+              <div className="h-12 w-full rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)]" />
             </div>
           </div>
         </div>
@@ -1696,7 +1696,7 @@ export default function AIModelsStep({
 
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8 relative overflow-hidden">
+      <div className="rounded-[var(--r-3)] bg-[var(--set-surface-container)] p-5 sm:p-8 relative overflow-hidden">
         {configuringState && (
           <ConfiguringOverlay
             provider={configuringState.provider}
@@ -1713,11 +1713,11 @@ export default function AIModelsStep({
         <h1 className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
           {resolvedTitle}
         </h1>
-        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)] mb-6">
+        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--set-on-surface-variant)] mb-6">
           {resolvedDescription}
         </p>
 
-        <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+        <div role="radiogroup" aria-label="AI Provider" className="rounded-[var(--r-1)] bg-[var(--set-surface-container-high)] overflow-hidden">
           {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
             // ClawBox AI's row is shared verbatim with the Hermes provider panel
@@ -1735,10 +1735,10 @@ export default function AIModelsStep({
             return (
               <label
                 key={provider.id}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--hair)] last:border-b-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
+                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--set-outline-variant)] last:border-b-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--set-primary)] has-[:focus-visible]:ring-inset ${
                   isSelected
-                    ? "bg-[var(--coral-wash)]"
-                    : "hover:bg-[var(--fill-3)]"
+                    ? "bg-[color-mix(in_srgb,var(--set-primary)_8%,transparent)]"
+                    : "hover:bg-[var(--set-state-hover)]"
                 }`}
               >
                 <input
@@ -1753,31 +1753,31 @@ export default function AIModelsStep({
                   aria-hidden="true"
                   className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${
                     isSelected
-                      ? "border-[var(--coral-bright)]"
-                      : "border-[var(--border-subtle)]"
+                      ? "border-[var(--set-primary)]"
+                      : "border-[var(--set-outline)]"
                   }`}
                 >
                   {isSelected && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--set-primary)]" />
                   )}
                 </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0">
+                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-[var(--r-1)] bg-[var(--set-surface-container-highest)] shrink-0">
                   <AIProviderIcon provider={provider.id} size={22} />
                 </span>
                 <div className="flex-1 min-w-0">
-                  <span className="flex flex-wrap items-center gap-2 text-[length:var(--t-4)] font-semibold text-[var(--text-primary)]">
+                  <span className="flex flex-wrap items-center gap-2 text-[length:var(--t-4)] font-semibold text-[var(--set-on-surface)]">
                     {provider.name}
                     {provider.id === "llamacpp" && (
                       /* Cyan is DONE-and-verified everywhere else in the box;
                          "runs entirely on this device" is the one other fact
                          it is allowed to carry, and it is the fact this row
                          exists to state. */
-                      <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
+                      <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[color-mix(in_srgb,var(--set-success)_20%,transparent)] text-[var(--set-success)] leading-none">
                         {t("ai.fullyLocal")}
                       </span>
                     )}
                   </span>
-                  <span className="block text-[length:var(--t-2)] leading-[1.45] text-[var(--text-muted)]">
+                  <span className="block text-[length:var(--t-2)] leading-[1.45] text-[var(--set-on-surface-variant)]">
                     {providerDesc[provider.id] ?? provider.description}
                   </span>
                 </div>
@@ -1792,7 +1792,7 @@ export default function AIModelsStep({
               // No border-top of its own: the row above it is no longer the
               // list's last child, so that row's bottom hairline is already
               // the divider. Two would draw a 2px seam.
-              className="flex w-full min-h-[48px] items-center gap-2 px-4 py-3 text-[length:var(--t-4)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer hover:bg-[var(--fill-3)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-left"
+              className="flex w-full min-h-[48px] items-center gap-2 px-4 py-3 text-[length:var(--t-4)] text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface)] bg-transparent border-none cursor-pointer hover:bg-[var(--set-state-hover)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] text-left"
             >
               <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 18 }}>expand_more</span>
               {t("ai.showMore")}
@@ -1844,7 +1844,7 @@ export default function AIModelsStep({
         {selected && selected.id !== "ollama" && selected.id !== "llamacpp" && selected.id !== "clawai" && activeAuth && (
           <div className="mt-3">
             {effectiveAuthOptions.length > 1 && (
-              <div className="flex gap-1 mb-4 p-1 bg-[var(--bg-deep)] rounded-[var(--r-1)]">
+              <div className="flex gap-1 mb-4 p-1 bg-[var(--set-surface-container-highest)] rounded-[var(--r-1)]">
                 {effectiveAuthOptions.map((opt) => (
                   <button
                     type="button"
@@ -1863,8 +1863,8 @@ export default function AIModelsStep({
                     }}
                     className={`flex-1 min-h-[40px] px-2 rounded-[var(--r-1)] text-[length:var(--t-4)] font-semibold transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer border-none ${
                       authMode === opt.mode
-                        ? "bg-[var(--fill-3)] text-[var(--text-primary)]"
-                        : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                        ? "bg-[var(--set-surface-container-highest)] text-[var(--set-on-surface)]"
+                        : "bg-transparent text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface-variant)]"
                     }`}
                   >
                     {opt.mode === "token" ? t("ai.apiKey") : opt.mode === "subscription" ? t("ai.subscription") : opt.mode === "local" && selected?.id === "clawai" ? t("ai.free") : opt.mode === "local" ? t("ai.local") : opt.label}
@@ -1883,7 +1883,7 @@ export default function AIModelsStep({
                     href={activeAuth.tokenUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 mb-3 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+                    className="inline-flex items-center gap-1.5 mb-3 text-[length:var(--t-2)] font-semibold text-[var(--set-primary)] hover:text-[color-mix(in_srgb,var(--set-on-surface)_20%,var(--set-primary))] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     {activeAuth.tokenUrlLabel === "Get API Key" ? t("ai.getApiKey") : t("ai.getToken")}
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>open_in_new</span>
@@ -1892,7 +1892,7 @@ export default function AIModelsStep({
 
                 <label
                   htmlFor="ai-api-key"
-                  className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
+                  className="block text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)] mb-2"
                 >
                   {selected.name} API Key
                 </label>
@@ -1908,18 +1908,18 @@ export default function AIModelsStep({
                     placeholder={activeAuth.placeholder}
                     spellCheck={false}
                     autoComplete="off"
-                    className="w-full min-h-[48px] px-4 py-3 pr-12 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--text-muted)]"
+                    className="w-full min-h-[48px] px-4 py-3 pr-12 bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--set-on-surface)] outline-none focus:border-[var(--set-primary)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] placeholder:text-[var(--set-on-surface-variant)]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
                     aria-label={showKey ? "Hide key" : "Show key"}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface)] hover:bg-[var(--set-state-hover)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>{showKey ? "visibility_off" : "visibility"}</span>
                   </button>
                 </div>
-                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">{activeAuth.hint}</p>
+                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--set-on-surface-variant)]">{activeAuth.hint}</p>
               </div>
             )}
             {renderProviderModelPicker()}
@@ -1933,14 +1933,14 @@ export default function AIModelsStep({
             it. Radius joins the ladder (12 → 8); the surface does not move
             until the shared card can move with it. */}
         {selected?.id === "clawai" && (
-          <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+          <div className="mt-3 rounded-[var(--r-1)] bg-[var(--set-surface-container-high)] p-4">
             <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow
                 vs paste a key". */}
             {effectiveAuthOptions.length > 1 && (
-              <div className="mt-4 flex gap-1 p-1 bg-[var(--bg-deep)] rounded-[var(--r-1)]">
+              <div className="mt-4 flex gap-1 p-1 bg-[var(--set-surface-container-highest)] rounded-[var(--r-1)]">
                 {effectiveAuthOptions.map((opt) => (
                   <button
                     type="button"
@@ -1955,8 +1955,8 @@ export default function AIModelsStep({
                     }}
                     className={`flex-1 min-h-[40px] px-2 rounded-[var(--r-1)] text-[length:var(--t-4)] font-semibold transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer border-none ${
                       authMode === opt.mode
-                        ? "bg-[var(--fill-3)] text-[var(--text-primary)]"
-                        : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                        ? "bg-[var(--set-surface-container-highest)] text-[var(--set-on-surface)]"
+                        : "bg-transparent text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface-variant)]"
                     }`}
                   >
                     {opt.mode === "subscription" ? t("ai.subscription") : t("ai.apiKey")}
@@ -1984,7 +1984,7 @@ export default function AIModelsStep({
                 stays available for users who already have one. */}
             {currentAuthMode === "token" && (
               <div className="mt-4">
-                <label htmlFor="clawai-portal-token" className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2">
+                <label htmlFor="clawai-portal-token" className="block text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)] mb-2">
                   Portal token
                 </label>
                 <div className="relative">
@@ -2005,21 +2005,21 @@ export default function AIModelsStep({
                     placeholder="Paste your portal token"
                     spellCheck={false}
                     autoComplete="off"
-                    className="w-full min-h-[48px] px-4 py-3 pr-12 text-[length:var(--t-4)] bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[var(--text-primary)] outline-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--coral-bright)] placeholder:text-[var(--text-muted)]"
+                    className="w-full min-h-[48px] px-4 py-3 pr-12 text-[length:var(--t-4)] bg-[var(--set-surface-container-highest)] border border-[var(--set-outline)] rounded-[var(--r-2)] text-[var(--set-on-surface)] outline-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--set-primary)] placeholder:text-[var(--set-on-surface-variant)]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
                     aria-label={showKey ? "Hide token" : "Show token"}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface)] hover:bg-[var(--set-state-hover)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
                       {showKey ? "visibility_off" : "visibility"}
                     </span>
                   </button>
                 </div>
-                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
-                  Issue a token in the <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">ClawBox portal</a> and paste it here.
+                <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--set-on-surface-variant)]">
+                  Issue a token in the <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--set-primary)] underline">ClawBox portal</a> and paste it here.
                 </p>
               </div>
             )}
@@ -2086,7 +2086,7 @@ export default function AIModelsStep({
               type="button"
               onClick={handleSkipAction}
               disabled={saving}
-              className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:cursor-not-allowed"
+              className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--set-on-surface-variant)] hover:text-[var(--set-on-surface)] hover:bg-[var(--set-state-hover)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:cursor-not-allowed"
             >
               {configureScope === "local" ? t("skip") : t("ai.skipUseLocalOnly")}
             </button>

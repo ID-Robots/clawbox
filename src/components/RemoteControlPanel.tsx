@@ -405,6 +405,13 @@ export default function RemoteControlPanel() {
                 <SettingsTextField
                   readOnly
                   value={url!}
+                  /* The last un-declared text input inside the Settings pane.
+                     It holds a tunnel URL, never an identity, and it is
+                     focused on purpose (the select-all below) — exactly the
+                     event a password manager listens for before it opens its
+                     autofill tooltip. See the `::backdrop` note in globals.css
+                     for what that tooltip used to do to this screen. */
+                  autoComplete="off"
                   onFocus={e => e.currentTarget.select()}
                   aria-label={t("remoteControl.tunnelUrlLabel")}
                   className="min-w-[160px] flex-1"

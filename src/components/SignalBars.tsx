@@ -16,7 +16,10 @@ export default function SignalBars({ level }: SignalBarsProps) {
             width={3}
             height={h}
             rx={1}
-            fill={i < level ? "#f97316" : "#374151"}
+            // Roles, not hexes: the inactive bar used to be a navy-grey that
+            // read as a smudge on a Hermes ground. `--set-outline-variant` is
+            // the divider weight, which is exactly what an unlit bar is.
+            fill={i < level ? "var(--set-primary)" : "var(--set-outline-variant)"}
           />
         );
       })}

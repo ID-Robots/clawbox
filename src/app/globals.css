@@ -258,10 +258,25 @@ body {
   background: var(--background);
 }
 
-:fullscreen {
-  background: var(--background);
-}
-::backdrop {
+/* SCOPED TO THE FULLSCREEN BACKDROP ON PURPOSE — do not go back to a bare
+   `::backdrop`.
+
+   `::backdrop` matches the backdrop of ANY top-layer element, and a top-layer
+   backdrop is a viewport-sized box that paints above every element in the
+   document. The app itself never opens one (no `<dialog>`, `showModal()`,
+   `popover=` or `showPopover()` anywhere in src/), but a browser extension
+   can: the iCloud Passwords autofill tooltip appends a `popover="manual"` div
+   to `document.body` and calls `showPopover()` on it when a field is focused.
+   The UA default for a popover backdrop is `transparent`, and ANY author rule
+   beats the UA origin — so the unqualified rule that used to live here filled
+   the whole viewport with an opaque `var(--background)` and the page appeared
+   to go black the moment a Settings or Setup field was clicked. Keeping the
+   selector on `:fullscreen` preserves the only backdrop this app ever intends
+   to paint (`documentElement.requestFullscreen()` in ChromeShelf.tsx and
+   M3ExpressiveDock.tsx) while making the page inert to third-party top-layer
+   elements. If an in-app `<dialog>` ever needs one, add `dialog::backdrop`. */
+:fullscreen,
+:fullscreen::backdrop {
   background: var(--background);
 }
 
@@ -908,8 +923,39 @@ body:has([data-agent="hermes"]) .settings-pane {
    dock's `.m3dx` scope, which Settings cannot see) and `#0a0f1a` for
    on-primary, which is `--ground` by value but is a text colour here, not a
    ground, so it is spelled rather than borrowed.
+
+   SCOPE — why three selectors and not one.
+   A dozen surfaces are shared between the Settings window and the setup
+   wizard: HermesProviderConfig, AIModelsStep, ClawboxAiProviderRow,
+   ClawboxAiPlanPicker, ClawboxAiDeviceLogin, LlamaCppModelPanel,
+   AIProviderIcon, StatusMessage, SignalBars, TelegramConfiguringOverlay.
+   Once those reference `--set-*` the roles must resolve WHEREVER they
+   render, or the wizard ships an unpainted panel. Two ways out: spell a
+   legacy fallback into every one of the ~200 call sites
+   (`var(--set-x, var(--legacy-x))`), which puts the old palette straight back
+   into the `.tsx` this layer exists to empty and leaves two values to keep in
+   step forever — or widen the layer so it reaches every render site. Widened:
+     • `:root`          — the floor, so `--set-*` resolves ANYWHERE in the
+                          document and no component can render role-less. This
+                          is what covers the two `SetupWizard` mounts that are
+                          inside neither scope: `/setup/settings`
+                          (`SubPageLayout`) and the desktop's `setup` window
+                          (`page.tsx`). Both are ClawBox navy today and stay
+                          navy, because the floor IS the base palette.
+     • `.settings-pane` — restated rather than inherited, so the Hermes arm
+                          below has an equal-specificity rule to override.
+     • `.setup-shell`   — same, for the wizard. `[data-agent="hermes"]
+                          .setup-shell` re-points `--bg-deep`/`--bg-surface`/
+                          `--bg-elevated` ON THAT ELEMENT; a `:root`-only
+                          declaration is substituted before that override
+                          exists, so the block has to be restated here to see
+                          it. The Hermes arm below names the same values
+                          outright regardless, for the ink and outline rungs
+                          the `--bg-*` shift cannot reach.
    ═══════════════════════════════════════════════════════════════════════ */
-.settings-pane {
+:root,
+.settings-pane,
+.setup-shell {
   /* surfaces — tonal elevation ladder. Each rung has ONE job:
        surface            the pane's ground
        container          a group (the borderless card that replaced the border)
@@ -1001,15 +1047,21 @@ body:has([data-agent="hermes"]) .settings-pane {
 
    The `body:has(…)` arm is what reaches the three overlays Settings portals
    into `document.body`; see the shared rule above for why the first arm
-   cannot. Both arms are here so that an edition is a CSS change and never a
-   `.tsx` sweep — that is the entire justification for the role layer.
+   cannot. The `.setup-shell` arm is what carries the roles into the setup
+   wizard, where the same dozen components render with no `.settings-pane`
+   anywhere above them — without it the shared panels would fall through to
+   the `:root` floor and a Hermes box would show a teal wizard frame wrapped
+   around navy provider cards. All three arms are here so that an edition is a
+   CSS change and never a `.tsx` sweep — that is the entire justification for
+   the role layer.
 
    Only ground, surface and ink move. `--set-primary` and `--set-success` are
    NOT re-pointed here: coral means ACTION and cyan means DONE on every box,
    under every harness — see the note in the agent block above, where
    re-pointing them once put two opposed states 1.08:1 apart. */
 [data-agent="hermes"] .settings-pane,
-body:has([data-agent="hermes"]) .settings-pane {
+body:has([data-agent="hermes"]) .settings-pane,
+[data-agent="hermes"] .setup-shell {
   /* surfaces */
   --set-surface: var(--agent-card);
   --set-surface-container: #132826;

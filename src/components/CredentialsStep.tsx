@@ -610,6 +610,12 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   if (e.key === "Enter") save();
                 }}
                 maxLength={32}
+                /* An SSID is a radio network name, not a username — declared so
+                   it is not paired with the passphrase below as a login form.
+                   (See the `::backdrop` note in globals.css for what an autofill
+                   popover used to do to this screen.) */
+                name="hotspot-ssid"
+                autoComplete="off"
                 className={`${FIELD} ${FIELD_PAD} ${inputBorder(touched && !hotspotName.trim())}`}
                 style={{ ...T_FIELD, ...FIELD_MOTION }}
               />
@@ -691,6 +697,12 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     if (e.key === "Enter") save();
                   }}
                   placeholder={t("credentials.minChars")}
+                  /* A WPA passphrase for this box's own access point, not a
+                     website credential: no autofill, no capture, and NOT
+                     `new-password` (the system password above is the field that
+                     legitimately wants that). */
+                  name="hotspot-passphrase"
+                  autoComplete="off"
                   className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
                   style={{ ...T_FIELD, ...FIELD_MOTION }}
                 />
@@ -718,6 +730,10 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                       if (e.key === "Enter") save();
                     }}
                     placeholder={t("credentials.reenterHotspot")}
+                    /* Confirmation half of the hotspot passphrase — same
+                       reasoning as the field above. */
+                    name="hotspot-passphrase-confirm"
+                    autoComplete="off"
                     className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
                     style={{ ...T_FIELD, ...FIELD_MOTION }}
                   />

@@ -25,9 +25,9 @@ interface LlamaCppModelPanelProps {
   buttonSpinner?: ReactNode;
 }
 const DEFAULT_BUTTON_CLASS =
-  "mt-3 px-5 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2";
+  "mt-3 px-5 py-3 btn-gradient text-[var(--set-on-primary)] rounded-lg font-semibold text-sm transition transform hover:scale-105 shadow-lg shadow-[color-mix(in_srgb,var(--set-primary)_25%,transparent)] cursor-pointer disabled:opacity-50 disabled:hover:scale-100 flex items-center gap-2";
 const DEFAULT_SPINNER = (
-  <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+  <span className="inline-block w-4 h-4 border-2 border-[var(--set-on-primary)] border-t-transparent rounded-full animate-spin" />
 );
 
 export default function LlamaCppModelPanel({
@@ -72,19 +72,19 @@ export default function LlamaCppModelPanel({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-3">
+      <div className="rounded-xl bg-[var(--set-surface-container-high)] p-3">
         <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center shrink-0">
-            <span className="material-symbols-rounded text-orange-300" style={{ fontSize: 24 }}>terminal</span>
+          <div className="w-11 h-11 rounded-xl bg-[color-mix(in_srgb,var(--set-primary)_10%,transparent)] border border-[color-mix(in_srgb,var(--set-primary)_20%,transparent)] flex items-center justify-center shrink-0">
+            <span className="material-symbols-rounded text-[var(--set-primary)]" style={{ fontSize: 24 }}>terminal</span>
           </div>
           <div>
-            <div className="text-base font-semibold text-gray-100">Gemma 4</div>
-            <p className="text-sm text-[var(--text-secondary)]">
+            <div className="text-base font-semibold text-[var(--set-on-surface)]">Gemma 4</div>
+            <p className="text-sm text-[var(--set-on-surface-variant)]">
               Private on-device AI for ClawBox.
             </p>
           </div>
         </div>
-        <p className="mt-3 text-sm text-[var(--text-secondary)] leading-relaxed">
+        <p className="mt-3 text-sm text-[var(--set-on-surface-variant)] leading-relaxed">
           {description}
         </p>
       </div>
@@ -93,7 +93,7 @@ export default function LlamaCppModelPanel({
         <div
           role="status"
           aria-live="polite"
-          className="mt-3 px-5 py-3 rounded-lg font-semibold text-sm border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 flex items-center gap-2"
+          className="mt-3 px-5 py-3 rounded-lg font-semibold text-sm border border-[color-mix(in_srgb,var(--set-success)_40%,transparent)] bg-[color-mix(in_srgb,var(--set-success)_10%,transparent)] text-[var(--set-success)] flex items-center gap-2"
         >
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>check_circle</span>
           {llamaCppRunning ? "Gemma 4 is enabled and running" : "Gemma 4 is already configured"}
@@ -115,7 +115,7 @@ export default function LlamaCppModelPanel({
       )}
 
       {llamaCppSaving && llamaCppProgress && (
-        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+        <p className="text-xs text-[var(--set-on-surface-variant)] leading-relaxed">
           {llamaCppProgress}
         </p>
       )}
