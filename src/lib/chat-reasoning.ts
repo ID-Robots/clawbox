@@ -28,6 +28,10 @@ export const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
   adaptive: "Adaptive",
 };
 
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && value in THINKING_LEVEL_LABELS;
+}
+
 // Per-provider effort levels and defaults.
 //
 // Product decision (2026-07-23): the reasoning-effort picker is UNIFORM across
@@ -80,6 +84,56 @@ export function getProviderReasoningConfig(
 ): ProviderReasoningConfig {
   if (!provider) return FALLBACK_REASONING_CONFIG;
   return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG;
+}
+
+// The single level that is always safe to send: every provider config includes
+// `off`, and the gateway accepts it for models that expose no reasoning control
+// at all (local llama.cpp/Gemma). Used as the wire value whenever the active
+// provider is still unknown, so the picker can never push a speculative `high`
+// at a model that would reject it.
+export const SAFE_THINKING_LEVEL: ThinkingLevel = "off";
+
+// Clamp a desired level to what the active provider actually supports, so the
+// value pushed to the gateway is never one the model will reject.
+//
+// This is the last line of defence behind the picker's own gating: the picker
+// only *offers* supported levels, but a level can still go stale across a model
+// switch (a `high` chosen on DeepSeek carried into a local Gemma session before
+// the header state has caught up). Routing every wire push through here means
+// such a stale value is silently folded to the new provider's default (`off`
+// for local Gemma) instead of reaching the gateway and erroring.
+//
+// When the provider is not yet known (`null` — the model catalog is still
+// loading), returns `null` so the caller can hold the push until it knows what
+// the active model supports, rather than guessing with the permissive fallback.
+export function resolveWireThinkingLevel(
+  provider: string | null | undefined,
+  desired: ThinkingLevel,
+): ThinkingLevel | null {
+  if (!provider) return null;
+  const cfg = getProviderReasoningConfig(provider);
+  return cfg.levels.includes(desired) ? desired : cfg.default;
+}
+
+// The gateway rejects an unsupported effort with a message that also names the
+// level it WILL accept, e.g.:
+//
+//   thinkingLevel "high" is not supported for llamacpp/gemma4-e2b-it-q4_0 (use off)
+//
+// That parenthetical is the backend telling us the model's real capability.
+// Parse it so a client that still races into this error can silently retry with
+// the level the backend itself asked for, instead of surfacing a red banner.
+// Returns null when the message isn't this specific rejection (any other
+// failure should keep its normal error handling).
+export function parseUnsupportedThinkingLevelError(
+  message: string | null | undefined,
+): ThinkingLevel | null {
+  if (typeof message !== "string") return null;
+  if (!/thinkinglevel/i.test(message) || !/not supported/i.test(message)) return null;
+  const match = /\(\s*use\s+([a-z-]+)\s*\)/i.exec(message);
+  if (!match) return null;
+  const suggested = match[1].toLowerCase();
+  return isThinkingLevel(suggested) ? suggested : null;
 }
 
 export const PERSIST_KEY_PREFIX = "clawbox:chat:thinkingLevel";
