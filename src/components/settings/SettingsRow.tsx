@@ -18,9 +18,9 @@ export interface SettingsRowProps extends SettingsRowBase {
   onClick?: () => void;
   disabled?: boolean;
   /**
-   * Overrides the button's accessible name. Left unset, an interactive row
-   * that has a description names itself with the LABEL ONLY (the spec's rule),
-   * and a row without one lets its content speak.
+   * Overrides the button's accessible name. OPT-IN ONLY — left unset (the
+   * normal case) the row names itself from its content, which is what today's
+   * markup does and what the e2e suite's substring locators match.
    */
   ariaLabel?: string;
 }
@@ -82,15 +82,21 @@ export default function SettingsRow({
     );
   }
 
-  const name =
-    ariaLabel ?? (description && typeof label === "string" ? label : undefined);
-
+  // `aria-label` is applied ONLY when the caller asks for it. It used to be
+  // synthesised from `label` whenever a `description` was present, and
+  // `aria-label` overrides name-from-content — so a row rendered as
+  // `label="Language" description="…" value="English"` announced "Language"
+  // and silently dropped "English" from its name. That is a name REMOVAL, and
+  // e2e drives this file by role + visible text with no data-testid to fall
+  // back on (`getByRole("button", { name: /English/ })` reads the accessible
+  // name, not the DOM text). Name-from-content already yields
+  // "Language English", which is what today's hand-written markup produces.
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      aria-label={name}
+      aria-label={ariaLabel}
       style={{ minHeight }}
       className={`${shared} cursor-pointer border-none bg-transparent transition-colors hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent ${className}`}
     >

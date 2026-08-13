@@ -137,4 +137,33 @@ describe("globals.css agent layer", () => {
     expect(css).toContain('[data-agent="hermes"] .setup-shell');
     expect(css).not.toContain('[data-agent="hermes"].setup-shell');
   });
+
+  // The --agent-* ladder is shared by the wizard AND the Settings window. It
+  // was briefly copied verbatim into a second rule, which is two sources of
+  // truth for one palette: a change to --agent-ink in the wizard would have
+  // silently missed Settings. One declaration, one selector list.
+  it.each([
+    "--agent-ink",
+    "--agent-ink-2",
+    "--agent-ink-3",
+    "--agent-on-ink",
+    "--agent-line",
+    "--agent-card",
+    "--agent-muted",
+    "--agent-warn",
+    "--agent-live",
+    "--agent-term-bg",
+    "--agent-term-fg",
+  ])("declares %s exactly once in the whole stylesheet", (token) => {
+    expect(declarationsOf(token)).toHaveLength(1);
+  });
+
+  it("reaches Settings' document.body portals, which are outside desktop-root", () => {
+    // page.tsx stamps data-agent on desktop-root. SettingsApp portals the
+    // factory-reset, hostname-reboot and update overlays to document.body —
+    // SIBLINGS of desktop-root, not descendants — so a plain
+    // `[data-agent="hermes"] .settings-pane` cannot reach them and they would
+    // resolve no --set-* role at all. body:has() is the only shared ancestor.
+    expect(css).toContain('body:has([data-agent="hermes"]) .settings-pane');
+  });
 });

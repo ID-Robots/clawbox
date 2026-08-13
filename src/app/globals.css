@@ -844,12 +844,30 @@ h6 {
   --bg-surface: #132826;
   --bg-elevated: #182c2a;
   --bg-deep: #0e2423;
+}
 
-  /* 2. the agent tokens are ADDITIVE. --coral-bright and --cyan-bright are
-     deliberately NOT redefined: coral means ACTION and cyan means DONE on
-     every box, under every harness. Re-pointing them once put the wizard's
-     two opposed states 1.08:1 apart — the single most important thing a
-     setup wizard communicates, destroyed to make a tint. */
+/* 2. the agent tokens are ADDITIVE, and they are declared ONCE, here, for
+   every surface that speaks Hermes. --coral-bright and --cyan-bright are
+   deliberately NOT redefined: coral means ACTION and cyan means DONE on
+   every box, under every harness. Re-pointing them once put the wizard's
+   two opposed states 1.08:1 apart — the single most important thing a
+   setup wizard communicates, destroyed to make a tint.
+
+   THREE arms, and each earns its place:
+     • `.setup-shell`  — the wizard.
+     • `[data-agent="hermes"] .settings-pane` — the Settings window. `page.tsx`
+       stamps `data-agent` on `desktop-root`, which is an ancestor of the pane.
+     • `body:has([data-agent="hermes"]) .settings-pane` — Settings' three
+       `createPortal(…, document.body)` overlays (factory reset, hostname
+       reboot, update). Those roots are siblings of `desktop-root`, NOT
+       descendants, so the second arm cannot reach them and they would resolve
+       no role at all. `:has()` on `body` is the only ancestor both share.
+   Deliberately NOT hoisted to a bare `[data-agent="hermes"]`: `.setup-cobrand
+   .setup-caduceus` reads `var(--agent-ink, var(--text-secondary))` from
+   OUTSIDE `.setup-shell`, and a bare selector would tint the caduceus. */
+[data-agent="hermes"] .setup-shell,
+[data-agent="hermes"] .settings-pane,
+body:has([data-agent="hermes"]) .settings-pane {
   --agent-ink: #ffe6cb;                    /* midground: text AND accent */
   --agent-ink-2: rgba(255, 230, 203, 0.8);
   --agent-ink-3: rgba(255, 230, 203, 0.65);
@@ -892,7 +910,16 @@ h6 {
    ground, so it is spelled rather than borrowed.
    ═══════════════════════════════════════════════════════════════════════ */
 .settings-pane {
-  /* surfaces — tonal elevation ladder */
+  /* surfaces — tonal elevation ladder. Each rung has ONE job:
+       surface            the pane's ground
+       container          a group (the borderless card that replaced the border)
+       container-high     a raised element nested INSIDE a group — a value
+                          badge, a nested card, a hovered menu surface. No
+                          consumer yet; it is the rung the ladder needs to
+                          stay a ladder, and it is spelled out here so the
+                          next author does not reach for `highest` instead.
+       container-highest  a filled CONTROL: the text field's plate, the
+                          switch's off track, the slider's inactive track. */
   --set-surface: var(--bg-deep);
   --set-surface-container: var(--bg-surface);
   --set-surface-container-high: var(--bg-elevated);
@@ -902,8 +929,23 @@ h6 {
   --set-on-surface: var(--text-primary);
   --set-on-surface-variant: var(--text-secondary);
 
-  /* line */
-  --set-outline: var(--text-muted);
+  /* line.
+     `--set-outline` is the ONE role that cannot point at the `:root` ladder.
+     It was `var(--text-muted)` (#6b7280), which is 2.64:1 on
+     `--set-surface-container-highest` (#253347) — under 1.4.11's 3:1 floor for
+     a UI-component boundary. That pairing is not incidental, it is the only
+     pairing the two primitives that consume this role ever draw: the filled
+     text field's resting indicator sits on its container-highest plate, and the
+     switch's OFF state (2px track ring + the 16px handle that IS the off cue)
+     sits on its container-highest track. At 2.64:1 an unfocused empty field had
+     no 3:1 edge anywhere and an off switch read as an empty pill.
+     #828a97 measures 3.67:1 on highest / 4.69:1 on container / 5.10:1 on
+     surface. Deliberately NOT #9ca3af — that is `--set-on-surface-variant`
+     (5.03:1 on highest), and spending it here collapses the line/ink
+     distinction the M3 role set exists to keep. Hermes was never affected
+     (rgba(255,230,203,.45) on #1d3331 = 3.52:1), which is exactly why a
+     Hermes-first screenshot pass could not surface this. */
+  --set-outline: #828a97;
   --set-outline-variant: var(--border-subtle);
 
   /* accents. coral is ACTION, cyan is DONE — in every edition. */
@@ -923,31 +965,26 @@ h6 {
   --set-state-pressed: color-mix(in srgb, var(--set-on-surface) 12%, transparent);
 }
 
-/* The Hermes edition of the same roles. `page.tsx` stamps `data-agent` on
-   `desktop-root`, so this reaches the Settings window; the wizard's
-   `[data-agent="hermes"] .setup-shell` block above does NOT (it is scoped to
-   the wizard), which is why the agent ladder is carried here rather than
-   inherited. Values are the shipped Hermes palette, verbatim.
+/* The Hermes edition of the same roles. The `--agent-*` ladder these read
+   from is declared ONCE, in the shared rule above — there is no second copy
+   here, so the wizard and Settings cannot drift apart.
 
-   DESCENDANT selector, deliberately — `data-agent` sits on an ancestor of
+   DESCENDANT selectors, deliberately — `data-agent` sits on an ANCESTOR of
    the pane, never on the pane itself. A compound `[data-agent="hermes"].settings-pane`
    would silently never match. `src/tests/unit/setup-skin.test.ts` guards the
    same shape for the wizard.
+
+   The `body:has(…)` arm is what reaches the three overlays Settings portals
+   into `document.body`; see the shared rule above for why the first arm
+   cannot. Both arms are here so that an edition is a CSS change and never a
+   `.tsx` sweep — that is the entire justification for the role layer.
 
    Only ground, surface and ink move. `--set-primary` and `--set-success` are
    NOT re-pointed here: coral means ACTION and cyan means DONE on every box,
    under every harness — see the note in the agent block above, where
    re-pointing them once put two opposed states 1.08:1 apart. */
-[data-agent="hermes"] .settings-pane {
-  /* the agent ladder, carried onto the desktop */
-  --agent-ink: #ffe6cb;
-  --agent-ink-2: rgba(255, 230, 203, 0.8);
-  --agent-ink-3: rgba(255, 230, 203, 0.65);
-  --agent-on-ink: #041c1c;
-  --agent-line: rgba(255, 230, 203, 0.15);
-  --agent-card: #0e2423;
-  --agent-muted: #182c2a;
-
+[data-agent="hermes"] .settings-pane,
+body:has([data-agent="hermes"]) .settings-pane {
   /* surfaces */
   --set-surface: var(--agent-card);
   --set-surface-container: #132826;
@@ -975,15 +1012,22 @@ h6 {
    the input itself is transparent and rides on top so the native control keeps
    every keyboard and pointer behaviour it has. M3's handle is a 4×20 rounded
    BAR, not a circle. Deliberately NOT `.appearance-none`, which the global
-   orange thumb above is keyed to. */
+   orange thumb above is keyed to.
+
+   The input's BORDER BOX is the pointer target, and it is 44px — the declared
+   minimum — not the 20px the painted handle occupies. The component wraps it
+   in a 44px row, but a wrapper is not a target: at 20px the top and bottom
+   12px of that row hit nothing, which also fails 2.5.8's 24px floor. The track
+   is transparent and the thumb is re-centred with `margin-top`, so growing the
+   hit box changes not one painted pixel. */
 .settings-slider__input {
   -webkit-appearance: none;
   appearance: none;
-  height: 20px;
+  height: 44px;
   background: transparent;
 }
 .settings-slider__input::-webkit-slider-runnable-track {
-  height: 20px;
+  height: 44px;
   background: transparent;
 }
 .settings-slider__input::-webkit-slider-thumb {
@@ -991,13 +1035,25 @@ h6 {
   appearance: none;
   width: 4px;
   height: 20px;
+  /* (44 − 20) / 2 — WebKit lays the thumb out from the top of the runnable
+     track, so the bar stays optically centred on the 4px painted track. */
+  margin-top: 12px;
   border: none;
   border-radius: 2px;
   background: var(--set-primary);
   cursor: pointer;
 }
+/* The one control in the folder that cannot author its ring in the component:
+   `outline` on a range input is drawn around the 44px transparent box, so it
+   is scoped here alongside the rest of the input's box. Matches the 2px
+   `--set-primary` inset ring every sibling primitive draws. */
+.settings-slider__input:focus-visible {
+  outline: 2px solid var(--set-primary);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
 .settings-slider__input::-moz-range-track {
-  height: 20px;
+  height: 44px;
   background: transparent;
 }
 .settings-slider__input::-moz-range-thumb {

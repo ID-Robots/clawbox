@@ -29,7 +29,16 @@ import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import { DISCORD_INVITE_URL } from "@/lib/community";
-import { SettingsNav } from "./settings";
+import {
+  SettingsGroup,
+  SettingsGroupHeader,
+  SettingsNav,
+  SettingsRow,
+  SettingsSegmented,
+  SettingsSlider,
+  SettingsSwitch,
+  SettingsTextField,
+} from "./settings";
 
 /* ── Types ── */
 
@@ -1460,9 +1469,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   const resetOverlay = resetting && resetPhase && typeof document !== "undefined"
     ? createPortal(
+        // `settings-pane` carries the `--set-*` role layer, nothing else — the
+        // class declares custom properties and paints no pixel of its own. It
+        // is here because this root is portalled to `document.body`, i.e.
+        // OUTSIDE both the pane and `desktop-root` (where `data-agent` lives),
+        // so without it no `--set-*` role resolves and no edition can ever
+        // reach this overlay. globals.css pairs it with a `body:has(…)` arm.
         <div
-          className="fixed inset-0 flex items-center justify-center"
-          style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
+          className="settings-pane fixed inset-0 flex items-center justify-center"
+          style={{ zIndex: 2147483647, background: "var(--set-surface)" }}
           role="status"
           aria-live="polite"
         >
@@ -3226,7 +3241,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 label: navLabel(item),
                 subtitle: sectionStatus(item.id).subtitle,
               }))}
-              activeId={activeSection}
+              // No `activeId`: the mobile list is a drill-down menu, not a
+              // selected-state nav, and it never showed one. Passing it would
+              // read as if the current section were marked here — and the fix
+              // for that misreading (an `aria-current`) would change what the
+              // mobile rows announce, which the e2e suite matches on.
               onSelect={(id) => {
                 const next = id as Section;
                 if (next === "remote" && requireLoginFor("remote")) return;
@@ -3239,10 +3258,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           /* Content — chrome back closes window in one tap. A small "All settings"
               link at the top lets the user switch sections without leaving. */
           <>
+            {/* `min-h-[44px]` is the declared minimum, and this control is the
+                ONLY way back to the section list on a phone — the one branch
+                driven exclusively by touch. It was ~29px (14px label × 1.5 line
+                box + 4px padding). The horizontal padding grows to 8px with a
+                compensating -8px margin, so the label stays optically flush
+                with the 16px gutter and nothing else on the row moves; the
+                wrapper's existing pt/pb absorb the height. Label, element type
+                and role are untouched. */}
             <div className="px-[16px] pt-[12px] pb-[4px] shrink-0">
               <button
                 onClick={() => setMobileSection(null)}
-                className="flex items-center gap-1 text-[14px] font-medium text-[var(--set-primary)] bg-transparent border-none cursor-pointer p-[4px] rounded-[8px] hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)]"
+                className="flex items-center gap-1 min-h-[44px] px-[8px] -ml-[8px] py-0 text-[14px] font-medium text-[var(--set-primary)] bg-transparent border-none cursor-pointer rounded-[8px] hover:bg-[var(--set-state-hover)] active:bg-[var(--set-state-pressed)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)]"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
                 <span>{t("settings.title")}</span>
@@ -3630,7 +3657,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {hostnameRebootTo && typeof document !== "undefined" && createPortal(
-        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+        // `settings-pane` = the `--set-*` role layer and nothing else; this root
+        // is portalled to `document.body`, outside `desktop-root`, so it is the
+        // only way an edition reaches this overlay. See globals.css.
+        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="settings-pane fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "var(--set-surface)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
               <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />
@@ -3654,7 +3684,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {updateStarted && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+        // `settings-pane` = the `--set-*` role layer and nothing else; this root
+        // is portalled to `document.body`, outside `desktop-root`, so it is the
+        // only way an edition reaches this overlay. See globals.css.
+        <div className="settings-pane fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "var(--set-surface)" }}>
           <style>{`
             @keyframes update-pulse { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.15; transform: scale(1.3); } }
             @keyframes update-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }

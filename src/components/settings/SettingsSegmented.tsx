@@ -2,6 +2,8 @@
 
 import type { ReactNode } from "react";
 
+import { TOUCH_TARGET } from "./tokens";
+
 export interface SettingsSegmentedOption {
   value: string;
   label: ReactNode;
@@ -38,7 +40,13 @@ export default function SettingsSegmented({
   return (
     <div
       role="group"
-      className={`flex overflow-hidden rounded-[20px] ${className}`}
+      // 22px = SHAPE.full for a 44px-tall bar, i.e. a true pill. The visual
+      // spec's §4 writes 20px and its §5 says the scale is 4/8/12/16/28 with
+      // "nothing off-scale" — 20 satisfies neither. It was the pill radius for
+      // the 40px height §4 assumed; at the 44px minimum target below, half the
+      // height is 22, and a pill is a pill at any height. Recorded here rather
+      // than added to `SHAPE`, which is a scale of fixed steps, not of halves.
+      className={`flex overflow-hidden rounded-[22px] ${className}`}
       style={{ boxShadow: "inset 0 0 0 1px var(--set-outline)" }}
     >
       {options.map((option, i) => {
@@ -51,7 +59,10 @@ export default function SettingsSegmented({
             disabled={disabled}
             onClick={() => onChange(option.value)}
             style={{
-              minHeight: 40,
+              // TOUCH_TARGET, not the 40 M3 draws at desktop density: the same
+              // markup renders in the mobile tree, and the fit-mode control
+              // this is aimed at is one the e2e suite clicks by name.
+              minHeight: TOUCH_TARGET,
               boxShadow: i > 0 ? "inset 1px 0 0 0 var(--set-outline)" : undefined,
             }}
             className={`flex flex-1 cursor-pointer items-center justify-center gap-[8px] border-none px-[12px] text-[14px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--set-primary)] disabled:cursor-default disabled:opacity-40 ${

@@ -33,6 +33,11 @@ const HANDLE_GAP = 6;
  * rounded BAR rather than a circle, drawn by `.settings-slider__input`'s
  * pseudo-elements in globals.css — a range thumb cannot be styled inline.
  *
+ * The 44px row below is the input's own box, not just a wrapper: the input is
+ * `height: 44px` in globals.css with a transparent track and a `margin-top`-
+ * centred thumb. A 44px wrapper around a 20px input is not a 44px target — the
+ * top and bottom 12px would hit nothing.
+ *
  * (The visual spec writes the handle-to-track gap as 20px; 20 is the handle's
  * HEIGHT, and M3's gap is 6dp. A 20px gap reads as a broken track at these
  * widths, so the published 6 is used.)

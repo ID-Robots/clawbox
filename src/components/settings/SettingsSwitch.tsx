@@ -1,5 +1,7 @@
 "use client";
 
+import { TOUCH_TARGET } from "./tokens";
+
 export interface SettingsSwitchProps {
   checked: boolean;
   onChange: (next: boolean) => void;
@@ -10,6 +12,14 @@ export interface SettingsSwitchProps {
    * `getByRole("switch", { name })` and has no `data-testid` to fall back on.
    */
   label: string;
+  /**
+   * The toggle's POST is in flight. Emits `aria-busy`, which is what the two
+   * async toggles in this pane (Local-only mode, Telegram) announce today —
+   * and it is not the same statement as `disabled`: busy says "in flight",
+   * disabled says "unavailable". Both sites deliberately stay focusable while
+   * the request resolves, so `busy` does not imply `disabled` here.
+   */
+  busy?: boolean;
   id?: string;
   className?: string;
 }
@@ -17,7 +27,7 @@ export interface SettingsSwitchProps {
 /** Track 52×32, handle 24 selected / 16 unselected — the M3 metrics. */
 const TRACK_W = 52;
 const TRACK_H = 32;
-const HIT = 44;
+const HIT = TOUCH_TARGET;
 
 /**
  * The M3 switch, not a generic pill.
@@ -36,6 +46,7 @@ export default function SettingsSwitch({
   onChange,
   disabled = false,
   label,
+  busy = false,
   id,
   className = "",
 }: SettingsSwitchProps) {
@@ -49,6 +60,7 @@ export default function SettingsSwitch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-busy={busy || undefined}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       style={{ width: HIT, height: HIT }}
