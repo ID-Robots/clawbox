@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import MacAppIcon from "@/components/MacAppIcon";
 
 interface LauncherApp {
   id: string;
@@ -258,12 +259,14 @@ export default function ChromeLauncher({
                   className="flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
                 >
                   {/* App icon */}
-                  <div
-                    className="w-12 h-12 rounded-full flex items-center justify-center shadow-lg group-hover:scale-105 transition-transform"
-                    style={{ backgroundColor: app.color }}
+                  <MacAppIcon
+                    id={app.id}
+                    size={48}
+                    color={app.color}
+                    className="group-hover:scale-105 transition-transform"
                   >
                     {app.icon}
-                  </div>
+                  </MacAppIcon>
                   {/* App name */}
                   <span className="text-xs text-white/80 text-center w-full">
                     {app.name}

@@ -2015,12 +2015,14 @@ function ChromeDesktopInner() {
                   isRecent ? "animate-install-bounce" : ""
                 } ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
-                <div
-                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
-                  style={{ backgroundColor: app.color }}
+                <MacAppIcon
+                  id={app.id}
+                  size={56}
+                  color={app.color}
+                  className="transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
                 >
                   <InstalledAppIcon appId={app.id} iconUrl={app.iconUrl} name={app.name} size="w-7 h-7" />
-                </div>
+                </MacAppIcon>
                 <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
                 </span>
@@ -2073,12 +2075,14 @@ function ChromeDesktopInner() {
                 onContextMenu={(e) => handleIconContextMenu(e, `desktop-${app.id}`)}
                 className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
-                <div
-                  className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
-                  style={{ backgroundColor: app.color }}
+                <MacAppIcon
+                  id={app.id}
+                  size={56}
+                  color={app.color}
+                  className="transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
                 >
                   <AppIcon id={app.id} size="w-7 h-7" />
-                </div>
+                </MacAppIcon>
                 <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {resolveAppName(app)}
                 </span>
@@ -2307,15 +2311,15 @@ function ChromeDesktopInner() {
             const renderIcon = () => {
               if (app.type === "installed" && app.storeApp) {
                 return (
-                  <MacAppIcon id={app.id} size={40} color={app.color}>
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
                     <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
-                  </MacAppIcon>
+                  </div>
                 );
               }
               return (
-                <MacAppIcon id={app.id} size={40} color={app.color}>
+                <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
                   <AppIcon id={app.id} />
-                </MacAppIcon>
+                </div>
               );
             };
             return {
