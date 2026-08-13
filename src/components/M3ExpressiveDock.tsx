@@ -412,6 +412,30 @@ const DOCK_CSS = `
   box-sizing:border-box;
   font-family:inherit;
 }
+/* ── Hermes retint ───────────────────────────────────────────────────────
+   The same dock on a different ground. Keyed on an ANCESTOR (page.tsx stamps
+   data-agent on desktop-root), so the markup is byte-identical on both
+   harnesses and an edition is a token swap rather than a second component.
+
+   --primary (coral) and --tertiary (cyan) are deliberately NOT re-pointed:
+   coral means ACTION and cyan means DONE on every box, under every harness.
+   Re-pointing them to make a tint is what collapsed the setup wizard's two
+   opposed states to 1.08:1. Only ground, surfaces and ink move.
+   Values come from the agent ladder already in globals.css. */
+[data-agent="hermes"] .m3dx{
+  --surface:#041c1c;
+  --surface-container:#132826;
+  --surface-container-high:#182c2a;
+  --surface-container-highest:#0e2423;
+  --on-surface:#ffe6cb;
+  --on-surface-variant:rgba(255,230,203,.80);
+  --outline:rgba(255,230,203,.45);
+  --outline-variant:rgba(255,230,203,.15);
+  --secondary:rgba(255,230,203,.65);
+  --secondary-container:#182c2a;
+  --on-secondary-container:#ffe6cb;
+}
+
 .m3dx *,.m3dx *::before,.m3dx *::after{ box-sizing:border-box; }
 
 .m3dx .m3dx-dock{

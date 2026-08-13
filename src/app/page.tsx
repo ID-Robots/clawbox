@@ -1740,9 +1740,16 @@ function ChromeDesktopInner() {
     return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
   }
 
+  // `data-agent` below is the theming hook for everything on the desktop —
+  // dock, icons, settings. Only "hermes" is ever emitted: the ClawBox/OpenClaw
+  // skin is the BASE layer and is expressed by the absence of the attribute,
+  // matching src/lib/setup-skin.ts. It reuses the harness this component has
+  // already fetched, so there is no extra round-trip and the root layout stays
+  // static — which src/app/layout.tsx deliberately requires.
   return (
     <div
       data-testid="desktop-root"
+      data-agent={activeHarness === "hermes" ? "hermes" : undefined}
       className="relative overflow-hidden select-none"
       style={{ height: '100dvh' }}
       onContextMenu={(e) => {
