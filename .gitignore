@@ -25,3 +25,4 @@ scripts/nm-dispatcher-failover.sh
 
 # Local debug scripts (per-session sandbox)
 .scratch/
+scripts/__pycache__/

@@ -4,6 +4,42 @@ import { useCallback, useEffect, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
 import { copyToClipboard } from "@/lib/clipboard";
+import { SettingsGroup, SettingsTextField } from "./settings";
+
+/* ── M3 button recipes ──────────────────────────────────────────────────────
+   Colour here comes ONLY from the `--set-*` roles declared on `.settings-pane`
+   in globals.css — this panel used to hand-type `bg-white/[0.04]`,
+   `hover:bg-orange-500`, `border-green-500/30` and friends, and an overlay like
+   that ignores whatever palette is under it. A state layer is the on-colour
+   composited over its own container at 8% (hover) / 12% (pressed), so every
+   button below re-tints itself for free under `[data-agent="hermes"]`.
+
+   Radius is 22px = a true pill at the 44px minimum target; every other radius
+   in this file is on the 4/8/12/16/28 scale. Each string is written out in full
+   (rather than assembled at runtime) so Tailwind's source scanner sees it. */
+const FOCUS_RING =
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--set-primary)]";
+const BTN_BASE =
+  `inline-flex min-h-[44px] cursor-pointer items-center justify-center gap-[8px] rounded-[22px] border-none px-[16px] text-[14px] font-medium leading-[1.2] no-underline transition-colors ${FOCUS_RING} disabled:cursor-not-allowed`;
+/** The one primary action of a state: Install, Start. */
+const BTN_FILLED =
+  `${BTN_BASE} bg-[var(--set-primary)] text-[var(--set-on-primary)] hover:bg-[color-mix(in_srgb,var(--set-on-primary)_8%,var(--set-primary))] active:bg-[color-mix(in_srgb,var(--set-on-primary)_12%,var(--set-primary))] disabled:bg-[color-mix(in_srgb,var(--set-on-surface)_12%,transparent)] disabled:text-[color-mix(in_srgb,var(--set-on-surface)_38%,transparent)]`;
+/** Neutral secondary action inside a group: Copy, Regenerate. */
+const BTN_TONAL =
+  `${BTN_BASE} bg-[var(--set-secondary-container)] text-[var(--set-on-secondary-container)] hover:bg-[color-mix(in_srgb,var(--set-on-secondary-container)_8%,var(--set-secondary-container))] active:bg-[color-mix(in_srgb,var(--set-on-secondary-container)_12%,var(--set-secondary-container))] disabled:opacity-40`;
+/** Coral-tinted secondary action — still ACTION, but not the primary one. */
+const BTN_TONAL_PRIMARY =
+  `${BTN_BASE} bg-[color-mix(in_srgb,var(--set-primary)_14%,transparent)] text-[var(--set-primary)] hover:bg-[color-mix(in_srgb,var(--set-primary)_22%,transparent)] active:bg-[color-mix(in_srgb,var(--set-primary)_28%,transparent)]`;
+/** Quiet action that turns something off. Neutral at rest, error on hover —
+    exactly the intent the old `hover:text-red-300` carried. */
+const BTN_QUIET_DANGER =
+  `${BTN_BASE} bg-transparent text-[var(--set-on-surface-variant)] hover:bg-[color-mix(in_srgb,var(--set-error)_14%,transparent)] hover:text-[var(--set-error)] active:bg-[color-mix(in_srgb,var(--set-error)_20%,transparent)] disabled:opacity-40`;
+/** Same statement as BTN_QUIET_DANGER, but it stands alone under the running
+    card rather than inside a group, so it needs its own tonal plate. Spelled as
+    a separate constant instead of `${BTN_QUIET_DANGER} bg-…` because two
+    background utilities on one element resolve by CSS order, not class order. */
+const BTN_STOP =
+  `${BTN_BASE} bg-[var(--set-surface-container)] text-[var(--set-on-surface-variant)] hover:bg-[color-mix(in_srgb,var(--set-error)_14%,transparent)] hover:text-[var(--set-error)] active:bg-[color-mix(in_srgb,var(--set-error)_20%,transparent)] disabled:opacity-40`;
 
 interface TunnelInfo {
   installed: boolean;
@@ -185,10 +221,15 @@ export default function RemoteControlPanel() {
   if (loading && !status) {
     return (
       <div className="max-w-xl">
-        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 animate-pulse">
-          <div className="h-4 w-40 rounded bg-white/[0.08] mb-3" />
-          <div className="h-3 w-64 rounded bg-white/[0.06]" />
-        </div>
+        <SettingsGroup divided={false}>
+          <div className="animate-pulse px-[16px] py-[16px]">
+            {/* `max-w-full` on the wide bar: at 360px the group's content box is
+                ~296px, so a fixed 256px bar is fine today — but the pane is a
+                resizable window on desktop and the cap costs nothing. */}
+            <div className="mb-[12px] h-[16px] w-[160px] max-w-full rounded-[4px] bg-[var(--set-state-pressed)]" />
+            <div className="h-[12px] w-[256px] max-w-full rounded-[4px] bg-[var(--set-state-hover)]" />
+          </div>
+        </SettingsGroup>
       </div>
     );
   }
@@ -202,143 +243,199 @@ export default function RemoteControlPanel() {
 
   const journalCmd = "journalctl -u clawbox-tunnel";
 
+  /* The 40px status disc every state opens with. A tonal circle, not a
+     `bg-white/5` overlay, and it matches the one the migrated Network section
+     draws for its connection row. */
+  const disc = (icon: string, tint: "neutral" | "success") => (
+    <span
+      className="flex h-[40px] w-[40px] shrink-0 items-center justify-center rounded-full"
+      style={{
+        backgroundColor:
+          tint === "success"
+            ? "color-mix(in srgb, var(--set-success) 16%, transparent)"
+            : "var(--set-state-hover)",
+      }}
+    >
+      <span
+        className={
+          tint === "success"
+            ? "material-symbols-rounded text-[var(--set-success)]"
+            : "material-symbols-rounded text-[var(--set-on-surface-variant)]"
+        }
+        style={{ fontSize: 22 }}
+        aria-hidden="true"
+      >
+        {icon}
+      </span>
+    </span>
+  );
+
   return (
-    <div className="max-w-xl space-y-5">
+    /* Root stays a single `max-w-xl` div: the desktop shell centres the pane
+       with `[&>div]:mx-auto [&>div]:w-full` on DIRECT children, so an extra
+       wrapper or a second root sibling would break centring. Gutters are the
+       pane's own (24px desktop / 16px mobile), which is why nothing below
+       carries a viewport breakpoint — every reflow here is container-driven so
+       it behaves the same in a narrow desktop window and on a 360px phone. */
+    <div className="max-w-xl space-y-[16px]">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t("remoteControl.title")}</h2>
-        <p className="text-sm text-[var(--text-muted)]">{t("remoteControl.subtitle")}</p>
+        <h2 className="text-[16px] font-medium leading-[1.3] text-[var(--set-on-surface)]">{t("remoteControl.title")}</h2>
+        <p className="mt-[4px] text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("remoteControl.subtitle")}</p>
       </div>
 
       {error && <StatusMessage type="error" message={error} />}
 
       {!tunnelInstalled && (
-        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-          <div className="flex items-start gap-4 mb-4">
-            <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">download</span>
-            </div>
-            <div className="flex-1">
-              <div className="text-sm font-medium text-[var(--text-primary)] mb-0.5">{t("remoteControl.tunnelNotInstalled")}</div>
-              <div className="text-xs text-[var(--text-muted)]">{t("remoteControl.tunnelInstallDesc")}</div>
+        <SettingsGroup divided={false}>
+          <div className="flex items-start gap-[16px] px-[16px] py-[12px]">
+            {disc("download", "neutral")}
+            <div className="min-w-0 flex-1">
+              <div className="text-[14px] font-medium leading-[1.3] text-[var(--set-on-surface)]">{t("remoteControl.tunnelNotInstalled")}</div>
+              <div className="mt-[2px] text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("remoteControl.tunnelInstallDesc")}</div>
             </div>
           </div>
           {installError && (
+            /* `whitespace-pre-wrap` is load-bearing — this is a multi-line
+               journal tail. `break-words` is the 360px half of that: without it
+               a long unbroken systemd token pushes the pane sideways. */
             <p
               role="alert"
               aria-atomic="true"
-              className="text-xs text-red-400/80 mb-3 whitespace-pre-wrap"
+              className="whitespace-pre-wrap break-words px-[16px] pb-[8px] text-[12px] leading-[1.4] text-[var(--set-error)]"
             >
               {installError}
             </p>
           )}
-          <button
-            type="button"
-            onClick={handleInstallTunnel}
-            disabled={installState === "installing"}
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer disabled:opacity-50"
-          >
-            {installState === "installing" ? (
-              <>
-                <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
-                {t("remoteControl.tunnelInstalling")}
-              </>
-            ) : (
-              <>
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
-                {t("remoteControl.tunnelInstallButton")}
-              </>
-            )}
-          </button>
-        </div>
+          <div className="px-[16px] pb-[12px] pt-[4px]">
+            <button
+              type="button"
+              onClick={handleInstallTunnel}
+              disabled={installState === "installing"}
+              className={`${BTN_FILLED} w-full`}
+            >
+              {installState === "installing" ? (
+                <>
+                  <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                  {t("remoteControl.tunnelInstalling")}
+                </>
+              ) : (
+                <>
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
+                  {t("remoteControl.tunnelInstallButton")}
+                </>
+              )}
+            </button>
+          </div>
+        </SettingsGroup>
       )}
 
       {/* Not started */}
       {tunnelInstalled && svc !== "active" && svc !== "activating" && (
-        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-          <div className="flex items-start gap-4 mb-5">
-            <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">cloud_off</span>
-            </div>
-            <div className="flex-1">
-              <div className="text-sm font-medium text-[var(--text-primary)] mb-0.5">{t("remoteControl.offTitle")}</div>
-              <div className="text-xs text-[var(--text-muted)]">{t("remoteControl.offDesc")}</div>
+        <SettingsGroup divided={false}>
+          <div className="flex items-start gap-[16px] px-[16px] py-[12px]">
+            {disc("cloud_off", "neutral")}
+            <div className="min-w-0 flex-1">
+              <div className="text-[14px] font-medium leading-[1.3] text-[var(--set-on-surface)]">{t("remoteControl.offTitle")}</div>
+              <div className="mt-[2px] text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("remoteControl.offDesc")}</div>
             </div>
           </div>
-          <button
-            onClick={handleStart}
-            disabled={busy}
-            className="w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 disabled:bg-white/10 disabled:text-[var(--text-muted)] disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors border-none cursor-pointer flex items-center justify-center gap-2"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">play_arrow</span>
-            {action === "starting" ? t("remoteControl.starting") : t("remoteControl.start")}
-          </button>
-        </div>
+          <div className="px-[16px] pb-[12px] pt-[4px]">
+            <button
+              onClick={handleStart}
+              disabled={busy}
+              className={`${BTN_FILLED} w-full`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">play_arrow</span>
+              {action === "starting" ? t("remoteControl.starting") : t("remoteControl.start")}
+            </button>
+          </div>
+        </SettingsGroup>
       )}
 
       {/* Starting */}
       {tunnelInstalled && isStarting && (
-        <div className="rounded-2xl border border-[var(--coral-bright)]/40 bg-[var(--surface-card)] p-5 text-center">
-          <div className="inline-flex items-center gap-3 text-sm text-[var(--text-secondary)]">
-            <span className="w-4 h-4 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" aria-hidden="true" />
-            {t("remoteControl.negotiating")}
+        /* The old card announced "in progress" with a coral OUTLINE. In M3 the
+           progress indicator is the statement, so the container stays the same
+           neutral tonal plate as every other state and the coral lives in the
+           spinner. */
+        <SettingsGroup divided={false}>
+          <div className="flex flex-col items-center gap-[8px] px-[16px] py-[20px] text-center">
+            <div className="inline-flex items-center gap-[12px] text-[14px] text-[var(--set-on-surface)]">
+              <span className="h-[16px] w-[16px] shrink-0 animate-spin rounded-full border-2 border-[var(--set-primary)] border-t-transparent" aria-hidden="true" />
+              {t("remoteControl.negotiating")}
+            </div>
+            <div className="text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("remoteControl.negotiatingHint")}</div>
+            <button
+              onClick={handleStop}
+              disabled={busy}
+              className={`${BTN_QUIET_DANGER} mt-[4px]`}
+            >
+              {action === "stopping" ? t("remoteControl.stopping") : t("remoteControl.cancel")}
+            </button>
           </div>
-          <div className="text-xs text-[var(--text-muted)] mt-2">{t("remoteControl.negotiatingHint")}</div>
-          <button
-            onClick={handleStop}
-            disabled={busy}
-            className="mt-4 text-xs text-[var(--text-muted)] hover:text-red-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
-          >
-            {action === "stopping" ? t("remoteControl.stopping") : t("remoteControl.cancel")}
-          </button>
-        </div>
+        </SettingsGroup>
       )}
 
       {/* Running */}
       {isRunning && (
         <>
-          <div className="rounded-2xl border border-green-500/30 bg-green-500/[0.06] p-5">
-            <div className="flex items-start gap-4 mb-4">
-              <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }} aria-hidden="true">cloud_done</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-[var(--text-primary)] mb-0.5">{t("remoteControl.onlineTitle")}</div>
-                <div className="flex items-center gap-1.5 mt-1">
-                  <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                  <span className="text-xs text-[var(--text-muted)]">{t("remoteControl.onlineDesc")}</span>
+          <SettingsGroup divided={false}>
+            <div className="flex items-start gap-[16px] px-[16px] py-[12px]">
+              {disc("cloud_done", "success")}
+              <div className="min-w-0 flex-1">
+                <div className="text-[14px] font-medium leading-[1.3] text-[var(--set-on-surface)]">{t("remoteControl.onlineTitle")}</div>
+                <div className="mt-[4px] flex items-center gap-[6px]">
+                  <span aria-hidden="true" className="h-[6px] w-[6px] shrink-0 animate-pulse rounded-full bg-[var(--set-success)]" />
+                  <span className="text-[12px] leading-[1.4] text-[var(--set-on-surface-variant)]">{t("remoteControl.onlineDesc")}</span>
                 </div>
               </div>
             </div>
 
-            <label className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2">
-              {t("remoteControl.tunnelUrlLabel")}
-            </label>
-            <div className="flex items-center gap-2 mb-3">
-              <input
-                readOnly
-                value={url!}
-                className="flex-1 bg-black/40 border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/40"
-                onFocus={e => e.currentTarget.select()}
-                aria-label={t("remoteControl.tunnelUrlLabel")}
-              />
-              <button
-                onClick={copyUrl}
-                className="shrink-0 px-3 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] rounded-lg text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-none cursor-pointer flex items-center gap-1.5 transition-colors"
-                aria-label={t("remoteControl.copy")}
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
-                  {copied ? "check" : "content_copy"}
-                </span>
-                {copied ? t("remoteControl.copied") : t("remoteControl.copy")}
-              </button>
+            <div className="px-[16px] pb-[12px]">
+              {/* Still NO `htmlFor`, deliberately: the input's accessible name
+                  comes solely from its `aria-label`, and adding an association
+                  here would change what the field announces. */}
+              <label className="mb-[8px] block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--set-on-surface-variant)]">
+                {t("remoteControl.tunnelUrlLabel")}
+              </label>
+              {/* `flex-wrap` instead of the old fixed row: at 360px the field
+                  keeps its 160px floor and the Copy button drops to its own
+                  line rather than squeezing the URL to nothing. */}
+              <div className="flex flex-wrap items-center gap-[8px]">
+                <SettingsTextField
+                  readOnly
+                  value={url!}
+                  onFocus={e => e.currentTarget.select()}
+                  aria-label={t("remoteControl.tunnelUrlLabel")}
+                  className="min-w-[160px] flex-1"
+                  inputClassName="font-mono"
+                />
+                <button
+                  onClick={copyUrl}
+                  className={`${BTN_TONAL} shrink-0`}
+                  aria-label={t("remoteControl.copy")}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+                    {copied ? "check" : "content_copy"}
+                  </span>
+                  {copied ? t("remoteControl.copied") : t("remoteControl.copy")}
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {/* Container-driven, NOT `sm:` — this grid lives inside a resizable
+                window on desktop and a 16px-gutter pane on a phone, so it has to
+                ask its own width: one column at 360/414px, two once the pane can
+                actually seat two 180px buttons. */}
+            <div
+              className="grid gap-[8px] px-[16px] pb-[12px]"
+              style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}
+            >
               <a
                 href={`${status?.portalWeb ?? "https://openclawhardware.dev"}/portal/devices`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"
+                className={BTN_TONAL_PRIMARY}
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">devices</span>
                 {t("remoteControl.addDevice")}
@@ -347,7 +444,7 @@ export default function RemoteControlPanel() {
               <button
                 onClick={handleRegenerate}
                 disabled={busy}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] disabled:bg-white/[0.02] disabled:text-[var(--text-muted)] disabled:cursor-not-allowed border border-white/[0.08] rounded-lg text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                className={BTN_TONAL}
               >
                 <span
                   className={`material-symbols-rounded ${action === "regenerating" ? "animate-spin" : ""}`}
@@ -359,12 +456,12 @@ export default function RemoteControlPanel() {
                 {action === "regenerating" ? t("remoteControl.regenerating") : t("remoteControl.regenerate")}
               </button>
             </div>
-          </div>
+          </SettingsGroup>
 
           <button
             onClick={handleStop}
             disabled={busy}
-            className="w-full px-4 py-2.5 bg-white/5 hover:bg-red-500/15 hover:text-red-300 text-[var(--text-secondary)] rounded-lg transition-colors border-none cursor-pointer text-sm"
+            className={`${BTN_STOP} w-full`}
           >
             {action === "stopping" ? t("remoteControl.stopping") : t("remoteControl.stop")}
           </button>
@@ -373,21 +470,33 @@ export default function RemoteControlPanel() {
 
       {/* Failed */}
       {tunnelInstalled && svc === "failed" && (
-        <div role="alert" aria-live="assertive" className="rounded-xl border border-red-500/30 bg-red-500/[0.08] p-4 flex gap-3">
-          <span className="material-symbols-rounded text-red-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">error</span>
-          <div className="text-sm text-red-100/90 flex-1">
-            <strong className="block mb-1">{t("remoteControl.failedTitle")}</strong>
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex flex-wrap gap-[12px] rounded-[16px] px-[16px] py-[12px]"
+          style={{ backgroundColor: "color-mix(in srgb, var(--set-error) 10%, transparent)" }}
+        >
+          <span className="material-symbols-rounded shrink-0 text-[var(--set-error)]" style={{ fontSize: 20 }} aria-hidden="true">error</span>
+          <div className="min-w-[160px] flex-1 text-[14px] leading-[1.45] text-[var(--set-on-surface)]">
+            <strong className="mb-[4px] block">{t("remoteControl.failedTitle")}</strong>
             {t("remoteControl.failedDesc", { command: journalCmd }).split(journalCmd).map((seg, i, arr) => (
               <span key={i}>
                 {seg}
-                {i < arr.length - 1 && <code className="px-1 py-0.5 bg-black/30 rounded text-xs">{journalCmd}</code>}
+                {i < arr.length - 1 && (
+                  <code
+                    className="rounded-[4px] px-[4px] py-[2px] font-mono text-[12px] break-words"
+                    style={{ backgroundColor: "color-mix(in srgb, var(--set-on-surface) 12%, transparent)" }}
+                  >
+                    {journalCmd}
+                  </code>
+                )}
               </span>
             ))}
           </div>
           <button
             onClick={handleStart}
             disabled={busy}
-            className="shrink-0 self-start text-xs text-red-300 hover:text-red-200 bg-transparent border-none cursor-pointer underline underline-offset-2"
+            className={`${BTN_BASE} shrink-0 self-start bg-transparent px-[12px] text-[var(--set-error)] hover:bg-[color-mix(in_srgb,var(--set-error)_16%,transparent)] active:bg-[color-mix(in_srgb,var(--set-error)_22%,transparent)] disabled:opacity-40`}
           >
             {t("remoteControl.retry")}
           </button>

@@ -955,6 +955,31 @@ body:has([data-agent="hermes"]) .settings-pane {
   --set-on-secondary-container: var(--text-primary);
   --set-success: var(--cyan-bright);
   --set-error: #f87171;
+  /* CAUTION, which is not the same statement as error. Network needs a third
+     accent that is neither: the hotspot ships THREE states — off, broadcasting,
+     and enabled-but-blocked — and the third one is a warning about the single
+     WiFi radio, not a failure. Spending `--set-error` on it would paint a
+     working, saved configuration red; folding it into `--set-primary` would
+     erase the distinction the banner exists to draw. Points at the `:root`
+     amber ink the product already paints (StatusMessage's caution row), so
+     nothing moves on screen. Like `--set-error`, it is NOT re-pointed for
+     Hermes: caution reads the same on every box. */
+  --set-warning: var(--amber-ink);
+
+  /* THIRD-PARTY BRAND, which is not an accent and not a role.
+     Telegram's blue is the one colour in the Telegram section that must NOT
+     follow the palette: it identifies someone else's product, so re-pointing it
+     for Hermes would be a trademark statement, not a theme. It lives here
+     rather than as a hex in the `.tsx` for the same reason every other colour
+     does — the pane's rule is that no component carries a literal — and, like
+     `--set-error` and `--set-warning`, it is deliberately absent from the
+     Hermes block below so it renders identically on every box.
+     `#229ed9` / `#5eb8e6` and the 15%/25% washes are the values that ship
+     today, restated rather than re-derived so nothing moves on screen. */
+  --set-brand-telegram: #229ed9;
+  --set-brand-telegram-ink: #5eb8e6;
+  --set-brand-telegram-wash: color-mix(in srgb, var(--set-brand-telegram) 15%, transparent);
+  --set-brand-telegram-wash-strong: color-mix(in srgb, var(--set-brand-telegram) 25%, transparent);
 
   /* M3 state layers: on-surface composited over the container at 8/10/12%.
      Never a literal white/[0.0x] — an overlay ignores the palette under it,
