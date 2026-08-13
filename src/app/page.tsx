@@ -6,7 +6,7 @@ import * as kv from "@/lib/client-kv";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
-import ChromeShelf from "@/components/ChromeShelf";
+import M3ExpressiveDock from "@/components/M3ExpressiveDock";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
@@ -2164,7 +2164,7 @@ function ChromeDesktopInner() {
             <div
               key={top.id}
               className="fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
-              style={{ paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
+              style={{ paddingBottom: 'calc(var(--dock-band, 56px) + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
             >
               {/* Mobile window header */}
               <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
@@ -2286,7 +2286,7 @@ function ChromeDesktopInner() {
       />
 
       {/* Shelf (taskbar) */}
-      <ChromeShelf
+      <M3ExpressiveDock
         apps={(() => {
           const allApps = getAllApps();
           const pinnedIds = new Set(pinnedApps.map(a => a.id));

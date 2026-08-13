@@ -7,6 +7,22 @@ import { INSPIRATION_PHRASES, type MascotPhraseSet } from '@/lib/mascot-phrases'
 import { fetchUserName, fetchPhraseSet, pickNameGreeting } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 
+// Height of the dock band, published by the dock as --dock-band. Cached: this
+// is read from physics loops that run every frame, where getComputedStyle
+// would force a style recalculation.
+let dockBandPx = 96
+let refreshDockBand: (() => void) | null = null
+if (typeof window !== "undefined") {
+  const readDockBand = () => {
+    const v = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--dock-band"), 10)
+    if (!Number.isNaN(v)) dockBandPx = v
+  }
+  requestAnimationFrame(readDockBand)
+  window.addEventListener("resize", readDockBand)
+  refreshDockBand = readDockBand
+}
+
+
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
 // All speech-bubble phrases used to live as hardcoded arrays here. They've
@@ -330,7 +346,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
     // ─── Collision: floor ───
     // Floor (crab feet on shelf — crab image hangs below anchor point)
-    const crabFloor = 8
+    // The crab PNG is 87x128, object-fit:contain into a 150px box, so it scales
+    // by 150/128 and its last opaque row (natural y=84) lands 51.6px above the
+    // element's bottom edge. Standing the crab ON the dock therefore means
+    // floor = band - 51.6, plus ~4px overlap so it reads as resting on the edge
+    // rather than hovering. That is exactly what the original `crabFloor = 8`
+    // encoded for the old 56px shelf (56 - 48).
+    const crabFloor = dockBandPx - 48
     if (p.posY <= crabFloor) {
       p.posY = crabFloor
       applyImpactDamage(p.velY)
@@ -421,6 +443,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
     onBoxRef.current = false; setCrabOnBox(false); setBoxGlow(false)
     const rect = crabElRef.current?.getBoundingClientRect()
+    // Same resting -> physics hand-off as the cube: without this the crab
+    // drops by its resting offset (band - 48) the moment it is grabbed.
+    if (rect) physicsRef.current.posY = Math.max(0, window.innerHeight - rect.bottom)
     if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
@@ -453,7 +478,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
     xRef.current = Math.min(92, Math.max(2, ((e.clientX - dragOffsetRef.current.x) / vw) * 100))
     onPositionChangeRef.current?.(xRef.current)
-    const posY = Math.max(0, vh - e.clientY - 20)
+    const posY = Math.max(0, vh - e.clientY - 20 + dragOffsetRef.current.y)
     if (crabElRef.current) {
       crabElRef.current.style.bottom = '0px'
       crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-posY}px)`
@@ -516,7 +541,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     boxXRef.current += (p.velX * dt / vw) * 100
     p.posY -= p.velY * dt
     // Floor (box rests on shelf, 56px from bottom)
-    const boxFloor = 56
+    // Must equal the CSS resting position (band - 3), or handing back from
+    // physics to CSS drops the cube by the difference on every click.
+    const boxFloor = dockBandPx - 3
     if (p.posY <= boxFloor) {
       p.posY = boxFloor
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
@@ -550,15 +577,21 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   const handleBoxPointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
+    refreshDockBand?.()
     boxDraggingRef.current = true; setBoxPhysicsActive(true)
     const p = boxPhysicsRef.current
     p.active = false
     if (boxPhysicsRAF.current) cancelAnimationFrame(boxPhysicsRAF.current)
     const rect = boxElRef.current?.getBoundingClientRect()
-    if (rect) boxDragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
+    if (rect) {
+      boxDragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
+      // Hand CSS-resting position over to the physics coordinate system so
+      // switching to bottom:0 + translateY(-posY) is a visual no-op.
+      p.posY = Math.max(0, window.innerHeight - rect.bottom)
+    }
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
-    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
   }, [])
 
   const handleBoxPointerMove = useCallback((e: React.PointerEvent) => {
@@ -573,7 +606,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
     }
     boxXRef.current = Math.min(95, Math.max(2, ((e.clientX - boxDragOffsetRef.current.x) / vw) * 100))
-    const posY = Math.max(0, vh - e.clientY - 20)
+    // + offset.y so the cube keeps the point you actually grabbed under the
+    // cursor instead of snapping its centre to it.
+    const posY = Math.max(0, vh - e.clientY - 20 + boxDragOffsetRef.current.y)
     if (boxElRef.current) {
       boxElRef.current.style.bottom = '0px'
       boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-posY}px)`
@@ -1083,6 +1118,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         onContextMenu={(e) => {
           e.preventDefault()
           e.stopPropagation()
@@ -1091,7 +1127,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         }}
         style={{
         position: 'fixed', left: 0,
-        bottom: physicsActive ? 0 : 8,
+        bottom: physicsActive ? 0 : 'calc(var(--dock-band, 56px) - 48px)',
         // Keep the crab's real translateX (and hop height) while physics/drag is
         // active instead of dropping to `undefined`. Clearing the transform
         // reverts the crab to its base `left:0` — so a plain TAP (which flips
@@ -1259,11 +1295,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         onPointerDown={handleBoxPointerDown}
         onPointerMove={handleBoxPointerMove}
         onPointerUp={handleBoxPointerUp}
+        onPointerCancel={handleBoxPointerUp}
         style={{
         position: 'fixed',
         left: 0,
-        bottom: boxPhysicsActive ? 0 : 53,
-        transform: boxPhysicsActive ? undefined : `translateX(calc(${boxXRef.current}vw - 50%))`,
+        bottom: boxPhysicsActive ? 0 : 'calc(var(--dock-band, 56px) - 3px)',
+        // Never `undefined` while dragging: clearing the transform reverts the
+        // cube to its base `left:0` (screen-left) for the frame between
+        // pointerdown and the first imperative write, which reads as the cube
+        // teleporting away on grab. Same fix the crab already carries.
+        transform: boxPhysicsActive
+          ? `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-boxPhysicsRef.current.posY}px)`
+          : `translateX(calc(${boxXRef.current}vw - 50%))`,
         zIndex: 10003,
         pointerEvents: 'auto', cursor: 'grab', touchAction: 'none',
         willChange: 'transform, filter',

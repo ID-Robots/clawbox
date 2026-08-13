@@ -197,7 +197,7 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 100 + 32, bottom: 56 }}
+        style={{ maxWidth: gridCols * 100 + 32, bottom: "calc(var(--dock-band, 56px) + 12px)", maxHeight: "calc(100vh - var(--dock-band, 56px) - 32px)" }}
         data-testid="app-launcher"
         className={`fixed left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
