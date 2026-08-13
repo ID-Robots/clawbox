@@ -22,6 +22,25 @@ if (typeof window !== "undefined") {
   refreshDockBand = readDockBand
 }
 
+// A held-still pointer emits no `pointermove`, so the last sampled velocity
+// survives unchanged for as long as the user pauses before letting go. Throwing
+// with that stale value launches the sprite at a speed it had hundreds of
+// milliseconds ago — measured in-browser: a 430ms pause still released the cube
+// at ~1800px/s, which rocketed it across the screen and off the wall. That is
+// the "teleporting" report. Synthetic tests never see it because they dispatch
+// pointermove and pointerup back-to-back, so the sample is always fresh.
+//
+// Ramp the throw down over the window rather than hard-cutting it, so a small
+// hesitation at the end of a flick still throws — just softer.
+const THROW_FULL_MS = 50
+const THROW_DEAD_MS = 140
+
+function throwScale(sampleAgeMs: number): number {
+  if (sampleAgeMs <= THROW_FULL_MS) return 1
+  if (sampleAgeMs >= THROW_DEAD_MS) return 0
+  return (THROW_DEAD_MS - sampleAgeMs) / (THROW_DEAD_MS - THROW_FULL_MS)
+}
+
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -196,12 +215,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // Box physics (separate entity)
   const boxDraggingRef = useRef(false)
   const boxDragOffsetRef = useRef({ x: 0, y: 0 })
+  // Which pointer owns the current grab. A second finger landing on the cube
+  // would otherwise drive the same drag concurrently, snapping the cube back
+  // and forth between two touch points every frame.
+  const boxPointerIdRef = useRef<number | null>(null)
   const boxPhysicsRef = useRef({
     active: false,
     velX: 0, velY: 0, posY: 0,
     gravity: 900, friction: 300, bounciness: 0.4,
     minBounceVel: 30, maxVel: 2000,
-    lastTime: 0, lastPointerX: 0, lastPointerY: 0, lastPointerTime: 0,
+    // lastSample* track the CUBE's own last sampled position (x in vw, y as
+    // posY px) — not the raw pointer. See handleBoxPointerMove for why.
+    lastTime: 0, lastSampleX: 0, lastSampleY: 0, lastSampleTime: 0,
   })
   const boxPhysicsRAF = useRef<number>(0)
   const [boxPhysicsActive, setBoxPhysicsActive] = useState(false)
@@ -219,10 +244,26 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     saveCrabPos()
   }, [saveCrabPos])
 
-  const updateBoxPos = useCallback(() => {
-    if (!boxElRef.current) return
-    boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+  // Single source of truth for the cube's transform. While the cube is airborne
+  // it is positioned as bottom:0 + translateY(-posY), so a caller that writes a
+  // bare translateX (the crab's fly-by kick, the chat-panel glide) drops it to
+  // the very bottom of the screen until the next frame repairs it.
+  const boxTransform = useCallback((airborne: boolean) => {
+    const x = `translateX(calc(${boxXRef.current}vw - 50%))`
+    return airborne ? `${x} translateY(${-boxPhysicsRef.current.posY}px)` : x
   }, [])
+
+  const updateBoxPos = useCallback(() => {
+    const el = boxElRef.current
+    if (!el) return
+    const airborne = boxDraggingRef.current || boxPhysicsRef.current.active
+    // translateY(-posY) is only correct against bottom:0, so the pair must be
+    // written together. When resting we leave `bottom` alone — React owns it
+    // and holds it at the CSS resting value; clearing it here would let a
+    // render that sees no style change strand the cube at the screen bottom.
+    if (airborne) el.style.bottom = '0px'
+    el.style.transform = boxTransform(airborne)
+  }, [boxTransform])
 
   // Wrapper setters that update refs + DOM directly (no React setState for position)
   const setX = useCallback((v: number | ((p: number) => number)) => {
@@ -504,24 +545,21 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       return
     }
 
+    // Release the crab with the speed it actually had at let-go. Holding it
+    // still produces no pointermove events, so velX/velY would otherwise keep
+    // the speed from whenever the pointer last moved and fling it on release.
+    const p = physicsRef.current
+    const now = performance.now()
+    const scale = throwScale(now - p.lastPointerTime)
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX * scale))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY * scale))
+    p.lastTime = now
+    p.active = true
+
     // Drag-and-drop while sleeping wakes the mascot
     if (isSleepingRef.current) {
       wakeSleepRef.current?.()
-      // Let physics play out the drop, then resume normal actions
-      const p = physicsRef.current
-      p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
-      p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-      p.lastTime = performance.now()
-      p.active = true
-      physicsRAF.current = requestAnimationFrame(physicsLoop)
-      return
     }
-
-    const p = physicsRef.current
-    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
-    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-    p.lastTime = performance.now()
-    p.active = true
     physicsRAF.current = requestAnimationFrame(physicsLoop)
   }, [physicsLoop])
 
@@ -551,8 +589,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       } else {
         p.velY = 0
         if (Math.abs(p.velX) < 5) {
+          // Clear `active` before building the transform so it resolves to the
+          // resting form that React is about to render — matching writes mean
+          // the handoff cannot flicker.
           p.active = false; setBoxPhysicsActive(false)
-          if (boxElRef.current) boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%))`
+          if (boxElRef.current) boxElRef.current.style.transform = boxTransform(false)
           saveCrabPos()
           return
         }
@@ -570,15 +611,20 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (boxXRef.current >= 95) { boxXRef.current = 95; p.velX = -Math.abs(p.velX) * p.bounciness }
     if (boxElRef.current) {
       boxElRef.current.style.bottom = '0px'
-      boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-p.posY}px)`
+      boxElRef.current.style.transform = boxTransform(true)
     }
     boxPhysicsRAF.current = requestAnimationFrame(runBoxPhysicsLoop)
-  }, [])
+  }, [boxTransform, saveCrabPos])
 
   const handleBoxPointerDown = useCallback((e: React.PointerEvent) => {
+    // Right-click belongs to the desktop context menu, and a second finger must
+    // not hijack a grab that is already in flight. The crab already guards
+    // button 2; the cube did not, so right-dragging it threw it.
+    if (e.button === 2 || boxDraggingRef.current) return
     e.preventDefault(); e.stopPropagation()
     refreshDockBand?.()
-    boxDraggingRef.current = true; setBoxPhysicsActive(true)
+    boxDraggingRef.current = true; boxPointerIdRef.current = e.pointerId
+    setBoxPhysicsActive(true)
     const p = boxPhysicsRef.current
     p.active = false
     if (boxPhysicsRAF.current) cancelAnimationFrame(boxPhysicsRAF.current)
@@ -589,40 +635,66 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       // switching to bottom:0 + translateY(-posY) is a visual no-op.
       p.posY = Math.max(0, window.innerHeight - rect.bottom)
     }
-    p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
+    // While the crab rides the cube its rendered transform reads boxXRef, but
+    // dragging only mutates boxXRef imperatively — so the crab sits frozen for
+    // the whole drag and then teleports onto the cube at the next React render.
+    // Dismount it here, pinned to where it is already drawn.
+    if (onBoxRef.current) {
+      xRef.current = boxXRef.current
+      onBoxRef.current = false
+      setCrabOnBox(false); setBoxGlow(false)
+      updateCrabPos()
+    }
+    p.lastSampleX = boxXRef.current; p.lastSampleY = p.posY
+    p.lastSampleTime = performance.now()
     p.velX = 0; p.velY = 0
-    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
-  }, [])
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }, [updateCrabPos])
 
   const handleBoxPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!boxDraggingRef.current) return
+    if (!boxDraggingRef.current || e.pointerId !== boxPointerIdRef.current) return
     e.preventDefault()
     const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
     const p = boxPhysicsRef.current
-    const dt = (now - p.lastPointerTime) / 1000
-    if (dt > 0.005) {
-      p.velX = (e.clientX - p.lastPointerX) / dt
-      p.velY = (e.clientY - p.lastPointerY) / dt
-      p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
-    }
     boxXRef.current = Math.min(95, Math.max(2, ((e.clientX - boxDragOffsetRef.current.x) / vw) * 100))
     // + offset.y so the cube keeps the point you actually grabbed under the
     // cursor instead of snapping its centre to it.
     const posY = Math.max(0, vh - e.clientY - 20 + boxDragOffsetRef.current.y)
+    p.posY = posY
+    // Sample how fast the CUBE moved, not the pointer. Both axes are clamped
+    // (2..95vw, posY >= 0), so at an edge the pointer keeps travelling while the
+    // cube is pinned — a raw-pointer velocity therefore banks up speed the cube
+    // never had and fires it off the wall on release. Leaving lastSample*
+    // untouched when the sample is too short keeps displacement accumulating
+    // over a longer baseline instead of dividing by a near-zero dt.
+    const dt = (now - p.lastSampleTime) / 1000
+    if (dt > 0.005) {
+      p.velX = (((boxXRef.current - p.lastSampleX) / 100) * vw) / dt
+      p.velY = (p.lastSampleY - posY) / dt
+      p.lastSampleX = boxXRef.current; p.lastSampleY = posY; p.lastSampleTime = now
+    }
     if (boxElRef.current) {
       boxElRef.current.style.bottom = '0px'
-      boxElRef.current.style.transform = `translateX(calc(${boxXRef.current}vw - 50%)) translateY(${-posY}px)`
+      boxElRef.current.style.transform = boxTransform(true)
     }
-    boxPhysicsRef.current.posY = posY
-  }, [])
+  }, [boxTransform])
 
-  const handleBoxPointerUp = useCallback(() => {
-    if (!boxDraggingRef.current) return
+  const handleBoxPointerUp = useCallback((e: React.PointerEvent) => {
+    if (!boxDraggingRef.current || e.pointerId !== boxPointerIdRef.current) return
     boxDraggingRef.current = false
+    boxPointerIdRef.current = null
+    // pointercancel has already released it; releasing twice throws.
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    const now = performance.now()
     const p = boxPhysicsRef.current
-    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
-    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-    p.lastTime = performance.now()
+    // Only inherit the drag speed if the cube was still moving at release —
+    // otherwise a pause before letting go throws it at a long-dead velocity.
+    const scale = throwScale(now - p.lastSampleTime)
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX * scale))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY * scale))
+    p.lastTime = now
     p.active = true
     boxPhysicsRAF.current = requestAnimationFrame(boxPhysicsLoop)
   }, [boxPhysicsLoop])
@@ -782,8 +854,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         setX(cx)
 
         // ─── ALWAYS kick box when walking past it ───
+        // ...unless the cube is off the ground. The kick rewrites boxXRef by
+        // ±6vw, which during a drag teleports the cube ~86px sideways out from
+        // under the cursor before the next pointermove drags it back. Measured
+        // live at 1440px wide: 88.07vw -> 82.07vw in a single frame. Skipping
+        // leaves kickedRef false, so the crab still gets its kick once the cube
+        // is back on the shelf.
         const bx = boxXRef.current
-        if (!kickedRef.current && Math.abs(cx - bx) < 3) {
+        const boxAirborne = boxDraggingRef.current || boxPhysicsRef.current.active
+        if (!kickedRef.current && !boxAirborne && Math.abs(cx - bx) < 3) {
           kickedRef.current = true
           const dir: 'left' | 'right' = newTarget > startX ? 'right' : 'left'
           const shift = dir === 'right' ? 6 : -6
