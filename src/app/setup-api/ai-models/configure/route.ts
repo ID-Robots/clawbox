@@ -254,7 +254,12 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
 // 2026.7.1 (2026-08-17): with these fields absent, `openclaw models list`
 // resolved both V4 models to 200K; with them present it reports 1M.
 const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
-const CLAWBOX_AI_MAX_TOKENS = 384_000;
+// 393,216 (384 x 1024) is the ceiling the upstream actually enforces, measured
+// against the live proxy on 2026-08-18: max_tokens=393216 is accepted, 400000
+// comes back 400 "the valid range of max_tokens is [1, 393216]". The previous
+// 384,000 was a round number that left 9,216 tokens of output unusable for no
+// reason.
+const CLAWBOX_AI_MAX_TOKENS = 393_216;
 // V4 is text-in/text-out upstream. Stated rather than inferred so the picker
 // never offers image attachments the proxy would reject.
 const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
