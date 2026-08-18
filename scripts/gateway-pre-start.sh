@@ -964,6 +964,40 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # already mention CLAWBOX.md, so the agent loads our guide as part of
   # its session-start context without us having to overwrite AGENTS.md
   # (which the agent may have personalized).
+  # --- clawbox-md-ai-limits (extracted verbatim by tests) ---
+  # A CLAWBOX.md seeded before this section existed carries no statement of
+  # what the ClawBox AI window actually is, and the model will not supply one:
+  # asked cold, V4 answers "128K" from its own training data, wrong by a factor
+  # of eight and delivered in the product's voice. Seeding is seed-if-missing,
+  # so those boxes would never see a template change.
+  #
+  # The text is COPIED OUT OF THE SHIPPED TEMPLATE between its markers rather
+  # than restated here. A device upgraded in the field and a device flashed
+  # today then read the same words by construction — restating it inline is how
+  # the model picker came to claim 128K while the provider said something else.
+  if [ -f "$CLAWBOX_GUIDE_DST" ] && [ -f "$CLAWBOX_GUIDE_SRC" ] \
+     && ! grep -qF "clawbox:ai-model-limits" "$CLAWBOX_GUIDE_DST"; then
+    # Buffer and emit only once BOTH markers have been seen. Printing as we go
+    # would turn a template with an opening marker and no closing one into
+    # "everything from here to end of file", quietly appending unrelated
+    # sections to the customer's guide.
+    CLAWBOX_AI_LIMITS_SECTION="$(awk '
+      /<!-- clawbox:ai-model-limits -->/ { inside = 1 }
+      inside { buf = buf $0 "\n" }
+      /<!-- \/clawbox:ai-model-limits -->/ { if (inside) { printf "%s", buf; exit } }
+    ' "$CLAWBOX_GUIDE_SRC")"
+    # An empty extraction means the markers moved. Append nothing rather than a
+    # blank heading: a guide that says nothing about the window is the state we
+    # started from, while a truncated one is a new way to be wrong.
+    if [ -n "$CLAWBOX_AI_LIMITS_SECTION" ]; then
+      printf '\n---\n\n%s\n' "$CLAWBOX_AI_LIMITS_SECTION" >> "$CLAWBOX_GUIDE_DST"
+      echo "  Appended AI model limits to CLAWBOX.md"
+    else
+      echo "  WARNING: clawbox:ai-model-limits markers not found in template; CLAWBOX.md left as is" >&2
+    fi
+  fi
+  # --- end clawbox-md-ai-limits ---
+
   CLAWBOX_AGENTS_MD="$CLAWBOX_WORKSPACE/AGENTS.md"
   if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "CLAWBOX.md" "$CLAWBOX_AGENTS_MD"; then
     printf '\n\n## ClawBox integration\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, and how to install/uninstall skills through the App Store.\n' >> "$CLAWBOX_AGENTS_MD"
