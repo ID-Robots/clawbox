@@ -491,11 +491,14 @@ if isinstance(ds_models, list):
         if model.get("contextWindow") in (None, 128000, 131072, 200000):
             model["contextWindow"] = 1000000
             changed = True
-        # maxTokens is only filled in when absent. Unlike contextWindow there
-        # is no wrong-value set to recognise here, and a number someone chose
-        # is a choice — a box told to cap output at 8K meant it.
-        if model.get("maxTokens") is None:
-            model["maxTokens"] = 384000
+        # maxTokens: filled in when absent, and corrected when it holds a
+        # number this migration itself put there. 384000 shipped first and is
+        # 9,216 short of the ceiling the upstream enforces (393216 = 384*1024,
+        # measured against the live proxy), so a box carrying it is carrying
+        # our rounding, not its owner's decision. Any other value is left
+        # alone — a box told to cap output at 8K meant it.
+        if model.get("maxTokens") in (None, 384000):
+            model["maxTokens"] = 393216
             changed = True
         if not isinstance(model.get("input"), list) or not model.get("input"):
             model["input"] = ["text"]

@@ -353,7 +353,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // reproduced on a device running 2026.7.1 on 2026-08-17.
     for (const model of providerDef.models) {
       expect(model.contextWindow).toBe(1_000_000);
-      expect(model.maxTokens).toBe(384_000);
+      expect(model.maxTokens).toBe(393_216);
       expect(model.input).toEqual(["text"]);
     }
 

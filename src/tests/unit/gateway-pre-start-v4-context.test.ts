@@ -77,13 +77,21 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
   it.each(V4_IDS)("fills an absent contextWindow with 1M on %s", (id) => {
     const [m] = migrate([{ id, name: "ClawBox AI" }]);
     expect(m.contextWindow).toBe(1_000_000);
-    expect(m.maxTokens).toBe(384_000);
+    expect(m.maxTokens).toBe(393_216);
     expect(m.input).toEqual(["text"]);
   });
 
   it.each(V4_IDS)("replaces the old explicit 128K on %s", (id) => {
     const [m] = migrate([{ id, contextWindow: 128000 }]);
     expect(m.contextWindow).toBe(1_000_000);
+  });
+
+  it.each(V4_IDS)("raises the 384K output cap an earlier run wrote to the enforced 393,216 on %s", (id) => {
+    // The first version of this migration shipped 384000. It is under the real
+    // upstream ceiling, so boxes that already took it would keep a cap we chose
+    // by rounding rather than by measuring.
+    const [m] = migrate([{ id, maxTokens: 384000 }]);
+    expect(m.maxTokens).toBe(393_216);
   });
 
   it.each(V4_IDS)("replaces the 200K fallback written back by an earlier run on %s", (id) => {
