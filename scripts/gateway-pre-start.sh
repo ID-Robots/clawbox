@@ -964,6 +964,36 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # already mention CLAWBOX.md, so the agent loads our guide as part of
   # its session-start context without us having to overwrite AGENTS.md
   # (which the agent may have personalized).
+  # --- clawbox-md-ai-limits (extracted verbatim by tests) ---
+  # A CLAWBOX.md seeded before this section existed has no statement of what
+  # the ClawBox AI window actually is, and the model will not supply one: asked
+  # cold, V4 answers "128K" from its own training data, which is wrong by a
+  # factor of eight and reads to a customer like a spec sheet. Seeding is
+  # seed-if-missing, so those boxes would never get the correction. Append it
+  # to an existing file instead, guarded by the marker so a second gateway
+  # start is a no-op and anything the owner wrote is left where it is.
+  if [ -f "$CLAWBOX_GUIDE_DST" ] && ! grep -qF "clawbox:ai-model-limits" "$CLAWBOX_GUIDE_DST"; then
+    cat >> "$CLAWBOX_GUIDE_DST" <<'CLAWBOX_MD_AI_LIMITS'
+
+---
+
+<!-- clawbox:ai-model-limits -->
+## What ClawBox AI can actually hold
+
+When you run on ClawBox AI (`deepseek-v4-flash` or `deepseek-v4-pro`), these are the real limits of the session you are in:
+
+- **Context window: 1000000 tokens.**
+- **Output: up to 393216 tokens** in a single reply.
+- **Text in, text out.** Image attachments are rejected upstream.
+
+**Do not quote a smaller number if the user asks how much context you have.** The model weights were trained before this window existed, so asked cold you will tend to answer "128K" — that is a memory of an older DeepSeek, not a fact about this device.
+
+Keep the start of the context stable: upstream caches on prefix, so an unchanged opening is billed at roughly a tenth of the price and returns much faster. Rewriting early context throws that away for the entire remainder.
+CLAWBOX_MD_AI_LIMITS
+    echo "  Appended AI model limits to CLAWBOX.md"
+  fi
+  # --- end clawbox-md-ai-limits ---
+
   CLAWBOX_AGENTS_MD="$CLAWBOX_WORKSPACE/AGENTS.md"
   if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "CLAWBOX.md" "$CLAWBOX_AGENTS_MD"; then
     printf '\n\n## ClawBox integration\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, and how to install/uninstall skills through the App Store.\n' >> "$CLAWBOX_AGENTS_MD"
