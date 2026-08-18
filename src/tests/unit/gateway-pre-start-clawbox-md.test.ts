@@ -41,10 +41,20 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 /** Run the extracted block against a CLAWBOX.md in a temp dir. */
-function run(): string {
-  const program = `set -eu\nCLAWBOX_GUIDE_DST="${guide}"\n${BLOCK}\n`;
-  execFileSync("bash", ["-c", program], { encoding: "utf-8" });
+function run(templateSrc: string = GUIDE): string {
+  const program = `set -eu\nCLAWBOX_GUIDE_DST="${guide}"\nCLAWBOX_GUIDE_SRC="${templateSrc}"\n${BLOCK}\n`;
+  execFileSync("bash", ["-c", program], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
   return existsSync(guide) ? readFileSync(guide, "utf-8") : "";
+}
+
+/** The marked section of the shipped template, verbatim. */
+function templateSection(src: string = GUIDE): string {
+  const text = readFileSync(src, "utf-8");
+  const start = text.indexOf(`<!-- ${MARKER} -->`);
+  const endMarker = `<!-- /${MARKER} -->`;
+  const end = text.indexOf(endMarker, start);
+  if (start < 0 || end < 0) throw new Error("markers missing from template");
+  return text.slice(start, end + endMarker.length);
 }
 
 describe.skipIf(!hasBash)("gateway-pre-start.sh CLAWBOX.md model limits", () => {
@@ -52,8 +62,8 @@ describe.skipIf(!hasBash)("gateway-pre-start.sh CLAWBOX.md model limits", () => 
     writeFileSync(guide, "# ClawBox Integration Guide\n\nolder content\n");
     const out = run();
     expect(out).toContain(MARKER);
-    expect(out).toContain("1000000");
-    expect(out).toContain("393216");
+    expect(out).toContain("1,000,000");
+    expect(out).toContain("393,216");
   });
 
   it("keeps what the owner already wrote", () => {
@@ -66,7 +76,8 @@ describe.skipIf(!hasBash)("gateway-pre-start.sh CLAWBOX.md model limits", () => 
     const once = run();
     const twice = run();
     expect(twice).toBe(once);
-    expect(twice.match(new RegExp(MARKER, "g"))).toHaveLength(1);
+    // Count the opening marker only — the section carries a closing one too.
+    expect(twice.split(`<!-- ${MARKER} -->`)).toHaveLength(2);
   });
 
   it("does not create the file when the box has no guide at all", () => {
@@ -81,22 +92,39 @@ describe.skipIf(!hasBash)("gateway-pre-start.sh CLAWBOX.md model limits", () => 
     expect(run()).toContain("128K");
   });
 
+  it("appends the shipped section verbatim, so an upgraded box reads what a fresh one reads", () => {
+    // The whole point of copying out of the template: a device flashed today
+    // and a device upgraded in the field must not end up with two different
+    // explanations of the same limit.
+    writeFileSync(guide, "# ClawBox Integration Guide\n");
+    expect(run()).toContain(templateSection());
+  });
+
   it("states the same numbers the provider migration writes", () => {
     // One drifting without the other is how the picker came to claim 128K in
     // the first place: two places holding the same fact, only one maintained.
     const src = readFileSync(SCRIPT, "utf-8");
     expect(src).toContain('model["contextWindow"] = 1000000');
     expect(src).toContain('model["maxTokens"] = 393216');
-    writeFileSync(guide, "# ClawBox Integration Guide\n");
-    const out = run();
-    expect(out).toContain("1000000");
-    expect(out).toContain("393216");
+    const section = templateSection();
+    expect(section).toContain("1,000,000");
+    expect(section).toContain("393,216");
   });
 
-  it("ships the same section in the seeded template, so fresh boxes match upgraded ones", () => {
-    const template = readFileSync(GUIDE, "utf-8");
-    expect(template).toContain(MARKER);
-    expect(template).toContain("1,000,000");
-    expect(template).toContain("393,216");
+  it("appends nothing when the template markers have moved", () => {
+    // A truncated section is a new way to be wrong; saying nothing is the
+    // state we started from. The script warns and leaves the guide alone.
+    const brokenTemplate = path.join(dir, "template-without-markers.md");
+    writeFileSync(brokenTemplate, "# ClawBox Integration Guide\n\nno markers here\n");
+    writeFileSync(guide, "# ClawBox Integration Guide\n");
+    const out = run(brokenTemplate);
+    expect(out).toBe("# ClawBox Integration Guide\n");
+    expect(out).not.toContain(MARKER);
+  });
+
+  it("does nothing when the template is missing entirely", () => {
+    writeFileSync(guide, "# ClawBox Integration Guide\n");
+    const out = run(path.join(dir, "does-not-exist.md"));
+    expect(out).toBe("# ClawBox Integration Guide\n");
   });
 });

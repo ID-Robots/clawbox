@@ -103,3 +103,4 @@ Two things follow from a window this large:
 
 - **You rarely need to summarise to survive.** Reading a long file or a whole conversation in full is usually cheaper and more accurate than compacting it early.
 - **Keep the start of the context stable.** Upstream caches on prefix, so an unchanged opening is billed at roughly a tenth of the price and returns much faster — a 902K-token prompt drops from ~31s to ~6s on a cache hit. Reordering or rewriting early context throws that away for the entire remainder.
+<!-- /clawbox:ai-model-limits -->
