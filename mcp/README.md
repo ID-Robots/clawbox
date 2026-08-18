@@ -73,7 +73,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 ### Orientation — call these first
 | Tool | What it does |
 |---|---|
-| `device_status` | Edition, agent, AI provider/model/thinking level, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
+| `device_status` | Edition, agent, AI provider/model, configured context/output limits, thinking level, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
 | `clawbox_context` | The device field guide plus the webapp storage/styling rules. |
 
