@@ -977,10 +977,14 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # the model picker came to claim 128K while the provider said something else.
   if [ -f "$CLAWBOX_GUIDE_DST" ] && [ -f "$CLAWBOX_GUIDE_SRC" ] \
      && ! grep -qF "clawbox:ai-model-limits" "$CLAWBOX_GUIDE_DST"; then
+    # Buffer and emit only once BOTH markers have been seen. Printing as we go
+    # would turn a template with an opening marker and no closing one into
+    # "everything from here to end of file", quietly appending unrelated
+    # sections to the customer's guide.
     CLAWBOX_AI_LIMITS_SECTION="$(awk '
       /<!-- clawbox:ai-model-limits -->/ { inside = 1 }
-      inside { print }
-      /<!-- \/clawbox:ai-model-limits -->/ { if (inside) exit }
+      inside { buf = buf $0 "\n" }
+      /<!-- \/clawbox:ai-model-limits -->/ { if (inside) { printf "%s", buf; exit } }
     ' "$CLAWBOX_GUIDE_SRC")"
     # An empty extraction means the markers moved. Append nothing rather than a
     # blank heading: a guide that says nothing about the window is the state we

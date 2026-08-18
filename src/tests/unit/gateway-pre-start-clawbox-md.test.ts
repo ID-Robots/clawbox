@@ -122,6 +122,28 @@ describe.skipIf(!hasBash)("gateway-pre-start.sh CLAWBOX.md model limits", () => 
     expect(out).not.toContain(MARKER);
   });
 
+  it("appends nothing when the template opens the section but never closes it", () => {
+    // Printing as the section streams by would make a dangling opening marker
+    // mean "everything to end of file" — unrelated template content landing in
+    // the customer's guide, with a success exit code to hide it.
+    const dangling = path.join(dir, "template-unclosed.md");
+    writeFileSync(
+      dangling,
+      `# Guide\n\n<!-- ${MARKER} -->\n## Limits\n\nunrelated section that follows\n`,
+    );
+    writeFileSync(guide, "# ClawBox Integration Guide\n");
+    const out = run(dangling);
+    expect(out).toBe("# ClawBox Integration Guide\n");
+    expect(out).not.toContain("unrelated section that follows");
+  });
+
+  it("ignores a closing marker that appears without an opening one", () => {
+    const orphanClose = path.join(dir, "template-orphan-close.md");
+    writeFileSync(orphanClose, `# Guide\n\nsome text\n<!-- /${MARKER} -->\n`);
+    writeFileSync(guide, "# ClawBox Integration Guide\n");
+    expect(run(orphanClose)).toBe("# ClawBox Integration Guide\n");
+  });
+
   it("does nothing when the template is missing entirely", () => {
     writeFileSync(guide, "# ClawBox Integration Guide\n");
     const out = run(path.join(dir, "does-not-exist.md"));
