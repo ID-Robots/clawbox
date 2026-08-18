@@ -75,19 +75,24 @@ const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
 // upstream but the only end-user-pickable variants are the two device
 // tiers (Flash + Pro), gated by subscription. Skipping the openclaw
 // spawn for clawai also dodges the 3-min CLI execution time on Jetson.
-const CLAWAI_STATIC_MODELS: CatalogModel[] = [
+export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
+  // 1M/text matches what the provider definition writes to openclaw.json and
+  // what a real device reports back from `openclaw models list`. The previous
+  // 128K here was never the model's limit — it under-reported the window to
+  // every picker that reads this catalog. `text+image` was wrong too: V4 is
+  // text-in upstream, and offering image attachments only produced rejects.
   {
     id: "deepseek-v4-flash",
     label: "Free/Pro Tier",
-    contextWindow: 128_000,
-    input: "text+image",
+    contextWindow: 1_000_000,
+    input: "text",
     hint: "Default. Faster.",
   },
   {
     id: "deepseek-v4-pro",
     label: "Max Tier",
-    contextWindow: 128_000,
-    input: "text+image",
+    contextWindow: 1_000_000,
+    input: "text",
     hint: "1.6T frontier model. Max plan only.",
   },
 ];

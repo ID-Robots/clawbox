@@ -246,13 +246,22 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
   return "";
 }
 
+// Canonical DeepSeek V4 limits. Declared explicitly on every model entry
+// rather than left to OpenClaw's bundled catalog: a configured provider in
+// openclaw.json overrides the plugin catalog entirely, so an omitted
+// contextWindow does NOT inherit the canonical spec — it falls through to the
+// generic 200,000-token default. Verified on a real device running OpenClaw
+// 2026.7.1 (2026-08-17): with these fields absent, `openclaw models list`
+// resolved both V4 models to 200K; with them present it reports 1M.
+const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
+const CLAWBOX_AI_MAX_TOKENS = 384_000;
+// V4 is text-in/text-out upstream. Stated rather than inferred so the picker
+// never offers image attachments the proxy would reject.
+const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
+
 function buildClawboxAiProviderDefinition(apiKey: string) {
-  // Only emit fields that override defaults: the proxy URL, our auth, and
-  // per-tier identity/branding/reasoning. contextWindow, maxTokens, and
-  // input modalities are intentionally omitted — OpenClaw's bundled
-  // provider catalog (2026.4.24+) already knows the canonical V4 specs
-  // (1M context, 384K output, text-in/text-out), so duplicating them
-  // here just creates drift the next time DeepSeek bumps a number.
+  // Emit the proxy URL, our auth, per-tier identity/branding/reasoning, and
+  // the context/output/modality limits above.
   // `cost` stays zero to mark these as included-in-subscription so the
   // gateway doesn't surface DeepSeek's real per-token prices in the UI.
   return JSON.stringify({
@@ -280,6 +289,9 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
         reasoning: true,
+        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
@@ -290,6 +302,9 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         id: CLAWBOX_AI_PRO_MODEL_ID,
         name: "ClawBox AI Pro",
         reasoning: true,
+        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
