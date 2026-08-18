@@ -347,6 +347,16 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.models[0].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
     expect(providerDef.models[1].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
 
+    // A configured provider overrides OpenClaw's bundled catalog, so these
+    // three fields have to be stated on every model. Omit contextWindow and
+    // the gateway falls back to a generic 200,000 rather than V4's real 1M —
+    // reproduced on a device running 2026.7.1 on 2026-08-17.
+    for (const model of providerDef.models) {
+      expect(model.contextWindow).toBe(1_000_000);
+      expect(model.maxTokens).toBe(384_000);
+      expect(model.input).toEqual(["text"]);
+    }
+
     expect(mockSetMany).toHaveBeenCalledWith(
       expect.objectContaining({
         clawai_token: "portal-token-123",

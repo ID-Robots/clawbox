@@ -475,6 +475,32 @@ if isinstance(ds_models, list):
             compat["supportsReasoningEffort"] = True
             changed = True
 
+        # Context/output/modality backfill. A configured provider entry
+        # overrides OpenClaw's bundled catalog outright, so a model that
+        # omits contextWindow does not inherit V4's real 1M window — it
+        # silently resolves to the generic 200,000 default. Boxes shipped
+        # before this fix are in one of three states: absent, an old
+        # explicit 128000, or the 200000 fallback written back by a
+        # previous run. All three are wrong and all three are corrected.
+        #
+        # Only those three values are touched. A number we did not ship
+        # is left alone: someone capped it deliberately (a small-RAM box,
+        # a cost experiment) and stamping over that would be the migration
+        # picking a fight with its operator. Same reason input is only
+        # written when absent or empty.
+        if model.get("contextWindow") in (None, 128000, 131072, 200000):
+            model["contextWindow"] = 1000000
+            changed = True
+        # maxTokens is only filled in when absent. Unlike contextWindow there
+        # is no wrong-value set to recognise here, and a number someone chose
+        # is a choice — a box told to cap output at 8K meant it.
+        if model.get("maxTokens") is None:
+            model["maxTokens"] = 384000
+            changed = True
+        if not isinstance(model.get("input"), list) or not model.get("input"):
+            model["input"] = ["text"]
+            changed = True
+
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.
