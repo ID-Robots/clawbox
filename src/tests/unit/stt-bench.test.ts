@@ -840,6 +840,59 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     expect(broken.stderr + broken.stdout).toContain("not valid JSON");
   });
 
+  it("refuses a --score-only pair whose text is not text", () => {
+    // Present is not the same as usable: null and a number both get past a
+    // key check and then die inside normalize_text, naming neither the file
+    // nor the field.
+    const file = path.join(dir, "pairs.json");
+
+    writeFileSync(file, JSON.stringify([{ id: "nulled", reference: null, hypothesis: "a" }]), "utf8");
+    const nulled = run(["--score-only", file]);
+    expect(nulled.status).not.toBe(0);
+    const first = nulled.stderr + nulled.stdout;
+    expect(first).toContain("pair nulled: 'reference' must be a string, got NoneType");
+    expect(first).not.toContain("Traceback");
+
+    writeFileSync(file, JSON.stringify([{ id: "numeric", reference: "a", hypothesis: 42 }]), "utf8");
+    const numeric = run(["--score-only", file]);
+    expect(numeric.status).not.toBe(0);
+    const second = numeric.stderr + numeric.stdout;
+    expect(second).toContain("pair numeric: 'hypothesis' must be a string, got int");
+    expect(second).not.toContain("Traceback");
+  });
+
+  it("refuses a manifest sample whose fields are not strings", () => {
+    // A null "audio" reaches Path() and tracebacks before the missing-file
+    // check ever runs, so the type is what has to be rejected.
+    const audioDir = path.join(dir, "audio");
+    mkdirSync(audioDir, { recursive: true });
+    writeWav(path.join(audioDir, "en-1.wav"), 1.0);
+    const file = path.join(audioDir, "manifest.json");
+    const args = ["--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache, "--samples", file];
+
+    writeFileSync(file, JSON.stringify([{ id: "en-1", lang: "en", audio: null, reference: "hello" }]), "utf8");
+    const nulled = run(args);
+    expect(nulled.status).not.toBe(0);
+    const first = nulled.stderr + nulled.stdout;
+    expect(first).toContain("sample en-1: 'audio' must be a string, got NoneType");
+    expect(first).not.toContain("Traceback");
+
+    writeFileSync(file, JSON.stringify([{ id: "en-1", lang: "en", audio: "en-1.wav", reference: 7 }]), "utf8");
+    const numeric = run(args);
+    expect(numeric.status).not.toBe(0);
+    const second = numeric.stderr + numeric.stdout;
+    expect(second).toContain("sample en-1: 'reference' must be a string, got int");
+    expect(second).not.toContain("Traceback");
+
+    // A non-string id cannot name itself, so the position does it instead.
+    writeFileSync(file, JSON.stringify([{ id: 1, lang: "en", audio: "en-1.wav", reference: "hello" }]), "utf8");
+    const badId = run(args);
+    expect(badId.status).not.toBe(0);
+    const third = badId.stderr + badId.stdout;
+    expect(third).toContain("sample #0: 'id' must be a string, got int");
+    expect(third).not.toContain("Traceback");
+  });
+
   it("refuses to send the API key to a cleartext endpoint, and still writes the report", () => {
     // OPENAI_BASE_URL is the override that points the comparator at a proxy.
     // An http:// one hands the bearer token to everything on the path, so the
@@ -885,6 +938,32 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     expect(String(attempted.cloud.rows![0].skipped)).not.toContain(key);
   });
 
+  it("keeps a key pasted into the base URL's query out of the report", () => {
+    // A proxy URL carries its credential in ?api_key= at least as often as in
+    // userinfo, and the refusal reason is written to both the JSON and the
+    // markdown a human pastes into a ticket.
+    const secret = "sk-query-placeholder-not-a-real-key";
+    configure({ compute_types: { cpu: ["int8"] }, delay: 0.02, default_text: "hello" });
+    const out = path.join(dir, "report.json");
+    const md = path.join(dir, "report.md");
+    const r = run(
+      [
+        "--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache,
+        "--samples", manifestFile([{ id: "en-1", lang: "en", seconds: 1.0, reference: "hello" }]),
+        "--cloud-baseline", "--out", out, "--markdown", md,
+      ],
+      { OPENAI_API_KEY: "sk-test-placeholder-not-a-real-key", OPENAI_BASE_URL: `http://proxy.internal/v1?api_key=${secret}` },
+    );
+    expect(r.status).toBe(0);
+    const report = readReport(out);
+    expect(report.cloud.skipped).toContain("cleartext");
+    const everything = [r.stdout, r.stderr, readFileSync(out, "utf8"), readFileSync(md, "utf8")].join("\n");
+    expect(everything).not.toContain(secret);
+    expect(everything).not.toContain("api_key");
+    // The host is still there; it is the only part a reader needs to fix it.
+    expect(String(report.cloud.skipped)).toContain("http://proxy.internal/v1");
+  });
+
   it("refuses a redirect that would carry the bearer token off HTTPS", () => {
     // urllib copies the Authorization header onto the redirected request, so
     // following a 302 to http:// is what actually leaks the key.
@@ -916,5 +995,51 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("REFUSED");
     expect(r.stdout).toContain("non-HTTPS redirect");
+  });
+
+  it("refuses an HTTPS redirect that would carry the bearer token to another origin", () => {
+    // HTTPS is not the protection: urllib copies Authorization onto the
+    // redirected request whatever the scheme, so a 302 to a different https
+    // host hands the key to that host, encrypted all the way there.
+    const r = spawnSync(
+      "python3",
+      ["-c",
+       [
+         "import email.message, importlib.util, sys, urllib.request, urllib.error",
+         `spec = importlib.util.spec_from_file_location('b', ${JSON.stringify(SCRIPT)})`,
+         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+         "h = m.HTTPSOnlyRedirectHandler()",
+         "def hop(origin, target):",
+         "    req = urllib.request.Request(origin, data=b'x', method='POST',",
+         "        headers={'Authorization': 'Bearer sk-test-placeholder-not-a-real-key'})",
+         "    return h.redirect_request(req, None, 302, 'Found', email.message.Message(), target)",
+         "for origin, target in [",
+         "    ('https://api.example/v1/x', 'https://attacker.example/v1/x'),",
+         "    ('https://api.example/v1/x', 'https://api.example:8443/v1/x'),",
+         "]:",
+         "    try:",
+         "        hop(origin, target)",
+         "    except urllib.error.HTTPError as e:",
+         "        print('REFUSED', e)",
+         "    else:",
+         "        print('FOLLOWED', target); sys.exit(1)",
+         "# A same-origin hop is ordinary and must still work, default port and all.",
+         "for origin, target in [",
+         "    ('https://api.example/v1/x', 'https://api.example/v1/y'),",
+         "    ('https://api.example/v1/x', 'https://api.example:443/v1/y'),",
+         "]:",
+         "    new = hop(origin, target)",
+         "    assert new.full_url == target, new.full_url",
+         "    print('FOLLOWED', target)",
+         "sys.exit(0)",
+       ].join("\n")],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("REFUSED");
+    expect(r.stdout).toContain("cross-origin redirect to https://attacker.example");
+    expect(r.stdout).toContain("cross-origin redirect to https://api.example:8443");
+    expect(r.stdout).toContain("FOLLOWED https://api.example/v1/y");
+    expect(r.stdout).toContain("FOLLOWED https://api.example:443/v1/y");
   });
 });

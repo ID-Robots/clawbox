@@ -67,6 +67,7 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
@@ -482,9 +483,18 @@ def run_score_only(source: str) -> int:
         # error, and a missing key would surface as a bare KeyError.
         if not isinstance(pair, dict):
             raise SystemExit(f"{label}: pair {index} is not an object: {describe_entry(pair)}")
+        # A non-string id cannot name the entry back to its author, so the
+        # position does it instead.
+        name = pair["id"] if isinstance(pair.get("id"), str) else f"#{index}"
         for field in ("reference", "hypothesis"):
             if field not in pair:
-                raise SystemExit(f"{label}: pair {pair.get('id', f'#{index}')} is missing '{field}'")
+                raise SystemExit(f"{label}: pair {name} is missing '{field}'")
+            # Present is not usable: null or a number reaches normalize_text and
+            # comes back as a TypeError with no file and no field in it.
+            if not isinstance(pair[field], str):
+                raise SystemExit(
+                    f"{label}: pair {name}: '{field}' must be a string, got {type(pair[field]).__name__}"
+                )
         result = score_transcript(pair["reference"], pair["hypothesis"])
         result["id"] = pair.get("id", str(index))
         scored.append(result)
@@ -826,9 +836,17 @@ def load_samples(manifest_path: Path) -> tuple[list[dict], dict]:
         # would then die reaching for .get on a str.
         if not isinstance(sample, dict):
             raise SystemExit(f"{manifest_path}: sample {index} is not an object: {describe_entry(sample)}")
+        name = sample["id"] if isinstance(sample.get("id"), str) else f"#{index}"
         for field in ("id", "lang", "audio", "reference"):
             if field not in sample:
-                raise SystemExit(f"{manifest_path}: sample {sample.get('id', f'#{index}')} is missing '{field}'")
+                raise SystemExit(f"{manifest_path}: sample {name} is missing '{field}'")
+            # A null or numeric "audio" reaches Path() and tracebacks; a null
+            # "reference" gets that far and dies in the scorer instead.
+            if not isinstance(sample[field], str):
+                raise SystemExit(
+                    f"{manifest_path}: sample {name}: '{field}' must be a string, "
+                    f"got {type(sample[field]).__name__}"
+                )
         audio = Path(sample["audio"]).expanduser()
         if not audio.is_absolute():
             audio = base / audio
@@ -1043,7 +1061,14 @@ def is_https(url: str) -> bool:
 
 
 def redact_url(url: str) -> str:
-    """The URL without its userinfo, so a key pasted into it stays out of the report."""
+    """The URL without its userinfo, query or fragment, so a key pasted into any
+    of them stays out of the report.
+
+    Userinfo is the textbook case; `?api_key=` and `?token=` are the common one.
+    This string is written to the JSON report and to the markdown a human pastes
+    into a ticket, so everything that could carry a secret comes off first.
+    """
+    url = url.partition("#")[0].partition("?")[0]
     scheme, sep, rest = url.partition("://")
     if not sep:
         return url
@@ -1053,19 +1078,39 @@ def redact_url(url: str) -> str:
     return f"{scheme}://{location}" + (f"/{path}" if path else "")
 
 
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin_of(url: str) -> tuple[str, str, int]:
+    """Scheme, host and effective port — what "same origin" has to mean here."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    try:
+        port = parsed.port
+    except ValueError:  # a port that is not a number is not an origin to match
+        port = None
+    return scheme, (parsed.hostname or "").lower(), port or DEFAULT_PORTS.get(scheme, -1)
+
+
 class HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse a redirect that would move the request off HTTPS.
+    """Refuse a redirect that would hand the bearer token to anyone else.
 
     urllib copies caller-supplied headers — including Authorization — onto the
     redirected request, so a 302 to an http:// Location puts the API key on the
-    wire in cleartext before anything here gets a say. Raising instead of
-    following turns that into one failed row.
+    wire in cleartext before anything here gets a say. HTTPS does not fix that
+    on its own: the same copying sends the key to whatever host the Location
+    names, so a redirect to a different origin is a handover, encrypted or not.
+    Raising instead of following turns either into one failed row.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not is_https(newurl):
             raise urllib.error.HTTPError(
                 newurl, code, f"refusing a non-HTTPS redirect to {redact_url(newurl)}", headers, fp
+            )
+        if origin_of(newurl) != origin_of(req.full_url):
+            raise urllib.error.HTTPError(
+                newurl, code, f"refusing a cross-origin redirect to {redact_url(newurl)}", headers, fp
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
