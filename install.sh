@@ -1792,6 +1792,41 @@ step_openclaw_tts() {
     echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
     return 1
   fi
+
+  # Configuring the provider is not the same as OpenClaw HAVING it, and the
+  # gap between those two is silent. `tts-local-cli` ships inside OpenClaw as a
+  # bundled extension, but the gateway resolves plugins through a PERSISTED
+  # registry rather than by scanning dist/extensions, and that index goes stale
+  # whenever the extension set on disk changes — `openclaw plugins registry`
+  # calls the reason `source-changed`, which is every OpenClaw upgrade. A stale
+  # index simply does not contain tts-local-cli: the gateway comes up without
+  # it and every spoken reply dies with
+  #     TTS conversion failed: tts-local-cli: no provider registered
+  # while this step, openclaw.json and `capability tts status` all still say
+  # the box is configured correctly.
+  #
+  # Measured on the freshly flashed Orin used for the TASK-383 hardware proof
+  # (2026-08-19): persisted 32/33 plugins against 49/67 current, the gateway
+  # loading only memory-core and ollama, and no on-device speech at all —
+  # `plugins doctor` reported no issues and `plugins enable tts-local-cli`
+  # answered "Plugin not found". Rebuilding the index was the whole fix.
+  if ! as_clawbox "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
+    echo "  Warning: could not refresh the plugin registry — the provider may not be visible to the gateway" >&2
+  fi
+
+  # Then verify, and refuse to select a provider that is not there. This is the
+  # same rule already applied to the script path above: never leave the box
+  # configured to speak through something that does not exist, because that
+  # configures exactly the silent failure this task removes. Leaving
+  # messages.tts.provider unset is the better outcome — OpenClaw then reports
+  # TTS as unconfigured instead of pretending it is ready.
+  if ! as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1; then
+    echo "  ERROR: the tts-local-cli plugin is not registered even after refreshing the registry." >&2
+    echo "         Leaving messages.tts.provider unset rather than pointing the box at a provider" >&2
+    echo "         that cannot answer. Diagnose with: openclaw plugins registry; openclaw plugins doctor" >&2
+    return 1
+  fi
+
   if ! oc_config_set messages.tts.provider "tts-local-cli"; then
     echo "  ERROR: could not select the tts-local-cli provider" >&2
     return 1
