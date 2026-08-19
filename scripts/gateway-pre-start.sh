@@ -794,22 +794,23 @@ fi
 # OpenAI embeddings, which need an OPENAI_API_KEY many boxes don't have
 # (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
 # "Semantic memory search is still offline ... missing OpenAI provider
-# auth/API-key access". If the user hasn't deliberately chosen an embeddings
-# provider AND the local model is present in Ollama, point memory search at
-# local Ollama so semantic recall works with zero API key. Self-heals existing
-# boxes on upgrade, not just fresh installs. Gated on the model actually being
-# present so we never leave memorySearch fail-closed on a missing model; only
-# touches an unset/"auto" provider so a deliberate OpenAI/remote setup stays.
-MEM_PROVIDER="$(python3 -c "import json;print(((json.load(open('$OPENCLAW_CONFIG')).get('agents',{}).get('defaults',{}) or {}).get('memorySearch',{}) or {}).get('provider') or '')" 2>/dev/null || echo "")"
-if [ -z "$MEM_PROVIDER" ] || [ "$MEM_PROVIDER" = "auto" ]; then
-  if curl -fsS --max-time 5 http://localhost:11434/api/tags 2>/dev/null | grep -q "qwen3-embedding"; then
-    if "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1 \
-       && "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model qwen3-embedding:0.6b >/dev/null 2>&1; then
-      echo "  Memory search -> local Ollama embeddings (qwen3-embedding:0.6b, no API key needed)"
-    else
-      echo "  WARN: could not set memorySearch to local Ollama embeddings (non-fatal; memory falls back to lexical FTS)"
-    fi
-  fi
+# auth/API-key access", and on the boxes that do have a key it means every
+# indexed note is embedded by a third party. scripts/ensure-local-embeddings.sh
+# pulls the local model if it is missing, points memorySearch at it (only when
+# the provider is unset/"auto"/already ollama, so a deliberate remote setup
+# stays), and forces the reindex the dimension change requires.
+#
+# Launched DETACHED on purpose: this is a blocking ExecStartPre and the model is
+# a ~600MB download. The script takes its own lock, so overlapping restarts do
+# not stack up pulls.
+LOCAL_EMBEDDINGS="$SCRIPT_DIR/ensure-local-embeddings.sh"
+LOCAL_EMBEDDINGS_LOG="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/local-embeddings.log"
+if [ -x "$LOCAL_EMBEDDINGS" ]; then
+  mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
+  setsid nohup "$LOCAL_EMBEDDINGS" >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
+  echo "  Local embeddings check running in the background (see $LOCAL_EMBEDDINGS_LOG)"
+else
+  echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"
 fi
 
 # Ensure the per-install MCP bearer token exists and is wired into the

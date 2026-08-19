@@ -2291,13 +2291,21 @@ step_ollama_install() {
 
   # Local embedding model for semantic memory. OpenClaw's memory search
   # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
-  # doesn't have (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
-  # "Semantic memory search is still offline ... missing OpenAI provider
-  # auth/API-key access". Pull a small local embedding model so semantic
-  # recall works with zero API key; gateway-pre-start.sh points memorySearch
-  # at it once present. Best-effort: a failed pull must not abort the install
-  # (memory falls back to lexical FTS).
-  if ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
+  # doesn't have (ChatGPT-OAuth / DeepSeek users) — and on the boxes that do
+  # have one it means every indexed note gets embedded by a third party.
+  # ensure-local-embeddings.sh is the single implementation of "pull the model,
+  # point memorySearch at it, reindex"; gateway-pre-start.sh runs the same
+  # script on every boot so a box that misses this pull still self-heals.
+  # Best-effort: a failure must not abort the install (memory falls back to
+  # lexical FTS).
+  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
+  if [ -x "$ENSURE_EMBEDDINGS" ]; then
+    if as_clawbox_login "$ENSURE_EMBEDDINGS"; then
+      echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
+    else
+      echo "  WARN: local embeddings setup did not complete; semantic memory falls back to lexical FTS until the next boot retries it (non-fatal)"
+    fi
+  elif ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
     echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
   else
     echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
