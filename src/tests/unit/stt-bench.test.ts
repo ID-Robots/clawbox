@@ -773,4 +773,148 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     expect(existsSync(dest)).toBe(false);
     expect(existsSync(`${dest}.part`)).toBe(false);
   });
+  it("names a manifest entry that is not a sample object instead of misreading it", () => {
+    // `"id" not in "some string"` is a substring test that quietly passes, so a
+    // bare string in the list used to get past the field check and then take
+    // the error path down with an AttributeError.
+    const audioDir = path.join(dir, "audio");
+    mkdirSync(audioDir, { recursive: true });
+    const file = path.join(audioDir, "manifest.json");
+    writeFileSync(file, JSON.stringify(["id lang audio reference"]), "utf8");
+    const r = run(["--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache, "--samples", file]);
+    expect(r.status).not.toBe(0);
+    const output = r.stderr + r.stdout;
+    expect(output).toContain("sample 0 is not an object");
+    expect(output).toContain("id lang audio reference");
+    expect(output).not.toContain("Traceback");
+  });
+
+  it("names the manifest sample that is missing a field, and the field", () => {
+    const audioDir = path.join(dir, "audio");
+    mkdirSync(audioDir, { recursive: true });
+    writeWav(path.join(audioDir, "en-1.wav"), 1.0);
+    const file = path.join(audioDir, "manifest.json");
+    writeFileSync(file, JSON.stringify([{ id: "en-1", lang: "en", audio: "en-1.wav" }]), "utf8");
+    const r = run(["--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache, "--samples", file]);
+    expect(r.status).not.toBe(0);
+    const output = r.stderr + r.stdout;
+    expect(output).toContain("sample en-1 is missing 'reference'");
+    expect(output).not.toContain("Traceback");
+
+    // A manifest that is an object where a list of samples was expected, and
+    // one that is not JSON at all, fail the same readable way.
+    writeFileSync(file, JSON.stringify({ samples: "en-1" }), "utf8");
+    const wrongType = run(["--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache, "--samples", file]);
+    expect(wrongType.status).not.toBe(0);
+    expect(wrongType.stderr + wrongType.stdout).toContain("'samples' must be a list");
+
+    writeFileSync(file, "{not json", "utf8");
+    const broken = run(["--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache, "--samples", file]);
+    expect(broken.status).not.toBe(0);
+    const brokenOutput = broken.stderr + broken.stdout;
+    expect(brokenOutput).toContain("not valid JSON");
+    expect(brokenOutput).not.toContain("Traceback");
+  });
+
+  it("names a --score-only pair it cannot score instead of raising KeyError", () => {
+    const file = path.join(dir, "pairs.json");
+
+    writeFileSync(file, JSON.stringify([{ id: "ok", reference: "a", hypothesis: "a" }, "reference"]), "utf8");
+    const notAnObject = run(["--score-only", file]);
+    expect(notAnObject.status).not.toBe(0);
+    const first = notAnObject.stderr + notAnObject.stdout;
+    expect(first).toContain("pair 1 is not an object");
+    expect(first).not.toContain("Traceback");
+
+    writeFileSync(file, JSON.stringify([{ id: "half", hypothesis: "a" }]), "utf8");
+    const missing = run(["--score-only", file]);
+    expect(missing.status).not.toBe(0);
+    const second = missing.stderr + missing.stdout;
+    expect(second).toContain("pair half is missing 'reference'");
+    expect(second).not.toContain("KeyError");
+    expect(second).not.toContain("Traceback");
+
+    writeFileSync(file, "[{", "utf8");
+    const broken = run(["--score-only", file]);
+    expect(broken.status).not.toBe(0);
+    expect(broken.stderr + broken.stdout).toContain("not valid JSON");
+  });
+
+  it("refuses to send the API key to a cleartext endpoint, and still writes the report", () => {
+    // OPENAI_BASE_URL is the override that points the comparator at a proxy.
+    // An http:// one hands the bearer token to everything on the path, so the
+    // request is never made — but the on-device numbers are already measured
+    // by this point and must reach the file regardless.
+    const key = "sk-test-placeholder-not-a-real-key";
+    configure({ compute_types: { cpu: ["int8"] }, delay: 0.02, default_text: "hello" });
+    const out = path.join(dir, "report.json");
+    const md = path.join(dir, "report.md");
+    const r = run(
+      [
+        "--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache,
+        "--samples", manifestFile([{ id: "en-1", lang: "en", seconds: 1.0, reference: "hello" }]),
+        "--cloud-baseline", "--out", out, "--markdown", md,
+      ],
+      { OPENAI_API_KEY: key, OPENAI_BASE_URL: "http://127.0.0.1:9/v1" },
+    );
+    expect(r.status).toBe(0);
+    const report = readReport(out);
+    expect(report.variants[0].rows[0].median_wall_seconds).toBeGreaterThan(0);
+    expect(report.cloud.skipped).toContain("cleartext");
+    expect(report.cloud.rows).toBeUndefined();
+    // The key is what the refusal is protecting; it must not be what the
+    // refusal prints.
+    const everything = [r.stdout, r.stderr, readFileSync(out, "utf8"), readFileSync(md, "utf8")].join("\n");
+    expect(everything).not.toContain(key);
+    expect(readFileSync(md, "utf8")).toContain("cleartext");
+
+    // An https:// override is not what is being refused here.
+    const allowed = run(
+      [
+        "--models", "tiny", "--compute", "int8", "--reps", "1", "--cache", cache,
+        "--samples", manifestFile([{ id: "en-1", lang: "en", seconds: 1.0, reference: "hello" }]),
+        "--cloud-baseline", "--out", out,
+      ],
+      { OPENAI_API_KEY: key, OPENAI_BASE_URL: "https://127.0.0.1:9/v1", STT_BENCH_CLOUD_TIMEOUT: "5" },
+    );
+    expect(allowed.status).toBe(0);
+    const attempted = readReport(out);
+    expect(attempted.cloud.skipped).toBeUndefined();
+    // It tried and failed to connect, which is a row, not a refusal.
+    expect(attempted.cloud.rows).toHaveLength(1);
+    expect(String(attempted.cloud.rows![0].skipped)).not.toContain(key);
+  });
+
+  it("refuses a redirect that would carry the bearer token off HTTPS", () => {
+    // urllib copies the Authorization header onto the redirected request, so
+    // following a 302 to http:// is what actually leaks the key.
+    const r = spawnSync(
+      "python3",
+      ["-c",
+       [
+         "import importlib.util, http.server, socketserver, threading, sys, urllib.request, urllib.error",
+         `spec = importlib.util.spec_from_file_location('b', ${JSON.stringify(SCRIPT)})`,
+         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+         "class H(http.server.BaseHTTPRequestHandler):",
+         "    def do_POST(self):",
+         "        self.send_response(302)",
+         "        self.send_header('Location', 'http://127.0.0.1:9/leak')",
+         "        self.end_headers()",
+         "    def log_message(self, *a): pass",
+         "srv = socketserver.TCPServer(('127.0.0.1', 0), H)",
+         "threading.Thread(target=srv.serve_forever, daemon=True).start()",
+         "req = urllib.request.Request('http://127.0.0.1:%d/x' % srv.server_address[1], data=b'x',",
+         "    headers={'Authorization': 'Bearer sk-test-placeholder-not-a-real-key'}, method='POST')",
+         "try:",
+         "    m.CLOUD_OPENER.open(req, timeout=10)",
+         "except urllib.error.HTTPError as e:",
+         "    print('REFUSED', e); srv.shutdown(); sys.exit(0)",
+         "print('FOLLOWED'); srv.shutdown(); sys.exit(1)",
+       ].join("\n")],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("REFUSED");
+    expect(r.stdout).toContain("non-HTTPS redirect");
+  });
 });

@@ -306,8 +306,11 @@ def download(url: str, dest: Path, expected_sha256: str | None = None) -> None:
 def safe_extract(tarball: Path, dest: Path) -> None:
     """Extract without letting a member escape `dest`.
 
-    Python 3.12 has `filter="data"` for this; the box runs 3.10, so the check
-    is explicit rather than assumed.
+    Python 3.12 has `filter="data"` for this and 3.14 makes it the default; the
+    box runs 3.10, where the argument does not exist, so the check is explicit
+    rather than assumed. The filter is asked for as well when the interpreter
+    has it, so a newer Python enforces its own rules instead of warning about
+    the ones it is about to change.
     """
     dest = dest.resolve()
     with tarfile.open(tarball) as tar:
@@ -321,7 +324,10 @@ def safe_extract(tarball: Path, dest: Path) -> None:
                     raise RuntimeError(f"{tarball.name}: link escapes the target directory: {member.name}")
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
                 raise RuntimeError(f"{tarball.name}: refusing special member: {member.name}")
-        tar.extractall(dest)
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(dest, filter="data")
+        else:
+            tar.extractall(dest)
 
 
 # --- scoring -----------------------------------------------------------------
@@ -441,13 +447,44 @@ def score_transcript(reference: str, hypothesis: str) -> dict:
     }
 
 
+def load_json_document(raw: str, label: str):
+    """Decode JSON, or say which file was not JSON instead of tracebacking.
+
+    Everything else in this harness reports bad input as a SystemExit naming
+    what was wrong; a hand-written pairs file or manifest is exactly the kind of
+    input that arrives malformed, so it gets the same treatment.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label}: not valid JSON ({exc})") from exc
+
+
+def describe_entry(entry) -> str:
+    """Name an entry a human has to find again in their own file."""
+    try:
+        rendered = json.dumps(entry, ensure_ascii=False)
+    except (TypeError, ValueError):
+        rendered = repr(entry)
+    return f"{type(entry).__name__} {rendered[:60]}"
+
+
 def run_score_only(source: str) -> int:
     """Score pairs from a JSON file (or stdin with "-") and print JSON."""
+    label = "<stdin>" if source == "-" else source
     raw = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text(encoding="utf-8")
-    payload = json.loads(raw)
+    payload = load_json_document(raw, label)
     pairs = payload if isinstance(payload, list) else [payload]
     scored = []
     for index, pair in enumerate(pairs):
+        # A bare string in the list would otherwise index by character and
+        # score whatever came out, which is a wrong number rather than an
+        # error, and a missing key would surface as a bare KeyError.
+        if not isinstance(pair, dict):
+            raise SystemExit(f"{label}: pair {index} is not an object: {describe_entry(pair)}")
+        for field in ("reference", "hypothesis"):
+            if field not in pair:
+                raise SystemExit(f"{label}: pair {pair.get('id', f'#{index}')} is missing '{field}'")
         result = score_transcript(pair["reference"], pair["hypothesis"])
         result["id"] = pair.get("id", str(index))
         scored.append(result)
@@ -767,19 +804,31 @@ def load_samples(manifest_path: Path) -> tuple[list[dict], dict]:
     Audio paths are resolved against the manifest's own directory so a corpus
     can be moved without being rewritten.
     """
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload = load_json_document(manifest_path.read_text(encoding="utf-8"), str(manifest_path))
     if isinstance(payload, list):
         samples, meta = payload, {}
-    else:
+    elif isinstance(payload, dict):
         samples, meta = payload.get("samples", []), {k: v for k, v in payload.items() if k != "samples"}
+    else:
+        raise SystemExit(
+            f"{manifest_path}: expected a list of samples or an object with 'samples', "
+            f"got {type(payload).__name__}"
+        )
+    if not isinstance(samples, list):
+        raise SystemExit(f"{manifest_path}: 'samples' must be a list, got {type(samples).__name__}")
     if not samples:
         raise SystemExit(f"{manifest_path}: no samples in the manifest")
     base = manifest_path.parent
     resolved = []
-    for sample in samples:
+    for index, sample in enumerate(samples):
+        # Before the field test, not after: `"id" not in "some string"` is a
+        # substring check that happens to pass, and the error message below
+        # would then die reaching for .get on a str.
+        if not isinstance(sample, dict):
+            raise SystemExit(f"{manifest_path}: sample {index} is not an object: {describe_entry(sample)}")
         for field in ("id", "lang", "audio", "reference"):
             if field not in sample:
-                raise SystemExit(f"{manifest_path}: sample {sample.get('id', '?')} is missing '{field}'")
+                raise SystemExit(f"{manifest_path}: sample {sample.get('id', f'#{index}')} is missing '{field}'")
         audio = Path(sample["audio"]).expanduser()
         if not audio.is_absolute():
             audio = base / audio
@@ -989,6 +1038,41 @@ def find_piper_binary(cache: Path, override: str) -> Path | None:
 # --- cloud comparator --------------------------------------------------------
 
 
+def is_https(url: str) -> bool:
+    return url.strip().lower().startswith("https://")
+
+
+def redact_url(url: str) -> str:
+    """The URL without its userinfo, so a key pasted into it stays out of the report."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    location, _, path = rest.partition("/")
+    if "@" in location:
+        location = "***@" + location.rsplit("@", 1)[1]
+    return f"{scheme}://{location}" + (f"/{path}" if path else "")
+
+
+class HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that would move the request off HTTPS.
+
+    urllib copies caller-supplied headers — including Authorization — onto the
+    redirected request, so a 302 to an http:// Location puts the API key on the
+    wire in cleartext before anything here gets a say. Raising instead of
+    following turns that into one failed row.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not is_https(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, f"refusing a non-HTTPS redirect to {redact_url(newurl)}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+CLOUD_OPENER = urllib.request.build_opener(HTTPSOnlyRedirectHandler)
+
+
 def cloud_transcribe(audio: Path, model: str, api_key: str, language: str | None) -> tuple[float, str]:
     """One multipart POST to the transcription endpoint.
 
@@ -1025,7 +1109,7 @@ def cloud_transcribe(audio: Path, model: str, api_key: str, language: str | None
         method="POST",
     )
     start = time.monotonic()
-    with urllib.request.urlopen(request, timeout=CLOUD_TIMEOUT) as response:
+    with CLOUD_OPENER.open(request, timeout=CLOUD_TIMEOUT) as response:
         payload = json.loads(response.read().decode("utf-8"))
     return time.monotonic() - start, str(payload.get("text", ""))
 
@@ -1039,6 +1123,16 @@ def measure_cloud(samples: list[dict], model: str, language_hint: bool) -> dict:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return {"model": model, "skipped": "OPENAI_API_KEY not set"}
+    # A key goes on this request, so the endpoint has to be one that encrypts
+    # it. OPENAI_BASE_URL is an override a user sets to point at a proxy, and
+    # an http:// proxy hands the key to anything on the path. Recorded as a
+    # skipped section like any other cloud failure: the on-device numbers are
+    # already measured by the time this runs and must still reach the file.
+    if not is_https(CLOUD_BASE_URL):
+        return {
+            "model": model,
+            "skipped": f"refusing to send the API key over cleartext: OPENAI_BASE_URL is {redact_url(CLOUD_BASE_URL)}",
+        }
     rows = []
     for sample in samples:
         try:
