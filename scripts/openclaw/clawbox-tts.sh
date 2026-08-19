@@ -84,6 +84,24 @@ piper_voice_for() {
   esac
 }
 
+# Piper model ids are <lang>_<REGION>-<name>-<quality>, so the language falls
+# out of the id and no second table has to be kept in sync with the first. A
+# voice added to piper_voice_for above inherits the substitution behaviour
+# below for free.
+piper_language_of() { printf '%s' "${1%%_*}"; }
+
+# Any installed model for this language, in a deterministic order. Used only
+# when the voice's own model is absent.
+piper_model_for_language() {
+  local lang="$1" f
+  for f in "$PIPER_VOICE_DIR/${lang}_"*.onnx; do
+    [ -f "$f" ] || continue
+    basename "$f" .onnx
+    return 0
+  done
+  return 1
+}
+
 is_known_voice() {
   case "$1" in
     af_heart|alloy|echo|fable|nova|shimmer|am_michael|onyx|af_bella|am_adam|bf_emma|bm_george|bg_dimitar) return 0 ;;
@@ -318,11 +336,27 @@ try_piper() {
     note "piper: binary not found at $PIPER_BIN"
     return 1
   fi
+  # A voice whose own model is not on disk must not become silence — that is
+  # the bug this whole file exists to fix, and it would come back through the
+  # voice table rather than through the engines. Two different substitutions,
+  # and the difference between them is the whole point:
+  #
+  #   same language  -> acceptable. en_GB-alba-medium missing, en_US-lessac
+  #                     installed: the user hears the right words in a
+  #                     slightly different accent, and is told so.
+  #   cross language -> refused. Bulgarian read aloud by an English model is
+  #                     broken audio, which is worse than no audio.
   if [ ! -f "$model" ]; then
-    # Speaking this text with a voice for another language is worse than not
-    # speaking it, so we do NOT silently substitute the English model here.
-    note "piper: no voice model $pvoice at $PIPER_VOICE_DIR"
-    return 1
+    local lang substitute
+    lang="$(piper_language_of "$pvoice")"
+    substitute="$(piper_model_for_language "$lang")"
+    if [ -z "$substitute" ]; then
+      note "piper: no voice model for language '$lang' at $PIPER_VOICE_DIR (wanted $pvoice)"
+      return 1
+    fi
+    echo "clawbox-tts: voice model $pvoice is not installed, speaking '$voice' with $substitute instead" >&2
+    pvoice="$substitute"
+    model="$PIPER_VOICE_DIR/$pvoice.onnx"
   fi
 
   local piper_dir

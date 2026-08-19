@@ -264,6 +264,52 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
+  it("substitutes a same-language voice rather than going silent", () => {
+    // bm_george maps to en_GB-alba-medium, which the installer does not ship.
+    // On a box where Kokoro cannot run — the low-memory case the guard exists
+    // for — refusing here would be exactly the silence this task is about.
+    stubKokoro();
+    stubPiper();
+    writeMeminfo(900);
+    const r = synth(["--voice", "bm_george"]);
+    expect(r.status).toBe(0);
+    expect(calls()).not.toContain("kokoro ");
+    expect(calls()).toContain("en_US-lessac-medium.onnx");
+    expect(outputBytes()).toBeGreaterThan(1024);
+    // The user is told the accent is not the one they picked.
+    expect(r.stderr).toContain("en_GB-alba-medium");
+    expect(r.stderr).toContain("en_US-lessac-medium");
+    expect(r.stderr).toContain("bm_george");
+  });
+
+  it("prefers the voice's own model when it is installed", () => {
+    // Guards the substitution against becoming a permanent downgrade.
+    stubKokoro();
+    stubPiper();
+    installPiperVoice("en_GB-alba-medium");
+    writeMeminfo(900);
+    const r = synth(["--voice", "bm_george"]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("en_GB-alba-medium.onnx");
+    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
+    expect(r.stderr).not.toContain("instead");
+  });
+
+  it("still refuses to cross languages when only English is installed", () => {
+    // Same-language substitution must not weaken this: an English model
+    // reading Bulgarian is broken audio, which is worse than no audio.
+    stubKokoro();
+    stubPiper();
+    writeMeminfo(900);
+    const r = synth(["--voice", "bg_dimitar"]);
+    expect(r.status).not.toBe(0);
+    // Assert on what the engine was actually asked to load, not just the code.
+    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
+    expect(calls()).not.toContain("piper ");
+    expect(r.stderr).toContain("no voice model for language 'bg'");
+    expect(existsSync(outPath)).toBe(false);
+  });
+
   it("refuses to speak a missing-voice language in the wrong voice", () => {
     // With no Bulgarian model installed the honest answer is no audio and a
     // reason — NOT Bulgarian text read out by the English voice.
