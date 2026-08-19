@@ -13,6 +13,33 @@ import path from "node:path";
 // reimplementation of the maths in TypeScript would not.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/bench/tts-bench.py");
+
+interface BenchRow {
+  utterance: string;
+  lang: string;
+  audio_seconds: number;
+  cold_wall_seconds: number;
+  median_wall_seconds: number;
+  median_rtf: number | null;
+  median_x_realtime: number | null;
+  peak_rss_kb: number;
+  reps: number;
+}
+interface BenchEngine {
+  name: string;
+  languages: Record<string, string>;
+  device?: string;
+  skipped?: string;
+  rows: BenchRow[];
+}
+interface BenchReport {
+  reps: number;
+  engines: BenchEngine[];
+}
+
+function readReport(file: string): BenchReport {
+  return JSON.parse(readFileSync(file, "utf8")) as BenchReport;
+}
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 
 let dir: string;
@@ -158,8 +185,8 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
       { PIPER_CALLS: path.join(dir, "calls.log") },
     );
     expect(r.status).toBe(0);
-    const report = JSON.parse(readFileSync(out, "utf8"));
-    const piper = report.engines.find((e: any) => e.name === "piper");
+    const report = readReport(out);
+    const piper = report.engines.find((e) => e.name === "piper")!;
     expect(piper.skipped).toBeUndefined();
     expect(piper.rows).toHaveLength(2);
     for (const row of piper.rows) {
@@ -222,7 +249,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
                    "--piper-voices", voices, "--utterances", single, "--out", out],
                   { COUNTER: path.join(dir, "counter") });
     expect(r.status).toBe(0);
-    const row = JSON.parse(readFileSync(out, "utf8")).engines[0].rows[0];
+    const row = readReport(out).engines[0].rows[0];
     expect(row.cold_wall_seconds).toBeGreaterThan(0.9);
     expect(row.median_wall_seconds).toBeLessThan(0.5);
   });
@@ -244,7 +271,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     const r = run(["--engines", "piper", "--reps", "1", "--cache", cache,
                    "--piper-bin", path.join(dir, "nope"), "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).not.toBe(0);
-    const report = JSON.parse(readFileSync(out, "utf8"));
+    const report = readReport(out);
     expect(report.engines[0].skipped).toContain("piper binary not found");
     expect(r.stdout).toContain("Not measured");
   });
@@ -255,7 +282,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
                    "--piper-bin", path.join(dir, "nope"), "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Not measured");
-    expect(JSON.parse(readFileSync(out, "utf8")).engines[0].rows).toHaveLength(0);
+    expect(readReport(out).engines[0].rows).toHaveLength(0);
   });
 
   it("measures a worker engine without charging model load to every utterance", () => {
@@ -264,7 +291,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     const r = run(["--engines", "kokoro-torch", "--reps", "3", "--cache", cache,
                    "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).toBe(0);
-    const engine = JSON.parse(readFileSync(out, "utf8")).engines[0];
+    const engine = readReport(out).engines[0];
     expect(engine.device).toBe("cuda:0");
     expect(engine.rows[0].median_rtf).toBeCloseTo(0.125, 2);
     // VmHWM comes from the worker itself; a sampled RSS would miss the peak.
@@ -279,7 +306,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     const r = run(["--engines", "kokoro-torch", "--reps", "2", "--cache", cache,
                    "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).toBe(0);
-    const engine = JSON.parse(readFileSync(out, "utf8")).engines[0];
+    const engine = readReport(out).engines[0];
     expect(engine.skipped).toBeUndefined();
     expect(engine.rows[0].median_rtf).toBeCloseTo(0.25, 2);
   });
@@ -290,7 +317,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     const r = run(["--engines", "kokoro-onnx", "--reps", "3", "--cache", cache,
                    "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).not.toBe(0);
-    const engine = JSON.parse(readFileSync(out, "utf8")).engines[0];
+    const engine = readReport(out).engines[0];
     expect(engine.rows).toHaveLength(0);
     expect(engine.skipped).toBeTruthy();
   });
@@ -301,7 +328,7 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     const r = run(["--engines", "kokoro-torch", "--reps", "1", "--cache", cache,
                    "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
     expect(r.status).not.toBe(0);
-    expect(JSON.parse(readFileSync(out, "utf8")).engines[0].skipped).toContain("worker did not start");
+    expect(readReport(out).engines[0].skipped).toContain("worker did not start");
   });
 
   it("states the Bulgarian position of every engine, measured or not", () => {
@@ -311,13 +338,206 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
                    "--piper-bin", path.join(dir, "nope"), "--python-bin", path.join(dir, "nope"),
                    "--utterances", utteranceFile(), "--out", out, "--markdown", md]);
     expect(r.status).toBe(0);
-    const report = JSON.parse(readFileSync(out, "utf8"));
-    const piper = report.engines.find((e: any) => e.name === "piper");
-    const kokoro = report.engines.find((e: any) => e.name === "kokoro-onnx");
+    const report = readReport(out);
+    const piper = report.engines.find((e) => e.name === "piper")!;
+    const kokoro = report.engines.find((e) => e.name === "kokoro-onnx")!;
     expect(piper.languages.bg).toContain("native voice");
     expect(kokoro.languages.bg).toContain("NO Bulgarian voice");
     // The Bulgarian verdict has to survive into the report a human reads.
     expect(readFileSync(md, "utf8")).toContain("NO Bulgarian voice");
+  });
+
+
+  it("survives a worker that floods stderr before it is ready", () => {
+    // stderr on a pipe nobody drains is how a chatty engine deadlocks a
+    // benchmark: torch fills the buffer and neither side ever moves again.
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const prog = path.join(dir, "chatty.py");
+    writeFileSync(
+      prog,
+      [
+        "import json, sys, wave",
+        "sys.stderr.write('x' * 400000)",  // far beyond a 64K pipe buffer
+        "sys.stderr.flush()",
+        "print('__ttsbench__ ' + json.dumps({'ready': True, 'rss_kb': 1000, 'device': 'cpu'}), flush=True)",
+        "for line in sys.stdin:",
+        "    req = json.loads(line)",
+        "    if req.get('quit'):",
+        "        break",
+        "    w = wave.open(req['out'], 'wb')",
+        "    w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)",
+        "    w.writeframes(b'\\x00\\x00' * 24000)",
+        "    w.close()",
+        "    print('__ttsbench__ ' + json.dumps({'wall': 0.1, 'audio': 1.0, 'rss_kb': 1000}), flush=True)",
+      ].join("\n"),
+    );
+    const worker = path.join(binDir, "chatty");
+    writeFileSync(worker, ["#!/usr/bin/env bash", `exec python3 "${prog}"`].join("\n"));
+    chmodSync(worker, 0o755);
+    const out = path.join(dir, "report.json");
+    const r = run(["--engines", "kokoro-onnx", "--reps", "2", "--cache", cache,
+                   "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
+    expect(r.status).toBe(0);
+    expect(readReport(out).engines[0].rows).toHaveLength(2);
+  });
+
+  it("gives up on a worker that answers nothing at all", () => {
+    // The true hang: stdout stays open, nothing is ever written to it. Without
+    // a deadline the loop would sit here until the cron watchdog killed it.
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const prog = path.join(dir, "mute.py");
+    writeFileSync(
+      prog,
+      [
+        "import json, sys, time",
+        "print('__ttsbench__ ' + json.dumps({'ready': True, 'rss_kb': 1000, 'device': 'cpu'}), flush=True)",
+        "sys.stdin.readline()",
+        "time.sleep(600)",
+      ].join("\n"),
+    );
+    const worker = path.join(binDir, "mute");
+    writeFileSync(worker, ["#!/usr/bin/env bash", `exec python3 "${prog}"`].join("\n"));
+    chmodSync(worker, 0o755);
+    const out = path.join(dir, "report.json");
+    const started = Date.now();
+    const r = run(["--engines", "kokoro-onnx", "--reps", "1", "--cache", cache,
+                   "--python-bin", worker, "--utterances", utteranceFile(), "--out", out],
+                  { TTS_BENCH_SYNTH_TIMEOUT: "3" });
+    expect(Date.now() - started).toBeLessThan(60_000);
+    expect(r.status).not.toBe(0);
+    expect(readReport(out).engines[0].skipped).toMatch(/no answer within/);
+  }, 45_000);
+
+  it("gives up on a worker that closes stdout but stays alive", () => {
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const prog = path.join(dir, "zombie.py");
+    writeFileSync(
+      prog,
+      [
+        "import json, os, sys, time",
+        "print('__ttsbench__ ' + json.dumps({'ready': True, 'rss_kb': 1000, 'device': 'cpu'}), flush=True)",
+        "sys.stdin.readline()",
+        "os.close(1)",          // stdout gone, process very much alive
+        "time.sleep(600)",
+      ].join("\n"),
+    );
+    const worker = path.join(binDir, "zombie");
+    writeFileSync(worker, ["#!/usr/bin/env bash", `exec python3 "${prog}"`].join("\n"));
+    chmodSync(worker, 0o755);
+    const out = path.join(dir, "report.json");
+    const started = Date.now();
+    const r = run(["--engines", "kokoro-onnx", "--reps", "1", "--cache", cache,
+                   "--python-bin", worker, "--utterances", utteranceFile(), "--out", out],
+                  { TTS_BENCH_SYNTH_TIMEOUT: "3" });
+    // The run ends on the timeout, not when someone notices it hung.
+    // stderr on a file rather than an undrained pipe is what makes this end at
+    // all: reading stderr to EOF would block for as long as the worker lives.
+    expect(Date.now() - started).toBeLessThan(60_000);
+    expect(r.status).not.toBe(0);
+    expect(readReport(out).engines[0].skipped).toMatch(/died mid-run/);
+    // Teardown gives the worker its 10s to answer `quit` before killing it, so
+    // this case is legitimately slower than the default per-test budget.
+  }, 45_000);
+
+  it("still writes the report when an engine produces no audio", () => {
+    // A zero-length result used to take the whole run down in the renderer,
+    // after every measurement had been made and before any of it was saved.
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const prog = path.join(dir, "silent.py");
+    writeFileSync(
+      prog,
+      [
+        "import json, sys, wave",
+        "print('__ttsbench__ ' + json.dumps({'ready': True, 'rss_kb': 1000, 'device': 'cpu'}), flush=True)",
+        "for line in sys.stdin:",
+        "    req = json.loads(line)",
+        "    if req.get('quit'):",
+        "        break",
+        "    w = wave.open(req['out'], 'wb')",
+        "    w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.close()",
+        "    print('__ttsbench__ ' + json.dumps({'wall': 0.2, 'audio': 0.0, 'rss_kb': 1000}), flush=True)",
+      ].join("\n"),
+    );
+    const worker = path.join(binDir, "silent");
+    writeFileSync(worker, ["#!/usr/bin/env bash", `exec python3 "${prog}"`].join("\n"));
+    chmodSync(worker, 0o755);
+    const out = path.join(dir, "report.json");
+    const md = path.join(dir, "report.md");
+    const r = run(["--engines", "kokoro-onnx", "--reps", "2", "--cache", cache, "--skip-missing",
+                   "--python-bin", worker, "--utterances", utteranceFile(), "--out", out, "--markdown", md]);
+    expect(r.status).toBe(0);
+    const row = readReport(out).engines[0].rows[0];
+    expect(row.audio_seconds).toBe(0);
+    expect(row.median_rtf).toBeNull();
+    expect(readFileSync(md, "utf8")).toContain("—");
+  });
+
+  it("refuses an artifact whose digest does not match the pin", () => {
+    const artifact = path.join(dir, "artifact.bin");
+    writeFileSync(artifact, "not the pinned bytes");
+    const dest = path.join(dir, "fetched.bin");
+    const r = spawnSync(
+      "python3",
+      ["-c",
+       [
+         "import importlib.util, sys",
+         `spec = importlib.util.spec_from_file_location('b', ${JSON.stringify(SCRIPT)})`,
+         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+         "from pathlib import Path",
+         "try:",
+         `    m.download('file://${artifact}', Path(${JSON.stringify(dest)}), 'deadbeef')`,
+         "except RuntimeError as e:",
+         "    print('REFUSED', e); sys.exit(0)",
+         "print('ACCEPTED'); sys.exit(1)",
+       ].join("\n")],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("REFUSED");
+    // Nothing half-written is left behind for the next run to trust.
+    expect(existsSync(dest)).toBe(false);
+    expect(existsSync(`${dest}.part`)).toBe(false);
+  });
+
+  it("refuses a tarball whose member escapes the target directory", () => {
+    const tarball = path.join(dir, "evil.tar.gz");
+    const target = path.join(dir, "extract-here");
+    mkdirSync(target, { recursive: true });
+    const build = spawnSync(
+      "python3",
+      ["-c",
+       [
+         "import io, tarfile",
+         `tar = tarfile.open(${JSON.stringify(tarball)}, 'w:gz')`,
+         "info = tarfile.TarInfo('../escaped.txt'); data = b'pwned'; info.size = len(data)",
+         "tar.addfile(info, io.BytesIO(data)); tar.close()",
+       ].join("\n")],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(build.status).toBe(0);
+    const r = spawnSync(
+      "python3",
+      ["-c",
+       [
+         "import importlib.util, sys",
+         `spec = importlib.util.spec_from_file_location('b', ${JSON.stringify(SCRIPT)})`,
+         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+         "from pathlib import Path",
+         "try:",
+         `    m.safe_extract(Path(${JSON.stringify(tarball)}), Path(${JSON.stringify(target)}))`,
+         "except RuntimeError as e:",
+         "    print('REFUSED', e); sys.exit(0)",
+         "print('EXTRACTED'); sys.exit(1)",
+       ].join("\n")],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("REFUSED");
+    expect(existsSync(path.join(dir, "escaped.txt"))).toBe(false);
   });
 
   it("refuses a rep count that cannot produce a median", () => {

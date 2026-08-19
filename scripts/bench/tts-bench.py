@@ -48,12 +48,15 @@ Exit code is non-zero when a requested engine could not run, unless
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import statistics
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.request
@@ -70,6 +73,24 @@ PIPER_VOICES = {
 }
 KOKORO_ONNX_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 KOKORO_ONNX_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
+
+# Every artifact is pinned. A benchmark whose engine can change under it is not
+# a benchmark, and these are executables and model weights fetched over the
+# network onto a device. Digests taken from the files the numbers on TASK-382
+# were produced with (Orin Nano, 2026-08-19).
+ARTIFACT_SHA256 = {
+    "piper_linux_aarch64.tar.gz": "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb",
+    "kokoro-v1.0.onnx": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+    "voices-v1.0.bin": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+    "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+    "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+    "bg_BG-dimitar-medium.onnx": "4972fe764468e8501416407ad81662de94cc6c9cdc680fcf807daef04e319f13",
+    "bg_BG-dimitar-medium.onnx.json": "ec9a9abdd17384d3db225e83085b2f68b790b112f058417c3a8a2ac58b79e7f0",
+}
+
+# A worker that never answers must fail the run, not hang the loop overnight.
+WORKER_START_TIMEOUT = float(os.environ.get("TTS_BENCH_START_TIMEOUT", "600"))
+WORKER_SYNTH_TIMEOUT = float(os.environ.get("TTS_BENCH_SYNTH_TIMEOUT", "300"))
 
 # Two sentences a ClawBox actually says, in both languages, plus a long one:
 # a notification voice and a "read this answer to me" voice have different
@@ -166,14 +187,59 @@ class Sampler:
         self._thread.join(timeout=1)
 
 
-def download(url: str, dest: Path) -> None:
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download(url: str, dest: Path, expected_sha256: str | None = None) -> None:
+    """Fetch `url` to `dest` once, and refuse anything that is not the pinned file.
+
+    A cached file is verified too: a truncated or swapped artifact on disk is
+    exactly as wrong as a bad download, and it would otherwise be trusted
+    forever.
+    """
     if dest.exists() and dest.stat().st_size > 0:
-        return
+        if expected_sha256 is None or sha256_of(dest) == expected_sha256:
+            return
+        log(f"{dest.name}: cached copy does not match its pinned digest — refetching")
+        dest.unlink()
     log(f"downloading {dest.name}")
     tmp = dest.with_suffix(dest.suffix + ".part")
     with urllib.request.urlopen(url, timeout=120) as r, tmp.open("wb") as f:
         shutil.copyfileobj(r, f)
+    if expected_sha256 is not None:
+        actual = sha256_of(tmp)
+        if actual != expected_sha256:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"{dest.name}: sha256 {actual} does not match the pinned {expected_sha256}"
+            )
     tmp.rename(dest)
+
+
+def safe_extract(tarball: Path, dest: Path) -> None:
+    """Extract without letting a member escape `dest`.
+
+    Python 3.12 has `filter="data"` for this; the box runs 3.10, so the check
+    is explicit rather than assumed.
+    """
+    dest = dest.resolve()
+    with tarfile.open(tarball) as tar:
+        for member in tar.getmembers():
+            target = (dest / member.name).resolve()
+            if not str(target).startswith(str(dest) + os.sep) and target != dest:
+                raise RuntimeError(f"{tarball.name}: member escapes the target directory: {member.name}")
+            if member.issym() or member.islnk():
+                link_target = (target.parent / member.linkname).resolve()
+                if not str(link_target).startswith(str(dest) + os.sep):
+                    raise RuntimeError(f"{tarball.name}: link escapes the target directory: {member.name}")
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise RuntimeError(f"{tarball.name}: refusing special member: {member.name}")
+        tar.extractall(dest)
 
 
 # --- engines -----------------------------------------------------------------
@@ -227,7 +293,10 @@ class PiperEngine(Engine):
         env = dict(os.environ)
         # The release tarball ships its own onnxruntime and espeak-ng data next
         # to the binary.
-        env["LD_LIBRARY_PATH"] = f"{self.binary.parent}:{env.get('LD_LIBRARY_PATH', '')}"
+        # An empty entry in LD_LIBRARY_PATH means "the current directory" to the
+        # loader, which is not somewhere a benchmark should be resolving .so files.
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{self.binary.parent}:{existing}" if existing else str(self.binary.parent)
         cmd = [
             str(self.binary),
             "-m",
@@ -244,7 +313,14 @@ class PiperEngine(Engine):
             env=env,
         )
         with Sampler(proc.pid) as sampler:
-            _, err = proc.communicate(text.encode("utf-8"), timeout=300)
+            try:
+                _, err = proc.communicate(text.encode("utf-8"), timeout=WORKER_SYNTH_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # Left alive, it would keep writing into the output file while
+                # the next rep is being timed.
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError(f"piper did not finish within {WORKER_SYNTH_TIMEOUT:.0f}s")
         wall = time.monotonic() - start
         if proc.returncode != 0:
             raise RuntimeError(f"piper exited {proc.returncode}: {err.decode('utf-8', 'replace')[:300]}")
@@ -344,35 +420,84 @@ class WorkerEngine(Engine):
         self.load_seconds = 0.0
         self.device = "unknown"
         self.peak_rss_kb = 0
+        # stderr goes to a file, never a pipe nobody drains: torch on this board
+        # is chatty enough to fill a pipe buffer and deadlock before the model
+        # has even loaded.
+        self._stderr_file = None
+
+    def _stderr_tail(self, limit: int = 500) -> str:
+        if self._stderr_file is None:
+            return ""
+        try:
+            path = Path(self._stderr_file.name)
+            data = path.read_bytes()
+        except OSError:
+            return ""
+        return data[-limit:].decode("utf-8", "replace").strip()
 
     def _start(self) -> subprocess.Popen:
         if self.proc is not None:
             return self.proc
         start = time.monotonic()
+        self._stderr_file = tempfile.NamedTemporaryFile(prefix=f"tts-bench-{self.name}-", suffix=".err")
         proc = subprocess.Popen(
             [self.python_bin, "-c", WORKER_SRC, self.mode, str(self.model_dir)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._stderr_file,
             text=True,
         )
-        info = self._read_tagged(proc, "worker did not start")
+        try:
+            info = self._read_tagged(proc, "worker did not start", WORKER_START_TIMEOUT)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=10)
+            self._close_stderr()
+            raise
         self.load_seconds = time.monotonic() - start
         self.device = info.get("device", "unknown")
         self.peak_rss_kb = int(info.get("rss_kb", 0))
         self.proc = proc
         return proc
 
-    def _read_tagged(self, proc: subprocess.Popen, what: str) -> dict:
-        """Return the next tagged line, stepping over library banners."""
+    def _close_stderr(self) -> None:
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except OSError:
+                pass
+            self._stderr_file = None
+
+    def _read_tagged(self, proc: subprocess.Popen, what: str, timeout: float) -> dict:
+        """Return the next tagged line, stepping over library banners.
+
+        The deadline is enforced by killing the worker rather than by polling
+        the pipe: `select` on a text-mode pipe reports "nothing to read" while
+        a complete line is already sitting in Python's own buffer, which
+        deadlocks on exactly the fast workers it is meant to protect. Killing
+        the child turns any hang — no answer, or stdout closed while the
+        process lives on — into an EOF this loop can report.
+        """
         assert proc.stdout
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                err = proc.stderr.read()[:500] if proc.stderr else ""
-                raise RuntimeError(f"{self.name} {what}: {err.strip() or 'no output'}")
-            if line.startswith(WORKER_TAG):
-                return json.loads(line[len(WORKER_TAG):])
+        timed_out = threading.Event()
+
+        def give_up() -> None:
+            timed_out.set()
+            proc.kill()
+
+        watchdog = threading.Timer(timeout, give_up)
+        watchdog.start()
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if timed_out.is_set():
+                        raise RuntimeError(f"{self.name} {what}: no answer within {timeout:.0f}s")
+                    raise RuntimeError(f"{self.name} {what}: {self._stderr_tail() or 'no output'}")
+                if line.startswith(WORKER_TAG):
+                    return json.loads(line[len(WORKER_TAG):])
+        finally:
+            watchdog.cancel()
 
     def unavailable_reason(self) -> str | None:
         try:
@@ -387,7 +512,7 @@ class WorkerEngine(Engine):
         with Sampler(None) as sampler:
             proc.stdin.write(json.dumps({"text": text, "lang": lang, "out": str(out)}) + "\n")
             proc.stdin.flush()
-            res = self._read_tagged(proc, "worker died mid-run")
+            res = self._read_tagged(proc, "worker died mid-run", WORKER_SYNTH_TIMEOUT)
         self.peak_rss_kb = max(self.peak_rss_kb, int(res.get("rss_kb", 0)))
         self.min_avail_kb = sampler.min_avail_kb
         return float(res["wall"]), float(res["audio"]), self.peak_rss_kb
@@ -400,7 +525,12 @@ class WorkerEngine(Engine):
                 self.proc.wait(timeout=10)
             except Exception:  # noqa: BLE001 - best effort teardown
                 self.proc.kill()
+                try:
+                    self.proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
         self.proc = None
+        self._close_stderr()
 
 
 class KokoroOnnxEngine(WorkerEngine):
@@ -425,18 +555,19 @@ def do_setup(cache: Path, engines: list[str]) -> None:
     if "piper" in engines:
         piper_dir = cache / "piper"
         if not (piper_dir / "piper").exists():
-            tarball = cache / "piper.tar.gz"
-            download(PIPER_TARBALL, tarball)
-            subprocess.run(["tar", "xzf", str(tarball), "-C", str(cache)], check=True)
+            tarball = cache / "piper_linux_aarch64.tar.gz"
+            download(PIPER_TARBALL, tarball, ARTIFACT_SHA256["piper_linux_aarch64.tar.gz"])
+            safe_extract(tarball, cache)
             tarball.unlink(missing_ok=True)
         voices = cache / "voices"
         voices.mkdir(exist_ok=True)
         for voice, path in PIPER_VOICES.values():
             for suffix in (".onnx", ".onnx.json"):
-                download(f"{PIPER_VOICES_BASE}/{path}/{voice}{suffix}", voices / f"{voice}{suffix}")
+                name = f"{voice}{suffix}"
+                download(f"{PIPER_VOICES_BASE}/{path}/{name}", voices / name, ARTIFACT_SHA256.get(name))
     if "kokoro-onnx" in engines:
         for name in KOKORO_ONNX_FILES:
-            download(f"{KOKORO_ONNX_BASE}/{name}", cache / name)
+            download(f"{KOKORO_ONNX_BASE}/{name}", cache / name, ARTIFACT_SHA256.get(name))
     log("setup complete")
 
 
@@ -531,14 +662,20 @@ def render_markdown(report: dict) -> str:
     lines.append("")
     lines.append("| engine | utterance | lang | audio s | cold s | median s | RTF | x real-time | peak RSS MB |")
     lines.append("|---|---|---|---|---|---|---|---|---|")
+    def num(value, fmt: str, suffix: str = "") -> str:
+        # An engine that produced no audio still has to appear in the table:
+        # formatting None here would take a whole benchmark run down with it.
+        return f"{value:{fmt}}{suffix}" if isinstance(value, (int, float)) else "—"
+
     for engine in report["engines"]:
         if engine.get("skipped"):
             continue
         for row in engine["rows"]:
             lines.append(
-                f"| {engine['name']} | {row['utterance']} | {row['lang']} | {row['audio_seconds']:.2f} | "
-                f"{row['cold_wall_seconds']:.2f} | {row['median_wall_seconds']:.2f} | "
-                f"{row['median_rtf']:.3f} | {row['median_x_realtime']:.1f}x | {row['peak_rss_kb'] / 1024:.0f} |"
+                f"| {engine['name']} | {row['utterance']} | {row['lang']} | {num(row['audio_seconds'], '.2f')} | "
+                f"{num(row['cold_wall_seconds'], '.2f')} | {num(row['median_wall_seconds'], '.2f')} | "
+                f"{num(row['median_rtf'], '.3f')} | {num(row['median_x_realtime'], '.1f', 'x')} | "
+                f"{num(row['peak_rss_kb'] / 1024, '.0f')} |"
             )
     lines.append("")
     lines.append("## Language support")
@@ -642,11 +779,13 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    markdown = render_markdown(report)
-    print(markdown)
+    # JSON first: rendering must never be able to destroy an hour of
+    # measurements on the way to the screen.
     if args.out:
         Path(args.out).expanduser().write_text(json.dumps(report, indent=2, ensure_ascii=False))
         log(f"wrote {args.out}")
+    markdown = render_markdown(report)
+    print(markdown)
     if args.markdown:
         Path(args.markdown).expanduser().write_text(markdown)
         log(f"wrote {args.markdown}")
