@@ -60,7 +60,8 @@ function stubKokoro() {
       '  case "$1" in',
       '    -o) out="$2"; shift 2;;',
       '    -m) voice="$2"; shift 2;;',
-      '    -t|-l) shift 2;;',
+      '    -t) shift 2;;',
+      '    -l) echo "lang=$2" >> "$CALLS_LOG"; shift 2;;',
       "    *) shift;;",
       "  esac",
       "done",
@@ -189,8 +190,10 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(r.status).toBe(0);
     expect(calls()).toContain("piper ");
     expect(outputBytes()).toBeGreaterThan(1024);
-    // The reason has to be visible; a silent fallback hides a broken GPU box.
-    expect(r.stderr === "" || r.stderr.length >= 0).toBe(true);
+    // The reason has to be visible; a silent fallback hides a broken GPU box
+    // that is quietly living on the CPU engine.
+    expect(r.stderr).toContain("fell back to Piper");
+    expect(r.stderr).toContain("is not installed");
   });
 
   it("falls back to Piper when kokoro fails, instead of exiting 1", () => {
@@ -479,6 +482,53 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(existsSync(mp3)).toBe(false);
   });
 
+  it("rejects --voice with no value instead of spinning on it", () => {
+    // `shift 2` with one argument left does not shift and returns non-zero;
+    // swallowing that left $1 as --voice and span the parse loop on a core
+    // until the caller's timeout killed it. The `timeout` wrapper means a
+    // regression fails this test in 5s rather than hanging the suite.
+    const r = spawnSync("timeout", ["5", "bash", SCRIPT, "--voice"], {
+      encoding: "utf8",
+      env: baseEnv(),
+      timeout: 30_000,
+    });
+    expect(r.status).not.toBe(124); // 124 == killed by timeout, i.e. it hung
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--voice requires a value");
+  });
+
+  it("rejects --set-voice with no value", () => {
+    const r = spawnSync("timeout", ["5", "bash", SCRIPT, "--set-voice"], {
+      encoding: "utf8",
+      env: baseEnv(),
+      timeout: 30_000,
+    });
+    expect(r.status).not.toBe(124);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--set-voice requires a value");
+  });
+
+  it("tells Kokoro the American language code for an American voice", () => {
+    stubKokoro();
+    stubPiper();
+    const r = synth(["--voice", "af_heart"]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("lang=a");
+  });
+
+  it("tells Kokoro the British language code for a British voice", () => {
+    // kokoro does not fail on a mismatch — it warns "Language mismatch,
+    // loading <voice> into <language> pipeline" and synthesises anyway, so
+    // hardcoding -l a degraded pronunciation instead of erroring.
+    stubKokoro();
+    stubPiper();
+    const r = synth(["--voice", "bm_george"]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("voice=bm_george");
+    expect(calls()).toContain("lang=b");
+    expect(calls()).not.toContain("lang=a");
+  });
+
   it("does not mistake reply text starting with -- for its own options", () => {
     stubKokoro();
     stubPiper();
@@ -505,10 +555,29 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toContain("config get messages.tts.provider");
     expect(step).toMatch(/CURRENT_TTS.*!=.*"null"|"\$CURRENT_TTS" != "null"/);
     expect(step).toContain("preserving");
+    // The preserve branch must return BEFORE anything is written, otherwise
+    // "seed-if-unset" is just "set".
     const guardIndex = step.indexOf("preserving");
     const setIndex = step.indexOf("oc_config_set messages.tts.provider");
-    expect(guardIndex).toBeGreaterThan(-1);
+    expect(step.slice(guardIndex, setIndex)).toContain("return 0");
     expect(setIndex).toBeGreaterThan(guardIndex);
+  });
+
+  it("does not select a provider it failed to define", () => {
+    // oc_config_set retries 3x then returns 1. Naming tts-local-cli as THE
+    // provider after its definition failed to land points the box at a
+    // provider that does not exist and breaks every spoken reply.
+    expect(step).toContain("if ! oc_config_set messages.tts.providers.tts-local-cli");
+    const defineIndex = step.indexOf("oc_config_set messages.tts.providers.tts-local-cli");
+    const selectIndex = step.indexOf("oc_config_set messages.tts.provider ");
+    expect(step.slice(defineIndex, selectIndex)).toContain("return 1");
+  });
+
+  it("refuses to wire the provider to a command that is not there", () => {
+    expect(step).toContain('[ ! -x "$TTS_SCRIPT" ]');
+    const checkIndex = step.indexOf('[ ! -x "$TTS_SCRIPT" ]');
+    const setIndex = step.indexOf("oc_config_set messages.tts.providers");
+    expect(checkIndex).toBeLessThan(setIndex);
   });
 
   it("writes config through the retrying helper, not a raw config set", () => {
@@ -522,8 +591,12 @@ describe("install.sh wires TTS to the on-device chain", () => {
     // the script would be handed no destination at all.
     expect(step).toContain("{{OutputPath}}");
     expect(step).toContain("{{Text}}");
+    // All three invalid spellings, written out literally. The previous version
+    // of this test excluded "{{outputpath }}" — with a trailing space — which
+    // no regression would ever produce, so it guarded nothing.
     expect(step).not.toContain("{{outputPath}}");
-    expect(step).not.toContain("{{OutputPath }}".replace("OutputPath", "outputpath"));
+    expect(step).not.toContain("{{outputpath}}");
+    expect(step).not.toContain("{{OUTPUTPATH}}");
   });
 
   it("points the provider at the shipped entrypoint", () => {
@@ -574,6 +647,38 @@ describe("install-voice.sh installs the fallback engine", () => {
   it("is idempotent: a matching digest on disk is not re-downloaded", () => {
     expect(INSTALL_VOICE_SH).toMatch(/piper_digest_ok "\$dest" "\$want"[\s\S]{0,60}return 0/);
     expect(INSTALL_VOICE_SH).toContain("Piper binary already installed");
+  });
+
+  it("bounds a stalled download so an update cannot hang forever", () => {
+    // This runs from step_post_update on every in-app update of a shipped
+    // device; an unbounded curl there hangs the whole update.
+    expect(INSTALL_VOICE_SH).toContain("--connect-timeout");
+    expect(INSTALL_VOICE_SH).toContain("--speed-limit");
+    expect(INSTALL_VOICE_SH).toContain("--speed-time");
+  });
+
+  it("proves the binary exists rather than discarding the chmod", () => {
+    expect(INSTALL_VOICE_SH).toContain("the Piper tarball did not contain piper");
+    expect(INSTALL_VOICE_SH).not.toMatch(/chmod \+x "\$PIPER_DIR\/piper" 2>\/dev\/null \|\| true/);
+  });
+
+  it("reports piper-only failure instead of exiting 0 regardless", () => {
+    const branch = INSTALL_VOICE_SH.slice(
+      INSTALL_VOICE_SH.indexOf('"${1:-}" = "--piper-only"'),
+      INSTALL_VOICE_SH.indexOf("Piper fallback ready"),
+    );
+    expect(branch).toContain("install_piper || PIPER_ONLY_RC=1");
+    expect(branch).toContain("deploy_voice_scripts || PIPER_ONLY_RC=1");
+    expect(branch).toContain("exit 1");
+  });
+
+  it("treats a missing TTS entrypoint as a deploy failure", () => {
+    const fn = INSTALL_VOICE_SH.slice(
+      INSTALL_VOICE_SH.indexOf("deploy_voice_scripts() {"),
+      INSTALL_VOICE_SH.indexOf("\n}", INSTALL_VOICE_SH.indexOf("deploy_voice_scripts() {")),
+    );
+    expect(fn).toContain("clawbox-tts.sh is missing");
+    expect(fn).toContain('return "$rc"');
   });
 
   it("offers a cheap piper-only path for the updater", () => {

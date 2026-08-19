@@ -207,20 +207,25 @@ emit() {
         note "output: ffmpeg not available to encode .mp3 (audio was synthesised, but writing WAV bytes into an .mp3 would be broken audio)"
         return 1
       fi
-      "$FFMPEG_BIN" -y -i "$src" -codec:a libmp3lame -b:a 128k -ar 24000 "$dst" >/dev/null 2>&1 || {
+      if ! "$FFMPEG_BIN" -y -i "$src" -codec:a libmp3lame -b:a 128k -ar 24000 "$dst" >/dev/null 2>&1; then
+        # ffmpeg -y can leave a truncated file at $dst when it dies partway.
+        # Handing a consumer corrupt audio is the failure this script exists
+        # to prevent, so the partial file goes with the error.
+        rm -f "$dst"
         note "output: ffmpeg failed to encode .mp3"
         return 1
-      }
+      fi
       ;;
     *.ogg|*.opus)
       if ! command -v "$FFMPEG_BIN" >/dev/null 2>&1; then
         note "output: ffmpeg not available to encode Opus"
         return 1
       fi
-      "$FFMPEG_BIN" -y -i "$src" -codec:a libopus -b:a 64k -ar 48000 -ac 1 "$dst" >/dev/null 2>&1 || {
+      if ! "$FFMPEG_BIN" -y -i "$src" -codec:a libopus -b:a 64k -ar 48000 -ac 1 "$dst" >/dev/null 2>&1; then
+        rm -f "$dst"
         note "output: ffmpeg failed to encode Opus"
         return 1
-      }
+      fi
       ;;
     *)
       cp -f "$src" "$dst" || {
@@ -253,6 +258,7 @@ kokoro_via_server() {
   # Text goes through the environment, never through the shell or the argv of
   # an interpreter, so an utterance containing quotes cannot become code.
   KOKORO_TEXT="$text" KOKORO_OUTPUT="$wav" KOKORO_SOCKET="$KOKORO_SOCKET" KOKORO_VOICE="$voice" \
+    KOKORO_TIMEOUT="$KOKORO_TIMEOUT" \
     "$PYTHON_BIN" -c '
 import json, os, socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -275,10 +281,19 @@ if not resp.startswith("OK"):
   return 0
 }
 
+# Kokoro voice ids are <lang><gender>_<name>: af_heart and am_michael are
+# American ("a"), bf_emma and bm_george are British ("b"). Passing -l a for a
+# British voice does not fail — kokoro warns "Language mismatch, loading
+# <voice> into <language> pipeline" and carries on — so the only symptom is
+# the wrong G2P and mispronounced output. Derive it instead of hardcoding it,
+# so a voice added to the table above cannot silently inherit "a".
+kokoro_lang_of() { printf '%s' "${1:0:1}"; }
+
 kokoro_cold_start() {
-  local text="$1" wav="$2" voice="$3"
+  local text="$1" wav="$2" voice="$3" lang
   command -v "$KOKORO_BIN" >/dev/null 2>&1 || return 1
-  timeout "$KOKORO_TIMEOUT" "$KOKORO_BIN" -t "$text" -o "$wav" -m "$voice" -l a >/dev/null 2>&1 || return 1
+  lang="$(kokoro_lang_of "$voice")"
+  timeout "$KOKORO_TIMEOUT" "$KOKORO_BIN" -t "$text" -o "$wav" -m "$voice" -l "$lang" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -383,6 +398,15 @@ try_piper() {
 
 # ── Entry ───────────────────────────────────────────────────────────────────
 
+# Refuse an option that was handed no value, rather than looping on it.
+need_value() {
+  if [ "$2" -lt 2 ]; then
+    echo "clawbox-tts: $1 requires a value" >&2
+    usage
+    exit 2
+  fi
+}
+
 usage() {
   cat >&2 <<USAGE
 Usage: clawbox-tts.sh [--voice <voice>] <text> <output-path>
@@ -400,11 +424,17 @@ ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --voice)
-      REQUESTED_VOICE="${2:-}"; shift 2 || true ;;
+      # `shift 2` with only one argument left does NOT shift — it returns
+      # non-zero and leaves $@ untouched. Swallowing that with `|| true` left
+      # $1 as --voice forever and span this loop on a core until the caller's
+      # timeout killed it. Every option that takes a value checks for it.
+      need_value "--voice" "$#"
+      REQUESTED_VOICE="$2"; shift 2 ;;
     --voice=*)
       REQUESTED_VOICE="${1#--voice=}"; shift ;;
     --set-voice)
-      save_voice "${2:-}"; exit $? ;;
+      need_value "--set-voice" "$#"
+      save_voice "$2"; exit $? ;;
     --get-voice)
       resolve_voice ""; echo; exit 0 ;;
     --list-voices)
@@ -438,6 +468,12 @@ trap 'rm -f "$TMPWAV"' EXIT
 
 if try_kokoro "$TEXT" "$TMPWAV" "$VOICE" || try_piper "$TEXT" "$TMPWAV" "$VOICE"; then
   if emit "$TMPWAV" "$OUTPUT"; then
+    # A fallback that leaves no trace is indistinguishable from a healthy GPU
+    # path. Say so once, on stderr, so a box quietly living on the CPU engine
+    # is visible in the gateway log instead of only in the audio.
+    if [ "$ENGINE_USED" = "piper" ] && [ "${#REASONS[@]}" -gt 0 ]; then
+      echo "clawbox-tts: fell back to Piper — ${REASONS[*]}" >&2
+    fi
     echo "$OUTPUT"
     exit 0
   fi

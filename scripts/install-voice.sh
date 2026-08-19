@@ -52,7 +52,15 @@ piper_fetch() {
     return 0
   fi
   rm -f "$dest" "$dest.part"
-  curl -fsSL --retry 3 -o "$dest.part" "$url" || {
+  # No timeouts here meant a stalled TCP connection blocked forever, and this
+  # runs from step_post_update on every in-app update of a shipped device: one
+  # dead transfer hung the whole update with no bound and no diagnostic.
+  # --speed-limit/--speed-time abort a connection that has effectively stopped
+  # without killing a slow-but-progressing download, which a flat --max-time
+  # would; only then can --retry actually do anything.
+  curl -fsSL --retry 3 --retry-delay 5 \
+    --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
+    -o "$dest.part" "$url" || {
     echo "  ERROR: download failed: $url" >&2
     rm -f "$dest.part"
     return 1
@@ -98,7 +106,18 @@ install_piper() {
       return 1
     }
     rm -f "$tarball"
-    chmod +x "$PIPER_DIR/piper" 2>/dev/null || true
+    # A discarded chmod hid a missing binary: if the release layout ever
+    # changes, tar still succeeds and this printed "installed" for a directory
+    # with no piper in it. The failure then surfaced much later as
+    # "piper: binary not found", at the moment a user expected speech.
+    if [ ! -f "$PIPER_DIR/piper" ]; then
+      echo "  ERROR: the Piper tarball did not contain piper at $PIPER_DIR/piper" >&2
+      return 1
+    fi
+    if ! chmod +x "$PIPER_DIR/piper"; then
+      echo "  ERROR: could not make $PIPER_DIR/piper executable" >&2
+      return 1
+    fi
     echo "  Piper binary installed at $PIPER_DIR/piper"
   fi
 
@@ -117,20 +136,40 @@ install_piper() {
 # runs from. Split out of the big install so --piper-only can call it too: the
 # updater re-runs that cheap path on every update, and a box whose
 # clawbox-tts.sh is stale is a box whose fallback chain is stale.
+# Returns non-zero if ANY required piece did not land. A device that keeps a
+# stale or half-copied speech install while the updater reports success is the
+# same class of bug as a silent TTS failure, one layer further out.
 deploy_voice_scripts() {
-  local src dst
-  src="$(cd "$(dirname "$0")" && pwd)"
+  local src dst f rc=0
+  src="$(cd "$(dirname "$0")" && pwd)" || return 1
   dst="$WORKSPACE/scripts"
-  mkdir -p "$dst/openclaw"
+  if ! mkdir -p "$dst/openclaw"; then
+    echo "  ERROR: could not create $dst/openclaw" >&2
+    return 1
+  fi
   for f in kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py; do
-    [ -f "$src/$f" ] && cp "$src/$f" "$dst/$f"
+    if [ -f "$src/$f" ]; then
+      cp "$src/$f" "$dst/$f" || { echo "  ERROR: could not copy $f" >&2; rc=1; }
+    fi
   done
-  if [ -f "$src/openclaw/clawbox-tts.sh" ]; then
-    cp "$src/openclaw/clawbox-tts.sh" "$dst/openclaw/clawbox-tts.sh"
-    chmod +x "$dst/openclaw/clawbox-tts.sh"
+  # The entrypoint is not optional — it is the command OpenClaw execs — so a
+  # missing source file is an error rather than something to step over.
+  if [ ! -f "$src/openclaw/clawbox-tts.sh" ]; then
+    echo "  ERROR: $src/openclaw/clawbox-tts.sh is missing" >&2
+    rc=1
+  elif ! cp "$src/openclaw/clawbox-tts.sh" "$dst/openclaw/clawbox-tts.sh"; then
+    echo "  ERROR: could not deploy clawbox-tts.sh to $dst/openclaw" >&2
+    rc=1
+  elif ! chmod +x "$dst/openclaw/clawbox-tts.sh"; then
+    echo "  ERROR: could not make $dst/openclaw/clawbox-tts.sh executable" >&2
+    rc=1
   fi
   chmod +x "$dst"/*.sh 2>/dev/null || true
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"
+  if ! chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"; then
+    echo "  ERROR: could not chown $WORKSPACE to $CLAWBOX_USER" >&2
+    rc=1
+  fi
+  return "$rc"
 }
 
 # --piper-only installs just the CPU fallback and refreshes the entrypoint.
@@ -139,8 +178,13 @@ deploy_voice_scripts() {
 # run unattended on a box that already works.
 if [ "${1:-}" = "--piper-only" ]; then
   echo "=== Voice fallback (Piper) ==="
-  install_piper
-  deploy_voice_scripts
+  PIPER_ONLY_RC=0
+  install_piper || PIPER_ONLY_RC=1
+  deploy_voice_scripts || PIPER_ONLY_RC=1
+  if [ "$PIPER_ONLY_RC" -ne 0 ]; then
+    echo "=== Piper fallback INCOMPLETE — the box may answer speech with silence ===" >&2
+    exit 1
+  fi
   echo "=== Piper fallback ready ==="
   exit 0
 fi

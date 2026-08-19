@@ -1758,10 +1758,28 @@ step_openclaw_tts() {
     return 0
   fi
 
+  # Never point OpenClaw at a command that is not there: that configures the
+  # exact silent failure this task removes, and it would look like a working
+  # install until someone asked the box to speak.
+  if [ ! -x "$TTS_SCRIPT" ]; then
+    echo "  ERROR: $TTS_SCRIPT is missing or not executable — refusing to configure TTS against it" >&2
+    return 1
+  fi
+
   local TTS_PROVIDER_JSON
   TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:120000}));' "$TTS_SCRIPT")
-  oc_config_set messages.tts.providers.tts-local-cli "$TTS_PROVIDER_JSON" --json
-  oc_config_set messages.tts.provider "tts-local-cli"
+  # Order matters and so does the gate. oc_config_set retries three times and
+  # then gives up; if the provider definition did not land, naming it as THE
+  # provider leaves the box pointing at a provider that does not exist, and
+  # every spoken reply fails — strictly worse than not having run at all.
+  if ! oc_config_set messages.tts.providers.tts-local-cli "$TTS_PROVIDER_JSON" --json; then
+    echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
+    return 1
+  fi
+  if ! oc_config_set messages.tts.provider "tts-local-cli"; then
+    echo "  ERROR: could not select the tts-local-cli provider" >&2
+    return 1
+  fi
   echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
 }
 
