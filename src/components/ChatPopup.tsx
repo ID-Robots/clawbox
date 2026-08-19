@@ -175,6 +175,7 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
+import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import { fetchHarness } from '@/lib/client-harness'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
@@ -2273,6 +2274,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
+        <CloudTtsWarning connected={status === 'connected'} request={wsRequest} />
+
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
             <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } } @keyframes clawReloadFill { from { transform: scaleX(0.04) } to { transform: scaleX(0.9) } }`}</style>
