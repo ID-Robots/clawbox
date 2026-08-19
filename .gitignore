@@ -25,3 +25,7 @@ scripts/nm-dispatcher-failover.sh
 
 # Local debug scripts (per-session sandbox)
 .scratch/
+
+# Python bytecode (scripts/ has .py helpers; the cache is never shipped)
+__pycache__/
+*.pyc
