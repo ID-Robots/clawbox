@@ -30,6 +30,7 @@ OLLAMA_BIN="${OLLAMA_BIN:-ollama}"
 OLLAMA_TAGS_URL="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
 EMBED_MODEL="${EMBED_MODEL:-qwen3-embedding:0.6b}"
 EMBED_STATE_FILE="${EMBED_STATE_FILE:-/home/clawbox/clawbox/data/local-embeddings.state}"
+FLOCK_BIN="${FLOCK_BIN:-flock}"
 # Don't retry a failed ~600MB pull on every gateway restart.
 EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
 
@@ -66,14 +67,24 @@ esac
 # advisory lock the kernel drops when this process exits, so it stays valid for
 # exactly as long as its owner runs — a pull that takes an hour on a slow link
 # still holds it, and a killed run never leaves it behind.
+#
+# No lock, no run: proceeding unserialised would let two starts pull, configure
+# and reindex at once, which is the failure this exists to prevent. Doing
+# nothing is always the safe outcome here — the next boot tries again.
 mkdir -p "$(dirname "$EMBED_STATE_FILE")" 2>/dev/null || true
 LOCK_FILE="${EMBED_STATE_FILE}.lock"
-if command -v flock >/dev/null 2>&1 && : >"$LOCK_FILE" 2>/dev/null; then
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    log "another run is already working on this — skipping"
-    exit 0
-  fi
+if ! command -v "$FLOCK_BIN" >/dev/null 2>&1; then
+  log "WARN: $FLOCK_BIN is not available, cannot serialise runs — doing nothing"
+  exit 0
+fi
+if ! : >>"$LOCK_FILE" 2>/dev/null; then
+  log "WARN: cannot open $LOCK_FILE — doing nothing"
+  exit 0
+fi
+exec 9>>"$LOCK_FILE"
+if ! "$FLOCK_BIN" -n 9; then
+  log "another run is already working on this — skipping"
+  exit 0
 fi
 
 # --- is the local model there? -----------------------------------------------
@@ -93,8 +104,13 @@ state_get() {
 }
 # The state file carries the pull backoff and whether a reindex is still owed.
 state_write() {
+  # temp + rename: a run killed mid-write must never leave a truncated state
+  # file, because a lost reindex_pending marker means a permanently
+  # fail-closed index.
+  local tmp="${EMBED_STATE_FILE}.tmp.$$"
   printf 'last_attempt=%s\nfailures=%s\nreindex_pending=%s\n' \
-    "$1" "$2" "${3:-$(state_get reindex_pending)}" > "$EMBED_STATE_FILE"
+    "$1" "$2" "${3:-$(state_get reindex_pending)}" > "$tmp"
+  mv -f "$tmp" "$EMBED_STATE_FILE"
 }
 state_set_reindex_pending() {
   state_write "$(state_get last_attempt)" "$(state_get failures)" "$1"
@@ -153,15 +169,18 @@ else
     log "WARN: could not set the local embedding model (non-fatal; nothing changed, lexical FTS remains)"
     exit 0
   fi
+  # Recorded BEFORE the provider write, not after: between switching the
+  # backend and recording that a reindex is owed there must be no window where
+  # a killed run leaves a configured provider and an index nobody rebuilds.
+  # The marker is deliberately kept if the provider write then fails — a later
+  # attempt finishes the job, and a stale marker only costs one extra reindex.
+  state_set_reindex_pending 1
   if [ "$SET_PROVIDER" -eq 1 ] \
     && ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1; then
     log "WARN: could not point memorySearch at Ollama (non-fatal; provider is unchanged, lexical FTS remains)"
     exit 0
   fi
   log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"
-  # Recorded BEFORE the reindex runs: if this run is killed mid-reindex, the
-  # next one has to finish the job rather than report "nothing to do".
-  state_set_reindex_pending 1
 fi
 
 # --- and reindex, or it stays fail-closed ------------------------------------

@@ -105,6 +105,8 @@ type RunOpts = {
   tagsAfterPull?: string;
   unreachable?: boolean;
   failOn?: string;
+  flockBin?: string;
+  stateFile?: string;
 };
 
 function run(opts: RunOpts = {}) {
@@ -133,11 +135,12 @@ function run(opts: RunOpts = {}) {
       TEST_CONFIG: configPath,
       OLLAMA_TAGS_URL: "http://stub/api/tags",
       TAGS_FIXTURE: tagsPath,
-      EMBED_STATE_FILE: statePath,
+      EMBED_STATE_FILE: opts.stateFile ?? statePath,
       CALLS_LOG: callsPath,
       OLLAMA_PULL_RC: String(opts.pullRc ?? 0),
       OPENCLAW_RC: String(opts.openclawRc ?? 0),
       FAIL_ON: opts.failOn ?? "",
+      FLOCK_BIN: opts.flockBin ?? "flock",
       TAGS_AFTER_PULL: opts.tagsAfterPull ?? tags([MODEL]),
     },
   });
@@ -149,7 +152,7 @@ function run(opts: RunOpts = {}) {
     stderr: res.stderr ?? "",
     calls,
     memorySearch: (config.agents?.defaults?.memorySearch ?? {}) as Record<string, string>,
-    state: existsSync(statePath) ? readFileSync(statePath, "utf-8") : "",
+    state: existsSync(opts.stateFile ?? statePath) ? readFileSync(opts.stateFile ?? statePath, "utf-8") : "",
   };
 }
 
@@ -281,9 +284,45 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(second.state).toContain("reindex_pending=0");
   });
 
+  it("does nothing at all when it cannot take the lock", () => {
+    const r = run({ present: true, flockBin: "flock-that-does-not-exist" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("cannot serialise runs");
+    expect(pulls(r.calls)).toEqual([]);
+    expect(configSets(r.calls)).toEqual([]);
+    expect(reindexes(r.calls)).toEqual([]);
+  });
+
+  it("does nothing at all when the lock file cannot be opened", () => {
+    const readOnly = path.join(dir, "readonly");
+    mkdirSync(readOnly);
+    chmodSync(readOnly, 0o500);
+    const r = run({ present: true, stateFile: path.join(readOnly, "state") });
+    chmodSync(readOnly, 0o700);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("cannot open");
+    expect(configSets(r.calls)).toEqual([]);
+  });
+
+  it("records the owed reindex before the provider is switched, not after", () => {
+    // A run killed between the provider write and the marker would leave a
+    // configured backend and an index nobody ever rebuilds.
+    const r = run({ present: true, failOn: "memorySearch.provider" });
+    expect(r.state).toContain("reindex_pending=1");
+    expect(r.memorySearch.provider).toBeUndefined();
+  });
+
+  it("writes the state file atomically and leaves no temp file behind", () => {
+    const script = readFileSync(SCRIPT, "utf-8");
+    expect(script).toMatch(/mv -f "\$tmp" "\$EMBED_STATE_FILE"/);
+    const r = run({ present: true });
+    expect(r.status).toBe(0);
+    expect(existsSync(`${statePath}.tmp`)).toBe(false);
+  });
+
   it("takes a lock that outlives a long pull rather than one that expires", () => {
     const script = readFileSync(SCRIPT, "utf-8");
-    expect(script).toMatch(/flock -n 9/);
+    expect(script).toMatch(/"\$FLOCK_BIN" -n 9/);
     expect(script).not.toMatch(/-mmin/);
   });
 
