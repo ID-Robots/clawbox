@@ -66,6 +66,53 @@ interface ChatModelPayload {
   current?: string | null;
 }
 
+interface ConfiguredModelLimits {
+  model: string;
+  context_window_tokens: number | "unknown";
+  max_output_tokens: number | "unknown";
+  source: "openclaw_config";
+}
+
+/** Keep only positive whole-token counts; invalid config stays visibly unknown. */
+function positiveInteger(value: unknown): number | "unknown" {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : "unknown";
+}
+
+/** Read the active model's declared limits from the config the gateway uses. */
+export function readConfiguredModelLimits(
+  configPath = process.env.OPENCLAW_CONFIG
+    ?? join(process.env.HOME ?? "/home/clawbox", ".openclaw", "openclaw.json"),
+): ConfiguredModelLimits | "unknown" {
+  try {
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+      agents?: { defaults?: { model?: { primary?: unknown } } };
+      models?: { providers?: Record<string, { models?: unknown[] }> };
+    };
+    const primary = config.agents?.defaults?.model?.primary;
+    if (typeof primary !== "string") return "unknown";
+    const slash = primary.indexOf("/");
+    if (slash <= 0 || slash === primary.length - 1) return "unknown";
+    const provider = primary.slice(0, slash);
+    const modelId = primary.slice(slash + 1);
+    const models = config.models?.providers?.[provider]?.models;
+    if (!Array.isArray(models)) return "unknown";
+    const model = models.find((entry): entry is Record<string, unknown> =>
+      !!entry && typeof entry === "object" && (entry as { id?: unknown }).id === modelId
+    );
+    if (!model) return "unknown";
+    return {
+      model: primary,
+      context_window_tokens: positiveInteger(model.contextWindow),
+      max_output_tokens: positiveInteger(model.maxTokens),
+      source: "openclaw_config",
+    };
+  } catch {
+    return "unknown";
+  }
+}
+
 /** The root mount is what "free disk" means to a customer. */
 function rootDisk(stats: StatsPayload | null) {
   if (!stats?.storage?.length) return "unknown";
@@ -76,7 +123,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    "Report what this ClawBox is: edition, active agent, AI provider and model, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself, and before choosing between tools that exist on only one edition. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
+    "Report what this ClawBox is: edition, active agent, AI provider and model, the active model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -112,6 +159,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
           : {
               provider: chatModel?.selected?.provider ?? "unknown",
               model: chatModel?.selected?.model ?? chatModel?.current ?? "unknown",
+              limits: readConfiguredModelLimits(),
               thinking: "unknown",
             };
 
