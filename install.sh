@@ -1766,8 +1766,24 @@ step_openclaw_tts() {
     return 1
   fi
 
+  # timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
+  # It used to be a hardcoded 120000 while the script's own Kokoro timeout was
+  # also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
+  # Piper was never invoked — a hung GPU stayed silent, which is the failure
+  # this whole feature exists to remove. Ask the script for the number instead
+  # of keeping a second copy of it here: it derives the value from its own
+  # engine slices, so re-tuning one of them moves this with it.
+  local TTS_TIMEOUT_MS
+  TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
+  case "$TTS_TIMEOUT_MS" in
+    ''|*[!0-9]*)
+      echo "  ERROR: $TTS_SCRIPT did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
+      return 1
+      ;;
+  esac
+
   local TTS_PROVIDER_JSON
-  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:120000}));' "$TTS_SCRIPT")
+  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
   # Order matters and so does the gate. oc_config_set retries three times and
   # then gives up; if the provider definition did not land, naming it as THE
   # provider leaves the box pointing at a provider that does not exist, and

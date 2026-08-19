@@ -20,6 +20,32 @@ const SCRIPT = path.resolve(process.cwd(), "scripts/openclaw/clawbox-tts.sh");
 const INSTALL_SH = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");
 const INSTALL_VOICE_SH = readFileSync(path.resolve(process.cwd(), "scripts/install-voice.sh"), "utf-8");
 
+/** Pull a shell function body out of a script, for asserting on its shape. */
+function extractShellFn(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found`);
+  const end = source.indexOf("\n}", start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return source.slice(start, end + 2);
+}
+
+/** Every curl command in a script, line continuations folded in. */
+function curlInvocations(source: string): string[] {
+  const lines = source.split("\n");
+  const found: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/(^|[\s;(&|])curl\s/.test(lines[i])) continue;
+    let cmd = lines[i];
+    let j = i;
+    while (/\\\s*$/.test(lines[j]) && j + 1 < lines.length) {
+      j += 1;
+      cmd += " " + lines[j];
+    }
+    found.push(cmd);
+  }
+  return found;
+}
+
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 const canRun = hasBash && hasPython3;
@@ -529,6 +555,61 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(calls()).not.toContain("lang=a");
   });
 
+  it("still reaches Piper when Kokoro hangs rather than fails", () => {
+    // The scenario the budget exists for, end to end: kokoro never returns.
+    // With timeoutMs equal to KOKORO_TIMEOUT, OpenClaw killed this process at
+    // the moment kokoro was given up on, so Piper never ran and a wedged GPU
+    // was still silence. Timeouts are shrunk here so the test is quick; the
+    // relationship under test is the ordering, not the numbers.
+    writeStub("kokoro", ['echo "kokoro $*" >> "$CALLS_LOG"', "sleep 30"].join("\n"));
+    stubPiper();
+    const started = Date.now();
+    const r = synth([], { KOKORO_TIMEOUT: "2", KOKORO_SERVER_TIMEOUT: "1", PIPER_TIMEOUT: "10" });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("kokoro ");
+    expect(calls()).toContain("piper ");
+    expect(outputBytes()).toBeGreaterThan(1024);
+    // It gave up on kokoro and moved on, rather than waiting out the sleep.
+    expect(Date.now() - started).toBeLessThan(20_000);
+  }, 30_000);
+
+  it("leaves room for the whole chain inside the caller's timeout", () => {
+    // The regression this pins: timeoutMs and KOKORO_TIMEOUT were both 120s,
+    // so OpenClaw killed the process at the moment Kokoro gave up and Piper
+    // never ran. A hung GPU stayed silent — the exact bug this PR fixes.
+    const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
+    const providerMs = Number(spawnSync("bash", [SCRIPT, "--provider-timeout-ms"], { encoding: "utf8" }).stdout.trim());
+    expect(Number.isFinite(budget)).toBe(true);
+    expect(budget).toBeGreaterThan(0);
+    expect(providerMs).toBeGreaterThan(budget * 1000);
+  });
+
+  it("reports a budget that is really the sum of its engine timeouts", () => {
+    // Stops the budget from being a decorative number that drifts away from
+    // the timeouts actually handed to `timeout`.
+    const src = readFileSync(SCRIPT, "utf8");
+    const slice = (name: string): number => {
+      const m = src.match(new RegExp(`^${name}="\\$\\{${name}:-(\\d+)\\}"`, "m"));
+      if (!m) throw new Error(`${name} default not found`);
+      return Number(m[1]);
+    };
+    const parts = ["KOKORO_SERVER_TIMEOUT", "KOKORO_TIMEOUT", "PIPER_TIMEOUT", "CONVERT_TIMEOUT"];
+    const sum = parts.reduce((acc, n) => acc + slice(n), 0);
+    const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
+    expect(budget).toBe(sum);
+    // And each slice is actually enforced, not just declared.
+    for (const name of parts) {
+      expect(src).toMatch(new RegExp(`timeout "\\$${name}"`));
+    }
+  });
+
+  it("keeps every engine slice short enough to fail over usefully", () => {
+    // A spoken reply that takes even half a minute has already failed as an
+    // interaction; the point of the budget is fast failover, not long rope.
+    const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
+    expect(budget).toBeLessThanOrEqual(120);
+  });
+
   it("does not mistake reply text starting with -- for its own options", () => {
     stubKokoro();
     stubPiper();
@@ -578,6 +659,18 @@ describe("install.sh wires TTS to the on-device chain", () => {
     const checkIndex = step.indexOf('[ ! -x "$TTS_SCRIPT" ]');
     const setIndex = step.indexOf("oc_config_set messages.tts.providers");
     expect(checkIndex).toBeLessThan(setIndex);
+  });
+
+  it("takes the provider timeout from the script instead of hardcoding one", () => {
+    expect(step).toContain("--provider-timeout-ms");
+    expect(step).toContain("timeoutMs:Number(process.argv[2])");
+    // The old hardcoded value, and any other literal, must be gone: a second
+    // copy of this number is how it drifted into equalling KOKORO_TIMEOUT.
+    expect(step).not.toMatch(/timeoutMs:\s*\d+/);
+  });
+
+  it("refuses a provider timeout it cannot parse", () => {
+    expect(step).toContain("did not report a usable provider timeout");
   });
 
   it("writes config through the retrying helper, not a raw config set", () => {
@@ -649,12 +742,107 @@ describe("install-voice.sh installs the fallback engine", () => {
     expect(INSTALL_VOICE_SH).toContain("Piper binary already installed");
   });
 
-  it("bounds a stalled download so an update cannot hang forever", () => {
-    // This runs from step_post_update on every in-app update of a shipped
-    // device; an unbounded curl there hangs the whole update.
-    expect(INSTALL_VOICE_SH).toContain("--connect-timeout");
-    expect(INSTALL_VOICE_SH).toContain("--speed-limit");
-    expect(INSTALL_VOICE_SH).toContain("--speed-time");
+  it("bounds EVERY download, not just one of them", () => {
+    // Asserting the flags appear somewhere in the file would be satisfied by a
+    // single bounded curl while an unbounded one was added elsewhere. This
+    // runs from step_post_update on every in-app update of a shipped device,
+    // so any unbounded transfer hangs the whole update.
+    const invocations = curlInvocations(INSTALL_VOICE_SH);
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const cmd of invocations) {
+      expect(cmd).toContain("--connect-timeout");
+      expect(cmd).toContain("--speed-limit");
+      expect(cmd).toContain("--speed-time");
+    }
+  });
+
+  describe.skipIf(!canRun)("piper_fetch against a recording curl", () => {
+    // Runs the real function out of the shipped script with a stub curl on
+    // PATH that records the argv it was handed, so the bound is checked on the
+    // call as it is actually made rather than on the file's text.
+    function runFetch(body: string, wantSha: string, times = 1) {
+      const fetchDir = mkdtempSync(path.join(tmpdir(), "piper-fetch-"));
+      const fetchBin = path.join(fetchDir, "bin");
+      mkdirSync(fetchBin, { recursive: true });
+      const curlArgs = path.join(fetchDir, "curl-args.log");
+      const curl = path.join(fetchBin, "curl");
+      writeFileSync(
+        curl,
+        [
+          "#!/usr/bin/env bash",
+          'printf "%s\n" "$*" >> "$CURL_ARGS"',
+          'out=""',
+          'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done',
+          'printf "%s" "$CURL_BODY" > "$out"',
+        ].join("\n"),
+      );
+      chmodSync(curl, 0o755);
+      const dest = path.join(fetchDir, "artifact.bin");
+      const harness = path.join(fetchDir, "harness.sh");
+      writeFileSync(
+        harness,
+        [
+          "set -uo pipefail",
+          extractShellFn(INSTALL_VOICE_SH, "piper_digest_ok"),
+          extractShellFn(INSTALL_VOICE_SH, "piper_fetch"),
+          ...Array.from(
+            { length: times },
+            () => `piper_fetch "https://example.invalid/artifact.bin" "${dest}" "${wantSha}"`,
+          ),
+        ].join("\n"),
+      );
+      const r = spawnSync("bash", [harness], {
+        encoding: "utf8",
+        env: { PATH: `${fetchBin}:/usr/bin:/bin`, CURL_ARGS: curlArgs, CURL_BODY: body },
+        timeout: 30_000,
+      });
+      const recorded = existsSync(curlArgs) ? readFileSync(curlArgs, "utf8") : "";
+      return { r, recorded, dest, cleanup: () => rmSync(fetchDir, { recursive: true, force: true }) };
+    }
+
+    const BODY = "piper-artifact-bytes";
+    // sha256 of BODY, computed here so the fixture cannot drift from it.
+    const SHA = spawnSync("bash", ["-c", `printf %s '${BODY}' | sha256sum | cut -d' ' -f1`], {
+      encoding: "utf8",
+    }).stdout.trim();
+
+    it("passes the timeout bounds on the actual call", () => {
+      const { r, recorded, cleanup } = runFetch(BODY, SHA);
+      try {
+        expect(r.status).toBe(0);
+        expect(recorded).toContain("--connect-timeout");
+        expect(recorded).toContain("--speed-limit");
+        expect(recorded).toContain("--speed-time");
+        expect(recorded).toContain("--retry");
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("refuses bytes whose digest does not match the pin", () => {
+      const { r, dest, cleanup } = runFetch(BODY, "deadbeef");
+      try {
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain("does not match the pin");
+        // Nothing half-written is left for the next run to trust.
+        expect(existsSync(dest)).toBe(false);
+        expect(existsSync(`${dest}.part`)).toBe(false);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("does not re-download an artifact that is already correct", () => {
+      // Called twice; the second call must be satisfied by the digest already
+      // on disk. The updater re-runs this on every update of every device.
+      const { r, recorded, cleanup } = runFetch(BODY, SHA, 2);
+      try {
+        expect(r.status).toBe(0);
+        expect(recorded.trim().split("\n")).toHaveLength(1);
+      } finally {
+        cleanup();
+      }
+    });
   });
 
   it("proves the binary exists rather than discarding the chmod", () => {

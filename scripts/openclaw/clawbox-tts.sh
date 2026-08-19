@@ -44,11 +44,47 @@ CLAWBOX_TTS_MIN_AUDIO_BYTES="${CLAWBOX_TTS_MIN_AUDIO_BYTES:-1024}"
 
 KOKORO_BIN="${KOKORO_BIN:-kokoro}"
 KOKORO_SOCKET="${KOKORO_SOCKET:-/tmp/kokoro-server.sock}"
-KOKORO_TIMEOUT="${KOKORO_TIMEOUT:-120}"
+
+# ── The time budget ─────────────────────────────────────────────────────────
+# Every engine gets its own slice, and the caller's timeout has to be larger
+# than all of them added together. It was not: KOKORO_TIMEOUT and the
+# provider's timeoutMs were both 120s, two constants that happened to be equal,
+# so OpenClaw killed this process at the exact moment Kokoro gave up and Piper
+# was never reached. A hung GPU — precisely the case the fallback exists for —
+# was still silence.
+#
+# The slices are small on purpose. A spoken reply that takes even half a minute
+# has already failed as an interaction, so the budget is sized to fail over
+# quickly rather than to let a wedged engine use its full rope:
+#
+#   KOKORO_SERVER_TIMEOUT  10s  the model is already resident on the GPU and a
+#                               healthy answer is ~2s; 10s means wedged.
+#   KOKORO_TIMEOUT         40s  cold start, so it pays torch CUDA init plus the
+#                               Kokoro-82M load on an Orin Nano.
+#   PIPER_TIMEOUT          15s  CPU, 63MB model, RTF well under 1 — generous.
+#   CONVERT_TIMEOUT        10s  ffmpeg on a few seconds of audio. It had no
+#                               bound at all before, which was its own hang.
+#
+# Worst case walks all four: server wedged, cold start wedged, then Piper, then
+# conversion. tts_provider_timeout_ms() adds a margin on top of that sum, and
+# install.sh asks this script for the number instead of keeping its own copy —
+# so changing a slice here moves the caller's timeout with it and this cannot
+# quietly come back.
+KOKORO_SERVER_TIMEOUT="${KOKORO_SERVER_TIMEOUT:-10}"
+KOKORO_TIMEOUT="${KOKORO_TIMEOUT:-40}"
+PIPER_TIMEOUT="${PIPER_TIMEOUT:-15}"
+CONVERT_TIMEOUT="${CONVERT_TIMEOUT:-10}"
+TTS_BUDGET_MARGIN_SECONDS="${TTS_BUDGET_MARGIN_SECONDS:-25}"
+
+tts_budget_seconds() {
+  printf '%s' "$((KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + PIPER_TIMEOUT + CONVERT_TIMEOUT))"
+}
+tts_provider_timeout_ms() {
+  printf '%s' "$(( ($(tts_budget_seconds) + TTS_BUDGET_MARGIN_SECONDS) * 1000 ))"
+}
 
 PIPER_BIN="${PIPER_BIN:-/home/clawbox/.local/share/piper/piper}"
 PIPER_VOICE_DIR="${PIPER_VOICE_DIR:-/home/clawbox/.local/share/piper/voices}"
-PIPER_TIMEOUT="${PIPER_TIMEOUT:-120}"
 
 FFMPEG_BIN="${FFMPEG_BIN:-ffmpeg}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -207,7 +243,7 @@ emit() {
         note "output: ffmpeg not available to encode .mp3 (audio was synthesised, but writing WAV bytes into an .mp3 would be broken audio)"
         return 1
       fi
-      if ! "$FFMPEG_BIN" -y -i "$src" -codec:a libmp3lame -b:a 128k -ar 24000 "$dst" >/dev/null 2>&1; then
+      if ! timeout "$CONVERT_TIMEOUT" "$FFMPEG_BIN" -y -i "$src" -codec:a libmp3lame -b:a 128k -ar 24000 "$dst" >/dev/null 2>&1; then
         # ffmpeg -y can leave a truncated file at $dst when it dies partway.
         # Handing a consumer corrupt audio is the failure this script exists
         # to prevent, so the partial file goes with the error.
@@ -221,7 +257,7 @@ emit() {
         note "output: ffmpeg not available to encode Opus"
         return 1
       fi
-      if ! "$FFMPEG_BIN" -y -i "$src" -codec:a libopus -b:a 64k -ar 48000 -ac 1 "$dst" >/dev/null 2>&1; then
+      if ! timeout "$CONVERT_TIMEOUT" "$FFMPEG_BIN" -y -i "$src" -codec:a libopus -b:a 64k -ar 48000 -ac 1 "$dst" >/dev/null 2>&1; then
         rm -f "$dst"
         note "output: ffmpeg failed to encode Opus"
         return 1
@@ -258,11 +294,11 @@ kokoro_via_server() {
   # Text goes through the environment, never through the shell or the argv of
   # an interpreter, so an utterance containing quotes cannot become code.
   KOKORO_TEXT="$text" KOKORO_OUTPUT="$wav" KOKORO_SOCKET="$KOKORO_SOCKET" KOKORO_VOICE="$voice" \
-    KOKORO_TIMEOUT="$KOKORO_TIMEOUT" \
-    "$PYTHON_BIN" -c '
+    KOKORO_SERVER_TIMEOUT="$KOKORO_SERVER_TIMEOUT" \
+    timeout "$KOKORO_SERVER_TIMEOUT" "$PYTHON_BIN" -c '
 import json, os, socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(float(os.environ.get("KOKORO_TIMEOUT", "120")))
+s.settimeout(float(os.environ.get("KOKORO_SERVER_TIMEOUT", "10")))
 try:
     s.connect(os.environ["KOKORO_SOCKET"])
     s.sendall(json.dumps({
@@ -413,6 +449,8 @@ Usage: clawbox-tts.sh [--voice <voice>] <text> <output-path>
        clawbox-tts.sh --set-voice <voice>
        clawbox-tts.sh --get-voice
        clawbox-tts.sh --list-voices
+       clawbox-tts.sh --budget-seconds       # worst-case engine-chain seconds
+       clawbox-tts.sh --provider-timeout-ms  # what the caller's timeout must be
 Voices: $(list_voices)
 USAGE
 }
@@ -439,6 +477,10 @@ while [ $# -gt 0 ]; do
       resolve_voice ""; echo; exit 0 ;;
     --list-voices)
       list_voices; exit 0 ;;
+    --budget-seconds)
+      tts_budget_seconds; echo; exit 0 ;;
+    --provider-timeout-ms)
+      tts_provider_timeout_ms; echo; exit 0 ;;
     -h|--help)
       usage; exit 0 ;;
     --)
