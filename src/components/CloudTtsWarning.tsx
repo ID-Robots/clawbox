@@ -3,6 +3,8 @@
 import React, { useEffect, useState } from 'react'
 import { buildCloudTtsWarning } from '@/lib/tts-cloud-warning'
 
+const TTS_STATUS_REFRESH_MS = 60_000
+
 interface CloudTtsWarningProps {
   connected: boolean
   request: (method: string, params: unknown) => Promise<unknown>
@@ -27,17 +29,34 @@ export function CloudTtsWarning({ connected, request }: CloudTtsWarningProps) {
       return () => { cancelled = true }
     }
 
-    void request('tts.status', {})
-      .then((payload) => {
+    let refreshTimer: number | null = null
+    const refreshWarning = async () => {
+      try {
+        const payload = await request('tts.status', {})
         if (!cancelled) setWarning(buildCloudTtsWarning(payload))
-      })
-      .catch(() => {
+      } catch {
         // Older gateways may not expose tts.status. Chat must remain usable;
-        // the next successful reconnect will try again after an update.
+        // a later refresh or reconnect can recover after an update or a
+        // transient gateway error.
         if (!cancelled) setWarning(null)
-      })
+      } finally {
+        // Schedule only after the previous request settles. The gateway can be
+        // busy with an agent turn for longer than the refresh interval, so a
+        // fixed interval would accumulate overlapping status calls.
+        if (!cancelled) {
+          refreshTimer = window.setTimeout(refreshWarning, TTS_STATUS_REFRESH_MS)
+        }
+      }
+    }
 
-    return () => { cancelled = true }
+    void refreshWarning()
+    // messages.tts preferences can hot-reload without dropping the chat WebSocket.
+    // Refresh periodically so a newly enabled cloud provider cannot leave a stale
+    // local-only state on screen until the user reconnects.
+    return () => {
+      cancelled = true
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+    }
   }, [connected, request])
 
   if (!connected || !warning) return null
