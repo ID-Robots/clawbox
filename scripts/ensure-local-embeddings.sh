@@ -62,19 +62,19 @@ case "$PROVIDER" in
 esac
 
 # --- one run at a time -------------------------------------------------------
-# Two gateway restarts in quick succession must not start two pulls.
+# Two gateway restarts in quick succession must not start two pulls. flock is an
+# advisory lock the kernel drops when this process exits, so it stays valid for
+# exactly as long as its owner runs — a pull that takes an hour on a slow link
+# still holds it, and a killed run never leaves it behind.
 mkdir -p "$(dirname "$EMBED_STATE_FILE")" 2>/dev/null || true
-LOCK_DIR="${EMBED_STATE_FILE}.lock"
-# A lock older than the retry window belongs to a run that was killed (systemd
-# tears the cgroup down on gateway stop), not to a live one.
-if [ -d "$LOCK_DIR" ] && [ -z "$(find "$LOCK_DIR" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
-  rmdir "$LOCK_DIR" 2>/dev/null || true
+LOCK_FILE="${EMBED_STATE_FILE}.lock"
+if command -v flock >/dev/null 2>&1 && : >"$LOCK_FILE" 2>/dev/null; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    log "another run is already working on this — skipping"
+    exit 0
+  fi
 fi
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  log "another run is already working on this — skipping"
-  exit 0
-fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # --- is the local model there? -----------------------------------------------
 fetch_tags() { curl -fsS --max-time 5 "$OLLAMA_TAGS_URL" 2>/dev/null || true; }
@@ -91,8 +91,13 @@ state_get() {
   v="$(sed -n "s/^$1=//p" "$EMBED_STATE_FILE" | head -1)"
   case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
 }
+# The state file carries the pull backoff and whether a reindex is still owed.
 state_write() {
-  printf 'last_attempt=%s\nfailures=%s\n' "$1" "$2" > "$EMBED_STATE_FILE"
+  printf 'last_attempt=%s\nfailures=%s\nreindex_pending=%s\n' \
+    "$1" "$2" "${3:-$(state_get reindex_pending)}" > "$EMBED_STATE_FILE"
+}
+state_set_reindex_pending() {
+  state_write "$(state_get last_attempt)" "$(state_get failures)" "$1"
 }
 
 if ! model_present "$TAGS"; then
@@ -125,17 +130,39 @@ fi
 
 # --- point memory search at it -----------------------------------------------
 CURRENT_MODEL="$(read_cfg model)"
-if [ "$PROVIDER" = "ollama" ] && [ "$CURRENT_MODEL" = "$EMBED_MODEL" ]; then
-  log "memory search already runs on local embeddings ($EMBED_MODEL) — nothing to do"
-  exit 0
-fi
+SET_MODEL=0
+SET_PROVIDER=0
+if [ "$CURRENT_MODEL" != "$EMBED_MODEL" ]; then SET_MODEL=1; fi
+if [ "$PROVIDER" != "ollama" ]; then SET_PROVIDER=1; fi
 
-if ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1 \
-  || ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model "$EMBED_MODEL" >/dev/null 2>&1; then
-  log "WARN: could not point memorySearch at local Ollama embeddings (non-fatal; lexical FTS remains)"
-  exit 0
+if [ "$SET_MODEL" -eq 0 ] && [ "$SET_PROVIDER" -eq 0 ]; then
+  if [ "$(state_get reindex_pending)" != "1" ]; then
+    log "memory search already runs on local embeddings ($EMBED_MODEL) — nothing to do"
+    exit 0
+  fi
+  # Config is right but the reindex it needs never completed, so memory search
+  # is still fail-closed. Rolling the config back would only move the box to a
+  # provider it has no key for; retrying the reindex is the recoverable half.
+  log "memory search is on local embeddings but its reindex never completed — retrying it"
+else
+  # Model first, provider last. The provider write is what actually switches
+  # embedding backends, so if either call fails the box is left on exactly the
+  # provider it already had — never on ollama pointed at the wrong model.
+  if [ "$SET_MODEL" -eq 1 ] \
+    && ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model "$EMBED_MODEL" >/dev/null 2>&1; then
+    log "WARN: could not set the local embedding model (non-fatal; nothing changed, lexical FTS remains)"
+    exit 0
+  fi
+  if [ "$SET_PROVIDER" -eq 1 ] \
+    && ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1; then
+    log "WARN: could not point memorySearch at Ollama (non-fatal; provider is unchanged, lexical FTS remains)"
+    exit 0
+  fi
+  log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"
+  # Recorded BEFORE the reindex runs: if this run is killed mid-reindex, the
+  # next one has to finish the job rather than report "nothing to do".
+  state_set_reindex_pending 1
 fi
-log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"
 
 # --- and reindex, or it stays fail-closed ------------------------------------
 # Changing the embedding model changes the vector dimensions (3072 for OpenAI's
@@ -145,7 +172,8 @@ log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"
 # Switching the provider without this is how you get a box that looks configured
 # and returns nothing.
 if "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
+  state_set_reindex_pending 0
   log "forced a full memory reindex for the new embedding dimensions"
 else
-  log "WARN: forced reindex failed — memory search may stay fail-closed until 'openclaw memory index --force' is run"
+  log "WARN: forced reindex failed — memory search stays fail-closed until it succeeds; retrying on the next run"
 fi

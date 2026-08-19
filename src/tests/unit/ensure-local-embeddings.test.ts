@@ -72,6 +72,8 @@ beforeEach(() => {
     [
       'echo "openclaw $*" >> "$CALLS_LOG"',
       'if [ "${OPENCLAW_RC:-0}" != "0" ]; then exit "$OPENCLAW_RC"; fi',
+      '# FAIL_ON matches against the whole argv so a test can fail exactly one call.',
+      'if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then exit 1; fi',
       'if [ "${1:-}" = "config" ] && [ "${2:-}" = "set" ]; then',
       '  CFG_KEY="$3" CFG_VALUE="$4" python3 - "$TEST_CONFIG" <<\'PY\'',
       "import json, os, sys",
@@ -102,9 +104,13 @@ type RunOpts = {
   state?: string;
   tagsAfterPull?: string;
   unreachable?: boolean;
+  failOn?: string;
 };
 
 function run(opts: RunOpts = {}) {
+  // Each run starts from a clean call log so a second run in the same test
+  // cannot inherit the first one's calls.
+  rmSync(callsPath, { force: true });
   const cfg: Record<string, unknown> = {};
   if (opts.provider !== undefined) cfg.provider = opts.provider;
   if (opts.model !== undefined) cfg.model = opts.model;
@@ -131,6 +137,7 @@ function run(opts: RunOpts = {}) {
       CALLS_LOG: callsPath,
       OLLAMA_PULL_RC: String(opts.pullRc ?? 0),
       OPENCLAW_RC: String(opts.openclawRc ?? 0),
+      FAIL_ON: opts.failOn ?? "",
       TAGS_AFTER_PULL: opts.tagsAfterPull ?? tags([MODEL]),
     },
   });
@@ -164,9 +171,11 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     const r = run({ present: false });
     expect(r.status).toBe(0);
     expect(pulls(r.calls)).toEqual([`ollama pull ${MODEL}`]);
+    // Order matters: the provider write is what activates local embeddings, so
+    // it goes last and a failure earlier leaves the box where it was.
     expect(configSets(r.calls)).toEqual([
-      "openclaw config set agents.defaults.memorySearch.provider ollama",
       `openclaw config set agents.defaults.memorySearch.model ${MODEL}`,
+      "openclaw config set agents.defaults.memorySearch.provider ollama",
     ]);
     expect(reindexes(r.calls)).toHaveLength(1);
     expect(r.memorySearch).toMatchObject({ provider: "ollama", model: MODEL });
@@ -194,10 +203,12 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(pulls(r.calls)).toEqual([]);
   });
 
-  it("still switches when the provider is ollama but the model is a different one", () => {
+  it("rewrites only the model when the provider is already ollama", () => {
     const r = run({ provider: "ollama", model: "nomic-embed-text", present: true });
     expect(r.status).toBe(0);
-    expect(configSets(r.calls)).toHaveLength(2);
+    expect(configSets(r.calls)).toEqual([
+      `openclaw config set agents.defaults.memorySearch.model ${MODEL}`,
+    ]);
     expect(reindexes(r.calls)).toHaveLength(1);
   });
 
@@ -234,6 +245,46 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(pulls(r.calls)).toEqual([]);
     expect(configSets(r.calls)).toEqual([]);
     expect(r.memorySearch).toEqual({});
+  });
+
+  it("changes nothing when the model write fails", () => {
+    const r = run({ present: true, failOn: "memorySearch.model" });
+    expect(r.status).toBe(0);
+    expect(r.memorySearch).toEqual({});
+    expect(reindexes(r.calls)).toEqual([]);
+    expect(r.stdout).toContain("nothing changed");
+  });
+
+  it("leaves the provider as it was when the provider write fails", () => {
+    // Model first, provider last: a failed provider write must not leave the
+    // box on ollama, and the box keeps embedding exactly where it did before.
+    const r = run({ present: true, failOn: "memorySearch.provider" });
+    expect(r.status).toBe(0);
+    expect(r.memorySearch.provider).toBeUndefined();
+    expect(reindexes(r.calls)).toEqual([]);
+    expect(r.stdout).toContain("provider is unchanged");
+  });
+
+  it("records the reindex as owed when it fails, and finishes it on the next run", () => {
+    const first = run({ present: true, failOn: "memory index" });
+    expect(first.status).toBe(0);
+    expect(first.memorySearch).toMatchObject({ provider: "ollama", model: MODEL });
+    expect(first.state).toContain("reindex_pending=1");
+    expect(first.stdout).toContain("retrying on the next run");
+
+    // Second run: config already correct, so the old code said "nothing to do"
+    // and left memory search fail-closed forever.
+    const second = run({ provider: "ollama", model: MODEL, present: true, state: first.state });
+    expect(second.status).toBe(0);
+    expect(configSets(second.calls)).toEqual([]);
+    expect(reindexes(second.calls)).toHaveLength(1);
+    expect(second.state).toContain("reindex_pending=0");
+  });
+
+  it("takes a lock that outlives a long pull rather than one that expires", () => {
+    const script = readFileSync(SCRIPT, "utf-8");
+    expect(script).toMatch(/flock -n 9/);
+    expect(script).not.toMatch(/-mmin/);
   });
 
   it("does not leave the provider set when openclaw config set fails", () => {

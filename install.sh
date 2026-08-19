@@ -2300,10 +2300,14 @@ step_ollama_install() {
   # lexical FTS).
   local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
   if [ -x "$ENSURE_EMBEDDINGS" ]; then
-    if as_clawbox_login "$ENSURE_EMBEDDINGS"; then
+    as_clawbox_login "$ENSURE_EMBEDDINGS" || true
+    # The helper exits 0 on every soft failure by design (a missing Ollama must
+    # not abort an install), so its exit code says nothing about the outcome.
+    # Read the config it was supposed to write instead.
+    if as_clawbox python3 -c 'import json,sys; ms=((json.load(open("/home/clawbox/.openclaw/openclaw.json")).get("agents",{}).get("defaults",{}) or {}).get("memorySearch",{}) or {}); sys.exit(0 if ms.get("provider")=="ollama" and ms.get("model")=="qwen3-embedding:0.6b" else 1)' 2>/dev/null; then
       echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
     else
-      echo "  WARN: local embeddings setup did not complete; semantic memory falls back to lexical FTS until the next boot retries it (non-fatal)"
+      echo "  WARN: local embeddings are not configured yet; semantic memory falls back to lexical FTS until the next boot retries it (non-fatal)"
     fi
   elif ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
     echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
