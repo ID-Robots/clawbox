@@ -96,7 +96,11 @@ function stubWorker(audio: number, wall: number, opts: { dieAfter?: number; fail
     prog,
     [
       "import json, sys, wave",
-      "print(json.dumps({'ready': True, 'rss_kb': 512000, 'device': 'cuda:0'}), flush=True)",
+      "TAG = '__ttsbench__ '",
+      // Real engines print banners before we get a word in — torch, spaCy and
+      // kokoro all do it on the device. The harness must step over them.
+      "print('WARNING: Defaulting repo_id to hexgrad/Kokoro-82M.', flush=True)",
+      "print(TAG + json.dumps({'ready': True, 'rss_kb': 512000, 'device': 'cuda:0'}), flush=True)",
       "served = 0",
       "for line in sys.stdin:",
       "    line = line.strip()",
@@ -112,7 +116,8 @@ function stubWorker(audio: number, wall: number, opts: { dieAfter?: number; fail
       `    w.writeframes(b'\\x00\\x00' * int(24000 * ${audio}))`,
       "    w.close()",
       "    served += 1",
-      `    print(json.dumps({'wall': ${wall}, 'audio': ${audio}, 'rss_kb': 640000}), flush=True)`,
+      "    print('some library logging to stdout mid-run', flush=True)",
+      `    print(TAG + json.dumps({'wall': ${wall}, 'audio': ${audio}, 'rss_kb': 640000}), flush=True)`,
     ].join("\n"),
   );
   const worker = path.join(binDir, "fakepython");
@@ -264,6 +269,19 @@ describe.skipIf(!hasPython3)("scripts/bench/tts-bench.py", () => {
     expect(engine.rows[0].median_rtf).toBeCloseTo(0.125, 2);
     // VmHWM comes from the worker itself; a sampled RSS would miss the peak.
     expect(engine.rows[0].peak_rss_kb).toBe(640000);
+  });
+
+  it("steps over library banners on the worker's stdout instead of parsing them", () => {
+    // The first device run of kokoro-torch failed exactly here: torch and
+    // spaCy print to stdout before the worker's handshake.
+    const worker = stubWorker(2.0, 0.5);
+    const out = path.join(dir, "report.json");
+    const r = run(["--engines", "kokoro-torch", "--reps", "2", "--cache", cache,
+                   "--python-bin", worker, "--utterances", utteranceFile(), "--out", out]);
+    expect(r.status).toBe(0);
+    const engine = JSON.parse(readFileSync(out, "utf8")).engines[0];
+    expect(engine.skipped).toBeUndefined();
+    expect(engine.rows[0].median_rtf).toBeCloseTo(0.25, 2);
   });
 
   it("records a worker that dies mid-run as a failure, not as fast", () => {

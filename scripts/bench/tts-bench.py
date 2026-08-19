@@ -252,8 +252,17 @@ class PiperEngine(Engine):
         return wall, wav_seconds(out), sampler.peak_rss_kb
 
 
+# Kokoro, torch and spaCy all write banners to stdout before the worker gets a
+# word in, so every line the parent cares about is tagged. Anything untagged is
+# somebody else's noise and is skipped rather than parsed and blamed.
+WORKER_TAG = "__ttsbench__ "
+
 WORKER_SRC = r'''
 import json, os, sys, time, wave
+
+TAG = "__ttsbench__ "
+def emit(payload):
+    print(TAG + json.dumps(payload), flush=True)
 
 MODE = sys.argv[1]
 model_dir = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -300,8 +309,8 @@ else:
     raise SystemExit("unknown worker mode: " + MODE)
 
 # The model is loaded; the parent times synthesis only from here on.
-print(json.dumps({"ready": True, "rss_kb": hwm_kb(),
-                  "device": device if MODE == "kokoro-torch" else "cpu"}), flush=True)
+emit({"ready": True, "rss_kb": hwm_kb(),
+      "device": device if MODE == "kokoro-torch" else "cpu"})
 
 for line in sys.stdin:
     line = line.strip()
@@ -314,8 +323,7 @@ for line in sys.stdin:
     samples, rate = speak(req["text"], req.get("lang", "en"))
     wall = time.monotonic() - start
     write_wav(req["out"], samples, rate)
-    print(json.dumps({"wall": wall, "audio": len(samples) / float(rate),
-                      "rss_kb": hwm_kb()}), flush=True)
+    emit({"wall": wall, "audio": len(samples) / float(rate), "rss_kb": hwm_kb()})
 '''
 
 
@@ -348,16 +356,23 @@ class WorkerEngine(Engine):
             stderr=subprocess.PIPE,
             text=True,
         )
-        ready = proc.stdout.readline() if proc.stdout else ""
-        if not ready.strip():
-            err = proc.stderr.read()[:500] if proc.stderr else ""
-            raise RuntimeError(f"{self.name} worker did not start: {err}")
-        info = json.loads(ready)
+        info = self._read_tagged(proc, "worker did not start")
         self.load_seconds = time.monotonic() - start
         self.device = info.get("device", "unknown")
         self.peak_rss_kb = int(info.get("rss_kb", 0))
         self.proc = proc
         return proc
+
+    def _read_tagged(self, proc: subprocess.Popen, what: str) -> dict:
+        """Return the next tagged line, stepping over library banners."""
+        assert proc.stdout
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                err = proc.stderr.read()[:500] if proc.stderr else ""
+                raise RuntimeError(f"{self.name} {what}: {err.strip() or 'no output'}")
+            if line.startswith(WORKER_TAG):
+                return json.loads(line[len(WORKER_TAG):])
 
     def unavailable_reason(self) -> str | None:
         try:
@@ -372,11 +387,7 @@ class WorkerEngine(Engine):
         with Sampler(None) as sampler:
             proc.stdin.write(json.dumps({"text": text, "lang": lang, "out": str(out)}) + "\n")
             proc.stdin.flush()
-            line = proc.stdout.readline()
-        if not line.strip():
-            err = proc.stderr.read()[:500] if proc.stderr else ""
-            raise RuntimeError(f"{self.name} worker died mid-run: {err}")
-        res = json.loads(line)
+            res = self._read_tagged(proc, "worker died mid-run")
         self.peak_rss_kb = max(self.peak_rss_kb, int(res.get("rss_kb", 0)))
         self.min_avail_kb = sampler.min_avail_kb
         return float(res["wall"]), float(res["audio"]), self.peak_rss_kb
