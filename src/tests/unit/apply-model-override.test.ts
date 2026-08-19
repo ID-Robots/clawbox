@@ -120,6 +120,74 @@ describe("applyModelOverrideToAllAgentSessions — skipUserTagged", () => {
     expect(after.already_matching.modelOverrideSource).toBe("user");
   });
 
+  it("normalises a stale reasoning effort the new model can't honour (deepseek high -> local Gemma off)", async () => {
+    // The production bug: a session ran DeepSeek with a sticky
+    // `thinkingLevel: "high"`, then the chat picker repointed it to the
+    // local llama.cpp Gemma model (which supports `off` only). Without
+    // normalising the sticky value here, the gateway rejects the next turn
+    // with `thinkingLevel "high" is not supported for llamacpp/… (use off)`.
+    await seedSessions("main", {
+      chat: {
+        modelOverride: "deepseek-v4-flash",
+        modelProvider: "deepseek",
+        providerOverride: "deepseek",
+        modelOverrideSource: "user",
+        thinkingLevel: "high",
+      },
+    });
+
+    await applyModelOverrideToAllAgentSessions(
+      { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0" },
+      { agentsDir },
+    );
+
+    const after = await readSessions("main");
+    expect(after.chat.model).toBe("gemma4-e2b-it-q4_0");
+    expect(after.chat.modelProvider).toBe("llamacpp");
+    // The stale high is folded down to the local model's only level.
+    expect(after.chat.thinkingLevel).toBe("off");
+  });
+
+  it("leaves a reasoning effort the new provider still supports untouched (cloud -> cloud)", async () => {
+    await seedSessions("main", {
+      chat: {
+        modelOverride: "deepseek-v4-flash",
+        modelProvider: "deepseek",
+        providerOverride: "deepseek",
+        modelOverrideSource: "user",
+        thinkingLevel: "high",
+      },
+    });
+
+    await applyModelOverrideToAllAgentSessions(
+      { provider: "anthropic", modelId: "claude-sonnet-4-6" },
+      { agentsDir },
+    );
+
+    const after = await readSessions("main");
+    // anthropic honours `high`, so the sticky effort is preserved.
+    expect(after.chat.thinkingLevel).toBe("high");
+  });
+
+  it("does not inject a reasoning effort into sessions that never had one", async () => {
+    await seedSessions("main", {
+      chat: {
+        modelOverride: "deepseek-v4-flash",
+        modelProvider: "deepseek",
+        modelOverrideSource: "auto",
+        // no thinkingLevel field
+      },
+    });
+
+    await applyModelOverrideToAllAgentSessions(
+      { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0" },
+      { agentsDir },
+    );
+
+    const after = await readSessions("main");
+    expect("thinkingLevel" in after.chat).toBe(false);
+  });
+
   it("ignores sessions files that fail to parse instead of bailing the sweep", async () => {
     await seedSessions("main", {
       ok: { modelOverride: "old", modelOverrideSource: "auto" },

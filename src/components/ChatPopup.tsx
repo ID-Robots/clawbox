@@ -18,8 +18,11 @@ import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
   THINKING_LEVEL_LABELS,
+  SAFE_THINKING_LEVEL,
   getProviderReasoningConfig,
   readPersistedThinkingLevel,
+  resolveWireThinkingLevel,
+  parseUnsupportedThinkingLevelError,
   PERSIST_KEY_PREFIX,
 } from '@/lib/chat-reasoning'
 
@@ -290,11 +293,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
-  // Initialised to a generic placeholder; the real value is snapped to
-  // the active provider's persisted choice (or that provider's default)
-  // by the [headerProvider] effect below as soon as chatModelState
-  // resolves.
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('high')
+  // Initialised to the always-safe level, not a speculative `high`: the real
+  // value is snapped to the active provider's persisted choice (or that
+  // provider's default) by the [headerProvider] effect below as soon as
+  // chatModelState resolves. Starting at `off` means that if the socket
+  // connects before the catalog does, the first wire push can't offer a
+  // reasoning level a local (off-only) model would reject.
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
 
@@ -666,20 +671,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (status !== 'connected') return
     const key = sessionKeyRef.current
     if (!key) return
-    const wireValue: string = effectiveThinkingLevel
+    // Never push a level the ACTIVE model doesn't support. `resolveWireThinkingLevel`
+    // clamps to the provider's config (so a stale `high` carried over from a
+    // reasoning-capable model is folded to the local model's `off`) and returns
+    // null while the provider is still unknown (catalog loading) so we hold the
+    // push rather than sending a speculative value the gateway would reject.
+    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel)
+    if (wireLevel === null) return
+    const wireValue: string = wireLevel
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
     void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err: unknown) => {
       // Reset so a reconnect or next user change retries.
       lastSentThinkingRef.current = undefined
+      // The gateway itself tells us the level to fall back to when a model
+      // exposes no (or a narrower) reasoning control — e.g. local Gemma:
+      //   thinkingLevel "high" is not supported for llamacpp/... (use off)
+      // Honour that silently: snap to the suggested level and re-push it,
+      // surfacing a plain note rather than a red failure banner (a residual
+      // race, an external model change, or an API client can still reach here).
+      const message = err instanceof Error ? err.message : 'unknown error'
+      const suggested = parseUnsupportedThinkingLevelError(message)
+      if (suggested !== null) {
+        if (headerProvider) {
+          try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, suggested) } catch { /* localStorage unavailable */ }
+        }
+        setThinkingLevel(prev => (prev === suggested ? prev : suggested))
+        setMessages(msgs => [...msgs, {
+          role: 'system',
+          text: `Reasoning effort isn't available for this model — using ${THINKING_LEVEL_LABELS[suggested] ?? suggested}.`,
+          timestamp: Date.now(),
+          variant: 'success',
+        }])
+        return
+      }
       setMessages(msgs => [...msgs, {
         role: 'system',
-        text: `Failed to change effort: ${err instanceof Error ? err.message : 'unknown error'}`,
+        text: `Failed to change effort: ${message}`,
         timestamp: Date.now(),
         variant: 'error',
       }])
     })
-  }, [status, effectiveThinkingLevel, wsRequest])
+  }, [status, headerProvider, thinkingLevel, wsRequest])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the

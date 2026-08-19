@@ -5,6 +5,7 @@ import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { readEdition } from "@/lib/edition-source";
+import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
 
 const exec = promisify(execFile);
 
@@ -389,6 +390,20 @@ export async function applyModelOverrideToAllAgentSessions(
       session.authProfileOverrideSource = source;
       session.modelProvider = update.provider;
       session.model = update.modelId;
+      // Normalise the sticky reasoning-effort override to the new model's
+      // capability. `thinkingLevel` is a per-session sticky the gateway keeps
+      // (set via `sessions.patch`); repointing the session to a model that
+      // can't honour the old level would otherwise leave e.g. a DeepSeek
+      // `high` on a local llama.cpp Gemma session, and the gateway rejects the
+      // next turn with `thinkingLevel "high" is not supported for llamacpp/…
+      // (use off)`. Only rewrite when the existing level is actually
+      // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+      if (isThinkingLevel(session.thinkingLevel)) {
+        const reasoning = getProviderReasoningConfig(update.provider);
+        if (!reasoning.levels.includes(session.thinkingLevel)) {
+          session.thinkingLevel = reasoning.default;
+        }
+      }
       touchedInFile += 1;
     }
 
