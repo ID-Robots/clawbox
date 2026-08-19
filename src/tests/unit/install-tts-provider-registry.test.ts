@@ -65,9 +65,12 @@ case "$1 $2" in
 esac
 case "$1" in
   config)
-    # \`config get messages.tts.provider\` must come back empty so the step does
-    # not take its "already configured — preserving" early return.
-    [ "$2" = "get" ] && exit 0
+    # \`config get messages.tts.provider\` decides whether the step takes its
+    # "already configured — preserving" path. Empty by default.
+    if [ "$2" = "get" ]; then
+      [ "$3" = "messages.tts.provider" ] && printf '%s' "\${CURRENT_TTS_PROVIDER:-}"
+      exit 0
+    fi
     exit 0 ;;
 esac
 exit 0
@@ -88,6 +91,7 @@ function runStep(env: Record<string, string> = {}) {
     "as_clawbox() { env \"$@\"; }",
     "is_hermes_edition() { return 1; }",
     extractShellFn(INSTALL_SH, "oc_config_set"),
+    extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
   ].join("\n");
@@ -138,10 +142,18 @@ describe.skipIf(!hasBash)("step_openclaw_tts registers the provider before selec
     expect(refreshed).toBeLessThan(selected);
   });
 
-  it("verifies the plugin actually registered", () => {
+  it("verifies the plugin actually registered, before selecting it", () => {
     const res = runStep();
-    expect(calls()).toContain("plugins info tts-local-cli");
     expect(res.status).toBe(0);
+
+    const log = calls();
+    const verified = log.findIndex((c) => c === "plugins info tts-local-cli");
+    const selected = log.findIndex((c) => c === "config set messages.tts.provider tts-local-cli");
+
+    expect(verified, "the plugin is never verified").toBeGreaterThanOrEqual(0);
+    // Verifying after the selection would prove nothing: the box would already
+    // be pointing at the provider by the time we found out it is missing.
+    expect(verified).toBeLessThan(selected);
   });
 
   it("refuses to select a provider that is still not registered", () => {
@@ -168,5 +180,59 @@ describe.skipIf(!hasBash)("step_openclaw_tts registers the provider before selec
     const res = runStep({ REFRESH_EXIT: "1" });
     expect(res.status).toBe(0);
     expect(calls()).toContain("config set messages.tts.provider tts-local-cli");
+    // Silently swallowing it would hide the one clue for the next person
+    // debugging a box that went quiet.
+    expect(res.stderr).toMatch(/could not refresh the plugin registry/i);
+  });
+});
+
+/**
+ * The boxes that need this most are the ones that already ran the old step:
+ * they have `messages.tts.provider = tts-local-cli` saved, and the OpenClaw
+ * upgrade they just took is exactly what invalidated the registry. The
+ * seed-if-unset guard returns early for them, so the verification has to live
+ * on that path too — otherwise the fix reaches only fresh installs, and
+ * step_openclaw_tts is in step_post_update precisely for the others.
+ */
+describe.skipIf(!hasBash)("an already-configured box is re-verified, not just preserved", () => {
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "tts-registry-upgrade-"));
+    projectDir = path.join(dir, "project");
+    callsLog = path.join(dir, "calls.log");
+    mkdirSync(path.join(projectDir, "scripts", "openclaw"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, "scripts", "openclaw", "clawbox-tts.sh"),
+      "#!/usr/bin/env bash\n[ \"${1:-}\" = \"--provider-timeout-ms\" ] && echo 100000\nexit 0\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(path.join(projectDir, "scripts", "install-voice.sh"), "#!/usr/bin/env bash\nexit 0\n", {
+      mode: 0o755,
+    });
+    writeOpenclawStub();
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("refreshes the registry when tts-local-cli is already selected", () => {
+    const res = runStep({ CURRENT_TTS_PROVIDER: "tts-local-cli" });
+    expect(res.status).toBe(0);
+    expect(calls()).toContain("plugins registry --refresh");
+    expect(calls()).toContain("plugins info tts-local-cli");
+  });
+
+  it("fails loudly when the already-selected provider still does not resolve", () => {
+    const res = runStep({ CURRENT_TTS_PROVIDER: "tts-local-cli", INFO_EXIT: "1" });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toMatch(/does not resolve/i);
+  });
+
+  it("leaves a different provider alone entirely", () => {
+    // An owner on ElevenLabs must not have their choice touched, and must not
+    // pay for a registry rebuild on every update either.
+    const res = runStep({ CURRENT_TTS_PROVIDER: "elevenlabs" });
+    expect(res.status).toBe(0);
+    expect(calls()).not.toContain("plugins registry --refresh");
+    expect(calls()).not.toContain("config set messages.tts.provider tts-local-cli");
+    expect(res.stdout).toMatch(/preserving/i);
   });
 });

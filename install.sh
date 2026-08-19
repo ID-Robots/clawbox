@@ -1741,6 +1741,34 @@ NODE
 # outputFormat wav is deliberate: both engines emit WAV natively, so the happy
 # path needs no ffmpeg at all, and OpenClaw transcodes to Opus itself when a
 # channel wants a voice note.
+# Configuring the provider is not the same as OpenClaw HAVING it, and the gap
+# between those two is silent. `tts-local-cli` ships inside OpenClaw as a
+# bundled extension, but the gateway resolves plugins through a PERSISTED
+# registry rather than by scanning dist/extensions, and that index goes stale
+# whenever the extension set on disk changes — `openclaw plugins registry`
+# calls the reason `source-changed`, which is every OpenClaw upgrade. A stale
+# index simply does not contain tts-local-cli: the gateway comes up without it
+# and every spoken reply dies with
+#     TTS conversion failed: tts-local-cli: no provider registered
+# while this step, openclaw.json and `capability tts status` all still say the
+# box is configured correctly.
+#
+# Measured on the freshly flashed Orin used for the TASK-383 hardware proof
+# (2026-08-19): persisted 32/33 plugins against 49/67 current, the gateway
+# loading only memory-core and ollama, and no on-device speech at all —
+# `plugins doctor` reported no issues and `plugins enable tts-local-cli`
+# answered "Plugin not found". Rebuilding the index was the whole fix.
+#
+# A failed refresh is only a warning: what decides the outcome is whether the
+# provider resolves, not how it got there, so an OpenClaw without the
+# subcommand must not cost a box its voice.
+tts_ensure_provider_registered() {
+  if ! as_clawbox "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
+    echo "  Warning: could not refresh the plugin registry — the provider may not be visible to the gateway" >&2
+  fi
+  as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
+}
+
 step_openclaw_tts() {
   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
@@ -1754,6 +1782,23 @@ step_openclaw_tts() {
   local CURRENT_TTS
   CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get messages.tts.provider 2>/dev/null || echo "")
   if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
+    # An owner who chose ElevenLabs keeps it. But when the box is already on
+    # OUR provider, preserving the selection is not enough: the update that
+    # just replaced OpenClaw is the very thing that invalidates the plugin
+    # registry (`source-changed`), so returning here is how an ALREADY-SHIPPED
+    # box keeps a provider selected that its gateway can no longer resolve.
+    # That is the population this step is in step_post_update for, so the
+    # verification has to happen on this path too, not only on first setup.
+    if [ "$CURRENT_TTS" = "tts-local-cli" ]; then
+      if ! tts_ensure_provider_registered; then
+        echo "  ERROR: messages.tts.provider is tts-local-cli but the plugin does not resolve," >&2
+        echo "         even after refreshing the registry. The box cannot speak until it does." >&2
+        echo "         Diagnose with: openclaw plugins registry; openclaw plugins doctor" >&2
+        return 1
+      fi
+      echo "  TTS provider already set (tts-local-cli) — preserved, plugin registry verified"
+      return 0
+    fi
     echo "  TTS provider already set ($CURRENT_TTS) — preserving"
     return 0
   fi
@@ -1793,34 +1838,13 @@ step_openclaw_tts() {
     return 1
   fi
 
-  # Configuring the provider is not the same as OpenClaw HAVING it, and the
-  # gap between those two is silent. `tts-local-cli` ships inside OpenClaw as a
-  # bundled extension, but the gateway resolves plugins through a PERSISTED
-  # registry rather than by scanning dist/extensions, and that index goes stale
-  # whenever the extension set on disk changes — `openclaw plugins registry`
-  # calls the reason `source-changed`, which is every OpenClaw upgrade. A stale
-  # index simply does not contain tts-local-cli: the gateway comes up without
-  # it and every spoken reply dies with
-  #     TTS conversion failed: tts-local-cli: no provider registered
-  # while this step, openclaw.json and `capability tts status` all still say
-  # the box is configured correctly.
-  #
-  # Measured on the freshly flashed Orin used for the TASK-383 hardware proof
-  # (2026-08-19): persisted 32/33 plugins against 49/67 current, the gateway
-  # loading only memory-core and ollama, and no on-device speech at all —
-  # `plugins doctor` reported no issues and `plugins enable tts-local-cli`
-  # answered "Plugin not found". Rebuilding the index was the whole fix.
-  if ! as_clawbox "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
-    echo "  Warning: could not refresh the plugin registry — the provider may not be visible to the gateway" >&2
-  fi
-
-  # Then verify, and refuse to select a provider that is not there. This is the
-  # same rule already applied to the script path above: never leave the box
-  # configured to speak through something that does not exist, because that
-  # configures exactly the silent failure this task removes. Leaving
-  # messages.tts.provider unset is the better outcome — OpenClaw then reports
-  # TTS as unconfigured instead of pretending it is ready.
-  if ! as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1; then
+  # Refuse to select a provider that is not there. Same rule already applied to
+  # the script path above: never leave the box configured to speak through
+  # something that does not exist, because that configures exactly the silent
+  # failure this task removes. Leaving messages.tts.provider unset is the
+  # better outcome — OpenClaw then reports TTS as unconfigured instead of
+  # accepting spoken requests it cannot answer.
+  if ! tts_ensure_provider_registered; then
     echo "  ERROR: the tts-local-cli plugin is not registered even after refreshing the registry." >&2
     echo "         Leaving messages.tts.provider unset rather than pointing the box at a provider" >&2
     echo "         that cannot answer. Diagnose with: openclaw plugins registry; openclaw plugins doctor" >&2
