@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { spawnSync, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -802,9 +803,13 @@ describe("install-voice.sh installs the fallback engine", () => {
 
     const BODY = "piper-artifact-bytes";
     // sha256 of BODY, computed here so the fixture cannot drift from it.
-    const SHA = spawnSync("bash", ["-c", `printf %s '${BODY}' | sha256sum | cut -d' ' -f1`], {
-      encoding: "utf8",
-    }).stdout.trim();
+    //
+    // In Node, not by shelling out to sha256sum: describe.skipIf still runs
+    // this factory to COLLECT the tests even when canRun is false, and
+    // spawnSync on a missing binary returns stdout undefined, so .trim() threw
+    // a TypeError and took the whole FILE down instead of skipping it
+    // cleanly. Anything evaluated out here has to survive a box with no bash.
+    const SHA = createHash("sha256").update(BODY).digest("hex");
 
     it("passes the timeout bounds on the actual call", () => {
       const { r, recorded, cleanup } = runFetch(BODY, SHA);
