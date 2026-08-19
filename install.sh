@@ -1120,6 +1120,7 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
+  step_openclaw_tts
 }
 
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
@@ -1717,6 +1718,87 @@ NODE
   echo "  OpenClaw config updated"
 }
 
+# Point OpenClaw's speech output at the box's own engines (TASK-383).
+#
+# Two halves, and both have to run on updates as well as fresh installs:
+#   1. Install Piper, the CPU fallback. Without it on disk the fallback chain
+#      in scripts/openclaw/clawbox-tts.sh has nowhere to fall, and every
+#      Kokoro failure is silence again.
+#   2. Point the built-in `tts-local-cli` provider at clawbox-tts.sh.
+#
+# The command is the REPO copy, not a copy deployed into the workspace: the
+# repo path is refreshed by `git pull` on every update, so the box can never
+# end up speaking through a stale fallback chain.
+#
+# Placeholder casing is load-bearing. OpenClaw's applyTemplate normalizes a
+# token to Firstupper+restlower and only falls back to the raw key, so
+# `{{OutputPath}}` works and `{{outputPath}}` silently substitutes an EMPTY
+# STRING — the command would then be handed no output path at all. `{{Text}}`
+# is also what stops OpenClaw piping the text to stdin instead of argv.
+# The literal `--` guards against a reply that itself begins with `--` being
+# parsed as an option by the script.
+#
+# outputFormat wav is deliberate: both engines emit WAV natively, so the happy
+# path needs no ffmpeg at all, and OpenClaw transcodes to Opus itself when a
+# channel wants a voice note.
+step_openclaw_tts() {
+  is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
+  local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
+
+  bash "$PROJECT_DIR/scripts/install-voice.sh" --piper-only \
+    || echo "  Warning: Piper fallback install failed (non-fatal) — Kokoro still works, but a GPU failure will be silent"
+
+  # Seed-if-unset, same contract as the primary model above: an owner who has
+  # chosen ElevenLabs (or turned TTS off) must not have it silently reset by
+  # every update, and rebuild_reboot re-invokes this step.
+  local CURRENT_TTS
+  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get messages.tts.provider 2>/dev/null || echo "")
+  if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
+    echo "  TTS provider already set ($CURRENT_TTS) — preserving"
+    return 0
+  fi
+
+  # Never point OpenClaw at a command that is not there: that configures the
+  # exact silent failure this task removes, and it would look like a working
+  # install until someone asked the box to speak.
+  if [ ! -x "$TTS_SCRIPT" ]; then
+    echo "  ERROR: $TTS_SCRIPT is missing or not executable — refusing to configure TTS against it" >&2
+    return 1
+  fi
+
+  # timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
+  # It used to be a hardcoded 120000 while the script's own Kokoro timeout was
+  # also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
+  # Piper was never invoked — a hung GPU stayed silent, which is the failure
+  # this whole feature exists to remove. Ask the script for the number instead
+  # of keeping a second copy of it here: it derives the value from its own
+  # engine slices, so re-tuning one of them moves this with it.
+  local TTS_TIMEOUT_MS
+  TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
+  case "$TTS_TIMEOUT_MS" in
+    ''|*[!0-9]*)
+      echo "  ERROR: $TTS_SCRIPT did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
+      return 1
+      ;;
+  esac
+
+  local TTS_PROVIDER_JSON
+  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
+  # Order matters and so does the gate. oc_config_set retries three times and
+  # then gives up; if the provider definition did not land, naming it as THE
+  # provider leaves the box pointing at a provider that does not exist, and
+  # every spoken reply fails — strictly worse than not having run at all.
+  if ! oc_config_set messages.tts.providers.tts-local-cli "$TTS_PROVIDER_JSON" --json; then
+    echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
+    return 1
+  fi
+  if ! oc_config_set messages.tts.provider "tts-local-cli"; then
+    echo "  ERROR: could not select the tts-local-cli provider" >&2
+    return 1
+  fi
+  echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
+}
+
 step_setup_config() {
   step_directories_permissions
   step_captive_portal_dns
@@ -1974,6 +2056,11 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  # On-device TTS: installs/refreshes the Piper fallback and seeds the
+  # tts-local-cli provider. Without this call the whole of TASK-383 would be
+  # fresh-install-only, and every already-shipped box would keep answering a
+  # spoken request with silence.
+  step_openclaw_tts || echo "  Warning: openclaw_tts step failed (non-fatal)"
   # Re-assert the gateway service after an in-app update. The full update
   # syncs repo files and rebuilds before this continuation runs; older devices
   # can therefore reach the new UI while the gateway is still using stale
@@ -3207,7 +3294,7 @@ step_validate_services() {
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
   chromium_install ai_tools_install vnc_install vnc_refresh
-  openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
+  openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
