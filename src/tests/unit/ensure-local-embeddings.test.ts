@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync, existsSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -294,11 +294,11 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
   });
 
   it("does nothing at all when the lock file cannot be opened", () => {
-    const readOnly = path.join(dir, "readonly");
-    mkdirSync(readOnly);
-    chmodSync(readOnly, 0o500);
-    const r = run({ present: true, stateFile: path.join(readOnly, "state") });
-    chmodSync(readOnly, 0o700);
+    // A regular file where a directory should be: the open fails with ENOTDIR
+    // for every user, including root, which a mode-0500 directory would not.
+    const notADirectory = path.join(dir, "not-a-directory");
+    writeFileSync(notADirectory, "");
+    const r = run({ present: true, stateFile: path.join(notADirectory, "state") });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("cannot open");
     expect(configSets(r.calls)).toEqual([]);
@@ -317,7 +317,10 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(script).toMatch(/mv -f "\$tmp" "\$EMBED_STATE_FILE"/);
     const r = run({ present: true });
     expect(r.status).toBe(0);
-    expect(existsSync(`${statePath}.tmp`)).toBe(false);
+    // The temp name carries the pid, so match the prefix rather than one name.
+    const leaked = readdirSync(path.dirname(statePath))
+      .filter((f) => f.startsWith(`${path.basename(statePath)}.tmp.`));
+    expect(leaked).toEqual([]);
   });
 
   it("takes a lock that outlives a long pull rather than one that expires", () => {
