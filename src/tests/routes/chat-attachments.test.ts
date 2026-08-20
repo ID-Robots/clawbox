@@ -129,6 +129,14 @@ describe("/setup-api/chat/attachments", () => {
     expect(path.basename(body.path)).toMatch(/-bashrc$/);
   });
 
+  it("rejects a multipart content-type with no boundary as client input", async () => {
+    // busboy's constructor throws on it; unguarded that surfaces as a 500 for a
+    // request the caller can fix.
+    const res = await POST(request(multipart("shapes.png", PNG), "multipart/form-data"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("boundary");
+  });
+
   it("rejects a non-multipart body", async () => {
     const res = await POST(request(Buffer.from("{}"), "application/json"));
     expect(res.status).toBe(400);

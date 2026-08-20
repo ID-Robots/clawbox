@@ -110,6 +110,12 @@ export async function POST(req: NextRequest) {
   if (!contentType.includes("multipart/form-data")) {
     return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });
   }
+  // A multipart type with no boundary is malformed input, not a server fault:
+  // busboy's constructor throws on it, and that throw would otherwise surface
+  // as a 500 for a request the caller can fix.
+  if (!/;\s*boundary=/i.test(contentType)) {
+    return NextResponse.json({ error: "Expected multipart/form-data with a boundary" }, { status: 400 });
+  }
   if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
 
   // Preparing the staging directory is our side of the contract, not the
@@ -151,6 +157,9 @@ export async function POST(req: NextRequest) {
       let destPath = "";
       let sawFile = false;
       const writes: Promise<void>[] = [];
+      // The file stream currently being written, so an abort can stop it at the
+      // source rather than wait for bytes nobody wants any more.
+      let activeFileStream: Readable | null = null;
 
       const rejectOnce = (error: unknown) => {
         if (settled) return;
@@ -190,6 +199,7 @@ export async function POST(req: NextRequest) {
         written = dest;
         // busboy raises `limit` and then ends the stream, so the pipeline would
         // otherwise resolve on a truncated file and hand back a path to it.
+        activeFileStream = fileStream as unknown as Readable;
         fileStream.on("limit", () => rejectOnce(new BadUpload("File exceeds the size limit", 413)));
         // "wx": never clobber. A path we just generated should not exist, and
         // if it does, something is wrong enough that overwriting is the worst
@@ -222,9 +232,15 @@ export async function POST(req: NextRequest) {
       nodeStream.on("data", (chunk: Buffer) => {
         receivedBytes += chunk.length;
         if (receivedBytes > MAX_REQUEST_BYTES) {
+          // Tear down every stage, not just the source. Leaving busboy or the
+          // file stream alive means the pipeline never settles and the awaited
+          // cleanup below hangs instead of answering 413.
           nodeStream.unpipe(busboy);
           nodeStream.destroy();
-          rejectOnce(new BadUpload("Request exceeds the size limit", 413));
+          const aborted = new BadUpload("Request exceeds the size limit", 413);
+          activeFileStream?.destroy(aborted);
+          busboy.destroy();
+          rejectOnce(aborted);
         }
       });
       nodeStream.on("error", rejectOnce);
