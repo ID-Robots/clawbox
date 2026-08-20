@@ -10,8 +10,8 @@ import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/l
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
 
-const STORE_SEARCH_API = "https://openclawhardware.dev/api/store/apps";
-const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+const STORE_SEARCH_API = "https://clawbox.com/api/store/apps";
+const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 
 export const dynamic = "force-dynamic";
 

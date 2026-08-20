@@ -335,7 +335,7 @@ export default function RemoteControlPanel() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <a
-                href={`${status?.portalWeb ?? "https://openclawhardware.dev"}/portal/devices`}
+                href={`${status?.portalWeb ?? "https://clawbox.com"}/portal/devices`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"

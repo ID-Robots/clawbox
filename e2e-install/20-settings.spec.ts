@@ -167,7 +167,7 @@ test.describe("settings actions", () => {
     expect(["active", "inactive", "failed", "activating", "unknown"]).toContain(
       body.tunnel.service,
     );
-    expect(body.portalAddDeviceUrl).toMatch(/openclawhardware\.dev/);
+    expect(body.portalAddDeviceUrl).toMatch(/clawbox\.com/);
   });
 
   test("System panel — power route exists (without actually shutting down)", async () => {

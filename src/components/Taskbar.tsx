@@ -48,7 +48,7 @@ export default function Taskbar({ windows, onWindowClick, onExternalLink }: Task
 
           {/* External links */}
           <button
-            onClick={() => onExternalLink("https://openclawhardware.dev/")}
+            onClick={() => onExternalLink("https://clawbox.com/")}
             aria-label="ClawBox website"
             className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition transform hover:scale-110"
             title="ClawBox Website"

@@ -358,7 +358,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
         models: [{
           id: CLAWBOX_AI_IMAGE_MODEL_ID,
           name: "   ",
-          baseUrl: "https://openclawhardware.dev/api/ai",
+          baseUrl: "https://clawbox.com/api/ai",
           api: "openai-completions",
         }],
       });

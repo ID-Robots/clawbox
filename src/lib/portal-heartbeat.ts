@@ -7,7 +7,7 @@ import { get as getConfigValue } from "./config-store";
 const DEVICE_ID_FILE = path.join(CLOUDFLARED_DIR, "device-id");
 const PORTAL_HEARTBEAT_URL =
   process.env.PORTAL_HEARTBEAT_URL?.trim() ||
-  "https://openclawhardware.dev/api/portal/devices/heartbeat";
+  "https://clawbox.com/api/portal/devices/heartbeat";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const MACHINE_ID_FILE = "/etc/machine-id";
 

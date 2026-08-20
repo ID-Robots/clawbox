@@ -17,11 +17,11 @@ def test_loads_minimum_valid_config(tmp_path: Path) -> None:
     p = write(
         tmp_path,
         """
-        server = "https://openclawhardware.dev/"
+        server = "https://clawbox.com/"
         """,
     )
     cfg = config.load(p)
-    assert cfg.server == "https://openclawhardware.dev"  # trailing slash stripped
+    assert cfg.server == "https://clawbox.com"  # trailing slash stripped
     assert cfg.schedule == "daily"
     assert cfg.openclaw.binary == "openclaw"
     assert cfg.openclaw.include_workspace is True

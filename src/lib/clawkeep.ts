@@ -42,7 +42,7 @@ const RESTORING_FLAG_PATH = path.join(CLAWKEEP_DATA_DIR, "restoring.flag");
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "schedule.json");
 
 export const DEFAULT_PORTAL_SERVER =
-  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://openclawhardware.dev";
+  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://clawbox.com";
 
 const DEFAULT_BIN_NAME = "clawkeepd";
 

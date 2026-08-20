@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react'
+import { createPortal } from 'react-dom'
 
 // ── Gateway WebSocket chat widget ──
 // Connects directly to the OpenClaw gateway, no iframe.
@@ -11,9 +12,12 @@ import {
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
-import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
+import { useModalDialog } from '@/hooks/useModalDialog'
+import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
 import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
@@ -211,6 +215,51 @@ function extractText(msg: unknown): string {
   return ''
 }
 
+// ── Waiting for a generated picture ─────────────────────────────────────────
+//
+// `image_generate` returns as soon as the job is QUEUED, so its tool pill goes
+// green long before there is anything to show. The picture lands 20-40s later
+// in a SEPARATE background run, and that run's reply reaches this socket with
+// its MEDIA: directive already stripped — which is why the image only appeared
+// after a manual refresh: `chat.history` returns the stored text, directive
+// intact, and the reload was the only thing ever asking for it.
+//
+// So the banner stays up from the tool call until the picture actually appears.
+// Finding it is push-driven: the gateway's `session.message` event fires on
+// every transcript append and carries the stored text, directive intact.
+// Only a backstop: `session.message` pushes the append the moment it lands, so
+// this exists for a gateway too old to have the subscription (or one that
+// dropped the event as slow) — not as the normal path.
+const IMAGE_GEN_BACKSTOP_MS = 20_000
+const IMAGE_GEN_MAX_WAIT_MS = 4 * 60_000
+
+// A reconcile usually returns a transcript identical to the one on screen.
+// Handing React a fresh array anyway re-renders the whole list and re-fires the
+// auto-scroll, which would yank a user who had scrolled up back to the bottom.
+function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    if (x.role !== y.role || x.text !== y.text || x.timestamp !== y.timestamp) return false
+    if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
+  }
+  return true
+}
+
+function countImages(msgs: ChatMessage[]): number {
+  let total = 0
+  for (const m of msgs) total += m.images?.length ?? 0
+  return total
+}
+
+// The two controls floating over the full-size preview (download, close).
+const PREVIEW_BUTTON_STYLE: React.CSSProperties = {
+  width: 38, height: 38, borderRadius: 10, border: 'none',
+  background: 'rgba(255,255,255,0.12)', color: '#fff',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  textDecoration: 'none', backdropFilter: 'blur(6px)',
+}
+
 // 420, not the old 400, because of the header. The three selector pills spend
 // ~120px on their own padding, chevrons and gaps, so a 400px panel left ~154px
 // for the three LABELS — and the widest shipped default pairing, "Claude" +
@@ -234,6 +283,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Read when a wait begins, to know what "a new picture" means.
+  const messagesRef = useRef<ChatMessage[]>([])
+  // Debounce for the pushed-append reconcile, and a stable handle on it — the
+  // socket handler is built once and must not close over a stale callback.
+  const transcriptReconcileTimerRef = useRef<number | null>(null)
+  const reconcileTranscriptRef = useRef<() => Promise<void>>(async () => {})
+  // Mirrors `generatingImage` for the socket handler and the reconcile, neither
+  // of which re-subscribes when it changes.
+  const generatingImageRef = useRef(false)
+  // Set when a history read passes an envelope saying the image job failed.
+  // A failed job produces no picture, so the count check that normally ends the
+  // wait would never fire and the banner would sit there until it timed out.
+  const imageFailedRef = useRef(false)
   // Which agent harness backs this chat. OpenClaw uses the gateway WebSocket;
   // Hermes uses the /setup-api/hermes/chat HTTP route (hermes -z, persistent
   // session). Loaded once on mount; connect() is gated on `harnessLoaded` so we
@@ -302,6 +364,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
+  // The image the full-size preview is showing, or null when it is closed.
+  const [preview, setPreview] = useState<string | null>(null)
+  const closePreview = useCallback(() => setPreview(null), [])
+  // The desktop's one modal-dialog behaviour: focus in, Tab trapped, focus
+  // restored, the page behind inerted, and Escape closing THIS and stopping
+  // there — which is why the chat's own Escape handler needs no special case.
+  const previewPanelRef = useModalDialog<HTMLDivElement>({
+    open: preview !== null,
+    onClose: closePreview,
+  })
+  // True from the image_generate tool call until the picture arrives (or the
+  // wait times out). Drives the banner AND the history polling.
+  const [generatingImage, setGeneratingImage] = useState(false)
+  // How many images the transcript held when the wait began — the picture has
+  // landed once that count goes up. A count beats a timestamp here: the browser
+  // may be a phone whose clock disagrees with the device's.
+  const imageBaselineRef = useRef(0)
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -310,7 +389,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const popupRef = useRef<HTMLDivElement>(null)
 
   // Reset position and size when reopened
-  useEffect(() => { if (isOpen) { setPos(null); setSize(DEFAULT_SIZE) } }, [isOpen])
+  useEffect(() => {
+    if (isOpen) { setPos(null); setSize(DEFAULT_SIZE); setPreview(null) }
+    else setGeneratingImage(false)
+  }, [isOpen])
 
   // Provider id for the header model dropdown. Memoised on the active
   // option so the catalog hook below only re-fetches when the provider
@@ -843,6 +925,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
+          // Ask the gateway to push every append to this session's transcript.
+          // A generated picture is produced by a SEPARATE background run whose
+          // reply reaches the `chat` stream with its MEDIA: directive stripped,
+          // so that stream alone can never show it — this event is how we learn
+          // the transcript gained something the live turn could not render.
+          // Same projection `chat.history` uses, so the directive is intact.
+          void wsRequest('sessions.messages.subscribe', { key: mainSessionKey })
+            .catch(() => {
+              // A gateway without the RPC just means we fall back to the
+              // backstop reconcile below; the chat still works.
+            })
           // If a skill was just installed/uninstalled, start fresh session.
           // Provider changes re-use the same flag for retry-budget + overlay
           // purposes, but we skip the auto-send prompt for them (no skill
@@ -1010,8 +1103,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
-            applyToolEvent(payload.data as Record<string, unknown> | undefined)
+            const toolData = payload.data as Record<string, unknown> | undefined
+            applyToolEvent(toolData)
+            // Any phase starts the wait: `result` only means the job was
+            // accepted, and a socket reconnecting mid-job may never see `start`.
+            const toolName = typeof toolData?.name === 'string' ? toolData.name : ''
+            if (isImageGenerationTool(toolName) && !generatingImageRef.current) {
+              generatingImageRef.current = true
+              imageFailedRef.current = false
+              imageBaselineRef.current = countImages(messagesRef.current)
+              setGeneratingImage(true)
+            }
           }
+          return
+        }
+
+        // The transcript gained a message. Rather than merge a pushed message
+        // into the local list (and have to dedupe it against the one the `chat`
+        // stream may also deliver), treat it as a signal and re-read history —
+        // the same reconcile a manual page refresh used to be doing by hand.
+        if (eventName === 'session.message') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (!payload) return
+          const sk = payload.sessionKey as string | undefined
+          if (sk && sk !== sessionKeyRef.current) return
+          if (transcriptReconcileTimerRef.current !== null) {
+            window.clearTimeout(transcriptReconcileTimerRef.current)
+          }
+          // Coalesce the burst an agent turn produces into one read.
+          transcriptReconcileTimerRef.current = window.setTimeout(() => {
+            transcriptReconcileTimerRef.current = null
+            void reconcileTranscriptRef.current()
+          }, 400)
           return
         }
 
@@ -1025,26 +1148,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const msg = payload.message
 
           if (state === 'delta') {
-            const text = extractText(msg)
+            // Strip MEDIA: directives while streaming too, or the raw path
+            // flashes in the bubble for the moment before `final` lands.
+            const text = splitMediaDirectives(extractText(msg)).text
             // Sentinels would flash before the final-state filter drops them.
             if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
             }
           } else if (state === 'final') {
-            const text = extractText(msg)
+            // A generated picture arrives as a MEDIA: line inside the reply
+            // text, not as a structured attachment — see lib/chat-media.ts.
+            const { text, images } = splitAssistantMedia(extractText(msg))
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
             // chat.history refetch scheduled below. Skipping the append
             // avoids a brief "Sent." bubble flashing on the screen before
             // the real reply replaces it.
-            const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
-            // Same suppression as the history path, so the bubble cannot
-            // appear in real time either — and so an envelope can never be
-            // cached as a mascot snippet.
-            if (text && !isAckOnly && !isInterSessionEnvelope(text, msg)) {
-              setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
-              saveMascotSnippet(text)
+            // An image with no caption is a real reply, not an ack — it must
+            // not be mistaken for the empty "Sent." case and refetched away.
+            const isAckOnly = (!text && images.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // Envelope suppression (TASK-416) still applies on the live path, so
+            // the bubble cannot appear in real time and an envelope can never be
+            // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
+            // envelope carrying a MEDIA: line must be dropped whole, not split
+            // into a picture plus its own machinery.
+            if (!isAckOnly && !isInterSessionEnvelope(extractText(msg), msg)) {
+              setMessages(prev => [...prev, {
+                role: 'assistant', text, timestamp: Date.now(), images,
+              }])
+              if (text) saveMascotSnippet(text)
+              // The picture reached us over the socket after all — nothing
+              // left to wait for, so take the banner down.
+              if (images.length > 0) endImageWait()
             }
             setStreaming('')
             clearToolCalls()
@@ -1195,14 +1331,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const m = msg as Record<string, unknown>
         const role = (m.role as string)?.toLowerCase()
         if (role !== 'user' && role !== 'assistant') continue
-        const text = extractText(m)
-        if (!text || isSentinel(text)) continue
-        // Inter-session routing envelopes are machinery addressed to the
-        // agent, not chat content — drop the whole message. Shared with
-        // ChatApp so the two surfaces can't drift.
-        if (isInterSessionEnvelope(text, m)) continue
-        const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
-        chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
+        const raw = extractText(m)
+        if (isSentinel(raw)) continue
+        // OpenClaw routes background-job results back into the conversation as
+        // `role: "user"` messages. They are instructions to the agent, not
+        // anything the person typed, and rendering them puts a wall of internal
+        // text in the transcript attributed to the user.
+        if (isInternalRoutingMessage(m, raw)) {
+          if (isFailedImageGenerationNotice(raw)) imageFailedRef.current = true
+          continue
+        }
+        // Inter-session routing envelopes are machinery addressed to the agent,
+        // not chat content — drop the whole message (TASK-416). Kept alongside
+        // isInternalRoutingMessage rather than replacing it: that one catches
+        // background-job results arriving as role:"user", this one catches the
+        // generic envelope on either role, and the two were written against
+        // different failure reports. Checked BEFORE splitAssistantMedia so an
+        // envelope carrying a MEDIA: line is dropped whole rather than
+        // surviving as a picture. Shared with ChatApp so the surfaces can't drift.
+        if (isInterSessionEnvelope(raw, m)) continue
+        const timestamp = (m.timestamp as number) || 0
+        if (role === 'user') {
+          const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
+          if (!cleaned) continue
+          chatMsgs.push({ role: 'user', text: cleaned, timestamp })
+          continue
+        }
+        // Replayed history carries the same MEDIA: lines the live turn did, so
+        // a reopened chat shows its pictures rather than a bare caption.
+        const { text, images } = splitAssistantMedia(raw)
+        if (!text && images.length === 0) continue
+        chatMsgs.push({
+          role: 'assistant', text, timestamp, images,
+        })
       }
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
@@ -1211,7 +1372,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (prev.length === 0) return chatMsgs
         const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
         const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
-        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+        const next = inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+        // Returning `prev` when nothing changed makes React skip the render.
+        return sameTranscript(prev, next) ? prev : next
       })
 
       // Auto-send a greeting if no history exists (first conversation)
@@ -1235,11 +1398,60 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       } else if (mightAutoGreet) {
         setIsBootstrappingHistory(false)
       }
+      // Handed back so a caller can act on what was just loaded without waiting
+      // for the state commit — the image poll below decides on this, not on a
+      // ref React has not refreshed yet.
+      return chatMsgs
     } catch (err) {
       console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
     }
   }, [wsRequest])
+
+  useEffect(() => { messagesRef.current = messages }, [messages])
+
+  const endImageWait = useCallback(() => {
+    generatingImageRef.current = false
+    imageFailedRef.current = false
+    setGeneratingImage(false)
+  }, [])
+
+  // Re-read the transcript and, if it gained a picture since the wait began,
+  // end the wait. Used by the pushed-append handler and by the backstop below.
+  const reconcileTranscript = useCallback(async () => {
+    const loaded = await loadHistory()
+    if (!loaded) return
+    if (!generatingImageRef.current) return
+    // Either the picture landed, or the job reported that it never will.
+    if (imageFailedRef.current || countImages(loaded) > imageBaselineRef.current) {
+      endImageWait()
+    }
+  }, [loadHistory, endImageWait])
+
+  useEffect(() => { reconcileTranscriptRef.current = reconcileTranscript }, [reconcileTranscript])
+
+  // While a picture is being generated, go and look for it. The background run
+  // that produces it does not deliver renderable media over this socket, so a
+  // history read — which returns the stored reply, directive intact — is what
+  // actually finds it. Normally the pushed append triggers this within ~400ms;
+  // this timer only covers a gateway that never sent the event.
+  useEffect(() => {
+    if (!generatingImage || status !== 'connected') return
+    const startedAt = Date.now()
+    let inFlight = false
+    const timer = window.setInterval(() => {
+      // Never stack reads on a gateway that is busy generating the picture.
+      if (inFlight) return
+      if (Date.now() - startedAt > IMAGE_GEN_MAX_WAIT_MS) {
+        // Give up rather than wait forever on a job that failed silently.
+        endImageWait()
+        return
+      }
+      inFlight = true
+      void reconcileTranscript().finally(() => { inFlight = false })
+    }, IMAGE_GEN_BACKSTOP_MS)
+    return () => window.clearInterval(timer)
+  }, [generatingImage, status, reconcileTranscript, endImageWait])
 
   // Upload one or more files to the server's /uploads dir and add them to
   // the chat attachment list. Shared by the file-input change handler and
@@ -1383,7 +1595,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // establish anything, and the announcement should survive to be made.
       hermesSentProviderRef.current = provider
       hermesSentModelRef.current = model
-      setMessages(prev => [...prev, { role: 'assistant', text: data.text || '(no response)', timestamp: Date.now() }])
+      // Same MEDIA: split as the gateway path, so a picture renders the same
+      // way whichever edition answered. A reply that is nothing BUT a media
+      // line is still a real answer — don't call it '(no response)'.
+      const hermesReply = splitAssistantMedia(typeof data.text === 'string' ? data.text : '')
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        text: hermesReply.text || (hermesReply.images.length > 0 ? '' : '(no response)'),
+        timestamp: Date.now(),
+        images: hermesReply.images,
+      }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
       if ((err as Error)?.name !== 'AbortError') {
@@ -1749,7 +1970,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [isOpen, visible, status])
 
-  // Close on Escape
+  // Close on Escape. An open image preview swallows the key before it reaches
+  // here (useModalDialog stops it at the document capture phase), so dismissing
+  // the picture cannot also close the conversation behind it.
   useEffect(() => {
     if (!isOpen) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -1981,6 +2204,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         65%  { transform: scale(0.965) translateY(3px) rotate(-1.4deg); }
         82%  { transform: scale(1.015) translateY(-1px) rotate(0.5deg); }
         100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); }
+      }
+      @keyframes clawImageGenPulse {
+        0%, 100% { opacity: 0.45; transform: scale(0.92); }
+        50%      { opacity: 1;    transform: scale(1.08); }
       }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile) */}
       <div
@@ -2400,13 +2627,82 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 lineHeight: 1.45,
                 wordBreak: 'break-word',
               }}>
-                {msg.role === 'user' ? msg.text : renderText(msg.text)}
+                {msg.images && msg.images.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
+                    {msg.images.map((src, j) => (
+                      <div key={j} style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }}>
+                        {/* A button, not a bare onClick on the image: the
+                            preview has to be reachable from the keyboard too,
+                            and the alt text gives the control its name. */}
+                        <button
+                          type="button"
+                          onClick={() => setPreview(src)}
+                          style={{
+                            padding: 0, border: 'none', background: 'none',
+                            cursor: 'zoom-in', lineHeight: 0, borderRadius: 8, maxWidth: '100%',
+                          }}
+                        >
+                          {/* A generated picture IS the message, not decoration:
+                              it gets a real alt so a screen reader announces it,
+                              and it is contained rather than cropped so the image
+                              the user asked for does not lose its edges. */}
+                          <img src={src} alt={t("chat.generatedImage")} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
+                        </button>
+                        {/* Same-origin, so the `download` attribute is enough to
+                            save it under the name the harness gave it. */}
+                        <a
+                          href={src}
+                          download={mediaFileName(src)}
+                          title={t("chat.downloadImage")}
+                          aria-label={t("chat.downloadImage")}
+                          style={{
+                            position: 'absolute', top: 6, right: 6,
+                            width: 26, height: 26, borderRadius: 8,
+                            background: 'rgba(0,0,0,0.55)', color: '#fff',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            textDecoration: 'none', backdropFilter: 'blur(4px)',
+                          }}
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
               </div>
             </div>
           );
         })}
 
         {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
+
+        {/* The picture outlives the turn that asked for it, so this banner is
+            the only thing on screen during the 20-40s wait — the tool pill has
+            already gone green and `sending` is back to false. */}
+        {!reloadingSkill && generatingImage && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              alignSelf: 'flex-start',
+              padding: '5px 11px', borderRadius: 999,
+              background: 'rgba(249,115,22,0.12)',
+              border: '1px solid rgba(249,115,22,0.25)',
+              color: '#fdba74', fontSize: 12, fontWeight: 500,
+            }}
+          >
+            <span
+              className="material-symbols-rounded"
+              aria-hidden="true"
+              style={{ fontSize: 15, animation: 'clawImageGenPulse 1.4s ease-in-out infinite' }}
+            >
+              imagesmode
+            </span>
+            <span>{t("chat.generatingImage")}</span>
+          </div>
+        )}
 
         {/* Streaming message */}
         {!reloadingSkill && streaming && (
@@ -2605,6 +2901,70 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={(e) => handleResizeStart("bl", e)} onTouchStart={(e) => handleResizeStart("bl", e)} />
         <div className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize" onMouseDown={(e) => handleResizeStart("br", e)} onTouchStart={(e) => handleResizeStart("br", e)} />
       </>}
+
+      {/* Full-size image preview.
+          Portalled to <body> rather than nested here: the popup root carries a
+          `transform`, which makes it the containing block for fixed-position
+          descendants — an overlay rendered inside it would be clipped to the
+          popup instead of covering the screen. */}
+      {preview && createPortal(
+        // Backdrop: dismissal only. The dialog role belongs on the panel — on
+        // the backdrop the accessible dialog would be the whole viewport and
+        // its name would swallow every bit of text behind the scrim.
+        <div
+          onClick={closePreview}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 10020,
+            background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(2px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 24,
+          }}
+        >
+          {/* Clicking the picture or its controls must not dismiss, or the
+              image is impossible to inspect without losing it. */}
+          <div
+            ref={previewPanelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("chat.imagePreview")}
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'relative', display: 'flex',
+              maxWidth: '100%', maxHeight: '100%',
+            }}
+          >
+            <img
+              src={preview}
+              alt={t("chat.generatedImage")}
+              style={{
+                maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
+                borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
+              }}
+            />
+            <div style={{ position: 'absolute', top: 16, right: 16, display: 'flex', gap: 8 }}>
+              <a
+                href={preview}
+                download={mediaFileName(preview)}
+                title={t("chat.downloadImage")}
+                aria-label={t("chat.downloadImage")}
+                style={PREVIEW_BUTTON_STYLE}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>download</span>
+              </a>
+              <button
+                type="button"
+                onClick={closePreview}
+                title={t("chat.closePreview")}
+                aria-label={t("chat.closePreview")}
+                style={{ ...PREVIEW_BUTTON_STYLE, cursor: 'pointer' }}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 20 }}>close</span>
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }

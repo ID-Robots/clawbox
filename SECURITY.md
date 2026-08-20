@@ -1,6 +1,6 @@
 # Security Policy
 
-ClawBox is the operating system for [OpenClaw Hardware](https://openclawhardware.dev/),
+ClawBox is the operating system for [OpenClaw Hardware](https://clawbox.com/),
 running on NVIDIA Jetson. Because it manages WiFi, system credentials, OAuth tokens,
 and the on-device AI agent, we take security reports seriously.
 

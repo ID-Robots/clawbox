@@ -478,6 +478,8 @@ describe("middleware", () => {
       "/setup-api/apps/install",
       "/setup-api/apps/uninstall",
       "/setup-api/gateway/ws-config",
+      // Reads generated images straight off the harness media tree.
+      "/setup-api/chat/media",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
     ])("gates sensitive %s during the setup window", async (p) => {

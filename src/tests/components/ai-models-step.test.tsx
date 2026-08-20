@@ -205,7 +205,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             interval: 5,
           }),
         } as Response;
@@ -240,7 +240,7 @@ describe("AIModelsStep variants", () => {
     expect(await findByText("ABCD-1234")).toBeInTheDocument();
     expect(getByRole("link", { name: /Open authorization page/i })).toHaveAttribute(
       "href",
-      "https://openclawhardware.dev/portal/connect",
+      "https://clawbox.com/portal/connect",
     );
   });
 
@@ -256,7 +256,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             interval: 5,
           }),
         } as Response;
@@ -396,7 +396,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             // Sub-second poll interval keeps the test fast on real timers.
             interval: 0.05,
           }),

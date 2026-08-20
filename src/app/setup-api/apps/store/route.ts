@@ -3,7 +3,7 @@ import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 
 export const dynamic = "force-dynamic";
 
-const STORE_API = "https://openclawhardware.dev/api/store/apps";
+const STORE_API = "https://clawbox.com/api/store/apps";
 // Upstream caps any response at 200; reject anything outside [1, 200] rather
 // than forwarding arbitrary/malformed values to ClawHub.
 const MAX_LIMIT = 200;

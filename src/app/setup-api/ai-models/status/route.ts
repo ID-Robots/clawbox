@@ -42,7 +42,7 @@ const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 // pill → local says "pro" but token entitles only Free).
 const PORTAL_DEVICE_INFO_URL =
   process.env.CLAWBOX_AI_DEVICE_INFO_URL?.trim()
-  || "https://openclawhardware.dev/api/clawbox-ai/device-info";
+  || "https://clawbox.com/api/clawbox-ai/device-info";
 
 // 120s TTL > 30s poll cadence so most polls land on a warm cache. The
 // portal's reconcile-tier already self-heals on its end inside its own

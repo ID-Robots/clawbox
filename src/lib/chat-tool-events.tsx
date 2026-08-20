@@ -11,11 +11,30 @@ export interface ChatToolCall {
   startedAt: number;
 }
 
+// An MCP server prefixes its tools with its own name: `server__tool`. Stripping
+// it is what makes both readers below look at the TOOL, not the server it came
+// from — without it a server called `image-gen` would make every one of its
+// tools look like image generation.
+const TOOL_SERVER_PREFIX_RE = /^[a-z0-9-]+__/i;
+
 function prettifyToolName(raw: string): string {
   if (!raw) return "tool";
-  const stripped = raw.replace(/^[a-z0-9-]+__/i, "");
+  const stripped = raw.replace(TOOL_SERVER_PREFIX_RE, "");
   const cleaned = stripped.replace(/[_]+/g, " ").trim();
   return cleaned.length > 0 ? cleaned : raw;
+}
+
+/**
+ * True if `raw` names the harness' image-generation tool.
+ *
+ * Matched loosely (both words, either order, with or without a server prefix)
+ * because the name reaches us straight off the wire: `image_generate` today,
+ * but `mcp__x__generate_image` or `image_generation` are the same event as far
+ * as the chat is concerned.
+ */
+export function isImageGenerationTool(raw: string): boolean {
+  const name = raw.replace(TOOL_SERVER_PREFIX_RE, "").toLowerCase();
+  return name.includes("image") && name.includes("gen");
 }
 
 export function useChatToolCalls(): {

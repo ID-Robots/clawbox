@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 
 const CLAWBOX_AI_DEVICE_START_URL =
   process.env.CLAWBOX_AI_DEVICE_START_URL?.trim()
-  || "https://openclawhardware.dev/api/clawbox-ai/device-start";
+  || "https://clawbox.com/api/clawbox-ai/device-start";
 const CLAWBOX_AI_VERIFICATION_URL =
   process.env.CLAWBOX_AI_VERIFICATION_URL?.trim()
   || `${PORTAL_LOGIN_URL}/connect`;

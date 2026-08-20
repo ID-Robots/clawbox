@@ -65,7 +65,7 @@ export default function PortalSubscribePage() {
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <a
-            href="https://openclawhardware.dev/"
+            href="https://clawbox.com/"
             className="flex items-center gap-3 text-[var(--text-primary)] no-underline"
           >
             <Image

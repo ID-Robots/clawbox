@@ -236,7 +236,7 @@ function spawnOpenclawConfigSet(
     env: options.env,
   }).then(() => undefined);
 }
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+export const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;

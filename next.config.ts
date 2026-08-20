@@ -71,10 +71,10 @@ const nextConfig: NextConfig = {
   },
   async headers() {
     // Origins allowed to embed this ClawBox in an iframe. The portal
-    // (openclawhardware.dev) mounts each linked device in an iframe on its
+    // (clawbox.com) mounts each linked device in an iframe on its
     // dashboard; extend via PORTAL_EMBED_ORIGINS=https://a,https://b.
     const portalEmbed = (process.env.PORTAL_EMBED_ORIGINS
-      ?? "https://openclawhardware.dev https://*.openclawhardware.dev")
+      ?? "https://clawbox.com https://*.clawbox.com")
       .split(/[\s,]+/)
       .filter(Boolean);
     const frameAncestors = ["'self'", ...portalEmbed].join(" ");

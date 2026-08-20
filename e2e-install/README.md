@@ -16,7 +16,7 @@ specs depend on state set up by earlier ones:
 | `30-files.spec.ts`            | mkdir, upload, list, read, delete — verified both via API and on-disk |
 | `40-terminal.spec.ts`         | `/terminal-ws` PTY round-trip (`uname -a`) |
 | `50-webapps.spec.ts`          | Code-assistant init → file write → build → `/setup-api/webapps` serves |
-| `60-app-store.spec.ts`        | Live search against `openclawhardware.dev`, install + uninstall one skill |
+| `60-app-store.spec.ts`        | Live search against `clawbox.com`, install + uninstall one skill |
 | `70-browser.spec.ts`          | Real Chromium on Xvfb :99 via CDP; navigate to youtube.com, screenshot |
 | `80-chat.spec.ts`             | Gateway health + ws-config + real chat round-trip (needs AI key) |
 | `90-upgrade-main-to-beta.spec.ts` | In-app updater: pin `beta`, run, wait through restart, verify HEAD |

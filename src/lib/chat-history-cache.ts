@@ -4,7 +4,8 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   text: string;
   timestamp: number;
-  // data URLs for inline display only.
+  // Inline display only: data URLs for images the user attached, or
+  // /setup-api/chat/media URLs for ones the agent generated.
   images?: string[];
 }
 

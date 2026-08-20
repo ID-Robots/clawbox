@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="clawkeep pair")
-    parser.add_argument("--server", default="https://openclawhardware.dev")
+    parser.add_argument("--server", default="https://clawbox.com")
     parser.add_argument("--device-name", default=None)
     parser.add_argument("--token-path", default=None, type=Path)
     parser.add_argument("--port", default=PAIR_PORT, type=int)
