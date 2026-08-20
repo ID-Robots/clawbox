@@ -44,6 +44,11 @@ import {
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_LABEL,
+  CLAWBOX_AI_VISION_MODEL,
+  CLAWBOX_AI_VISION_MODEL_ID,
+  CLAWBOX_AI_VISION_MODEL_LABEL,
+  CLAWBOX_AI_VISION_INPUT_MODALITIES,
+  CLAWBOX_AI_VISION_MAX_TOKENS,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -321,6 +326,22 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
           supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
+      // Image understanding. Not a chat tier and never selectable as one —
+      // the device model picker reads CLAWAI_STATIC_MODELS, not this array —
+      // it exists so `agents.defaults.imageModel` has something to resolve to
+      // when the user attaches a picture and the text-only session model
+      // cannot look at it. See the CLAWBOX_AI_VISION_* block in
+      // src/lib/clawbox-ai-models.ts for why it lives under this provider.
+      //
+      // No `reasoning`/`compat`: the media-understanding path issues a
+      // one-shot describe and never negotiates a thinking level.
+      {
+        id: CLAWBOX_AI_VISION_MODEL_ID,
+        name: CLAWBOX_AI_VISION_MODEL_LABEL,
+        input: [...CLAWBOX_AI_VISION_INPUT_MODALITIES],
+        maxTokens: CLAWBOX_AI_VISION_MAX_TOKENS,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
     ],
   });
 }
@@ -522,7 +543,7 @@ function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined): string 
 }
 
 /**
- * True when `agents.defaults.imageGenerationModel` already names a model.
+ * True when an `agents.defaults.<tool>Model` slot already names a model.
  *
  * Byte-for-byte the same test OpenClaw applies in `hasToolModelConfig`
  * (`dist/model-config.helpers-BS3FWcoO.js:25` on 2026.7.1-2):
@@ -538,8 +559,12 @@ function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined): string 
  * only the fallback. Claiming an occupied slot there would silently overrule a
  * choice the user made elsewhere, so we claim only what is empty. Mirrors the
  * same guard in the boot migration in scripts/gateway-pre-start.sh.
+ *
+ * Shared by `imageGenerationModel` (where images come from) and `imageModel`
+ * (what looks at an image the user sent). Different slots, identical
+ * don't-clobber rule, and OpenClaw reads both through the same helper.
  */
-function hasImageGenerationModel(existing: unknown): boolean {
+function hasToolModelConfig(existing: unknown): boolean {
   if (typeof existing !== "object" || existing === null) return false;
   const cfg = existing as { primary?: unknown; fallbacks?: unknown };
   if (typeof cfg.primary === "string" && cfg.primary.trim()) return true;
@@ -567,7 +592,7 @@ function hasImageGenerationModel(existing: unknown): boolean {
  * So a box with only the provider block would satisfy gate 2, fail gate 1, and
  * never see the tool. Naming a model in `imageGenerationModel` is the
  * deterministic path — hence the write below on every box that does not
- * already name one (see `hasImageGenerationModel` for why "already" includes
+ * already name one (see `hasToolModelConfig` for why "already" includes
  * fallbacks).
  *
  * Note the key name: `imageGenerationModel`, *not* `imageModel`. They are two
@@ -621,7 +646,7 @@ async function configureClawboxAiImages(clawboxAiToken: string): Promise<boolean
     buildClawboxAiImageProviderModels(existingOpenAiProvider?.models),
     "--json",
   ]);
-  if (hasImageGenerationModel(existingImageModel)) {
+  if (hasToolModelConfig(existingImageModel)) {
     console.log(
       "[AI Config] Left agents.defaults.imageGenerationModel alone: it already names an image model",
     );
@@ -665,6 +690,51 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
     buildClawboxAiProviderDefinition(clawboxAiToken),
     "--json",
   ]);
+
+  // Point image *understanding* at the vision entry the provider definition
+  // above just wrote. Without this the device accepts an attached picture and
+  // then cannot look at it: the ClawBox AI chat models are `input: ["text"]`,
+  // so OpenClaw hands the turn a media path instead of inline image parts, and
+  // the `image` tool that would read that path resolves its model through
+  // `agents.defaults.imageModel` — which ClawBox provisioning never set, making
+  // `runWithImageModelFallback` throw "No image model configured"
+  // (`dist/model-fallback-CvSRhgYr.js` on 2026.7.1). Reproduced on a real box
+  // on 2026-08-21; see TASK-417.
+  //
+  // Same don't-clobber rule as image generation, for the same reason: this
+  // function also runs when ClawBox AI is merely being added as a *fallback*
+  // for some other provider, and a slot the owner filled is their choice.
+  // Non-fatal for the same reason too.
+  try {
+    let existingVisionModel: unknown;
+    try {
+      existingVisionModel = (await readOpenClawConfig()).agents?.defaults?.imageModel;
+    } catch {
+      // No readable config yet (fresh box) — nothing to preserve.
+      existingVisionModel = undefined;
+    }
+    if (hasToolModelConfig(existingVisionModel)) {
+      console.log(
+        "[AI Config] Left agents.defaults.imageModel alone: it already names a vision model",
+      );
+    } else {
+      await runCommand(OPENCLAW_BIN, [
+        "config",
+        "set",
+        "agents.defaults.imageModel",
+        JSON.stringify({ primary: CLAWBOX_AI_VISION_MODEL }),
+        "--json",
+      ]);
+      console.log(
+        `[AI Config] Set ClawBox AI vision model ${CLAWBOX_AI_VISION_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[AI Config] Failed to configure ClawBox AI vision model:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
 
   // Images ride on the same token and the same proxy, so they are provisioned
   // here rather than behind a separate opt-in — a box that has ClawBox AI has

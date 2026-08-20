@@ -244,7 +244,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       const call = callFor("agents.defaults.imageGenerationModel");
       expect(call?.[2]).toBe("--json");
       expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
-      expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+      // The route also writes `imageModel` — the vision key, from a different
+      // function (TASK-417). What must never happen is the two aliasing: the
+      // image-generation slot has to name the image model and nothing else.
+      const visionCall = callFor("agents.defaults.imageModel");
+      expect(JSON.parse(visionCall?.[1] ?? "null")).not.toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
 
     it("names the same model the boot migration writes", async () => {

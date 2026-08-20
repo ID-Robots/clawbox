@@ -460,6 +460,99 @@ if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
     deepseek_provider["baseUrl"] = "https://clawbox.com/api/ai"
     changed = True
 
+# Migration: ClawBox AI vision (image understanding).
+#
+# A ClawBox accepts an image attachment in chat and then cannot look at it.
+# Both ClawBox AI chat models are `input: ["text"]`, so OpenClaw does not
+# inline image parts; it hands the turn a media path and expects the `image`
+# tool to describe it. That tool resolves its model from
+# `agents.defaults.imageModel`, which ClawBox provisioning never wrote, so
+# runWithImageModelFallback throws "No image model configured"
+# (dist/model-fallback-CvSRhgYr.js on 2026.7.1). Reproduced on a real box on
+# 2026-08-21; see TASK-417.
+#
+# Boxes already in the field never re-run the configure route, so the repair
+# has to happen here. Mirrors buildClawboxAiProviderDefinition() and the
+# imageModel write in src/app/setup-api/ai-models/configure/route.ts; the two
+# must stay in step, and src/tests/unit/gateway-pre-start-clawai-vision.test.ts
+# runs these exact bytes out of the shipped .sh.
+#
+# Registered under the `deepseek` provider even though the id is an OpenAI one:
+# that entry IS the ClawBox AI proxy, already carrying api=openai-completions,
+# the proxy baseUrl and the claw_ token. OpenClaw's `openai` provider defaults
+# to openai-responses, which the proxy does not speak. It cannot show up in the
+# chat model picker — the clawai catalogue is the hardcoded CLAWAI_STATIC_MODELS
+# list, not a read of this array.
+#
+# The model id and the ceiling are duplicated from CLAWBOX_AI_VISION_* in
+# src/lib/clawbox-ai-models.ts because a shell migration cannot import them.
+# 128000 is measured, not guessed: against the live proxy on 2026-08-21,
+# max_tokens 128000 is accepted and 200000 (the generic default an entry falls
+# through to when the field is absent) comes back 400 "supports at most 128000
+# completion tokens".
+CLAWBOX_VISION_MODEL_ID = "gpt-5.6-luna"
+CLAWBOX_VISION_MODEL_NAME = "ClawBox AI Vision"
+CLAWBOX_VISION_MODEL_REF = "deepseek/" + CLAWBOX_VISION_MODEL_ID
+CLAWBOX_VISION_MAX_TOKENS = 128000
+
+# The token is the entitlement, exactly as for images: only a box that actually
+# has ClawBox AI gets a vision model pointed at the ClawBox AI proxy. Read here
+# rather than borrowing the image migration's `_clawai_token`, so this block
+# stays a self-contained slice its unit test can run out of the shipped .sh.
+_vision_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
+_vision_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
+if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _vision_token.startswith("claw_"):
+    _vision_entry = next(
+        (m for m in _vision_models if isinstance(m, dict) and m.get("id") == CLAWBOX_VISION_MODEL_ID),
+        None,
+    )
+    if _vision_entry is None:
+        _vision_models.append({
+            "id": CLAWBOX_VISION_MODEL_ID,
+            "name": CLAWBOX_VISION_MODEL_NAME,
+            "input": ["text", "image"],
+            "maxTokens": CLAWBOX_VISION_MAX_TOKENS,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        })
+        changed = True
+    else:
+        # Repair only what makes the entry unusable, in the same order the
+        # route builds it. `name` first: OpenClaw's schema rejects a models[]
+        # row without one and the gateway then refuses to start.
+        if not isinstance(_vision_entry.get("name"), str) or not _vision_entry.get("name").strip():
+            _vision_entry["name"] = CLAWBOX_VISION_MODEL_NAME
+            changed = True
+        # Without "image" in `input`, resolveImageRuntime refuses the model
+        # outright ("Model does not support images"), which is the whole
+        # failure this migration exists to fix.
+        _vision_input = _vision_entry.get("input")
+        if not isinstance(_vision_input, list) or "image" not in _vision_input:
+            _vision_entry["input"] = ["text", "image"]
+            changed = True
+        # Only fill an absent ceiling. A number someone else chose is theirs.
+        if _vision_entry.get("maxTokens") is None:
+            _vision_entry["maxTokens"] = CLAWBOX_VISION_MAX_TOKENS
+            changed = True
+
+    # Claim agents.defaults.imageModel only when it is empty, where "empty"
+    # means what OpenClaw's hasToolModelConfig means: neither a primary nor a
+    # usable fallback. A fallbacks-only entry is a working, deliberate
+    # configuration, and the write below replaces the whole object.
+    _vision_model_cfg = agents_defaults.get("imageModel")
+    _vision_fallbacks = (
+        _vision_model_cfg.get("fallbacks") if isinstance(_vision_model_cfg, dict) else None
+    )
+    _has_vision_model = isinstance(_vision_model_cfg, dict) and bool(
+        (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
+        or (
+            isinstance(_vision_fallbacks, list)
+            and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
+        )
+    )
+    if not _has_vision_model:
+        agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
+        changed = True
+
 # Migration: ClawBox AI image generation.
 #
 # OpenClaw only registers its `image_generate` tool when an image-generation

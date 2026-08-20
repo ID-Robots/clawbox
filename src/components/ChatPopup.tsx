@@ -1492,9 +1492,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => window.clearInterval(timer)
   }, [generatingImage, status, reconcileTranscript, endImageWait])
 
-  // Upload one or more files to the server's /uploads dir and add them to
-  // the chat attachment list. Shared by the file-input change handler and
-  // by the textarea paste handler (Ctrl+V on a clipboard image).
+  // Stage one or more files for the agent and add them to the chat attachment
+  // list. Shared by the file-input change handler and by the textarea paste
+  // handler (Ctrl+V on a clipboard image).
+  //
+  // Deliberately NOT the Files API. dispatchSend puts the returned absolute
+  // path in the message, and OpenClaw only reads media from a fixed allowlist
+  // of roots; $HOME/uploads, where `/setup-api/files?dir=uploads` writes, is
+  // not one of them, so the agent got "Local media path is not under an
+  // allowed directory" and told the user it could not see the picture
+  // (TASK-417). /setup-api/chat/attachments writes under <stateDir>/media,
+  // which is on that allowlist. Same { name, path } response shape.
   const uploadFiles = useCallback((files: File[]) => {
     if (files.length === 0) return
     const stampBase = Date.now()
@@ -1509,7 +1517,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const formData = new FormData()
       formData.append('file', rawFile, filename)
       try {
-        const res = await fetch('/setup-api/files?dir=uploads', { method: 'POST', body: formData })
+        const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         if (!res.ok) return
         const json = await res.json().catch(() => ({} as { name?: string; path?: string }))
         const name = json.name || filename

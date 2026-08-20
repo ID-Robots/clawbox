@@ -348,10 +348,19 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.models[1].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
 
     // A configured provider overrides OpenClaw's bundled catalog, so these
-    // three fields have to be stated on every model. Omit contextWindow and
-    // the gateway falls back to a generic 200,000 rather than V4's real 1M —
-    // reproduced on a device running 2026.7.1 on 2026-08-17.
-    for (const model of providerDef.models) {
+    // three fields have to be stated on every CHAT model. Omit contextWindow
+    // and the gateway falls back to a generic 200,000 rather than V4's real 1M
+    // — reproduced on a device running 2026.7.1 on 2026-08-17.
+    //
+    // Scoped to the two V4 tiers on purpose: the same provider also carries the
+    // vision entry (TASK-417), which is deliberately text+image with its own
+    // measured ceiling and is never a session model. Asserting over every row
+    // would make this test fail on a correct config.
+    const chatTiers = providerDef.models.filter(
+      (m: { id: string }) => m.id === "deepseek-v4-flash" || m.id === "deepseek-v4-pro",
+    );
+    expect(chatTiers).toHaveLength(2);
+    for (const model of chatTiers) {
       expect(model.contextWindow).toBe(1_000_000);
       expect(model.maxTokens).toBe(393_216);
       expect(model.input).toEqual(["text"]);

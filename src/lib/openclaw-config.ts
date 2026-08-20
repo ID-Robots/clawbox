@@ -500,6 +500,11 @@ export interface OpenClawConfig {
       // `model`, entirely separate key — and distinct again from `imageModel`,
       // which selects the vision (image *understanding*) model.
       imageGenerationModel?: { primary?: string; fallbacks?: string[] };
+      // Which model *looks at* an image — the vision model OpenClaw resolves
+      // when a text-only session model is handed a picture and the `image`
+      // tool has to describe it. Same shape, separate key from
+      // `imageGenerationModel`; nothing aliases the two.
+      imageModel?: { primary?: string; fallbacks?: string[] };
       workspace?: string;
       compaction?: { reserveTokensFloor?: number };
     };
