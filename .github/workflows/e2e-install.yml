@@ -64,7 +64,7 @@ jobs:
     steps:
       - name: Checkout PR head
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
@@ -72,15 +72,17 @@ jobs:
           # exact PR head avoids copying the repository's full object history
           # into the Docker image while preserving a real, fetchable .git repo.
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Checkout repository
         if: ${{ github.event_name != 'pull_request' }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Scheduled/dispatch runs update the checked-out branch. The updater
           # performs its own `git fetch origin <branch>`, and version checks use
           # `git ls-remote --tags`, so local history and tags are unnecessary.
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Show Docker + runner info
         run: |
