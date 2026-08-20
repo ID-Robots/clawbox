@@ -258,7 +258,19 @@ install_kokoro_packages() {
   # pip 22's resolver won't downgrade huggingface-hub (pulled in by
   # faster-whisper) to satisfy transformers<5 in a single command, so it
   # silently picks transformers 5.x. Keep these two as two pip invocations.
-  pip_as_clawbox "'numpy<2' kokoro soundfile 'Pillow>=10'" || return 1
+  #
+  # The numpy FLOOR is what makes this pip step do anything at all. JetPack
+  # ships numpy 1.21.5 as an apt package in /usr/lib/python3/dist-packages,
+  # which already satisfies a bare `numpy<2` — so pip installed nothing, and
+  # the Jetson torch wheel could not use 1.21.5:
+  #   $ kokoro -t "..." -o /tmp/k1.wav -m af_heart -l a
+  #   RuntimeError: Numpy is not available          (a 44-byte output file)
+  # With `numpy>=1.24,<2`, 1.26.4 lands in user-site and the same command
+  # produced 105,644 bytes of audio in 12.2 s (measured on a JetPack 6.2 Orin).
+  # The <2 ceiling stays: torch 2.5.0a0+872d972e41.nv24.8 is a numpy-1.x build.
+  # This defect was inherited from the pre-existing full path, which calls this
+  # same function, so both paths are fixed here.
+  pip_as_clawbox "'numpy>=1.24,<2' kokoro soundfile 'Pillow>=10'" || return 1
   pip_as_clawbox "'transformers<5'" || return 1
 }
 

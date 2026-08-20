@@ -42,8 +42,67 @@ CLAWBOX_TTS_MEMINFO="${CLAWBOX_TTS_MEMINFO:-/proc/meminfo}"
 # 24 kHz mono 16-bit — below anything a real utterance can be.
 CLAWBOX_TTS_MIN_AUDIO_BYTES="${CLAWBOX_TTS_MIN_AUDIO_BYTES:-1024}"
 
-KOKORO_BIN="${KOKORO_BIN:-kokoro}"
 KOKORO_SOCKET="${KOKORO_SOCKET:-/tmp/kokoro-server.sock}"
+
+# ── Finding the Kokoro CLI ──────────────────────────────────────────────────
+# `pip install --user kokoro` puts the CLI at ~/.local/bin/kokoro, and that
+# directory is not on the PATH a non-interactive exec inherits — on a shipped
+# box that is /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin and
+# nothing else. OpenClaw execs this script directly, with no login shell and no
+# profile, so `command -v kokoro` failed on a box where Kokoro was fully
+# installed and spoke correctly from an interactive shell: every reply came out
+# of Piper with "kokoro: 'kokoro' is not installed" (TASK-420, measured on a
+# real Orin). Installing the engine was not enough; it also has to be findable
+# from the environment the gateway hands us.
+#
+# An explicit KOKORO_BIN still wins. It is how a per-channel provider `env` can
+# point at another build, and how the tests aim this at a stub.
+KOKORO_USER_BIN="${KOKORO_USER_BIN:-${HOME:-/home/clawbox}/.local/bin/kokoro}"
+KOKORO_UNRESOLVED=""
+resolve_kokoro_bin() {
+  [ -n "${KOKORO_BIN:-}" ] && return 0
+  if command -v kokoro >/dev/null 2>&1; then
+    KOKORO_BIN="kokoro"
+    return 0
+  fi
+  if [ -x "$KOKORO_USER_BIN" ]; then
+    KOKORO_BIN="$KOKORO_USER_BIN"
+    return 0
+  fi
+  # Nothing to run. The diagnostic keeps the name a person would type, and
+  # remembers that both places were searched so it can say where it looked.
+  KOKORO_BIN="kokoro"
+  KOKORO_UNRESOLVED=1
+}
+resolve_kokoro_bin
+
+# ── The CUDA loader path ────────────────────────────────────────────────────
+# Without it torch cannot be imported at all:
+#   ImportError: libcusparseLt.so.0: cannot open shared object file
+# That library ships inside the nvidia-cusparselt-cu12 wheel, under user-site,
+# where no loader looks by default. install-voice.sh appends the export to
+# ~/.bashrc and writes it into kokoro-server.service — neither of which reaches
+# here, for the same reason the PATH above does not. And because the engines'
+# own output is discarded, that ImportError arrived as nothing more than
+# "kokoro failed", with Piper quietly taking over.
+#
+# Derived from $HOME and whichever python user-site is actually on the box
+# rather than pinned to /home/clawbox and python3.10, and only directories that
+# exist are added: an EMPTY entry means "the current directory" to the loader,
+# which is not somewhere to resolve .so files from. Whatever the caller already
+# set is appended to, never replaced.
+kokoro_ld_path() {
+  local out="" d
+  for d in "${HOME:-/home/clawbox}/.local/lib" \
+           "${HOME:-/home/clawbox}"/.local/lib/python*/site-packages/nvidia/cusparselt/lib \
+           "${KOKORO_CUDA_LIB_DIR:-/usr/local/cuda/lib64}"; do
+    [ -d "$d" ] || continue
+    out="${out:+$out:}$d"
+  done
+  [ -n "${LD_LIBRARY_PATH:-}" ] && out="${out:+$out:}$LD_LIBRARY_PATH"
+  printf '%s' "$out"
+}
+KOKORO_LD_PATH="${KOKORO_LD_PATH:-$(kokoro_ld_path)}"
 
 # ── The time budget ─────────────────────────────────────────────────────────
 # Every engine gets its own slice, and the caller's timeout has to be larger
@@ -294,7 +353,7 @@ kokoro_via_server() {
   # Text goes through the environment, never through the shell or the argv of
   # an interpreter, so an utterance containing quotes cannot become code.
   KOKORO_TEXT="$text" KOKORO_OUTPUT="$wav" KOKORO_SOCKET="$KOKORO_SOCKET" KOKORO_VOICE="$voice" \
-    KOKORO_SERVER_TIMEOUT="$KOKORO_SERVER_TIMEOUT" \
+    KOKORO_SERVER_TIMEOUT="$KOKORO_SERVER_TIMEOUT" LD_LIBRARY_PATH="$KOKORO_LD_PATH" \
     timeout "$KOKORO_SERVER_TIMEOUT" "$PYTHON_BIN" -c '
 import json, os, socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -329,7 +388,8 @@ kokoro_cold_start() {
   local text="$1" wav="$2" voice="$3" lang
   command -v "$KOKORO_BIN" >/dev/null 2>&1 || return 1
   lang="$(kokoro_lang_of "$voice")"
-  timeout "$KOKORO_TIMEOUT" "$KOKORO_BIN" -t "$text" -o "$wav" -m "$voice" -l "$lang" >/dev/null 2>&1 || return 1
+  LD_LIBRARY_PATH="$KOKORO_LD_PATH" \
+    timeout "$KOKORO_TIMEOUT" "$KOKORO_BIN" -t "$text" -o "$wav" -m "$voice" -l "$lang" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -370,6 +430,10 @@ try_kokoro() {
 
   if command -v "$KOKORO_BIN" >/dev/null 2>&1; then
     note "kokoro: '$KOKORO_BIN' failed (CUDA unavailable, allocation refused, or model missing)"
+  elif [ -n "$KOKORO_UNRESOLVED" ]; then
+    # Says where it looked, because "not installed" was the message a box
+    # printed while the engine was installed and working two directories away.
+    note "kokoro: '$KOKORO_BIN' is not installed (not on PATH, and nothing executable at $KOKORO_USER_BIN)"
   else
     note "kokoro: '$KOKORO_BIN' is not installed"
   fi

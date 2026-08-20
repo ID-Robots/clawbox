@@ -284,6 +284,34 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=ready");
   });
 
+  it("asks for a numpy the Jetson torch wheel can actually use", () => {
+    // `numpy<2` on its own is a NO-OP on this hardware: JetPack ships numpy
+    // 1.21.5 as an apt package in /usr/lib/python3/dist-packages, which
+    // already satisfies it, so pip installed nothing and the torch wheel could
+    // not use what was there —
+    //   $ kokoro -t "..." -o /tmp/k1.wav -m af_heart -l a
+    //   RuntimeError: Numpy is not available        (a 44-byte output file)
+    // With the floor, 1.26.4 lands in user-site and the same command produced
+    // 105,644 bytes of audio. A test that only checked the ceiling is what let
+    // that ship, so this one reads the floor and refuses a missing one.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
+    const step = res.su.filter((c) => c.includes("pip3 install")).find((c) => c.includes("kokoro"));
+    expect(step, "no pip step installs kokoro at all").toBeDefined();
+
+    const pin = /numpy>=(\d+)\.(\d+)[^'"]*,\s*<2/.exec(step!);
+    expect(
+      pin,
+      `numpy is pinned without a usable floor: ${step} — the board's apt numpy already satisfies <2`,
+    ).not.toBeNull();
+    // >= 1.24. The measured-good version is 1.26.4; 1.21.5 is the one that
+    // makes torch raise, and anything below 1.24 has no numpy-1.x guarantee
+    // for this wheel.
+    expect(Number(pin![1]) * 100 + Number(pin![2])).toBeGreaterThanOrEqual(124);
+    // And the ceiling stays: torch 2.5.0a0+872d972e41.nv24.8 is a numpy-1.x
+    // build, so an unbounded numpy would break it the other way.
+    expect(step).toContain("<2");
+  });
+
   it("writes the kokoro-server user unit and enables lingering", () => {
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     const unit = path.join(res.home, ".config/systemd/user/kokoro-server.service");
