@@ -50,20 +50,19 @@ ClawBox AI Flash and ClawBox AI Pro expose three reasoning-effort levels, select
 
 | Level | Behavior |
 |---|---|
-| `off` | No extended reasoning — the default. The cloud proxy disables thinking unless you opt in, keeping replies fast and cheap. |
+| `off` | No extended reasoning — the default. Keeps replies fast; you opt in to reasoning when you need it. |
 | `high` | Extended reasoning for harder tasks. |
-| `xhigh` | Maximum reasoning. Mapped upstream to DeepSeek's `reasoning_effort: "max"`. |
+| `xhigh` | Maximum reasoning. |
 
-The chat header may show more levels globally, but for the ClawBox AI (DeepSeek) provider only these three take effect; anything else is clamped or rejected by the gateway.
+The chat header may offer more levels globally, but for ClawBox AI only these three take effect.
 
 <Warning>
-**This list is set programmatically, not by hand-editing config.** Three mechanisms each independently overwrite a manual edit, so all three must be satisfied in code:
+**The available levels are set programmatically, not by hand-editing config.** Editing `openclaw.json` by hand does not stick — two separate mechanisms will overwrite it:
 
-1. **`gateway-pre-start.sh` re-asserts it on every gateway start.** The boot script rewrites `compat.supportedReasoningEfforts` on the DeepSeek models back to the target list each time the gateway starts. A hand edit to `openclaw.json` survives only until the next restart.
-2. **`npm install -g openclaw@latest` overwrites the plugin catalog.** The levels are also declared in the OpenClaw package at `dist/extensions/deepseek/openclaw.plugin.json`, which every system update replaces wholesale. ClawBox re-applies the patch on each boot precisely because of this.
-3. **A configured provider overrides the plugin catalog entirely.** When `openclaw.json` defines the `deepseek` provider, OpenClaw ignores the plugin's `modelCatalog` for those models — so the `compat` block must live on the configured entry (written by the setup route), not on the plugin file.
+1. **The gateway re-applies its expected values on every start.** ClawBox's boot-time configuration step rewrites the reasoning-effort metadata on the ClawBox AI models each time the gateway starts, so a manual edit survives only until the next restart.
+2. **System updates replace the bundled model catalog.** Updating OpenClaw overwrites the packaged catalog wholesale, so edits made there are lost on the next update. ClawBox re-applies its own values on each boot precisely because of this.
 
-Without the declaration, OpenClaw's `catalogSupportsXHigh()` returns false, `sessions.patch` rejects `xhigh` ("use off|minimal|low|medium|high"), and the chat header's **X-High** option silently fails — even though the transport layer already translates OpenClaw `xhigh` → DeepSeek `reasoning_effort: "max"` correctly. The capability is present; only the catalog declaration was ever missing. The two source-of-truth locations are `src/app/setup-api/ai-models/configure/route.ts` (written at pairing) and `scripts/gateway-pre-start.sh` (enforced at every boot).
+If the levels are not declared, the gateway rejects the higher effort settings and the chat header's **X-High** option silently fails. The levels must therefore be changed in ClawBox's setup and boot-time configuration code, which is the single source of truth.
 </Warning>
 
 ## Local models (Ollama / llama.cpp)
