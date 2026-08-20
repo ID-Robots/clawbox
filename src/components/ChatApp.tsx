@@ -14,7 +14,7 @@ import { renderText } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
-import { prettifyAssistantText, isSentinel } from '@/lib/chat-sentinels'
+import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 
 
@@ -251,7 +251,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
           if (state === 'delta') {
             const text = extractText(msg)
-            if (text) setStreaming(text)
+            if (text && !isInterSessionEnvelope(text, msg)) setStreaming(text)
           } else if (state === 'final') {
             const text = extractText(msg)
             // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
@@ -263,7 +263,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // ChatPopup uses, so the two components can't drift on which
             // finals count as ack-only.
             const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
-            if (text && !isAckOnly) {
+            // Same suppression as the history path, so the bubble cannot
+            // appear in real time either — only the append is skipped, the
+            // ack-only refetch below still runs.
+            if (text && !isAckOnly && !isInterSessionEnvelope(text, msg)) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
             setStreaming('')
@@ -337,6 +340,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
         if (!text || isSentinel(text)) continue
+        // Inter-session routing envelopes are machinery addressed to the
+        // agent, not chat content — drop the whole message. This is the
+        // path the image-generation leak actually arrives on: the turn is
+        // acked with "Sent.", which schedules the refetch below, and the
+        // envelope comes back as a `user` message.
+        if (isInterSessionEnvelope(text, m)) continue
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : prettifyAssistantText(text)
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
