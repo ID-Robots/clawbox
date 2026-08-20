@@ -84,15 +84,22 @@ export async function GET(req: NextRequest) {
   // TWO containment tests, and the order of the first one is the point.
   //
   // This one is purely lexical and runs BEFORE any filesystem call touches the
-  // query string. `path.resolve` collapses `..`, so a traversal is rejected
-  // without ever being handed to realpath. That matters for more than tidiness:
-  // realpath IS a filesystem sink, so validating after it left the taint flow
-  // intact and CodeQL flagged js/path-injection high severity even though the
-  // second check below made the handler behave correctly.
-  const candidate = path.resolve(requested);
-  if (candidate !== root && !candidate.startsWith(root + path.sep)) {
+  // query string. It reduces the request to a path RELATIVE to the media root,
+  // rejects anything that climbs out, and then rebuilds the absolute path by
+  // joining that cleared segment onto MEDIA_ROOT — a module constant, never
+  // user input. Nothing derived from the query string is handed to the
+  // filesystem; realpath below receives a value built from the constant.
+  //
+  // Written this way deliberately. Comparing `path.resolve(requested)` against
+  // the root with startsWith is equally correct and reads more naturally, but
+  // the root is only known after an async call, so a scanner cannot tie the
+  // guard to the sink and js/path-injection stayed open at high severity. This
+  // form is both correct and legible to the tool.
+  const rel = path.relative(MEDIA_ROOT, path.resolve(requested));
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+  const candidate = path.join(MEDIA_ROOT, rel);
 
   // The second test still resolves symlinks, because the lexical check above
   // cannot see them: a link planted inside the media tree pointing at
@@ -111,19 +118,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  // Everything below reads `safe`, never `real` or `requested`. `safe` is
-  // rebuilt from the trusted root plus a relative segment that has just been
-  // proven not to escape it, so no value derived from the query string reaches
-  // the filesystem calls. The containment test above already made this correct;
-  // reconstructing makes it *provable* — CodeQL's js/path-injection cannot
-  // follow the check through the async resolvedRoot() indirection and flagged
-  // the route high severity. A guard a scanner cannot see is one the next
-  // person will quietly refactor away.
-  const rel = path.relative(root, real);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  // Reads go through `safe`, rebuilt from the resolved root plus the segment the
+  // symlink check just cleared — so the value handed to stat and
+  // createReadStream is constructed from trusted parts rather than carried down
+  // from the request.
+  const realRel = path.relative(root, real);
+  if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  const safe = path.join(root, rel);
+  const safe = path.join(root, realRel);
 
   try {
     const stat = await fsp.stat(safe);
